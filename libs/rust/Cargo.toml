@@ -1,0 +1,66 @@
+cargo-features = ["profile-rustflags", "trim-paths"]
+
+[package]
+name = "OhMyKeymint"
+version = "0.1.1"
+edition = "2021"
+
+[[bin]]
+name = "keymint"
+path = "src/main.rs"
+
+[lib]
+name = "ohmykeymint"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+jni = "0.21.1"
+syscalls = "0.6.15"
+kmr-derive = { path = "derive" }
+kmr-common = { path = "common" }
+kmr-crypto-boring = { path = "boringssl" }
+kmr-ta = { path = "ta" }
+kmr-wire = { path = "wire" }
+libc = "0.2.176"
+prost = "0.14.1"
+prost-types = "0.14.1"
+hex = "0.4.3"
+log4rs = "1.4.0"
+log = "0.4.28"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger_lite = "0.1.0"
+
+
+[profile.release]
+opt-level = 'z'     # Optimize for size
+lto = true          # Enable link-time optimization
+codegen-units = 1   # Reduce number of codegen units to increase optimizations
+panic = 'abort'     # Abort on panic
+strip = true        # Strip symbols from binary*
+debuginfo = 0       # Disable debug info
+trim-paths = "all"
+
+[workspace]
+members = [
+  "boringssl",
+  "common",
+  "derive",
+  "ta",
+  "tests",
+  "wire",
+]
+
+[patch.crates-io]
+kmr-derive = { path = "derive" }
+kmr-common = { path = "common" }
+kmr-crypto-boring = { path = "boringssl" }
+kmr-ta = { path = "ta" }
+kmr-tests = { path = "tests" }
+kmr-wire = { path = "wire" }
+
+[build-dependencies]
+prost-build = "0.14.1"

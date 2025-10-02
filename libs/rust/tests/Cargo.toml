@@ -1,0 +1,23 @@
+# Note that Cargo is not an officially supported build tool (Android's Soong is the official
+# tool).  This Cargo.toml file is included purely for the convenience of KeyMint developers.
+
+[package]
+name = "kmr-tests"
+version = "0.1.0"
+authors = ["David Drysdale <drysdale@google.com>"]
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+ciborium = { version = "^0.2.0", default-features = false }
+env_logger = "^0.9"
+hex = "0.4.3"
+kmr-common = "*"
+kmr-crypto-boring = "*"
+kmr-ta = "*"
+kmr-wire = "*"
+log = "^0.4"
+x509-cert = "0.2.4"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(soong)'] }

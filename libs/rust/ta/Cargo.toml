@@ -1,0 +1,31 @@
+# Note that Cargo is not an officially supported build tool (Android's Soong is the official
+# tool).  This Cargo.toml file is included purely for the convenience of KeyMint developers.
+
+[package]
+name = "kmr-ta"
+version = "0.1.0"
+authors = ["David Drysdale <drysdale@google.com>"]
+edition = "2021"
+license = "Apache-2.0"
+
+[features]
+default = []
+# The `downgrade` feature allows the HAL service to tell the TA what version of the KeyMint
+# HAL to implement.
+downgrade = []
+
+[dependencies]
+ciborium = { version = "^0.2.0", default-features = false }
+ciborium-io = "^0.2.0"
+coset = "0.3.3"
+der = { version = "^0.7.8", features = ["alloc", "derive"] }
+flagset = "0.4.3"
+kmr-common = "*"
+kmr-derive = "*"
+kmr-wire = "*"
+log = "^0.4"
+spki = { version = "0.7.3"}
+x509-cert = { version = "0.2.4", default-features = false }
+
+[dev-dependencies]
+hex = "0.4.3"

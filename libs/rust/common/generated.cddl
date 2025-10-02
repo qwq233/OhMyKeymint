@@ -1,0 +1,638 @@
+DateTime = int
+KeySizeInBits = int
+RsaExponent = int
+Algorithm = &(
+    Algorithm_Rsa: 1,
+    Algorithm_Ec: 3,
+    Algorithm_Aes: 32,
+    Algorithm_TripleDes: 33,
+    Algorithm_Hmac: 128,
+)
+BlockMode = &(
+    BlockMode_Ecb: 1,
+    BlockMode_Cbc: 2,
+    BlockMode_Ctr: 3,
+    BlockMode_Gcm: 32,
+)
+Digest = &(
+    Digest_None: 0,
+    Digest_Md5: 1,
+    Digest_Sha1: 2,
+    Digest_Sha224: 3,
+    Digest_Sha256: 4,
+    Digest_Sha384: 5,
+    Digest_Sha512: 6,
+)
+EcCurve = &(
+    EcCurve_P224: 0,
+    EcCurve_P256: 1,
+    EcCurve_P384: 2,
+    EcCurve_P521: 3,
+    EcCurve_Curve25519: 4,
+)
+CurveType = &(
+    CurveType_Nist: 0,
+    CurveType_EdDsa: 1,
+    CurveType_Xdh: 2,
+)
+ErrorCode = &(
+    ErrorCode_Ok: 0,
+    ErrorCode_RootOfTrustAlreadySet: -1,
+    ErrorCode_UnsupportedPurpose: -2,
+    ErrorCode_IncompatiblePurpose: -3,
+    ErrorCode_UnsupportedAlgorithm: -4,
+    ErrorCode_IncompatibleAlgorithm: -5,
+    ErrorCode_UnsupportedKeySize: -6,
+    ErrorCode_UnsupportedBlockMode: -7,
+    ErrorCode_IncompatibleBlockMode: -8,
+    ErrorCode_UnsupportedMacLength: -9,
+    ErrorCode_UnsupportedPaddingMode: -10,
+    ErrorCode_IncompatiblePaddingMode: -11,
+    ErrorCode_UnsupportedDigest: -12,
+    ErrorCode_IncompatibleDigest: -13,
+    ErrorCode_InvalidExpirationTime: -14,
+    ErrorCode_InvalidUserId: -15,
+    ErrorCode_InvalidAuthorizationTimeout: -16,
+    ErrorCode_UnsupportedKeyFormat: -17,
+    ErrorCode_IncompatibleKeyFormat: -18,
+    ErrorCode_UnsupportedKeyEncryptionAlgorithm: -19,
+    ErrorCode_UnsupportedKeyVerificationAlgorithm: -20,
+    ErrorCode_InvalidInputLength: -21,
+    ErrorCode_KeyExportOptionsInvalid: -22,
+    ErrorCode_DelegationNotAllowed: -23,
+    ErrorCode_KeyNotYetValid: -24,
+    ErrorCode_KeyExpired: -25,
+    ErrorCode_KeyUserNotAuthenticated: -26,
+    ErrorCode_OutputParameterNull: -27,
+    ErrorCode_InvalidOperationHandle: -28,
+    ErrorCode_InsufficientBufferSpace: -29,
+    ErrorCode_VerificationFailed: -30,
+    ErrorCode_TooManyOperations: -31,
+    ErrorCode_UnexpectedNullPointer: -32,
+    ErrorCode_InvalidKeyBlob: -33,
+    ErrorCode_ImportedKeyNotEncrypted: -34,
+    ErrorCode_ImportedKeyDecryptionFailed: -35,
+    ErrorCode_ImportedKeyNotSigned: -36,
+    ErrorCode_ImportedKeyVerificationFailed: -37,
+    ErrorCode_InvalidArgument: -38,
+    ErrorCode_UnsupportedTag: -39,
+    ErrorCode_InvalidTag: -40,
+    ErrorCode_MemoryAllocationFailed: -41,
+    ErrorCode_ImportParameterMismatch: -44,
+    ErrorCode_SecureHwAccessDenied: -45,
+    ErrorCode_OperationCancelled: -46,
+    ErrorCode_ConcurrentAccessConflict: -47,
+    ErrorCode_SecureHwBusy: -48,
+    ErrorCode_SecureHwCommunicationFailed: -49,
+    ErrorCode_UnsupportedEcField: -50,
+    ErrorCode_MissingNonce: -51,
+    ErrorCode_InvalidNonce: -52,
+    ErrorCode_MissingMacLength: -53,
+    ErrorCode_KeyRateLimitExceeded: -54,
+    ErrorCode_CallerNonceProhibited: -55,
+    ErrorCode_KeyMaxOpsExceeded: -56,
+    ErrorCode_InvalidMacLength: -57,
+    ErrorCode_MissingMinMacLength: -58,
+    ErrorCode_UnsupportedMinMacLength: -59,
+    ErrorCode_UnsupportedKdf: -60,
+    ErrorCode_UnsupportedEcCurve: -61,
+    ErrorCode_KeyRequiresUpgrade: -62,
+    ErrorCode_AttestationChallengeMissing: -63,
+    ErrorCode_KeymintNotConfigured: -64,
+    ErrorCode_AttestationApplicationIdMissing: -65,
+    ErrorCode_CannotAttestIds: -66,
+    ErrorCode_RollbackResistanceUnavailable: -67,
+    ErrorCode_HardwareTypeUnavailable: -68,
+    ErrorCode_ProofOfPresenceRequired: -69,
+    ErrorCode_ConcurrentProofOfPresenceRequested: -70,
+    ErrorCode_NoUserConfirmation: -71,
+    ErrorCode_DeviceLocked: -72,
+    ErrorCode_EarlyBootEnded: -73,
+    ErrorCode_AttestationKeysNotProvisioned: -74,
+    ErrorCode_AttestationIdsNotProvisioned: -75,
+    ErrorCode_InvalidOperation: -76,
+    ErrorCode_StorageKeyUnsupported: -77,
+    ErrorCode_IncompatibleMgfDigest: -78,
+    ErrorCode_UnsupportedMgfDigest: -79,
+    ErrorCode_MissingNotBefore: -80,
+    ErrorCode_MissingNotAfter: -81,
+    ErrorCode_MissingIssuerSubject: -82,
+    ErrorCode_InvalidIssuerSubject: -83,
+    ErrorCode_BootLevelExceeded: -84,
+    ErrorCode_HardwareNotYetAvailable: -85,
+    ErrorCode_ModuleHashAlreadySet: -86,
+    ErrorCode_Unimplemented: -100,
+    ErrorCode_VersionMismatch: -101,
+    ErrorCode_UnknownError: -1000,
+    ErrorCode_EncodingError: -20000,
+    ErrorCode_BoringSslError: -30000,
+)
+HardwareAuthenticatorType = &(
+    HardwareAuthenticatorType_None: 0,
+    HardwareAuthenticatorType_Password: 1,
+    HardwareAuthenticatorType_Fingerprint: 2,
+    HardwareAuthenticatorType_Any: -1,
+)
+KeyFormat = &(
+    KeyFormat_X509: 0,
+    KeyFormat_Pkcs8: 1,
+    KeyFormat_Raw: 3,
+)
+KeyOrigin = &(
+    KeyOrigin_Generated: 0,
+    KeyOrigin_Derived: 1,
+    KeyOrigin_Imported: 2,
+    KeyOrigin_Reserved: 3,
+    KeyOrigin_SecurelyImported: 4,
+)
+KeyPurpose = &(
+    KeyPurpose_Encrypt: 0,
+    KeyPurpose_Decrypt: 1,
+    KeyPurpose_Sign: 2,
+    KeyPurpose_Verify: 3,
+    KeyPurpose_WrapKey: 5,
+    KeyPurpose_AgreeKey: 6,
+    KeyPurpose_AttestKey: 7,
+)
+PaddingMode = &(
+    PaddingMode_None: 1,
+    PaddingMode_RsaOaep: 2,
+    PaddingMode_RsaPss: 3,
+    PaddingMode_RsaPkcs115Encrypt: 4,
+    PaddingMode_RsaPkcs115Sign: 5,
+    PaddingMode_Pkcs7: 64,
+)
+SecurityLevel = &(
+    SecurityLevel_Software: 0,
+    SecurityLevel_TrustedEnvironment: 1,
+    SecurityLevel_Strongbox: 2,
+    SecurityLevel_Keystore: 100,
+)
+Tag = &(
+    Tag_Invalid: 0,
+    Tag_Purpose: 536870913,
+    Tag_Algorithm: 268435458,
+    Tag_KeySize: 805306371,
+    Tag_BlockMode: 536870916,
+    Tag_Digest: 536870917,
+    Tag_Padding: 536870918,
+    Tag_CallerNonce: 1879048199,
+    Tag_MinMacLength: 805306376,
+    Tag_EcCurve: 268435466,
+    Tag_RsaPublicExponent: 1342177480,
+    Tag_IncludeUniqueId: 1879048394,
+    Tag_RsaOaepMgfDigest: 536871115,
+    Tag_BootloaderOnly: 1879048494,
+    Tag_RollbackResistance: 1879048495,
+    Tag_HardwareType: 268435760,
+    Tag_EarlyBootOnly: 1879048497,
+    Tag_ActiveDatetime: 1610613136,
+    Tag_OriginationExpireDatetime: 1610613137,
+    Tag_UsageExpireDatetime: 1610613138,
+    Tag_MinSecondsBetweenOps: 805306771,
+    Tag_MaxUsesPerBoot: 805306772,
+    Tag_UsageCountLimit: 805306773,
+    Tag_UserId: 805306869,
+    Tag_UserSecureId: -1610612234,
+    Tag_NoAuthRequired: 1879048695,
+    Tag_UserAuthType: 268435960,
+    Tag_AuthTimeout: 805306873,
+    Tag_AllowWhileOnBody: 1879048698,
+    Tag_TrustedUserPresenceRequired: 1879048699,
+    Tag_TrustedConfirmationRequired: 1879048700,
+    Tag_UnlockedDeviceRequired: 1879048701,
+    Tag_ApplicationId: -1879047591,
+    Tag_ApplicationData: -1879047492,
+    Tag_CreationDatetime: 1610613437,
+    Tag_Origin: 268436158,
+    Tag_RootOfTrust: -1879047488,
+    Tag_OsVersion: 805307073,
+    Tag_OsPatchlevel: 805307074,
+    Tag_UniqueId: -1879047485,
+    Tag_AttestationChallenge: -1879047484,
+    Tag_AttestationApplicationId: -1879047483,
+    Tag_AttestationIdBrand: -1879047482,
+    Tag_AttestationIdDevice: -1879047481,
+    Tag_AttestationIdProduct: -1879047480,
+    Tag_AttestationIdSerial: -1879047479,
+    Tag_AttestationIdImei: -1879047478,
+    Tag_AttestationIdMeid: -1879047477,
+    Tag_AttestationIdManufacturer: -1879047476,
+    Tag_AttestationIdModel: -1879047475,
+    Tag_VendorPatchlevel: 805307086,
+    Tag_BootPatchlevel: 805307087,
+    Tag_DeviceUniqueAttestation: 1879048912,
+    Tag_IdentityCredentialKey: 1879048913,
+    Tag_StorageKey: 1879048914,
+    Tag_AttestationIdSecondImei: -1879047469,
+    Tag_AssociatedData: -1879047192,
+    Tag_Nonce: -1879047191,
+    Tag_MacLength: 805307371,
+    Tag_ResetSinceIdRotation: 1879049196,
+    Tag_ConfirmationToken: -1879047187,
+    Tag_CertificateSerial: -2147482642,
+    Tag_CertificateSubject: -1879047185,
+    Tag_CertificateNotBefore: 1610613744,
+    Tag_CertificateNotAfter: 1610613745,
+    Tag_MaxBootLevel: 805307378,
+    Tag_ModuleHash: -1879047468,
+)
+TagType = &(
+    TagType_Invalid: 0,
+    TagType_Enum: 268435456,
+    TagType_EnumRep: 536870912,
+    TagType_Uint: 805306368,
+    TagType_UintRep: 1073741824,
+    TagType_Ulong: 1342177280,
+    TagType_Date: 1610612736,
+    TagType_Bool: 1879048192,
+    TagType_Bignum: -2147483648,
+    TagType_Bytes: -1879048192,
+    TagType_UlongRep: -1610612736,
+)
+AttestationKey = [
+    key_blob: bstr,
+    attest_key_params: [* KeyParam],
+    issuer_subject_name: bstr,
+]
+Certificate = [
+    encoded_certificate: bstr,
+]
+DeviceInfo = [
+    device_info: bstr,
+]
+HardwareAuthToken = [
+    challenge: int,
+    user_id: int,
+    authenticator_id: int,
+    authenticator_type: HardwareAuthenticatorType,
+    timestamp: Timestamp,
+    mac: bstr,
+]
+KeyCharacteristics = [
+    security_level: SecurityLevel,
+    authorizations: [* KeyParam],
+]
+KeyCreationResult = [
+    key_blob: bstr,
+    key_characteristics: [* KeyCharacteristics],
+    certificate_chain: [* Certificate],
+]
+KeyMintHardwareInfo = [
+    version_number: int,
+    security_level: SecurityLevel,
+    key_mint_name: tstr,
+    key_mint_author_name: tstr,
+    timestamp_token_required: bool,
+]
+EekCurve = &(
+    EekCurve_None: 0,
+    EekCurve_P256: 1,
+    EekCurve_Curve25519: 2,
+)
+MacedPublicKey = [
+    maced_key: bstr,
+]
+ProtectedData = [
+    protected_data: bstr,
+]
+HardwareInfo = [
+    version_number: int,
+    rpc_author_name: tstr,
+    supported_eek_curve: EekCurve,
+    unique_id: [? tstr],
+    supported_num_keys_in_csr: int,
+]
+TimeStampToken = [
+    challenge: int,
+    timestamp: Timestamp,
+    mac: bstr,
+]
+Timestamp = [
+    milliseconds: int,
+]
+SharedSecretParameters = [
+    seed: bstr,
+    nonce: bstr,
+]
+KeyParam = &(
+    [268435458, Algorithm], ; Tag_Algorithm
+    [536870916, BlockMode], ; Tag_BlockMode
+    [536870918, PaddingMode], ; Tag_Padding
+    [536870917, Digest], ; Tag_Digest
+    [268435466, EcCurve], ; Tag_EcCurve
+    [268436158, KeyOrigin], ; Tag_Origin
+    [536870913, KeyPurpose], ; Tag_Purpose
+    [805306371, KeySizeInBits], ; Tag_KeySize
+    [1879048199, bstr], ; Tag_CallerNonce
+    [805306376, int], ; Tag_MinMacLength
+    [1342177480, RsaExponent], ; Tag_RsaPublicExponent
+    [1879048394, true], ; Tag_IncludeUniqueId
+    [536871115, Digest], ; Tag_RsaOaepMgfDigest
+    [1879048494, true], ; Tag_BootloaderOnly
+    [1879048495, true], ; Tag_RollbackResistance
+    [1879048497, true], ; Tag_EarlyBootOnly
+    [1610613136, DateTime], ; Tag_ActiveDatetime
+    [1610613137, DateTime], ; Tag_OriginationExpireDatetime
+    [1610613138, DateTime], ; Tag_UsageExpireDatetime
+    [805306772, int], ; Tag_MaxUsesPerBoot
+    [805306773, int], ; Tag_UsageCountLimit
+    [805306869, int], ; Tag_UserId
+    [-1610612234, int], ; Tag_UserSecureId
+    [1879048695, true], ; Tag_NoAuthRequired
+    [268435960, int], ; Tag_UserAuthType
+    [805306873, int], ; Tag_AuthTimeout
+    [1879048698, true], ; Tag_AllowWhileOnBody
+    [1879048699, true], ; Tag_TrustedUserPresenceRequired
+    [1879048700, true], ; Tag_TrustedConfirmationRequired
+    [1879048701, true], ; Tag_UnlockedDeviceRequired
+    [-1879047591, bstr], ; Tag_ApplicationId
+    [-1879047492, bstr], ; Tag_ApplicationData
+    [1610613437, DateTime], ; Tag_CreationDatetime
+    [-1879047488, bstr], ; Tag_RootOfTrust
+    [805307073, int], ; Tag_OsVersion
+    [805307074, int], ; Tag_OsPatchlevel
+    [-1879047484, bstr], ; Tag_AttestationChallenge
+    [-1879047483, bstr], ; Tag_AttestationApplicationId
+    [-1879047482, bstr], ; Tag_AttestationIdBrand
+    [-1879047481, bstr], ; Tag_AttestationIdDevice
+    [-1879047480, bstr], ; Tag_AttestationIdProduct
+    [-1879047479, bstr], ; Tag_AttestationIdSerial
+    [-1879047478, bstr], ; Tag_AttestationIdImei
+    [-1879047469, bstr], ; Tag_AttestationIdSecondImei
+    [-1879047477, bstr], ; Tag_AttestationIdMeid
+    [-1879047476, bstr], ; Tag_AttestationIdManufacturer
+    [-1879047475, bstr], ; Tag_AttestationIdModel
+    [805307086, int], ; Tag_VendorPatchlevel
+    [805307087, int], ; Tag_BootPatchlevel
+    [1879048912, true], ; Tag_DeviceUniqueAttestation
+    [1879048914, true], ; Tag_StorageKey
+    [-1879047191, bstr], ; Tag_Nonce
+    [805307371, int], ; Tag_MacLength
+    [1879049196, true], ; Tag_ResetSinceIdRotation
+    [-2147482642, bstr], ; Tag_CertificateSerial
+    [-1879047185, bstr], ; Tag_CertificateSubject
+    [1610613744, DateTime], ; Tag_CertificateNotBefore
+    [1610613745, DateTime], ; Tag_CertificateNotAfter
+    [805307378, int], ; Tag_MaxBootLevel
+    [-1879047468, bstr], ; Tag_ModuleHash
+)
+KeyMintOperation = &(
+    DeviceGetHardwareInfo: 0x11,
+    DeviceAddRngEntropy: 0x12,
+    DeviceGenerateKey: 0x13,
+    DeviceImportKey: 0x14,
+    DeviceImportWrappedKey: 0x15,
+    DeviceUpgradeKey: 0x16,
+    DeviceDeleteKey: 0x17,
+    DeviceDeleteAllKeys: 0x18,
+    DeviceDestroyAttestationIds: 0x19,
+    DeviceBegin: 0x1a,
+    DeviceEarlyBootEnded: 0x1c,
+    DeviceConvertStorageKeyToEphemeral: 0x1d,
+    DeviceGetKeyCharacteristics: 0x1e,
+    OperationUpdateAad: 0x31,
+    OperationUpdate: 0x32,
+    OperationFinish: 0x33,
+    OperationAbort: 0x34,
+    RpcGetHardwareInfo: 0x41,
+    RpcGenerateEcdsaP256KeyPair: 0x42,
+    RpcGenerateCertificateRequest: 0x43,
+    RpcGenerateCertificateV2Request: 0x44,
+    SharedSecretGetSharedSecretParameters: 0x51,
+    SharedSecretComputeSharedSecret: 0x52,
+    SecureClockGenerateTimeStamp: 0x61,
+    GetRootOfTrustChallenge: 0x71,
+    GetRootOfTrust: 0x72,
+    SendRootOfTrust: 0x73,
+    SetHalInfo: 0x81,
+    SetBootInfo: 0x82,
+    SetAttestationIds: 0x83,
+    SetHalVersion: 0x84,
+    SetAdditionalAttestationInfo: 0x91,
+)
+GetHardwareInfoRequest = []
+GetHardwareInfoResponse = [
+    ret: KeyMintHardwareInfo,
+]
+AddRngEntropyRequest = [
+    data: bstr,
+]
+AddRngEntropyResponse = []
+GenerateKeyRequest = [
+    key_params: [* KeyParam],
+    attestation_key: [? AttestationKey],
+]
+GenerateKeyResponse = [
+    ret: KeyCreationResult,
+]
+ImportKeyRequest = [
+    key_params: [* KeyParam],
+    key_format: KeyFormat,
+    key_data: bstr,
+    attestation_key: [? AttestationKey],
+]
+ImportKeyResponse = [
+    ret: KeyCreationResult,
+]
+ImportWrappedKeyRequest = [
+    wrapped_key_data: bstr,
+    wrapping_key_blob: bstr,
+    masking_key: bstr,
+    unwrapping_params: [* KeyParam],
+    password_sid: int,
+    biometric_sid: int,
+]
+ImportWrappedKeyResponse = [
+    ret: KeyCreationResult,
+]
+UpgradeKeyRequest = [
+    key_blob_to_upgrade: bstr,
+    upgrade_params: [* KeyParam],
+]
+UpgradeKeyResponse = [
+    ret: bstr,
+]
+DeleteKeyRequest = [
+    key_blob: bstr,
+]
+DeleteKeyResponse = []
+DeleteAllKeysRequest = []
+DeleteAllKeysResponse = []
+DestroyAttestationIdsRequest = []
+DestroyAttestationIdsResponse = []
+BeginRequest = [
+    purpose: KeyPurpose,
+    key_blob: bstr,
+    params: [* KeyParam],
+    auth_token: [? HardwareAuthToken],
+]
+InternalBeginResult = [
+    challenge: int,
+    params: [* KeyParam],
+    op_handle: int,
+]
+EarlyBootEndedRequest = []
+EarlyBootEndedResponse = []
+ConvertStorageKeyToEphemeralRequest = [
+    storage_key_blob: bstr,
+]
+ConvertStorageKeyToEphemeralResponse = [
+    ret: bstr,
+]
+GetKeyCharacteristicsRequest = [
+    key_blob: bstr,
+    app_id: bstr,
+    app_data: bstr,
+]
+GetKeyCharacteristicsResponse = [
+    ret: [* KeyCharacteristics],
+]
+UpdateAadRequest = [
+    op_handle: int,
+    input: bstr,
+    auth_token: [? HardwareAuthToken],
+    timestamp_token: [? TimeStampToken],
+]
+UpdateAadResponse = []
+UpdateRequest = [
+    op_handle: int,
+    input: bstr,
+    auth_token: [? HardwareAuthToken],
+    timestamp_token: [? TimeStampToken],
+]
+UpdateResponse = [
+    ret: bstr,
+]
+FinishRequest = [
+    op_handle: int,
+    input: [? bstr],
+    signature: [? bstr],
+    auth_token: [? HardwareAuthToken],
+    timestamp_token: [? TimeStampToken],
+    confirmation_token: [? bstr],
+]
+FinishResponse = [
+    ret: bstr,
+]
+AbortRequest = [
+    op_handle: int,
+]
+AbortResponse = []
+GetRpcHardwareInfoRequest = []
+GetRpcHardwareInfoResponse = [
+    ret: HardwareInfo,
+]
+GenerateEcdsaP256KeyPairRequest = [
+    test_mode: bool,
+]
+GenerateEcdsaP256KeyPairResponse = [
+    maced_public_key: MacedPublicKey,
+    ret: bstr,
+]
+GenerateCertificateRequestRequest = [
+    test_mode: bool,
+    keys_to_sign: [* MacedPublicKey],
+    endpoint_encryption_cert_chain: bstr,
+    challenge: bstr,
+]
+GenerateCertificateRequestResponse = [
+    device_info: DeviceInfo,
+    protected_data: ProtectedData,
+    ret: bstr,
+]
+GenerateCertificateRequestV2Request = [
+    keys_to_sign: [* MacedPublicKey],
+    challenge: bstr,
+]
+GenerateCertificateRequestV2Response = [
+    ret: bstr,
+]
+GetSharedSecretParametersRequest = []
+GetSharedSecretParametersResponse = [
+    ret: SharedSecretParameters,
+]
+ComputeSharedSecretRequest = [
+    params: [* SharedSecretParameters],
+]
+ComputeSharedSecretResponse = [
+    ret: bstr,
+]
+GenerateTimeStampRequest = [
+    challenge: int,
+]
+GenerateTimeStampResponse = [
+    ret: TimeStampToken,
+]
+PerformOpReq = &(
+    [DeviceGetHardwareInfo, GetHardwareInfoRequest],
+    [DeviceAddRngEntropy, AddRngEntropyRequest],
+    [DeviceGenerateKey, GenerateKeyRequest],
+    [DeviceImportKey, ImportKeyRequest],
+    [DeviceImportWrappedKey, ImportWrappedKeyRequest],
+    [DeviceUpgradeKey, UpgradeKeyRequest],
+    [DeviceDeleteKey, DeleteKeyRequest],
+    [DeviceDeleteAllKeys, DeleteAllKeysRequest],
+    [DeviceDestroyAttestationIds, DestroyAttestationIdsRequest],
+    [DeviceBegin, BeginRequest],
+    [DeviceEarlyBootEnded, EarlyBootEndedRequest],
+    [DeviceConvertStorageKeyToEphemeral, ConvertStorageKeyToEphemeralRequest],
+    [DeviceGetKeyCharacteristics, GetKeyCharacteristicsRequest],
+    [OperationUpdateAad, UpdateAadRequest],
+    [OperationUpdate, UpdateRequest],
+    [OperationFinish, FinishRequest],
+    [OperationAbort, AbortRequest],
+    [RpcGetHardwareInfo, GetRpcHardwareInfoRequest],
+    [RpcGenerateEcdsaP256KeyPair, GenerateEcdsaP256KeyPairRequest],
+    [RpcGenerateCertificateRequest, GenerateCertificateRequestRequest],
+    [RpcGenerateCertificateV2Request, GenerateCertificateRequestV2Request],
+    [SharedSecretGetSharedSecretParameters, GetSharedSecretParametersRequest],
+    [SharedSecretComputeSharedSecret, ComputeSharedSecretRequest],
+    [SecureClockGenerateTimeStamp, GenerateTimeStampRequest],
+    [GetRootOfTrustChallenge, GetRootOfTrustChallengeRequest],
+    [GetRootOfTrust, GetRootOfTrustRequest],
+    [SendRootOfTrust, SendRootOfTrustRequest],
+    [SetHalInfo, SetHalInfoRequest],
+    [SetBootInfo, SetBootInfoRequest],
+    [SetAttestationIds, SetAttestationIdsRequest],
+    [SetHalVersion, SetHalVersionRequest],
+    [SetAdditionalAttestationInfo, SetAdditionalAttestationInfoRequest],
+)
+PerformOpRsp = &(
+    [DeviceGetHardwareInfo, GetHardwareInfoResponse],
+    [DeviceAddRngEntropy, AddRngEntropyResponse],
+    [DeviceGenerateKey, GenerateKeyResponse],
+    [DeviceImportKey, ImportKeyResponse],
+    [DeviceImportWrappedKey, ImportWrappedKeyResponse],
+    [DeviceUpgradeKey, UpgradeKeyResponse],
+    [DeviceDeleteKey, DeleteKeyResponse],
+    [DeviceDeleteAllKeys, DeleteAllKeysResponse],
+    [DeviceDestroyAttestationIds, DestroyAttestationIdsResponse],
+    [DeviceBegin, BeginResponse],
+    [DeviceEarlyBootEnded, EarlyBootEndedResponse],
+    [DeviceConvertStorageKeyToEphemeral, ConvertStorageKeyToEphemeralResponse],
+    [DeviceGetKeyCharacteristics, GetKeyCharacteristicsResponse],
+    [OperationUpdateAad, UpdateAadResponse],
+    [OperationUpdate, UpdateResponse],
+    [OperationFinish, FinishResponse],
+    [OperationAbort, AbortResponse],
+    [RpcGetHardwareInfo, GetRpcHardwareInfoResponse],
+    [RpcGenerateEcdsaP256KeyPair, GenerateEcdsaP256KeyPairResponse],
+    [RpcGenerateCertificateRequest, GenerateCertificateRequestResponse],
+    [RpcGenerateCertificateV2Request, GenerateCertificateRequestV2Response],
+    [SharedSecretGetSharedSecretParameters, GetSharedSecretParametersResponse],
+    [SharedSecretComputeSharedSecret, ComputeSharedSecretResponse],
+    [SecureClockGenerateTimeStamp, GenerateTimeStampResponse],
+    [GetRootOfTrustChallenge, GetRootOfTrustChallengeResponse],
+    [GetRootOfTrust, GetRootOfTrustResponse],
+    [SendRootOfTrust, SendRootOfTrustResponse],
+    [SetHalInfo, SetHalInfoResponse],
+    [SetBootInfo, SetBootInfoResponse],
+    [SetAttestationIds, SetAttestationIdsResponse],
+    [SetHalVersion, SetHalVersionResponse],
+    [SetAdditionalAttestationInfo, SetAdditionalAttestationInfoResponse],
+)
+PerformOpResponse = [
+    error_code: int,
+    rsp: [? PerformOpRsp],
+]

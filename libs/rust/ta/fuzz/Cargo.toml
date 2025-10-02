@@ -1,0 +1,32 @@
+[package]
+name = "kmr-ta-fuzz"
+version = "0.0.0"
+authors = ["Automatically generated"]
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+der = { version = "^0.7.8", features = ["alloc", "derive"] }
+libfuzzer-sys = "0.4"
+
+[dependencies.kmr-ta]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "keydescription"
+path = "fuzz_targets/keydescription.rs"
+test = false
+doc = false
+bench = false
+
+[patch.crates-io]
+kmr-common = { path = "../../common" }
+kmr-derive = { path = "../../derive" }
+kmr-wire = { path = "../../wire" }
