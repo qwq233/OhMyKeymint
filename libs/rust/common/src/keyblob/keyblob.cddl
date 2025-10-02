@@ -1,0 +1,274 @@
+; encrypted_key_material is AES-GCM encrypted with:
+; - key derived as described below
+; - plaintext is the CBOR-serialization of `KeyMaterial`
+; - nonce value is fixed, all zeroes
+; - no additional data
+;
+; Key derivation uses HKDF (RFC 5869) with HMAC-SHA256 to generate an AES-256 key:
+; - input keying material = a root key held in hardware
+; - salt = absent
+; - info = the following three or four chunks of context data concatenated:
+;    - content of `EncryptedKeyBlob.key_derivation_input` (a random nonce)
+;    - CBOR-serialization of `EncryptedKeyBlob.characteristics`
+;    - CBOR-serialized array of additional hidden `KeyParam` items associated with the key, specifically:
+;        - [Tag_ApplicationId, bstr] if required
+;        - [Tag_ApplicationData, bstr] if required
+;        - [Tag_RootOfTrust, bstr .cbor RootOfTrustInfo]
+;    - (if secure storage is available) CBOR serialization of the `SecureDeletionData` structure, with:
+;        - `factory_reset_secret` always populated
+;        - `secure_deletion_secret` populated with:
+;           - all zeroes (if `EncryptedKeyBlob.secure_deletion_slot` is empty)
+;           - the contents of the slot (if `EncryptedKeyBlob.secure_deletion_slot` is non-empty)
+EncryptedKeyBlob = &(
+    [0, EncryptedKeyBlobV1] ; Version::V1
+)
+Version = &(
+    Version_V1: 0,
+)
+EncryptedKeyBlobV1 = [
+    characteristics: [* KeyCharacteristics],
+    key_derivation_input: bstr .size 32,
+    kek_context: bstr,
+    encrypted_key_material: #6.16(Cose_Encrypt0),
+    secure_deletion_slot: [? SecureDeletionSlot],
+]
+KeyCharacteristics = [
+    security_level: SecurityLevel,
+    authorizations: [* KeyParam],
+]
+Cose_Encrypt0 = [ protected: bstr, unprotected: { * (int / tstr) => any }, ciphertext: bstr / nil ]
+KeyMaterial = &(
+  ; For each variant the `bool` second entry indicates whether the bstr for the key material
+  ; is opaque (true), or explicit (false).
+  [32, bool, bstr], ; Algorithm_Aes
+  [33, bool, bstr], ; Algorithm_TripleDes
+  [128, bool, bstr], ; Algorithm_Hmac
+  ; An explicit RSA key is in the form of an ASN.1 DER encoding of a PKCS#1 `RSAPrivateKey`
+  ; structure, as specified by RFC 3447 sections A.1.2 and 3.2.
+  [1, bool, bstr], ; Algorithm_Rsa
+  ; An explicit EC key for a NIST curve is in the form of an ASN.1 DER encoding of a
+  ; `ECPrivateKey` structure, as specified by RFC 5915 section 3.
+  ; An explicit EC key for curve 25519 is the raw key bytes.
+  [3, bool, [EcCurve, CurveType, bstr]], ; Algorithm_Ec
+)
+SecureDeletionSlot = int
+SecureDeletionData = [
+    factory_reset_secret: bstr .size 32,
+    secure_deletion_secret: bstr .size 16,
+]
+RootOfTrustInfo = [
+    verified_boot_key: bstr,
+    device_boot_locked: bool,
+    verified_boot_state: VerifiedBootState,
+]
+VerifiedBootState = &(
+    VerifiedBootState_Verified: 0,
+    VerifiedBootState_SelfSigned: 1,
+    VerifiedBootState_Unverified: 2,
+    VerifiedBootState_Failed: 3,
+)
+SecurityLevel = &(
+    SecurityLevel_Software: 0,
+    SecurityLevel_TrustedEnvironment: 1,
+    SecurityLevel_Strongbox: 2,
+    SecurityLevel_Keystore: 100,
+)
+KeyParam = &(
+    [268435458, Algorithm], ; Tag_Algorithm
+    [536870916, BlockMode], ; Tag_BlockMode
+    [536870918, PaddingMode], ; Tag_Padding
+    [536870917, Digest], ; Tag_Digest
+    [268435466, EcCurve], ; Tag_EcCurve
+    [268436158, KeyOrigin], ; Tag_Origin
+    [536870913, KeyPurpose], ; Tag_Purpose
+    [805306371, KeySizeInBits], ; Tag_KeySize
+    [1879048199, bstr], ; Tag_CallerNonce
+    [805306376, int], ; Tag_MinMacLength
+    [1342177480, RsaExponent], ; Tag_RsaPublicExponent
+    [1879048394, true], ; Tag_IncludeUniqueId
+    [536871115, Digest], ; Tag_RsaOaepMgfDigest
+    [1879048494, true], ; Tag_BootloaderOnly
+    [1879048495, true], ; Tag_RollbackResistance
+    [1879048497, true], ; Tag_EarlyBootOnly
+    [1610613136, DateTime], ; Tag_ActiveDatetime
+    [1610613137, DateTime], ; Tag_OriginationExpireDatetime
+    [1610613138, DateTime], ; Tag_UsageExpireDatetime
+    [805306772, int], ; Tag_MaxUsesPerBoot
+    [805306773, int], ; Tag_UsageCountLimit
+    [805306869, int], ; Tag_UserId
+    [-1610612234, int], ; Tag_UserSecureId
+    [1879048695, true], ; Tag_NoAuthRequired
+    [268435960, int], ; Tag_UserAuthType
+    [805306873, int], ; Tag_AuthTimeout
+    [1879048698, true], ; Tag_AllowWhileOnBody
+    [1879048699, true], ; Tag_TrustedUserPresenceRequired
+    [1879048700, true], ; Tag_TrustedConfirmationRequired
+    [1879048701, true], ; Tag_UnlockedDeviceRequired
+    [-1879047591, bstr], ; Tag_ApplicationId
+    [-1879047492, bstr], ; Tag_ApplicationData
+    [1610613437, DateTime], ; Tag_CreationDatetime
+    [-1879047488, bstr], ; Tag_RootOfTrust
+    [805307073, int], ; Tag_OsVersion
+    [805307074, int], ; Tag_OsPatchlevel
+    [-1879047484, bstr], ; Tag_AttestationChallenge
+    [-1879047483, bstr], ; Tag_AttestationApplicationId
+    [-1879047482, bstr], ; Tag_AttestationIdBrand
+    [-1879047481, bstr], ; Tag_AttestationIdDevice
+    [-1879047480, bstr], ; Tag_AttestationIdProduct
+    [-1879047479, bstr], ; Tag_AttestationIdSerial
+    [-1879047478, bstr], ; Tag_AttestationIdImei
+    [-1879047469, bstr], ; Tag_AttestationIdSecondImei
+    [-1879047477, bstr], ; Tag_AttestationIdMeid
+    [-1879047476, bstr], ; Tag_AttestationIdManufacturer
+    [-1879047475, bstr], ; Tag_AttestationIdModel
+    [805307086, int], ; Tag_VendorPatchlevel
+    [805307087, int], ; Tag_BootPatchlevel
+    [1879048912, true], ; Tag_DeviceUniqueAttestation
+    [1879048914, true], ; Tag_StorageKey
+    [-1879047191, bstr], ; Tag_Nonce
+    [805307371, int], ; Tag_MacLength
+    [1879049196, true], ; Tag_ResetSinceIdRotation
+    [-2147482642, bstr], ; Tag_CertificateSerial
+    [-1879047185, bstr], ; Tag_CertificateSubject
+    [1610613744, DateTime], ; Tag_CertificateNotBefore
+    [1610613745, DateTime], ; Tag_CertificateNotAfter
+    [805307378, int], ; Tag_MaxBootLevel
+    [-1879047468, bstr], ; Tag_ModuleHash
+)
+Tag = &(
+    Tag_Invalid: 0,
+    Tag_Purpose: 536870913,
+    Tag_Algorithm: 268435458,
+    Tag_KeySize: 805306371,
+    Tag_BlockMode: 536870916,
+    Tag_Digest: 536870917,
+    Tag_Padding: 536870918,
+    Tag_CallerNonce: 1879048199,
+    Tag_MinMacLength: 805306376,
+    Tag_EcCurve: 268435466,
+    Tag_RsaPublicExponent: 1342177480,
+    Tag_IncludeUniqueId: 1879048394,
+    Tag_RsaOaepMgfDigest: 536871115,
+    Tag_BootloaderOnly: 1879048494,
+    Tag_RollbackResistance: 1879048495,
+    Tag_HardwareType: 268435760,
+    Tag_EarlyBootOnly: 1879048497,
+    Tag_ActiveDatetime: 1610613136,
+    Tag_OriginationExpireDatetime: 1610613137,
+    Tag_UsageExpireDatetime: 1610613138,
+    Tag_MinSecondsBetweenOps: 805306771,
+    Tag_MaxUsesPerBoot: 805306772,
+    Tag_UsageCountLimit: 805306773,
+    Tag_UserId: 805306869,
+    Tag_UserSecureId: -1610612234,
+    Tag_NoAuthRequired: 1879048695,
+    Tag_UserAuthType: 268435960,
+    Tag_AuthTimeout: 805306873,
+    Tag_AllowWhileOnBody: 1879048698,
+    Tag_TrustedUserPresenceRequired: 1879048699,
+    Tag_TrustedConfirmationRequired: 1879048700,
+    Tag_UnlockedDeviceRequired: 1879048701,
+    Tag_ApplicationId: -1879047591,
+    Tag_ApplicationData: -1879047492,
+    Tag_CreationDatetime: 1610613437,
+    Tag_Origin: 268436158,
+    Tag_RootOfTrust: -1879047488,
+    Tag_OsVersion: 805307073,
+    Tag_OsPatchlevel: 805307074,
+    Tag_UniqueId: -1879047485,
+    Tag_AttestationChallenge: -1879047484,
+    Tag_AttestationApplicationId: -1879047483,
+    Tag_AttestationIdBrand: -1879047482,
+    Tag_AttestationIdDevice: -1879047481,
+    Tag_AttestationIdProduct: -1879047480,
+    Tag_AttestationIdSerial: -1879047479,
+    Tag_AttestationIdImei: -1879047478,
+    Tag_AttestationIdMeid: -1879047477,
+    Tag_AttestationIdManufacturer: -1879047476,
+    Tag_AttestationIdModel: -1879047475,
+    Tag_VendorPatchlevel: 805307086,
+    Tag_BootPatchlevel: 805307087,
+    Tag_DeviceUniqueAttestation: 1879048912,
+    Tag_IdentityCredentialKey: 1879048913,
+    Tag_StorageKey: 1879048914,
+    Tag_AttestationIdSecondImei: -1879047469,
+    Tag_AssociatedData: -1879047192,
+    Tag_Nonce: -1879047191,
+    Tag_MacLength: 805307371,
+    Tag_ResetSinceIdRotation: 1879049196,
+    Tag_ConfirmationToken: -1879047187,
+    Tag_CertificateSerial: -2147482642,
+    Tag_CertificateSubject: -1879047185,
+    Tag_CertificateNotBefore: 1610613744,
+    Tag_CertificateNotAfter: 1610613745,
+    Tag_MaxBootLevel: 805307378,
+    Tag_ModuleHash: -1879047468,
+)
+Algorithm = &(
+    Algorithm_Rsa: 1,
+    Algorithm_Ec: 3,
+    Algorithm_Aes: 32,
+    Algorithm_TripleDes: 33,
+    Algorithm_Hmac: 128,
+)
+BlockMode = &(
+    BlockMode_Ecb: 1,
+    BlockMode_Cbc: 2,
+    BlockMode_Ctr: 3,
+    BlockMode_Gcm: 32,
+)
+Digest = &(
+    Digest_None: 0,
+    Digest_Md5: 1,
+    Digest_Sha1: 2,
+    Digest_Sha224: 3,
+    Digest_Sha256: 4,
+    Digest_Sha384: 5,
+    Digest_Sha512: 6,
+)
+EcCurve = &(
+    EcCurve_P224: 0,
+    EcCurve_P256: 1,
+    EcCurve_P384: 2,
+    EcCurve_P521: 3,
+    EcCurve_Curve25519: 4,
+)
+CurveType = &(
+    CurveType_Nist: 0,
+    CurveType_EdDsa: 1,
+    CurveType_Xdh: 2,
+)
+KeyOrigin = &(
+    KeyOrigin_Generated: 0,
+    KeyOrigin_Derived: 1,
+    KeyOrigin_Imported: 2,
+    KeyOrigin_Reserved: 3,
+    KeyOrigin_SecurelyImported: 4,
+)
+KeyPurpose = &(
+    KeyPurpose_Encrypt: 0,
+    KeyPurpose_Decrypt: 1,
+    KeyPurpose_Sign: 2,
+    KeyPurpose_Verify: 3,
+    KeyPurpose_WrapKey: 5,
+    KeyPurpose_AgreeKey: 6,
+    KeyPurpose_AttestKey: 7,
+)
+HardwareAuthenticatorType = &(
+    HardwareAuthenticatorType_None: 0,
+    HardwareAuthenticatorType_Password: 1,
+    HardwareAuthenticatorType_Fingerprint: 2,
+    HardwareAuthenticatorType_Any: -1,
+)
+PaddingMode = &(
+    PaddingMode_None: 1,
+    PaddingMode_RsaOaep: 2,
+    PaddingMode_RsaPss: 3,
+    PaddingMode_RsaPkcs115Encrypt: 4,
+    PaddingMode_RsaPkcs115Sign: 5,
+    PaddingMode_Pkcs7: 64,
+)
+DateTime = int
+KeySizeInBits = int
+RsaExponent = int
+

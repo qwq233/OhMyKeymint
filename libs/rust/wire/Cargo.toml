@@ -1,0 +1,30 @@
+# Note that Cargo is not an officially supported build tool (Android's Soong is the official
+# tool).  This Cargo.toml file is included purely for the convenience of KeyMint developers.
+
+[package]
+name = "kmr-wire"
+version = "0.1.0"
+authors = ["David Drysdale <drysdale@google.com>"]
+edition = "2021"
+license = "Apache-2.0"
+
+[features]
+default = ["hal_v2", "hal_v3", "hal_v4"]
+# Include support for types added in v4 of the KeyMint HAL.
+hal_v4 = ["hal_v3", "hal_v2"]
+# Include support for types added in v3 of the KeyMint HAL.
+hal_v3 = ["hal_v2"]
+# Include support for types added in v2 of the KeyMint HAL.
+hal_v2 = []
+
+[dependencies]
+ciborium = { version = "^0.2.2", default-features = false }
+ciborium-io = "^0.2.0"
+coset = "0.3.3"
+enumn = "0.1.4"
+kmr-derive = "*"
+log = "^0.4"
+zeroize = { version = "^1.5.6", features = ["alloc", "zeroize_derive"] }
+
+[dev-dependencies]
+hex = "0.4.3"

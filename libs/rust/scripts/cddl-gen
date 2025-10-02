@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -e
+
+# Regenerate CDDL files
+cargo run --bin cddl-dump > common/generated.cddl
+cargo run --bin keyblob-cddl-dump > common/src/keyblob/keyblob.cddl
