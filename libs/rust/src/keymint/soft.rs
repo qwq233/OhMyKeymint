@@ -57,11 +57,11 @@ impl Default for Derive {
     }
 }
 
-impl crate::rpc::DeriveBytes for Derive {
+impl crate::keymint::rpc::DeriveBytes for Derive {
     fn derive_bytes(&self, context: &[u8], output_len: usize) -> Result<Vec<u8>, Error> {
         BoringHmac.hkdf(&[], &self.hbk, context, output_len)
     }
 }
 
 /// RPC artifact retrieval using software fake key.
-pub type RpcArtifacts = crate::rpc::Artifacts<Derive>;
+pub type RpcArtifacts = crate::keymint::rpc::Artifacts<Derive>;

@@ -30,6 +30,11 @@ prost-types = "0.14.1"
 hex = "0.4.3"
 log4rs = "1.4.0"
 log = "0.4.28"
+rsbinder = "0.4.2"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+tokio = { version = "1.47.1", features = ["macros", "libc"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger_lite = "0.1.0"
@@ -64,3 +69,4 @@ kmr-wire = { path = "wire" }
 
 [build-dependencies]
 prost-build = "0.14.1"
+rsbinder-aidl = "0.4.2"
