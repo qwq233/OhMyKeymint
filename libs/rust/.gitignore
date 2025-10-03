@@ -18,3 +18,5 @@ Cargo.lock
 *.pdb
 
 /omk
+
+src/aidl.rs

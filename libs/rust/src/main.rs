@@ -1,22 +1,22 @@
-use std::fmt::Debug;
-
-use kmr_common::crypto::{self, des::Key, MonotonicClock};
+use kmr_common::crypto::{self, MonotonicClock};
 use kmr_crypto_boring::{
     aes::BoringAes, aes_cmac::BoringAesCmac, des::BoringDes, ec::BoringEc, eq::BoringEq, hmac::BoringHmac, rng::BoringRng, rsa::BoringRsa, sha256::BoringSha256
 };
 use kmr_ta::{device::{CsrSigningAlgorithm, Implementation}, HardwareInfo, KeyMintTa, RpcInfo, RpcInfoV3};
-use kmr_wire::{cbor::de, keymint::{AttestationKey, DateTime, KeyCharacteristics, KeyParam, KeyPurpose, SecurityLevel}, rpc::MINIMUM_SUPPORTED_KEYS_IN_CSR, sharedsecret::SharedSecretParameters, GenerateKeyRequest, GetHardwareInfoRequest, GetRootOfTrustRequest, GetSharedSecretParametersRequest, KeySizeInBits, PerformOpReq};
+use kmr_wire::{keymint::{DateTime, KeyCharacteristics, KeyParam, KeyPurpose, SecurityLevel}, rpc::MINIMUM_SUPPORTED_KEYS_IN_CSR, GenerateKeyRequest, GetHardwareInfoRequest, KeySizeInBits, PerformOpReq};
 use log::{debug, error};
-use kmr_wire::AsCborValue;
+
+use crate::keymint::{attest, clock, sdd, soft};
 
 pub mod macros;
-pub mod attest;
-pub mod sdd;
-pub mod clock;
 pub mod proto;
-pub mod soft;
-pub mod rpc;
+pub mod keymint;
+pub mod keymaster;
 pub mod logging;
+pub mod utils;
+
+include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
+// include!( "./aidl.rs"); // for development only
 
 #[cfg(target_os = "android")]
 const TAG: &str = "OhMyKeymint";
@@ -24,8 +24,11 @@ const TAG: &str = "OhMyKeymint";
 fn main(){
     debug!("Hello, OhMyKeymint!");
     logging::init_logger();
+    let db = keymaster::db::KeymasterDb::new().unwrap();
+    db.close().unwrap();
+
     #[cfg(target_os = "android")] logi!(TAG, "Application started");
-    let security_level = SecurityLevel::TrustedEnvironment;
+    let security_level: SecurityLevel = SecurityLevel::TrustedEnvironment;
     let hw_info = HardwareInfo {
         version_number: 2,
         security_level,
@@ -146,31 +149,6 @@ fn main(){
 
     let clock = clock::StdClock;
     let current_time = clock.now().0;
-    let keyblob = kmr_common::keyblob::EncryptedKeyBlobV1 {
-        characteristics: vec![KeyCharacteristics {
-            security_level: SecurityLevel::TrustedEnvironment,
-            authorizations: vec![
-                KeyParam::ApplicationId("com.example.app".as_bytes().to_vec()),
-                KeyParam::AttestationApplicationId("com.example.app".as_bytes().to_vec()),
-                KeyParam::Purpose(KeyPurpose::AttestKey),
-                KeyParam::KeySize(KeySizeInBits(256)),
-                KeyParam::Algorithm(kmr_wire::keymint::Algorithm::Ec),
-                KeyParam::EcCurve(kmr_wire::keymint::EcCurve::P256),
-                KeyParam::Digest(kmr_wire::keymint::Digest::Sha256),
-                KeyParam::NoAuthRequired,
-                KeyParam::CertificateNotBefore(DateTime{ms_since_epoch: clock.now().0 - 10000}), // -10 seconds
-                KeyParam::CertificateNotAfter(DateTime{ms_since_epoch: clock.now().0 + 31536000000}), // +1 year
-                KeyParam::CertificateSerial(b"1234567890".to_vec()),
-                KeyParam::CertificateSubject(b"CN=Android Keystore Key".to_vec()),
-                KeyParam::AttestationChallenge(b"Test Attestation Challenge".to_vec()),
-
-            ],
-        }],
-        key_derivation_input: [0u8; 32],
-        kek_context: vec![0; 32],
-        encrypted_key_material: kmr_wire::coset::CoseEncrypt0::default(),
-        secure_deletion_slot: None,
-    };
 
     let req = PerformOpReq::DeviceGenerateKey(GenerateKeyRequest{
         key_params: vec![
