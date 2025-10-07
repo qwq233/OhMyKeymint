@@ -39,6 +39,23 @@ pub use traits::*;
 /// Size of SHA-256 output in bytes.
 pub const SHA256_DIGEST_LEN: usize = 32;
 
+/// Length of the expected initialization vector.
+pub const GCM_IV_LENGTH: usize = 12;
+/// Length of the expected AEAD TAG.
+pub const TAG_LENGTH: usize = 16;
+/// Length of an AES 256 key in bytes.
+pub const AES_256_KEY_LENGTH: usize = 32;
+/// Length of an AES 128 key in bytes.
+pub const AES_128_KEY_LENGTH: usize = 16;
+/// Length of the expected salt for key from password generation.
+pub const SALT_LENGTH: usize = 16;
+/// Length of an HMAC-SHA256 tag in bytes.
+pub const HMAC_SHA256_LEN: usize = 32;
+
+/// Older versions of keystore produced IVs with four extra
+/// ignored zero bytes at the end; recognise and trim those.
+pub const LEGACY_IV_LENGTH: usize = 16;
+
 /// Function that mimics `slice.to_vec()` but which detects allocation failures.  This version emits
 /// `CborError` (instead of the `Error` that `crate::try_to_vec` emits).
 #[inline]
@@ -55,7 +72,9 @@ pub struct MillisecondsSinceEpoch(pub i64);
 
 impl From<MillisecondsSinceEpoch> for kmr_wire::secureclock::Timestamp {
     fn from(value: MillisecondsSinceEpoch) -> Self {
-        kmr_wire::secureclock::Timestamp { milliseconds: value.0 }
+        kmr_wire::secureclock::Timestamp {
+            milliseconds: value.0,
+        }
     }
 }
 
@@ -291,7 +310,11 @@ impl AsCborValue for KeyMaterial {
                 let curve_type = CurveType::from_cbor_value(a.remove(1))?;
                 let curve = <EcCurve>::from_cbor_value(a.remove(0))?;
                 if opaque {
-                    Ok(Self::Ec(curve, curve_type, OpaqueKeyMaterial(raw_key).into()))
+                    Ok(Self::Ec(
+                        curve,
+                        curve_type,
+                        OpaqueKeyMaterial(raw_key).into(),
+                    ))
                 } else {
                     let key = match (curve, curve_type) {
                         (EcCurve::P224, CurveType::Nist) => ec::Key::P224(ec::NistKey(raw_key)),

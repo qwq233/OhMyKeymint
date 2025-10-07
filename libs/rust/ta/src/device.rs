@@ -91,7 +91,8 @@ pub trait RetrieveKeyMaterial {
     fn unique_id_hbk(&self, ckdf: &dyn crypto::Ckdf) -> Result<crypto::hmac::Key, Error> {
         // By default, use CKDF on the key agreement secret to derive a key.
         let unique_id_label = b"UniqueID HBK 32B";
-        ckdf.ckdf(&self.kak()?, unique_id_label, &[], 32).map(crypto::hmac::Key::new)
+        ckdf.ckdf(&self.kak()?, unique_id_label, &[], 32)
+            .map(crypto::hmac::Key::new)
     }
 
     /// Build the HMAC input for a [`TimeStampToken`].  The default implementation produces

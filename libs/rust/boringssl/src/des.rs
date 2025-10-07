@@ -14,10 +14,10 @@
 
 //! BoringSSL-based implementation of 3-DES.
 use crate::{openssl_err, ossl};
-use Box;
-use Vec;
 use kmr_common::{crypto, crypto::OpaqueOr, explicit, vec_try, Error};
 use openssl::symm::{Cipher, Crypter};
+use Box;
+use Vec;
 
 /// [`crypto::Des`] implementation based on BoringSSL.
 pub struct BoringDes;
@@ -76,7 +76,10 @@ impl crypto::EmittingOperation for BoringDesOperation {
         let out_len = self
             .crypter
             .update(data, &mut output[..])
-            .map_err(openssl_err!("update with {} bytes of data failed", data.len()))?;
+            .map_err(openssl_err!(
+                "update with {} bytes of data failed",
+                data.len()
+            ))?;
         output.truncate(out_len);
         Ok(output)
     }

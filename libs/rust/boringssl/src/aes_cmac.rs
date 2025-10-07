@@ -15,12 +15,13 @@
 //! BoringSSL-based implementation of AES-CMAC.
 use crate::types::CmacCtx;
 use crate::{malloc_err, openssl_last_err};
-use Box;
-use Vec;
-#[cfg(target_os = "android")] use bssl_sys as ffi;
+#[cfg(target_os = "android")]
+use bssl_sys as ffi;
 use ffi;
 use kmr_common::{crypto, crypto::OpaqueOr, explicit, km_err, vec_try, Error};
 use log::error;
+use Box;
+use Vec;
 
 /// [`crypto::AesCmac`] implementation based on BoringSSL.
 pub struct BoringAesCmac;
@@ -91,7 +92,9 @@ impl core::ops::Drop for BoringAesCmacOperation {
 impl crypto::AccumulatingOperation for BoringAesCmacOperation {
     fn update(&mut self, data: &[u8]) -> Result<(), Error> {
         // Safety: `self.ctx` is non-null and valid, and `data` is a valid slice.
-        let result = unsafe { ffi::CMAC_Update(self.ctx.0, data.as_ptr() as *const libc::c_void, data.len()) };
+        let result = unsafe {
+            ffi::CMAC_Update(self.ctx.0, data.as_ptr() as *const libc::c_void, data.len())
+        };
         if result != 1 {
             return Err(openssl_last_err());
         }
@@ -104,13 +107,21 @@ impl crypto::AccumulatingOperation for BoringAesCmacOperation {
         // Safety: `self.ctx` is non-null and valid; `output_len` is correct size of `output`
         // buffer.
         let result = unsafe {
-            ffi::CMAC_Final(self.ctx.0, output.as_mut_ptr(), &mut output_len as *mut usize)
+            ffi::CMAC_Final(
+                self.ctx.0,
+                output.as_mut_ptr(),
+                &mut output_len as *mut usize,
+            )
         };
         if result != 1 {
             return Err(openssl_last_err());
         }
         if output_len != crypto::aes::BLOCK_SIZE {
-            return Err(km_err!(BoringSslError, "Unexpected CMAC output size of {}", output_len));
+            return Err(km_err!(
+                BoringSslError,
+                "Unexpected CMAC output size of {}",
+                output_len
+            ));
         }
         Ok(output)
     }

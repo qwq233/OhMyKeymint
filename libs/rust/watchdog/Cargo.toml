@@ -1,0 +1,19 @@
+# Note that Cargo is not an officially supported build tool (Android's Soong is the official
+# tool).  This Cargo.toml file is included purely for the convenience of KeyMint developers.
+
+[package]
+name = "watchdog_rs"
+version = "0.1.0"
+authors = ["David Drysdale <drysdale@google.com>"]
+edition = "2021"
+license = "Apache-2.0"
+
+[features]
+
+
+[dependencies]
+chrono = "0.4.42"
+log = "0.4.28"
+
+[dev-dependencies]
+hex = "0.4.3"

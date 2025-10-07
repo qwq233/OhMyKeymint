@@ -16,7 +16,6 @@
 
 use crate::keys::SigningInfo;
 use core::time::Duration;
-use std::borrow::Cow;
 use der::asn1::{BitString, OctetString, OctetStringRef, SetOfVec};
 use der::{
     asn1::{GeneralizedTime, Null, UtcTime},
@@ -39,6 +38,7 @@ use kmr_wire::{
     KeySizeInBits, RsaExponent,
 };
 use spki::{AlgorithmIdentifier, ObjectIdentifier, SubjectPublicKeyInfoOwned};
+use std::borrow::Cow;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::{
     certificate::{Certificate, TbsCertificate, Version},
@@ -88,7 +88,10 @@ pub(crate) fn tbs_certificate<'a>(
             KeyMaterial::Rsa(_) => crypto::rsa::SHA256_PKCS1_SIGNATURE_OID,
             KeyMaterial::Ec(curve, _, _) => crypto::ec::curve_to_signing_oid(curve),
             _ => {
-                return Err(km_err!(UnsupportedAlgorithm, "unexpected cert signing key type"));
+                return Err(km_err!(
+                    UnsupportedAlgorithm,
+                    "unexpected cert signing key type"
+                ));
             }
         },
         None => {
@@ -148,7 +151,10 @@ pub(crate) fn tbs_certificate<'a>(
         version: Version::V3,
         serial_number: SerialNumber::new(cert_serial)
             .map_err(|e| der_err!(e, "failed to build serial number for {:?}", cert_serial))?,
-        signature: AlgorithmIdentifier { oid: sig_alg_oid, parameters: None },
+        signature: AlgorithmIdentifier {
+            oid: sig_alg_oid,
+            parameters: None,
+        },
         issuer: RdnSequence::from_der(cert_issuer)
             .map_err(|e| der_err!(e, "failed to build issuer"))?,
         validity: x509_cert::time::Validity {
@@ -244,7 +250,10 @@ pub(crate) fn key_usage_extension_bits(params: &[KeyParam]) -> KeyUsage {
 
 /// Build basic constraints extension value
 pub(crate) fn basic_constraints_ext_value(ca_required: bool) -> BasicConstraints {
-    BasicConstraints { ca: ca_required, path_len_constraint: None }
+    BasicConstraints {
+        ca: ca_required,
+        path_len_constraint: None,
+    }
 }
 
 /// Attestation extension contents
@@ -346,8 +355,13 @@ pub(crate) fn attestation_extension<'a>(
         None,
         &[],
     )?;
-    let sec_level = SecurityLevel::try_from(security_level as u32)
-        .map_err(|_| km_err!(InvalidArgument, "invalid security level {:?}", security_level))?;
+    let sec_level = SecurityLevel::try_from(security_level as u32).map_err(|_| {
+        km_err!(
+            InvalidArgument,
+            "invalid security level {:?}",
+            security_level
+        )
+    })?;
     let ext = AttestationExtension {
         attestation_version: keymint_version,
         attestation_security_level: sec_level,
@@ -453,7 +467,11 @@ impl<'a> AuthorizationList<'a> {
         app_id: Option<&'a [u8]>,
         additional_attestation_info: &'a [KeyParam],
     ) -> Result<Self, Error> {
-        check_attestation_id!(keygen_params, AttestationIdBrand, attestation_ids.map(|v| &v.brand));
+        check_attestation_id!(
+            keygen_params,
+            AttestationIdBrand,
+            attestation_ids.map(|v| &v.brand)
+        );
         check_attestation_id!(
             keygen_params,
             AttestationIdDevice,
@@ -469,22 +487,37 @@ impl<'a> AuthorizationList<'a> {
             AttestationIdSerial,
             attestation_ids.map(|v| &v.serial)
         );
-        check_attestation_id!(keygen_params, AttestationIdImei, attestation_ids.map(|v| &v.imei));
+        check_attestation_id!(
+            keygen_params,
+            AttestationIdImei,
+            attestation_ids.map(|v| &v.imei)
+        );
         check_attestation_id!(
             keygen_params,
             AttestationIdSecondImei,
             attestation_ids.map(|v| &v.imei2)
         );
-        check_attestation_id!(keygen_params, AttestationIdMeid, attestation_ids.map(|v| &v.meid));
+        check_attestation_id!(
+            keygen_params,
+            AttestationIdMeid,
+            attestation_ids.map(|v| &v.meid)
+        );
         check_attestation_id!(
             keygen_params,
             AttestationIdManufacturer,
             attestation_ids.map(|v| &v.manufacturer)
         );
-        check_attestation_id!(keygen_params, AttestationIdModel, attestation_ids.map(|v| &v.model));
+        check_attestation_id!(
+            keygen_params,
+            AttestationIdModel,
+            attestation_ids.map(|v| &v.model)
+        );
 
         let encoded_rot = if let Some(rot) = rot_info {
-            Some(rot.to_der().map_err(|e| der_err!(e, "failed to encode RoT"))?)
+            Some(
+                rot.to_der()
+                    .map_err(|e| der_err!(e, "failed to encode RoT"))?,
+            )
         } else {
             None
         };
@@ -531,9 +564,9 @@ impl<'a> AuthorizationList<'a> {
                 | KeyParam::AttestationIdModel(_) => {
                     keygen_params.try_push(param).map_err(der_alloc_err)?
                 }
-                KeyParam::ModuleHash(_) => {
-                    additional_attestation_info.try_push(param).map_err(der_alloc_err)?
-                }
+                KeyParam::ModuleHash(_) => additional_attestation_info
+                    .try_push(param)
+                    .map_err(der_alloc_err)?,
                 _ => auths.try_push(param).map_err(der_alloc_err)?,
             }
         }
@@ -566,8 +599,11 @@ fn decode_opt_field<'a, R: der::Reader<'a>>(
     key_params: &mut Vec<KeyParam>,
 ) -> Result<Option<keymint::Tag>, der::Error> {
     // Decode the tag if no tag is provided
-    let tag =
-        if already_read_tag.is_none() { decode_tag_from_bytes(decoder)? } else { already_read_tag };
+    let tag = if already_read_tag.is_none() {
+        decode_tag_from_bytes(decoder)?
+    } else {
+        already_read_tag
+    };
     match tag {
         Some(tag) if tag == expected_tag => {
             // Decode the length of the inner encoding
@@ -848,7 +884,9 @@ fn decode_value_from_bytes(
         }
         Tag::RootOfTrust => {
             key_params
-                .try_push(KeyParam::RootOfTrust(try_to_vec(tlv_bytes).map_err(der_alloc_err)?))
+                .try_push(KeyParam::RootOfTrust(
+                    try_to_vec(tlv_bytes).map_err(der_alloc_err)?,
+                ))
                 .map_err(der_alloc_err)?;
         }
         Tag::OsVersion => {
@@ -1096,7 +1134,10 @@ impl EncodeValue for AuthorizationList<'_> {
             + asn1_len(asn1_null!(self.auths, RollbackResistance))?
             + asn1_len(asn1_null!(self.auths, EarlyBootOnly))?
             + asn1_len(asn1_integer_datetime!(self.auths, ActiveDatetime))?
-            + asn1_len(asn1_integer_datetime!(self.auths, OriginationExpireDatetime))?
+            + asn1_len(asn1_integer_datetime!(
+                self.auths,
+                OriginationExpireDatetime
+            ))?
             + asn1_len(asn1_integer_datetime!(self.auths, UsageExpireDatetime))?
             + asn1_len(asn1_integer!(self.auths, UsageCountLimit))?
             + asn1_len(asn1_null!(self.auths, NoAuthRequired))?
@@ -1130,17 +1171,29 @@ impl EncodeValue for AuthorizationList<'_> {
         length = length
             + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdBrand))?
             + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdDevice))?
-            + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdProduct))?
+            + asn1_len(asn1_octet_string!(
+                &self.keygen_params,
+                AttestationIdProduct
+            ))?
             + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdSerial))?
             + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdImei))?
             + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdMeid))?
-            + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdManufacturer))?
+            + asn1_len(asn1_octet_string!(
+                &self.keygen_params,
+                AttestationIdManufacturer
+            ))?
             + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdModel))?
             + asn1_len(asn1_integer!(self.auths, VendorPatchlevel))?
             + asn1_len(asn1_integer!(self.auths, BootPatchlevel))?
             + asn1_len(asn1_null!(self.auths, DeviceUniqueAttestation))?
-            + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdSecondImei))?
-            + asn1_len(asn1_octet_string!(&self.additional_attestation_info, ModuleHash))?;
+            + asn1_len(asn1_octet_string!(
+                &self.keygen_params,
+                AttestationIdSecondImei
+            ))?
+            + asn1_len(asn1_octet_string!(
+                &self.additional_attestation_info,
+                ModuleHash
+            ))?;
         length
     }
 
@@ -1159,8 +1212,14 @@ impl EncodeValue for AuthorizationList<'_> {
         asn1_val(asn1_null!(self.auths, RollbackResistance), writer)?;
         asn1_val(asn1_null!(self.auths, EarlyBootOnly), writer)?;
         asn1_val(asn1_integer_datetime!(self.auths, ActiveDatetime), writer)?;
-        asn1_val(asn1_integer_datetime!(self.auths, OriginationExpireDatetime), writer)?;
-        asn1_val(asn1_integer_datetime!(self.auths, UsageExpireDatetime), writer)?;
+        asn1_val(
+            asn1_integer_datetime!(self.auths, OriginationExpireDatetime),
+            writer,
+        )?;
+        asn1_val(
+            asn1_integer_datetime!(self.auths, UsageExpireDatetime),
+            writer,
+        )?;
         asn1_val(asn1_integer!(self.auths, UsageCountLimit), writer)?;
         // Skip `UserSecureId` as it's only included in the extension for
         // importWrappedKey() cases.
@@ -1192,19 +1251,49 @@ impl EncodeValue for AuthorizationList<'_> {
             .encode(writer)?;
         }
         // Accuracy of attestation IDs has already been checked, so just copy across.
-        asn1_val(asn1_octet_string!(&self.keygen_params, AttestationIdBrand), writer)?;
-        asn1_val(asn1_octet_string!(&self.keygen_params, AttestationIdDevice), writer)?;
-        asn1_val(asn1_octet_string!(&self.keygen_params, AttestationIdProduct), writer)?;
-        asn1_val(asn1_octet_string!(&self.keygen_params, AttestationIdSerial), writer)?;
-        asn1_val(asn1_octet_string!(&self.keygen_params, AttestationIdImei), writer)?;
-        asn1_val(asn1_octet_string!(&self.keygen_params, AttestationIdMeid), writer)?;
-        asn1_val(asn1_octet_string!(&self.keygen_params, AttestationIdManufacturer), writer)?;
-        asn1_val(asn1_octet_string!(&self.keygen_params, AttestationIdModel), writer)?;
+        asn1_val(
+            asn1_octet_string!(&self.keygen_params, AttestationIdBrand),
+            writer,
+        )?;
+        asn1_val(
+            asn1_octet_string!(&self.keygen_params, AttestationIdDevice),
+            writer,
+        )?;
+        asn1_val(
+            asn1_octet_string!(&self.keygen_params, AttestationIdProduct),
+            writer,
+        )?;
+        asn1_val(
+            asn1_octet_string!(&self.keygen_params, AttestationIdSerial),
+            writer,
+        )?;
+        asn1_val(
+            asn1_octet_string!(&self.keygen_params, AttestationIdImei),
+            writer,
+        )?;
+        asn1_val(
+            asn1_octet_string!(&self.keygen_params, AttestationIdMeid),
+            writer,
+        )?;
+        asn1_val(
+            asn1_octet_string!(&self.keygen_params, AttestationIdManufacturer),
+            writer,
+        )?;
+        asn1_val(
+            asn1_octet_string!(&self.keygen_params, AttestationIdModel),
+            writer,
+        )?;
         asn1_val(asn1_integer!(self.auths, VendorPatchlevel), writer)?;
         asn1_val(asn1_integer!(self.auths, BootPatchlevel), writer)?;
         asn1_val(asn1_null!(self.auths, DeviceUniqueAttestation), writer)?;
-        asn1_val(asn1_octet_string!(&self.keygen_params, AttestationIdSecondImei), writer)?;
-        asn1_val(asn1_octet_string!(&self.additional_attestation_info, ModuleHash), writer)?;
+        asn1_val(
+            asn1_octet_string!(&self.keygen_params, AttestationIdSecondImei),
+            writer,
+        )?;
+        asn1_val(
+            asn1_octet_string!(&self.additional_attestation_info, ModuleHash),
+            writer,
+        )?;
         Ok(())
     }
 }
@@ -1458,7 +1547,10 @@ mod tests {
         // encode
         assert_eq!(hex::encode(&got), want);
         // decode from encoded
-        assert_eq!(AuthorizationList::from_der(got.as_slice()).unwrap(), authz_list);
+        assert_eq!(
+            AuthorizationList::from_der(got.as_slice()).unwrap(),
+            authz_list
+        );
     }
 
     #[test]
@@ -1538,7 +1630,10 @@ mod tests {
         let got = AuthorizationList::from_der(&input).unwrap();
 
         let want = AuthorizationList::new(
-            &[KeyParam::Algorithm(keymint::Algorithm::Ec), KeyParam::UserSecureId(2)],
+            &[
+                KeyParam::Algorithm(keymint::Algorithm::Ec),
+                KeyParam::UserSecureId(2),
+            ],
             &[],
             None,
             Some(RootOfTrust {
@@ -1584,7 +1679,10 @@ mod tests {
     fn test_authz_list_order_fail() {
         use kmr_wire::keymint::Digest;
         let authz_list = AuthorizationList::new(
-            &[KeyParam::Digest(Digest::Sha1), KeyParam::Digest(Digest::None)],
+            &[
+                KeyParam::Digest(Digest::Sha1),
+                KeyParam::Digest(Digest::None),
+            ],
             &[],
             None,
             Some(RootOfTrust {

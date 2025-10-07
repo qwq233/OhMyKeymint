@@ -14,12 +14,9 @@
 
 //! KeyMint trusted application (TA) implementation.
 
-
 use core::cmp::Ordering;
 use core::mem::size_of;
 use core::{cell::RefCell, convert::TryFrom};
-use std::collections::BTreeMap;
-use std::rc::Rc;
 use device::DiceInfo;
 use kmr_common::{
     crypto::{self, hmac, OpaqueOr},
@@ -40,6 +37,8 @@ use kmr_wire::{
     *,
 };
 use log::{debug, error, info, trace, warn};
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
 mod cert;
 mod clock;
@@ -265,6 +264,7 @@ pub struct RpcInfoV3 {
 
 /// Enum to distinguish the set of information required for different versions of IRPC HAL
 /// implementations
+#[derive(Debug)]
 pub enum RpcInfo {
     /// Information for v2 of the IRPC HAL.
     V2(RpcInfoV2),
@@ -465,14 +465,20 @@ impl KeyMintTa {
                             check(v, hal_info.os_version, "OS version")?;
                         }
                     } else {
-                        error!("OS version not available, can't check for upgrade from {}", v);
+                        error!(
+                            "OS version not available, can't check for upgrade from {}",
+                            v
+                        );
                     }
                 }
                 KeyParam::OsPatchlevel(v) => {
                     if let Some(hal_info) = &self.hal_info {
                         check(v, hal_info.os_patchlevel, "OS patchlevel")?;
                     } else {
-                        error!("OS patchlevel not available, can't check for upgrade from {}", v);
+                        error!(
+                            "OS patchlevel not available, can't check for upgrade from {}",
+                            v
+                        );
                     }
                 }
                 KeyParam::VendorPatchlevel(v) => {
@@ -489,7 +495,10 @@ impl KeyMintTa {
                     if let Some(boot_info) = &self.boot_info {
                         check(v, boot_info.boot_patchlevel, "boot patchlevel")?;
                     } else {
-                        error!("boot patchlevel not available, can't check for upgrade from {}", v);
+                        error!(
+                            "boot patchlevel not available, can't check for upgrade from {}",
+                            v
+                        );
                     }
                 }
                 _ => {}
@@ -500,13 +509,18 @@ impl KeyMintTa {
 
     /// Generate a unique identifier for a keyblob.
     fn key_id(&self, keyblob: &[u8]) -> Result<KeyId, Error> {
-        let mut hmac_op =
-            self.imp.hmac.begin(crypto::hmac::Key(vec_try![0; 16]?).into(), Digest::Sha256)?;
+        let mut hmac_op = self
+            .imp
+            .hmac
+            .begin(crypto::hmac::Key(vec_try![0; 16]?).into(), Digest::Sha256)?;
         hmac_op.update(keyblob)?;
         let tag = hmac_op.finish()?;
 
         Ok(KeyId(tag.try_into().map_err(|_e| {
-            km_err!(SecureHwCommunicationFailed, "wrong size output from HMAC-SHA256")
+            km_err!(
+                SecureHwCommunicationFailed,
+                "wrong size output from HMAC-SHA256"
+            )
         })?))
     }
 
@@ -518,7 +532,10 @@ impl KeyMintTa {
             match &self.use_count[idx] {
                 None if free_idx.is_none() => free_idx = Some(idx),
                 None => {}
-                Some(UseCount { key_id: k, count: _count }) if *k == key_id => {
+                Some(UseCount {
+                    key_id: k,
+                    count: _count,
+                }) if *k == key_id => {
                     slot_idx = Some(idx);
                     break;
                 }
@@ -536,13 +553,21 @@ impl KeyMintTa {
         if let Some(idx) = slot_idx {
             let c = self.use_count[idx].as_mut().unwrap(); // safe: code above guarantees
             if c.count >= max_uses as u64 {
-                Err(km_err!(KeyMaxOpsExceeded, "use count {} >= limit {}", c.count, max_uses))
+                Err(km_err!(
+                    KeyMaxOpsExceeded,
+                    "use count {} >= limit {}",
+                    c.count,
+                    max_uses
+                ))
             } else {
                 c.count += 1;
                 Ok(())
             }
         } else {
-            Err(km_err!(TooManyOperations, "too many use-counted keys already in play"))
+            Err(km_err!(
+                TooManyOperations,
+                "too many use-counted keys already in play"
+            ))
         }
     }
 
@@ -551,7 +576,10 @@ impl KeyMintTa {
     /// implementation-specific manner).
     pub fn set_boot_info(&mut self, boot_info: keymint::BootInfo) -> Result<(), Error> {
         if !self.in_early_boot {
-            error!("Rejecting attempt to set boot info {:?} after early boot", boot_info);
+            error!(
+                "Rejecting attempt to set boot info {:?} after early boot",
+                boot_info
+            );
             return Err(km_err!(
                 EarlyBootEnded,
                 "attempt to set boot info to {boot_info:?} after early boot"
@@ -614,12 +642,21 @@ impl KeyMintTa {
             200 => KeyMintHalVersion::V2,
             300 => KeyMintHalVersion::V3,
             400 => KeyMintHalVersion::V4,
-            _ => return Err(km_err!(InvalidArgument, "unsupported HAL version {}", aidl_version)),
+            _ => {
+                return Err(km_err!(
+                    InvalidArgument,
+                    "unsupported HAL version {}",
+                    aidl_version
+                ))
+            }
         };
         if aidl_version == self.aidl_version {
             debug!("Set aidl_version to existing version {aidl_version:?}");
         } else if cfg!(feature = "downgrade") {
-            info!("Change aidl_version from {:?} to {:?}", self.aidl_version, aidl_version);
+            info!(
+                "Change aidl_version from {:?} to {:?}",
+                self.aidl_version, aidl_version
+            );
             self.aidl_version = aidl_version;
         } else {
             // Only allow HAL-triggered downgrade if the "downgrade" feature is enabled.
@@ -732,7 +769,9 @@ impl KeyMintTa {
             }
             PerformOpReq::SetAttestationIds(req) => {
                 self.set_attestation_ids(req.ids);
-                op_ok_rsp(PerformOpRsp::SetAttestationIds(SetAttestationIdsResponse {}))
+                op_ok_rsp(PerformOpRsp::SetAttestationIds(
+                    SetAttestationIdsResponse {},
+                ))
             }
             PerformOpReq::SetHalVersion(req) => match self.set_hal_version(req.aidl_version) {
                 Ok(_) => op_ok_rsp(PerformOpRsp::SetHalVersion(SetHalVersionResponse {})),
@@ -769,9 +808,9 @@ impl KeyMintTa {
 
             // IKeyMintDevice messages.
             PerformOpReq::DeviceGetHardwareInfo(_req) => match self.get_hardware_info() {
-                Ok(ret) => {
-                    op_ok_rsp(PerformOpRsp::DeviceGetHardwareInfo(GetHardwareInfoResponse { ret }))
-                }
+                Ok(ret) => op_ok_rsp(PerformOpRsp::DeviceGetHardwareInfo(
+                    GetHardwareInfoResponse { ret },
+                )),
                 Err(e) => op_error_rsp(GetHardwareInfoRequest::CODE, e),
             },
             PerformOpReq::DeviceAddRngEntropy(req) => match self.add_rng_entropy(&req.data) {
@@ -807,11 +846,9 @@ impl KeyMintTa {
                     req.password_sid,
                     req.biometric_sid,
                 ) {
-                    Ok(ret) => {
-                        op_ok_rsp(PerformOpRsp::DeviceImportWrappedKey(ImportWrappedKeyResponse {
-                            ret,
-                        }))
-                    }
+                    Ok(ret) => op_ok_rsp(PerformOpRsp::DeviceImportWrappedKey(
+                        ImportWrappedKeyResponse { ret },
+                    )),
                     Err(e) => op_error_rsp(ImportWrappedKeyRequest::CODE, e),
                 }
             }
@@ -845,9 +882,9 @@ impl KeyMintTa {
                 }
             }
             PerformOpReq::DeviceEarlyBootEnded(_req) => match self.early_boot_ended() {
-                Ok(_ret) => {
-                    op_ok_rsp(PerformOpRsp::DeviceEarlyBootEnded(EarlyBootEndedResponse {}))
-                }
+                Ok(_ret) => op_ok_rsp(PerformOpRsp::DeviceEarlyBootEnded(
+                    EarlyBootEndedResponse {},
+                )),
                 Err(e) => op_error_rsp(EarlyBootEndedRequest::CODE, e),
             },
             PerformOpReq::DeviceConvertStorageKeyToEphemeral(req) => {
@@ -935,15 +972,18 @@ impl KeyMintTa {
 
             // IRemotelyProvisionedComponentOperation messages.
             PerformOpReq::RpcGetHardwareInfo(_req) => match self.get_rpc_hardware_info() {
-                Ok(ret) => {
-                    op_ok_rsp(PerformOpRsp::RpcGetHardwareInfo(GetRpcHardwareInfoResponse { ret }))
-                }
+                Ok(ret) => op_ok_rsp(PerformOpRsp::RpcGetHardwareInfo(
+                    GetRpcHardwareInfoResponse { ret },
+                )),
                 Err(e) => op_error_rsp(GetRpcHardwareInfoRequest::CODE, e),
             },
             PerformOpReq::RpcGenerateEcdsaP256KeyPair(req) => {
                 match self.generate_ecdsa_p256_keypair(rpc::TestMode(req.test_mode)) {
                     Ok((pubkey, ret)) => op_ok_rsp(PerformOpRsp::RpcGenerateEcdsaP256KeyPair(
-                        GenerateEcdsaP256KeyPairResponse { maced_public_key: pubkey, ret },
+                        GenerateEcdsaP256KeyPairResponse {
+                            maced_public_key: pubkey,
+                            ret,
+                        },
                     )),
                     Err(e) => op_error_rsp(GenerateEcdsaP256KeyPairRequest::CODE, e),
                 }
@@ -957,7 +997,11 @@ impl KeyMintTa {
                 ) {
                     Ok((device_info, protected_data, ret)) => {
                         op_ok_rsp(PerformOpRsp::RpcGenerateCertificateRequest(
-                            GenerateCertificateRequestResponse { device_info, protected_data, ret },
+                            GenerateCertificateRequestResponse {
+                                device_info,
+                                protected_data,
+                                ret,
+                            },
                         ))
                     }
                     Err(e) => op_error_rsp(GenerateCertificateRequestRequest::CODE, e),
@@ -976,7 +1020,11 @@ impl KeyMintTa {
 
     fn add_rng_entropy(&mut self, data: &[u8]) -> Result<(), Error> {
         if data.len() > 2048 {
-            return Err(km_err!(InvalidInputLength, "entropy size {} too large", data.len()));
+            return Err(km_err!(
+                InvalidInputLength,
+                "entropy size {} too large",
+                data.len()
+            ));
         };
 
         info!("add {} bytes of entropy", data.len());
@@ -990,7 +1038,7 @@ impl KeyMintTa {
         Ok(())
     }
 
-    fn get_hardware_info(&self) -> Result<KeyMintHardwareInfo, Error> {
+    pub fn get_hardware_info(&self) -> Result<KeyMintHardwareInfo, Error> {
         Ok(KeyMintHardwareInfo {
             version_number: self.hw_info.version_number,
             security_level: self.hw_info.security_level,
@@ -1008,9 +1056,10 @@ impl KeyMintTa {
         {
             // We have to trust that any secure deletion slot in the keyblob is valid, because the
             // key can't be decrypted.
-            if let (Some(sdd_mgr), Some(slot)) =
-                (&mut self.dev.sdd_mgr, encrypted_keyblob.secure_deletion_slot)
-            {
+            if let (Some(sdd_mgr), Some(slot)) = (
+                &mut self.dev.sdd_mgr,
+                encrypted_keyblob.secure_deletion_slot,
+            ) {
                 if let Err(e) = sdd_mgr.delete_secret(slot) {
                     error!("failed to delete secure deletion slot: {:?}", e);
                 }
@@ -1047,14 +1096,20 @@ impl KeyMintTa {
             }
             None => {
                 error!("destroying device attestation IDs requested but not supported");
-                Err(km_err!(Unimplemented, "no attestation ID functionality available"))
+                Err(km_err!(
+                    Unimplemented,
+                    "no attestation ID functionality available"
+                ))
             }
         }
     }
 
     fn get_root_of_trust_challenge(&mut self) -> Result<[u8; 16], Error> {
         if !self.is_strongbox() {
-            return Err(km_err!(Unimplemented, "root-of-trust challenge only for StrongBox"));
+            return Err(km_err!(
+                Unimplemented,
+                "root-of-trust challenge only for StrongBox"
+            ));
         }
         self.imp.rng.fill_bytes(&mut self.rot_challenge[..]);
         Ok(self.rot_challenge)
@@ -1062,7 +1117,10 @@ impl KeyMintTa {
 
     fn get_root_of_trust(&mut self, challenge: &[u8]) -> Result<Vec<u8>, Error> {
         if self.is_strongbox() {
-            return Err(km_err!(Unimplemented, "root-of-trust retrieval not for StrongBox"));
+            return Err(km_err!(
+                Unimplemented,
+                "root-of-trust retrieval not for StrongBox"
+            ));
         }
         let payload = self
             .boot_info_hashed_key()?
@@ -1071,7 +1129,9 @@ impl KeyMintTa {
 
         let mac0 = coset::CoseMac0Builder::new()
             .protected(
-                coset::HeaderBuilder::new().algorithm(coset::iana::Algorithm::HMAC_256_256).build(),
+                coset::HeaderBuilder::new()
+                    .algorithm(coset::iana::Algorithm::HMAC_256_256)
+                    .build(),
             )
             .payload(payload)
             .try_create_tag(challenge, |data| self.device_hmac(data))?
@@ -1082,28 +1142,36 @@ impl KeyMintTa {
 
     fn send_root_of_trust(&mut self, root_of_trust: &[u8]) -> Result<(), Error> {
         if !self.is_strongbox() {
-            return Err(km_err!(Unimplemented, "root-of-trust delivery only for StrongBox"));
+            return Err(km_err!(
+                Unimplemented,
+                "root-of-trust delivery only for StrongBox"
+            ));
         }
         let mac0 = coset::CoseMac0::from_tagged_slice(root_of_trust)
             .map_err(|_e| km_err!(InvalidArgument, "Failed to CBOR-decode CoseMac0"))?;
         mac0.verify_tag(&self.rot_challenge, |tag, data| {
             match self.verify_device_hmac(data, tag) {
                 Ok(true) => Ok(()),
-                Ok(false) => {
-                    Err(km_err!(VerificationFailed, "HMAC verification of RootOfTrust failed"))
-                }
+                Ok(false) => Err(km_err!(
+                    VerificationFailed,
+                    "HMAC verification of RootOfTrust failed"
+                )),
                 Err(e) => Err(e),
             }
         })?;
-        let payload =
-            mac0.payload.ok_or_else(|| km_err!(InvalidArgument, "Missing payload in CoseMac0"))?;
+        let payload = mac0
+            .payload
+            .ok_or_else(|| km_err!(InvalidArgument, "Missing payload in CoseMac0"))?;
         let boot_info = keymint::BootInfo::from_tagged_slice(&payload)
             .map_err(|_e| km_err!(InvalidArgument, "Failed to CBOR-decode RootOfTrust"))?;
         if self.boot_info.is_none() {
             info!("Setting boot_info to TEE-provided {:?}", boot_info);
             self.boot_info = Some(boot_info);
         } else {
-            info!("Ignoring TEE-provided RootOfTrust {:?} as already set", boot_info);
+            info!(
+                "Ignoring TEE-provided RootOfTrust {:?} as already set",
+                boot_info
+            );
         }
         Ok(())
     }
@@ -1115,7 +1183,11 @@ impl KeyMintTa {
                 warn!("ignoring non-allowlisted tag: {tag:?}");
                 continue;
             }
-            match self.additional_attestation_info.iter().find(|&x| x.tag() == tag) {
+            match self
+                .additional_attestation_info
+                .iter()
+                .find(|&x| x.tag() == tag)
+            {
                 Some(value) if value == &param => {
                     warn!(
                         concat!(
@@ -1155,7 +1227,10 @@ impl KeyMintTa {
             // Check that the keyblob is indeed a storage key.
             let chars = keyblob.characteristics_at(self.hw_info.security_level)?;
             if !get_bool_tag_value!(chars, StorageKey)? {
-                return Err(km_err!(InvalidArgument, "attempting to convert non-storage key"));
+                return Err(km_err!(
+                    InvalidArgument,
+                    "attempting to convert non-storage key"
+                ));
             }
 
             // Now that we've got the key material, use a device-specific method to re-wrap it
@@ -1205,7 +1280,10 @@ impl KeyMintTa {
     fn root_of_trust(&self) -> Result<&[u8], Error> {
         match &self.rot_data {
             Some(data) => Ok(data),
-            None => Err(km_err!(HardwareNotYetAvailable, "No root-of-trust info available")),
+            None => Err(km_err!(
+                HardwareNotYetAvailable,
+                "No root-of-trust info available"
+            )),
         }
     }
 
@@ -1248,12 +1326,18 @@ impl KeyMintTa {
 /// Create an OK response structure with the given inner response message.
 fn op_ok_rsp(rsp: PerformOpRsp) -> PerformOpResponse {
     // Zero is OK in any context.
-    PerformOpResponse { error_code: 0, rsp: Some(rsp) }
+    PerformOpResponse {
+        error_code: 0,
+        rsp: Some(rsp),
+    }
 }
 
 /// Create a response structure with the given error code.
 fn error_rsp(error_code: i32) -> PerformOpResponse {
-    PerformOpResponse { error_code, rsp: None }
+    PerformOpResponse {
+        error_code,
+        rsp: None,
+    }
 }
 
 /// Create a response structure with the given error.

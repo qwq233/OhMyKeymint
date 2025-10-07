@@ -1,0 +1,21 @@
+[package]
+name = "rsproperties-service"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+rsproperties = "*"
+log = "*"
+thiserror = "*"
+tokio = "*"
+rsactor = "*"
+
+[dev-dependencies]
+env_logger = "*"
+ctrlc = "*"
+anyhow = "*"
+clap = "*"
+
+[[example]]
+name = "example_service"

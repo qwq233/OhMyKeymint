@@ -26,10 +26,13 @@ pub mod aes;
 pub mod des;
 pub mod ec;
 pub mod eq;
+pub mod error;
 pub mod hmac;
+pub mod km;
 pub mod rng;
 pub mod rsa;
 pub mod sha256;
+pub mod zvec;
 
 #[cfg(soong)]
 mod err;

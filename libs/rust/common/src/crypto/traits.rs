@@ -518,7 +518,11 @@ pub trait Sha256: Send {
 #[macro_export]
 macro_rules! log_unimpl {
     () => {
-        error!("{}:{}: Unimplemented placeholder KeyMint trait method invoked!", file!(), line!(),);
+        error!(
+            "{}:{}: Unimplemented placeholder KeyMint trait method invoked!",
+            file!(),
+            line!(),
+        );
     };
 }
 

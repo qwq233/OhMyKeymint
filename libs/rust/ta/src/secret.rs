@@ -24,7 +24,10 @@ impl crate::KeyMintTa {
         if self.shared_secret_params.is_none() {
             let mut nonce = vec_try![0u8; 32]?;
             self.imp.rng.fill_bytes(&mut nonce);
-            self.shared_secret_params = Some(SharedSecretParameters { seed: Vec::new(), nonce });
+            self.shared_secret_params = Some(SharedSecretParameters {
+                seed: Vec::new(),
+                nonce,
+            });
         }
         Ok(self.shared_secret_params.as_ref().unwrap().clone()) // safe: filled above
     }
@@ -33,10 +36,18 @@ impl crate::KeyMintTa {
         &mut self,
         params: &[SharedSecretParameters],
     ) -> Result<Vec<u8>, Error> {
-        info!("Setting HMAC key from {} shared secret parameters", params.len());
+        info!(
+            "Setting HMAC key from {} shared secret parameters",
+            params.len()
+        );
         let local_params = match &self.shared_secret_params {
             Some(params) => params,
-            None => return Err(km_err!(HardwareNotYetAvailable, "no local shared secret params")),
+            None => {
+                return Err(km_err!(
+                    HardwareNotYetAvailable,
+                    "no local shared secret params"
+                ))
+            }
         };
 
         let context = shared_secret_context(params, local_params)?;
@@ -67,7 +78,11 @@ pub fn shared_secret_context(
     for param in params {
         result.try_extend_from_slice(&param.seed)?;
         if param.nonce.len() != 32 {
-            return Err(km_err!(InvalidArgument, "nonce len {} not 32", param.nonce.len()));
+            return Err(km_err!(
+                InvalidArgument,
+                "nonce len {} not 32",
+                param.nonce.len()
+            ));
         }
         result.try_extend_from_slice(&param.nonce)?;
         if param == must_include {
@@ -75,7 +90,10 @@ pub fn shared_secret_context(
         }
     }
     if !seen {
-        Err(km_err!(InvalidArgument, "shared secret params missing local value"))
+        Err(km_err!(
+            InvalidArgument,
+            "shared secret params missing local value"
+        ))
     } else {
         Ok(result)
     }

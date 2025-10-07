@@ -30,7 +30,10 @@ impl StdClock {
 
 impl crypto::MonotonicClock for StdClock {
     fn now(&self) -> crypto::MillisecondsSinceEpoch {
-        let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         // Use `CLOCK_BOOTTIME` for consistency with the times used by the Cuttlefish
         // C++ implementation of Gatekeeper.
         let rc =

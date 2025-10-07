@@ -19,4 +19,8 @@ Cargo.lock
 
 /omk
 
+# development files
+hex.txt
+parcel.bin
+
 src/aidl.rs

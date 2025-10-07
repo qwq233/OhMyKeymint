@@ -345,7 +345,10 @@ pub fn coordinates_from_pub_key(
             curve
         ));
     }
-    Ok((try_to_vec(&pub_key[1..1 + coord_len])?, try_to_vec(&pub_key[1 + coord_len..])?))
+    Ok((
+        try_to_vec(&pub_key[1..1 + coord_len])?,
+        try_to_vec(&pub_key[1 + coord_len..])?,
+    ))
 }
 
 /// An Ed25519 private key.
@@ -380,7 +383,10 @@ pub fn import_sec1_private_key(data: &[u8]) -> Result<KeyMaterial, Error> {
     let ec_key = sec1::EcPrivateKey::from_der(data)
         .map_err(|e| der_err!(e, "failed to parse ECPrivateKey"))?;
     let ec_parameters = ec_key.parameters.ok_or_else(|| {
-        km_err!(InvalidArgument, "sec1 formatted EC private key didn't have a parameters field")
+        km_err!(
+            InvalidArgument,
+            "sec1 formatted EC private key didn't have a parameters field"
+        )
     })?;
     let parameters_oid = ec_parameters.named_curve().ok_or_else(|| {
         km_err!(
@@ -388,8 +394,10 @@ pub fn import_sec1_private_key(data: &[u8]) -> Result<KeyMaterial, Error> {
             "couldn't retrieve parameters oid from sec1 ECPrivateKey formatted ec key parameters"
         )
     })?;
-    let algorithm =
-        AlgorithmIdentifier { oid: X509_NIST_OID, parameters: Some(AnyRef::from(&parameters_oid)) };
+    let algorithm = AlgorithmIdentifier {
+        oid: X509_NIST_OID,
+        parameters: Some(AnyRef::from(&parameters_oid)),
+    };
     let pkcs8_key = pkcs8::PrivateKeyInfo::new(algorithm, data);
     import_pkcs8_key_impl(&pkcs8_key)
 }
@@ -417,18 +425,22 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfo) -> Result<KeyMaterial
                 .decode_as()
                 .map_err(|_e| km_err!(InvalidArgument, "imported key has no OID parameter"))?;
             let (curve, key) = match curve_oid {
-                ALGO_PARAM_P224_OID => {
-                    (EcCurve::P224, Key::P224(NistKey(try_to_vec(key_info.private_key)?)))
-                }
-                ALGO_PARAM_P256_OID => {
-                    (EcCurve::P256, Key::P256(NistKey(try_to_vec(key_info.private_key)?)))
-                }
-                ALGO_PARAM_P384_OID => {
-                    (EcCurve::P384, Key::P384(NistKey(try_to_vec(key_info.private_key)?)))
-                }
-                ALGO_PARAM_P521_OID => {
-                    (EcCurve::P521, Key::P521(NistKey(try_to_vec(key_info.private_key)?)))
-                }
+                ALGO_PARAM_P224_OID => (
+                    EcCurve::P224,
+                    Key::P224(NistKey(try_to_vec(key_info.private_key)?)),
+                ),
+                ALGO_PARAM_P256_OID => (
+                    EcCurve::P256,
+                    Key::P256(NistKey(try_to_vec(key_info.private_key)?)),
+                ),
+                ALGO_PARAM_P384_OID => (
+                    EcCurve::P384,
+                    Key::P384(NistKey(try_to_vec(key_info.private_key)?)),
+                ),
+                ALGO_PARAM_P521_OID => (
+                    EcCurve::P521,
+                    Key::P521(NistKey(try_to_vec(key_info.private_key)?)),
+                ),
                 oid => {
                     return Err(km_err!(
                         ImportParameterMismatch,
@@ -441,7 +453,10 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfo) -> Result<KeyMaterial
         }
         X509_ED25519_OID => {
             if algo_params.is_some() {
-                Err(km_err!(InvalidArgument, "unexpected PKCS#8 parameters for Ed25519 import"))
+                Err(km_err!(
+                    InvalidArgument,
+                    "unexpected PKCS#8 parameters for Ed25519 import"
+                ))
             } else {
                 // For Ed25519 the PKCS#8 `privateKey` field holds a `CurvePrivateKey`
                 // (RFC 8410 s7) that is an OCTET STRING holding the raw key.  As this is DER,
@@ -450,14 +465,20 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfo) -> Result<KeyMaterial
                     || key_info.private_key[0] != 0x04
                     || key_info.private_key[1] != 0x20
                 {
-                    return Err(km_err!(InvalidArgument, "unexpected CurvePrivateKey contents"));
+                    return Err(km_err!(
+                        InvalidArgument,
+                        "unexpected CurvePrivateKey contents"
+                    ));
                 }
                 import_raw_ed25519_key(&key_info.private_key[2..])
             }
         }
         X509_X25519_OID => {
             if algo_params.is_some() {
-                Err(km_err!(InvalidArgument, "unexpected PKCS#8 parameters for X25519 import",))
+                Err(km_err!(
+                    InvalidArgument,
+                    "unexpected PKCS#8 parameters for X25519 import",
+                ))
             } else {
                 // For X25519 the PKCS#8 `privateKey` field holds a `CurvePrivateKey`
                 // (RFC 8410 s7) that is an OCTET STRING holding the raw key.  As this is DER,
@@ -466,7 +487,10 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfo) -> Result<KeyMaterial
                     || key_info.private_key[0] != 0x04
                     || key_info.private_key[1] != 0x20
                 {
-                    return Err(km_err!(InvalidArgument, "unexpected CurvePrivateKey contents"));
+                    return Err(km_err!(
+                        InvalidArgument,
+                        "unexpected CurvePrivateKey contents"
+                    ));
                 }
                 import_raw_x25519_key(&key_info.private_key[2..])
             }
@@ -482,17 +506,33 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfo) -> Result<KeyMaterial
 /// Import a 32-byte raw Ed25519 key.
 pub fn import_raw_ed25519_key(data: &[u8]) -> Result<KeyMaterial, Error> {
     let key = data.try_into().map_err(|_e| {
-        km_err!(InvalidInputLength, "import Ed25519 key of incorrect len {}", data.len())
+        km_err!(
+            InvalidInputLength,
+            "import Ed25519 key of incorrect len {}",
+            data.len()
+        )
     })?;
-    Ok(KeyMaterial::Ec(EcCurve::Curve25519, CurveType::EdDsa, Key::Ed25519(Ed25519Key(key)).into()))
+    Ok(KeyMaterial::Ec(
+        EcCurve::Curve25519,
+        CurveType::EdDsa,
+        Key::Ed25519(Ed25519Key(key)).into(),
+    ))
 }
 
 /// Import a 32-byte raw X25519 key.
 pub fn import_raw_x25519_key(data: &[u8]) -> Result<KeyMaterial, Error> {
     let key = data.try_into().map_err(|_e| {
-        km_err!(InvalidInputLength, "import X25519 key of incorrect len {}", data.len())
+        km_err!(
+            InvalidInputLength,
+            "import X25519 key of incorrect len {}",
+            data.len()
+        )
     })?;
-    Ok(KeyMaterial::Ec(EcCurve::Curve25519, CurveType::Xdh, Key::X25519(X25519Key(key)).into()))
+    Ok(KeyMaterial::Ec(
+        EcCurve::Curve25519,
+        CurveType::Xdh,
+        Key::X25519(X25519Key(key)).into(),
+    ))
 }
 
 /// Convert a signature as emitted from the `Ec` trait into the form needed for
@@ -546,9 +586,13 @@ pub fn from_cose_signature(curve: EcCurve, sig: &[u8]) -> Result<Vec<u8>, Error>
                 s: der::asn1::UintRef::new(&sig[l..])
                     .map_err(|e| km_err!(EncodingError, "failed to build INTEGER: {:?}", e))?,
             };
-            der_sig
-                .to_der()
-                .map_err(|e| km_err!(EncodingError, "failed to encode signature SEQUENCE: {:?}", e))
+            der_sig.to_der().map_err(|e| {
+                km_err!(
+                    EncodingError,
+                    "failed to encode signature SEQUENCE: {:?}",
+                    e
+                )
+            })
         }
         EcCurve::Curve25519 => {
             // Ed25519 signatures can be used as-is (RFC 8410 section 6)

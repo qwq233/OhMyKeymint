@@ -26,7 +26,10 @@ impl crypto::Rng for BoringRng {
         #[cfg(soong)]
         // Safety: `data` is a valid slice.
         unsafe {
-            ffi::RAND_seed(data.as_ptr() as *const libc::c_void, data.len() as libc::c_int);
+            ffi::RAND_seed(
+                data.as_ptr() as *const libc::c_void,
+                data.len() as libc::c_int,
+            );
         }
         #[cfg(not(soong))]
         // Safety: `data` is a valid slice.

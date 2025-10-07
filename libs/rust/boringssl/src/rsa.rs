@@ -15,8 +15,6 @@
 //! BoringSSL-based implementation of RSA.
 use crate::types::{EvpMdCtx, EvpPkeyCtx};
 use crate::{cvt, cvt_p, digest_into_openssl, openssl_err, openssl_last_err, ossl};
-use Box;
-use Vec;
 #[cfg(soong)]
 use bssl_sys as ffi;
 use core::ptr;
@@ -28,6 +26,8 @@ use kmr_common::crypto::{
 use kmr_common::{crypto, explicit, km_err, vec_try, Error, FallibleAllocExt};
 use kmr_wire::{keymint, keymint::Digest, KeySizeInBits, RsaExponent};
 use openssl::hash::MessageDigest;
+use Box;
+use Vec;
 
 /// Smallest allowed public exponent.
 const MIN_RSA_EXPONENT: RsaExponent = RsaExponent(3);
@@ -41,7 +41,9 @@ pub struct BoringRsa {
 impl core::default::Default for BoringRsa {
     fn default() -> Self {
         ffi::init();
-        Self { _priv: core::marker::PhantomData }
+        Self {
+            _priv: core::marker::PhantomData,
+        }
     }
 }
 
@@ -69,8 +71,9 @@ impl crypto::Rsa for BoringRsa {
                 pub_exponent
             ));
         }
-        let exponent = openssl::bn::BigNum::from_slice(&pub_exponent.0.to_be_bytes()[..])
-            .map_err(openssl_err!("failed to create BigNum for exponent {:?}", pub_exponent))?;
+        let exponent = openssl::bn::BigNum::from_slice(&pub_exponent.0.to_be_bytes()[..]).map_err(
+            openssl_err!("failed to create BigNum for exponent {:?}", pub_exponent),
+        )?;
 
         let rsa_key =
             openssl::rsa::Rsa::generate_with_e(key_size.0, &exponent).map_err(openssl_err!(
@@ -89,7 +92,12 @@ impl crypto::Rsa for BoringRsa {
     ) -> Result<Box<dyn crypto::AccumulatingOperation>, Error> {
         let key = explicit!(key)?;
         let max_size = key.size();
-        Ok(Box::new(BoringRsaDecryptOperation { key, mode, pending_input: Vec::new(), max_size }))
+        Ok(Box::new(BoringRsaDecryptOperation {
+            key,
+            mode,
+            pending_input: Vec::new(),
+            max_size,
+        }))
     }
 
     fn begin_sign(
@@ -110,9 +118,15 @@ impl crypto::Rsa for BoringRsa {
             }
             SignMode::Pkcs1_1_5Padding(digest) | SignMode::PssPadding(digest) => {
                 if let Some(digest) = digest_into_openssl(digest) {
-                    Ok(Box::new(BoringRsaDigestSignOperation::new(key, mode, digest, padding)?))
+                    Ok(Box::new(BoringRsaDigestSignOperation::new(
+                        key, mode, digest, padding,
+                    )?))
                 } else {
-                    Err(km_err!(InvalidArgument, "no digest provided for mode {:?}", mode))
+                    Err(km_err!(
+                        InvalidArgument,
+                        "no digest provided for mode {:?}",
+                        mode
+                    ))
                 }
             }
         }
@@ -144,21 +158,33 @@ impl crypto::AccumulatingOperation for BoringRsaDecryptOperation {
 
         let padding = match self.mode {
             DecryptionMode::NoPadding => openssl::rsa::Padding::NONE,
-            DecryptionMode::OaepPadding { msg_digest: _, mgf_digest: _ } => {
-                openssl::rsa::Padding::PKCS1_OAEP
-            }
+            DecryptionMode::OaepPadding {
+                msg_digest: _,
+                mgf_digest: _,
+            } => openssl::rsa::Padding::PKCS1_OAEP,
             DecryptionMode::Pkcs1_1_5Padding => openssl::rsa::Padding::PKCS1,
         };
-        decrypter
-            .set_rsa_padding(padding)
-            .map_err(openssl_err!("failed to create set_rsa_padding for {:?}", self.mode))?;
+        decrypter.set_rsa_padding(padding).map_err(openssl_err!(
+            "failed to create set_rsa_padding for {:?}",
+            self.mode
+        ))?;
 
-        if let DecryptionMode::OaepPadding { msg_digest, mgf_digest } = self.mode {
+        if let DecryptionMode::OaepPadding {
+            msg_digest,
+            mgf_digest,
+        } = self.mode
+        {
             let omsg_digest = digest_into_openssl(msg_digest).ok_or_else(|| {
-                km_err!(UnsupportedDigest, "Digest::None not allowed for RSA-OAEP msg digest")
+                km_err!(
+                    UnsupportedDigest,
+                    "Digest::None not allowed for RSA-OAEP msg digest"
+                )
             })?;
             let omgf_digest = digest_into_openssl(mgf_digest).ok_or_else(|| {
-                km_err!(UnsupportedDigest, "Digest::None not allowed for RSA-OAEP MGF1 digest")
+                km_err!(
+                    UnsupportedDigest,
+                    "Digest::None not allowed for RSA-OAEP MGF1 digest"
+                )
             })?;
             decrypter
                 .set_rsa_oaep_md(omsg_digest)
@@ -240,7 +266,10 @@ impl BoringRsaDigestSignOperation {
             }
 
             // Safety: `op.pctx` is not `nullptr` and is valid.
-            cvt(ffi::EVP_PKEY_CTX_set_rsa_padding(op.pctx.0, padding.as_raw()))?;
+            cvt(ffi::EVP_PKEY_CTX_set_rsa_padding(
+                op.pctx.0,
+                padding.as_raw(),
+            ))?;
 
             if let SignMode::PssPadding(digest) = mode {
                 let digest_len = (kmr_common::tag::digest_len(digest)? / 8) as libc::c_int;
@@ -259,7 +288,11 @@ impl crypto::AccumulatingOperation for BoringRsaDigestSignOperation {
     fn update(&mut self, data: &[u8]) -> Result<(), Error> {
         // Safety: `data` is a valid slice, and `self.md_ctx` is non-`nullptr` and valid.
         unsafe {
-            cvt(ffi::EVP_DigestUpdate(self.md_ctx.0, data.as_ptr() as *const _, data.len()))?;
+            cvt(ffi::EVP_DigestUpdate(
+                self.md_ctx.0,
+                data.as_ptr() as *const _,
+                data.len(),
+            ))?;
         }
         Ok(())
     }
@@ -268,7 +301,11 @@ impl crypto::AccumulatingOperation for BoringRsaDigestSignOperation {
         let mut max_siglen = 0;
         // Safety: `self.md_ctx` is non-`nullptr` and valid.
         unsafe {
-            cvt(ffi::EVP_DigestSignFinal(self.md_ctx.0, ptr::null_mut(), &mut max_siglen))?;
+            cvt(ffi::EVP_DigestSignFinal(
+                self.md_ctx.0,
+                ptr::null_mut(),
+                &mut max_siglen,
+            ))?;
         }
         let mut buf = vec_try![0; max_siglen]?;
         let mut actual_siglen = max_siglen;
@@ -299,12 +336,24 @@ impl BoringRsaUndigestSignOperation {
         let rsa_key = ossl!(openssl::rsa::Rsa::private_key_from_der(&key.0))?;
         let (left_pad, max_size) = match mode {
             SignMode::NoPadding => (true, rsa_key.size() as usize),
-            SignMode::Pkcs1_1_5Padding(Digest::None) => {
-                (false, (rsa_key.size() as usize) - PKCS1_UNDIGESTED_SIGNATURE_PADDING_OVERHEAD)
+            SignMode::Pkcs1_1_5Padding(Digest::None) => (
+                false,
+                (rsa_key.size() as usize) - PKCS1_UNDIGESTED_SIGNATURE_PADDING_OVERHEAD,
+            ),
+            _ => {
+                return Err(km_err!(
+                    UnsupportedPaddingMode,
+                    "sign undigested mode {:?}",
+                    mode
+                ))
             }
-            _ => return Err(km_err!(UnsupportedPaddingMode, "sign undigested mode {:?}", mode)),
         };
-        Ok(Self { rsa_key, left_pad, pending_input: Vec::new(), max_size })
+        Ok(Self {
+            rsa_key,
+            left_pad,
+            pending_input: Vec::new(),
+            max_size,
+        })
     }
 }
 
