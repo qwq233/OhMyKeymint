@@ -69,10 +69,14 @@ fn test_sdd_factory_secret() {
     let mut sdd_mgr = InMemorySlotManager::<10>::default();
     let mut rng = FakeRng::default();
     assert!(sdd_mgr.get_factory_reset_secret().is_err());
-    let secret1 = sdd_mgr.get_or_create_factory_reset_secret(&mut rng).unwrap();
+    let secret1 = sdd_mgr
+        .get_or_create_factory_reset_secret(&mut rng)
+        .unwrap();
     let secret2 = sdd_mgr.get_factory_reset_secret().unwrap();
     assert!(secret1 == secret2);
-    let secret3 = sdd_mgr.get_or_create_factory_reset_secret(&mut rng).unwrap();
+    let secret3 = sdd_mgr
+        .get_or_create_factory_reset_secret(&mut rng)
+        .unwrap();
     assert!(secret1 == secret3);
 }
 
@@ -80,11 +84,19 @@ fn test_sdd_factory_secret() {
 fn test_sdd_exhaustion() {
     let mut sdd_mgr = InMemorySlotManager::<2>::default();
     let mut rng = FakeRng::default();
-    let (_slot0, _sdd0) = sdd_mgr.new_secret(&mut rng, SlotPurpose::KeyGeneration).unwrap();
-    let (slot1a, sdd1a) = sdd_mgr.new_secret(&mut rng, SlotPurpose::KeyGeneration).unwrap();
-    assert!(sdd_mgr.new_secret(&mut rng, SlotPurpose::KeyGeneration).is_err());
+    let (_slot0, _sdd0) = sdd_mgr
+        .new_secret(&mut rng, SlotPurpose::KeyGeneration)
+        .unwrap();
+    let (slot1a, sdd1a) = sdd_mgr
+        .new_secret(&mut rng, SlotPurpose::KeyGeneration)
+        .unwrap();
+    assert!(sdd_mgr
+        .new_secret(&mut rng, SlotPurpose::KeyGeneration)
+        .is_err());
     sdd_mgr.delete_secret(slot1a).unwrap();
-    let (slot1b, sdd1b) = sdd_mgr.new_secret(&mut rng, SlotPurpose::KeyGeneration).unwrap();
+    let (slot1b, sdd1b) = sdd_mgr
+        .new_secret(&mut rng, SlotPurpose::KeyGeneration)
+        .unwrap();
     assert_eq!(slot1a, slot1b);
     assert!(sdd1a != sdd1b);
 }

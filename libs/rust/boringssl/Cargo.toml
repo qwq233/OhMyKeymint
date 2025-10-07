@@ -9,13 +9,16 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-ffi = { package = "openssl-sys", version = "^0.9.75" }
+ffi = { package = "openssl-sys", version = "^0.9.75", features = ["bindgen"]  }
 foreign-types = "0.3.1"
 kmr-common = "*"
 kmr-wire = "*"
 libc = "^0.2.112"
 log = "^0.4"
 openssl = "^0.10.36"
+anyhow = "*"
+thiserror = "*"
+nix = "*"
 
 [dev-dependencies]
 kmr-tests = "*"

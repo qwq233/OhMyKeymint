@@ -15,13 +15,15 @@
 //! BoringSSL-based implementation of HMAC.
 use crate::types::HmacCtx;
 use crate::{malloc_err, openssl_last_err};
-use Box;
-use Vec;
+use anyhow::Result;
 #[cfg(soong)]
 use bssl_sys as ffi;
+use kmr_common::crypto::Hkdf;
 use kmr_common::{crypto, crypto::OpaqueOr, explicit, km_err, vec_try, Error};
 use kmr_wire::keymint::Digest;
 use log::error;
+use Box;
+use Vec;
 
 /// [`crypto::Hmac`] implementation based on BoringSSL.
 pub struct BoringHmac;
@@ -128,5 +130,18 @@ fn digest_into_openssl_ffi(digest: Digest) -> Result<*const ffi::EVP_MD, Error> 
             Digest::Sha512 => Ok(ffi::EVP_sha512()),
             d => Err(km_err!(UnsupportedDigest, "unknown digest {:?}", d)),
         }
+    }
+}
+
+pub fn hkdf_expand(out_len: usize, key: &[u8], info: &[u8]) -> Result<Vec<u8>> {
+    let hmac = BoringHmac;
+    let key = crypto::hmac::Key(key.to_vec());
+    let key: OpaqueOr<crypto::hmac::Key> = OpaqueOr::Explicit(key);
+
+    let result = hmac.expand(&key, info, out_len);
+
+    match result {
+        Ok(v) => Ok(v),
+        Err(e) => Err(anyhow::anyhow!("hkdf expand error:0 {:?}", e)),
     }
 }

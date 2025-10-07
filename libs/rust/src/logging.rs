@@ -16,3 +16,15 @@ pub fn init_logger() {
         .unwrap();
     log4rs::init_config(config).unwrap();
 }
+
+#[cfg(target_os = "android")]
+use android_logger::Config;
+
+#[cfg(target_os = "android")]
+pub fn init_logger() {
+    android_logger::init_once(
+        Config::default()
+            .with_max_level(LevelFilter::Trace)
+            .with_tag("OhMyKeymint"),
+    );
+}

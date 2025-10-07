@@ -48,7 +48,11 @@ const SOFTWARE_ROOT_OF_TRUST: &[u8] = b"SW";
 
 /// Remove all instances of some tags from a set of `KeyParameter`s.
 pub fn remove_tags(params: &[KeyParam], tags: &[keymint::Tag]) -> Vec<KeyParam> {
-    params.iter().filter(|p| !tags.contains(&p.tag())).cloned().collect()
+    params
+        .iter()
+        .filter(|p| !tags.contains(&p.tag()))
+        .cloned()
+        .collect()
 }
 
 fn process(filename: &str, hex: bool) {
@@ -92,7 +96,10 @@ fn process(filename: &str, hex: bool) {
     {
         // Also round-trip the keyblob to binary and expect to get back where we started.
         let regenerated_data = keyblob.serialize(&hmac, &hidden).unwrap();
-        assert_eq!(&regenerated_data[..regenerated_data.len()], &data[..data.len()]);
+        assert_eq!(
+            &regenerated_data[..regenerated_data.len()],
+            &data[..data.len()]
+        );
     }
 
     // Create a PlaintextKeyBlob from the data.
@@ -155,7 +162,9 @@ fn process(filename: &str, hex: bool) {
     let mut keygen_params = filtered.clone();
     match tag::get_algorithm(&filtered).unwrap() {
         Algorithm::Ec | Algorithm::Rsa => {
-            keygen_params.push(KeyParam::CertificateNotBefore(DateTime { ms_since_epoch: 0 }));
+            keygen_params.push(KeyParam::CertificateNotBefore(DateTime {
+                ms_since_epoch: 0,
+            }));
             keygen_params.push(KeyParam::CertificateNotAfter(DateTime {
                 ms_since_epoch: 1_900_000_000_000,
             }));

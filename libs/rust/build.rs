@@ -1,18 +1,19 @@
 use std::{fs, path::PathBuf, vec};
- 
+
 fn main() {
+    println!("cargo:rerun-if-changed=aidl");
+    println!("cargo:rerun-if-changed=src/proto");
+    println!("cargo:rerun-if-changed=build.rs");
+
     let out_dir = "src/proto";
- 
+
     fs::create_dir_all(out_dir).unwrap();
- 
+
     prost_build::Config::new()
         .out_dir(out_dir)
-        .compile_protos(
-            &["proto/storage.proto"],
-            &["proto/"],
-        )
+        .compile_protos(&["proto/storage.proto"], &["proto/"])
         .expect("Failed to compile .proto files");
- 
+
     let mod_file = format!("{}/mod.rs", out_dir);
     let mod_content = ["storage.rs"]
         .iter()
@@ -43,8 +44,17 @@ fn main() {
             }
         }
     }
-
-    aidl.generate().unwrap();
+    aidl.source(PathBuf::from(
+        "aidl/android/content/pm/IPackageManager.aidl",
+    ))
+    .source(PathBuf::from(
+        "aidl/android/security/authorization/ResponseCode.aidl",
+    ))
+    .source(PathBuf::from(
+        "aidl/android/hardware/security/secureclock/ISecureClock.aidl",
+    ))
+    .generate()
+    .unwrap();
 
     let generated_path = PathBuf::from(format!("{}/aidl.rs", std::env::var("OUT_DIR").unwrap()));
     let content = fs::read_to_string(&generated_path).unwrap();
@@ -56,6 +66,6 @@ fn main() {
         .replace("r#operation: rsbinder::Strong<dyn super::IKeyMintOperation::IKeyMintOperation>,", "r#operation: Option<rsbinder::Strong<dyn super::IKeyMintOperation::IKeyMintOperation>>,");
 
     println!("Patched AIDL content:\n{}", generated_path.display());
-    
-    fs::write(generated_path, patched_content).unwrap(); 
+
+    fs::write(generated_path, patched_content).unwrap();
 }

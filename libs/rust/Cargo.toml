@@ -35,9 +35,21 @@ rusqlite = { version = "0.37.0", features = ["bundled"] }
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 tokio = { version = "1.47.1", features = ["macros", "libc"] }
+lazy_static = "1.5.0"
+thiserror = "2.0.17"
+serde = "1.0.228"
+x509-cert = "0.2.5"
+watchdog_rs = "*"
+nix = { version = "0.30.1", features = ["mman"] }
+rsproperties = { version = "0.2.2", features = ["builder"] }
+libsqlite3-sys = "0.35.0"
+rand = "0.9.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rsproperties-service = "*"
 
 [target.'cfg(target_os = "android")'.dependencies]
-android_logger_lite = "0.1.0"
+android_logger = "0.15.1"
 
 
 [profile.release]
@@ -57,6 +69,8 @@ members = [
   "ta",
   "tests",
   "wire",
+  "watchdog",
+  "rsproperties-service",
 ]
 
 [patch.crates-io]
@@ -66,7 +80,9 @@ kmr-crypto-boring = { path = "boringssl" }
 kmr-ta = { path = "ta" }
 kmr-tests = { path = "tests" }
 kmr-wire = { path = "wire" }
+watchdog_rs = { path = "watchdog" }
+rsproperties-service = { path = "rsproperties-service" }
 
 [build-dependencies]
 prost-build = "0.14.1"
-rsbinder-aidl = "0.4.2"
+rsbinder-aidl = "0.4.3"

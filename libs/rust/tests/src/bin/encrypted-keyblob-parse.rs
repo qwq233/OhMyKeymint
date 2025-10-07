@@ -70,7 +70,10 @@ fn process(filename: &str, hex: bool) {
     if let Some(addl_info) = keyblob.addl_info {
         println!("  addl_info={}", addl_info);
     }
-    println!("  hw_enforced={:?},\n  sw_enforced={:?},", keyblob.hw_enforced, keyblob.sw_enforced);
+    println!(
+        "  hw_enforced={:?},\n  sw_enforced={:?},",
+        keyblob.hw_enforced, keyblob.sw_enforced
+    );
     if let Some(key_slot) = keyblob.key_slot {
         println!("  key_slot={}", key_slot);
     }

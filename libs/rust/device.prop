@@ -1,0 +1,155 @@
+####################################
+# from generate_common_build_props
+# These properties identify this partition image.
+####################################
+ro.product.system.brand=Android
+ro.product.system.device=generic
+ro.product.system.manufacturer=Android
+ro.product.system.model=mainline
+ro.product.system.name=mainline
+ro.system.product.cpu.abilist=arm64-v8a,armeabi-v7a,armeabi
+ro.system.product.cpu.abilist32=armeabi-v7a,armeabi
+ro.system.product.cpu.abilist64=arm64-v8a
+ro.system.build.date=Sun Oct  5 23:32:30 CST 2025
+ro.system.build.date.utc=1759678350
+ro.system.build.fingerprint=google/oriole/oriole:15/BP1A.250505.005/13277524:user/release-keys
+ro.system.build.id=BP1A.250505.005
+ro.system.build.tags=release-keys
+ro.system.build.type=userdebug
+ro.system.build.version.incremental=1759678350
+ro.system.build.version.release=15
+ro.system.build.version.release_or_codename=15
+ro.system.build.version.sdk=35
+ro.system.build.version.sdk_minor=0
+####################################
+# from gen_build_prop.py:generate_build_info
+####################################
+# begin build properties
+ro.build.fingerprint=google/oriole/oriole:15/BP1A.250505.005/13277524:user/release-keys
+ro.build.id=BP1A.250505.005
+ro.build.display.id=BP1A.250505.005 release-keys
+ro.build.version.incremental=1759678350
+ro.build.version.sdk=35
+ro.build.version.sdk_minor=0
+ro.build.version.preview_sdk=0
+ro.build.version.preview_sdk_fingerprint=REL
+ro.build.version.codename=REL
+ro.build.version.all_codenames=REL
+ro.build.version.known_codenames=Base,Base11,Cupcake,Donut,Eclair,Eclair01,EclairMr1,Froyo,Gingerbread,GingerbreadMr1,Honeycomb,HoneycombMr1,HoneycombMr2,IceCreamSandwich,IceCreamSandwichMr1,JellyBean,JellyBeanMr1,JellyBeanMr2,Kitkat,KitkatWatch,Lollipop,LollipopMr1,M,N,NMr1,O,OMr1,P,Q,R,S,Sv2,Tiramisu,UpsideDownCake,VanillaIceCream,Baklava
+ro.build.version.release=15
+ro.build.version.release_or_codename=15
+ro.build.version.release_or_preview_display=15
+ro.build.version.security_patch=2025-07-01
+ro.build.version.base_os=
+ro.build.version.min_supported_target_sdk=28
+ro.build.date=Sun Oct  5 23:32:30 CST 2025
+ro.build.date.utc=1759678350
+ro.build.type=userdebug
+ro.build.user=Abcabc
+ro.build.host=azure
+ro.build.tags=release-keys
+ro.build.flavor=lineage_oriole-userdebug
+persist.sys.pihooks_FINGERPRINT=google/panther_beta/panther:16/BP31.250523.010/13667654:user/release-keys
+persist.sys.pihooks_MODEL=Pixel 7
+# ro.product.cpu.abi and ro.product.cpu.abi2 are obsolete,
+# use ro.product.cpu.abilist instead.
+ro.product.cpu.abi=arm64-v8a
+ro.product.locale=en-US
+ro.wifi.channels=
+# ro.build.product is obsolete; use ro.product.device
+ro.build.product=oriole
+# Do not try to parse description or thumbprint
+ro.build.description=oriole-user 15 BP1A.250505.005 13277524 release-keys
+# end build properties
+####################################
+# from variable ADDITIONAL_SYSTEM_PROPERTIES
+####################################
+ro.treble.enabled=true
+ro.llndk.api_level=202404
+ro.actionable_compatible_property.enabled=true
+persist.debug.dalvik.vm.core_platform_api_policy=just-warn
+ro.postinstall.fstab.prefix=/system
+security.perf_harden=1
+ro.appcompat_override.ro.boot.verifiedbootstate=green
+ro.allow.mock.location=0
+dalvik.vm.lockprof.threshold=500
+net.bt.name=Android
+ro.force.debuggable=0
+####################################
+# from variable PRODUCT_SYSTEM_PROPERTIES
+####################################
+ro.custom.blur.enable=true
+ro.surface_flinger.supports_background_blur=1
+persist.sys.battery_bypass_supported=false
+ro.com.google.clientidbase=android-google
+ro.boot.wificountrycode=00
+ro.modversion=10.7
+debug.atrace.tags.enableflags=0
+persist.traced.enable=1
+persist.service.adb.tcp.port=5555
+service.adb.tcp.port=5555
+dalvik.vm.image-dex2oat-Xms=64m
+dalvik.vm.image-dex2oat-Xmx=64m
+dalvik.vm.dex2oat-Xms=64m
+dalvik.vm.dex2oat-Xmx=512m
+dalvik.vm.usejit=true
+dalvik.vm.dexopt.secondary=true
+dalvik.vm.dexopt.thermal-cutoff=2
+dalvik.vm.appimageformat=lz4
+ro.dalvik.vm.native.bridge=0
+pm.dexopt.post-boot=verify
+pm.dexopt.first-boot=verify
+pm.dexopt.boot-after-ota=verify
+pm.dexopt.boot-after-mainline-update=verify
+pm.dexopt.install=speed-profile
+pm.dexopt.install-fast=skip
+pm.dexopt.install-bulk=speed-profile
+pm.dexopt.install-bulk-secondary=verify
+pm.dexopt.install-bulk-downgraded=verify
+pm.dexopt.install-bulk-secondary-downgraded=verify
+pm.dexopt.bg-dexopt=speed-profile
+pm.dexopt.ab-ota=speed-profile
+pm.dexopt.inactive=verify
+pm.dexopt.cmdline=verify
+pm.dexopt.shared=speed
+dalvik.vm.dex2oat-resolve-startup-strings=true
+dalvik.vm.dex2oat-max-image-block-size=524288
+dalvik.vm.minidebuginfo=true
+dalvik.vm.dex2oat-minidebuginfo=true
+dalvik.vm.madvise.vdexfile.size=104857600
+dalvik.vm.madvise.odexfile.size=104857600
+dalvik.vm.madvise.artfile.size=4294967295
+dalvik.vm.usap_pool_enabled=false
+dalvik.vm.usap_refill_threshold=1
+dalvik.vm.usap_pool_size_max=3
+dalvik.vm.usap_pool_size_min=1
+dalvik.vm.usap_pool_refill_delay_ms=3000
+dalvik.vm.useartservice=true
+dalvik.vm.enable_pr_dexopt=true
+ro.cp_system_other_odex=1
+ro.apex.updatable=true
+ro.launcher.blur.appLaunch=0
+####################################
+# from variable PRODUCT_SYSTEM_DEFAULT_PROPERTIES
+####################################
+ro.com.google.clientidbase=android-google
+persist.service.adb.enable=1
+persist.sys.strictmode.disable=true
+ro.ota.allow_downgrade=true
+audio.service.client_wait_ms=8500
+dalvik.vm.systemuicompilerfilter=speed
+debug.sf.enable_transaction_tracing=false
+media.recorder.show_manufacturer_and_model=true
+net.tethering.noprovisioning=true
+# Auto-added by post_process_props.py
+persist.sys.usb.config=adb
+####################################
+# Adding footer from :applied_backported_fixes
+# with path out/soong/.intermediates/build/make/backported_fixes/applied_backported_fixes/gen/applied_backported_fixes.prop
+####################################
+# The following backported fixes have been applied
+# https://issuetracker.google.com/issues/350037023 with alias 1
+ro.build.backported_fixes.alias_bitset.long_list=2
+# end of file
+
+keystore.boot_level=30

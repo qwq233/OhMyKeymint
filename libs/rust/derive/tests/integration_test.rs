@@ -23,12 +23,18 @@ struct NamedFields {
 
 #[test]
 fn test_derive_named_struct_roundtrip() {
-    let want = NamedFields { i: 42, s: "a string".to_string() };
+    let want = NamedFields {
+        i: 42,
+        s: "a string".to_string(),
+    };
     let want_value = want.clone().to_cbor_value().unwrap();
     let got = NamedFields::from_cbor_value(want_value).unwrap();
     assert_eq!(want, got);
     assert_eq!(NamedFields::cddl_typename().unwrap(), "NamedFields");
-    assert_eq!(NamedFields::cddl_schema().unwrap(), "[\n    i: int,\n    s: tstr,\n]");
+    assert_eq!(
+        NamedFields::cddl_schema().unwrap(),
+        "[\n    i: int,\n    s: tstr,\n]"
+    );
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, AsCborValue)]
@@ -41,7 +47,10 @@ fn test_derive_unnamed_struct_roundtrip() {
     let got = UnnamedFields::from_cbor_value(want_value).unwrap();
     assert_eq!(want, got);
     assert_eq!(UnnamedFields::cddl_typename().unwrap(), "UnnamedFields");
-    assert_eq!(UnnamedFields::cddl_schema().unwrap(), "[\n    int,\n    tstr,\n]");
+    assert_eq!(
+        UnnamedFields::cddl_schema().unwrap(),
+        "[\n    int,\n    tstr,\n]"
+    );
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, AsCborValue)]

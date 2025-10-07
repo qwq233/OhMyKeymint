@@ -154,7 +154,12 @@ pub fn test_hkdf<H: Hmac>(hmac: H) {
         let info = hex::decode(test.info).unwrap();
 
         let got = hmac.hkdf(&salt, &ikm, &info, test.out_len).unwrap();
-        assert_eq!(hex::encode(got), test.want, "incorrect HKDF result for case {}", i);
+        assert_eq!(
+            hex::encode(got),
+            test.want,
+            "incorrect HKDF result for case {}",
+            i
+        );
     }
 }
 
@@ -327,7 +332,9 @@ pub fn test_hmac<H: Hmac>(hmac: H) {
     ];
 
     for (i, test) in HMAC_TESTS.iter().enumerate() {
-        let mut op = hmac.begin(hmac::Key(test.key.to_vec()).into(), test.digest).unwrap();
+        let mut op = hmac
+            .begin(hmac::Key(test.key.to_vec()).into(), test.digest)
+            .unwrap();
         op.update(test.data).unwrap();
         let mut mac = op.finish().unwrap();
         mac.truncate(test.tag_size);
@@ -375,10 +382,15 @@ pub fn test_ckdf<T: Ckdf>(kdf: T) {
     let v2 = vec![0x02, 0x02, 0x02, 0x02];
     let v3 = vec![0x03, 0x03, 0x03, 0x03];
 
-    let result = kdf.ckdf(&key.into(), label, &[&v0, &v1, &v2, &v3], 32).unwrap();
+    let result = kdf
+        .ckdf(&key.into(), label, &[&v0, &v1, &v2, &v3], 32)
+        .unwrap();
     assert_eq!(
         hex::encode(result),
-        concat!("ac9af88a02241f53d43056a4676c42ee", "f06825755e419e7bd20f4e57487717aa")
+        concat!(
+            "ac9af88a02241f53d43056a4676c42ee",
+            "f06825755e419e7bd20f4e57487717aa"
+        )
     );
 }
 
@@ -424,7 +436,9 @@ pub fn test_aes_gcm<A: Aes>(aes: A) {
         let mut op = aes
             .begin_aead(
                 aes_key.into(),
-                aes::GcmMode::GcmTag16 { nonce: iv.clone().try_into().unwrap() },
+                aes::GcmMode::GcmTag16 {
+                    nonce: iv.clone().try_into().unwrap(),
+                },
                 SymmetricOperation::Encrypt,
             )
             .unwrap();
@@ -437,7 +451,9 @@ pub fn test_aes_gcm<A: Aes>(aes: A) {
         let mut op = aes
             .begin_aead(
                 aes_key.into(),
-                aes::GcmMode::GcmTag16 { nonce: iv.clone().try_into().unwrap() },
+                aes::GcmMode::GcmTag16 {
+                    nonce: iv.clone().try_into().unwrap(),
+                },
                 SymmetricOperation::Decrypt,
             )
             .unwrap();
@@ -450,7 +466,9 @@ pub fn test_aes_gcm<A: Aes>(aes: A) {
         let aes_key = aes::Key::new(key.clone()).unwrap();
         let mut op = match aes.begin_aead(
             aes_key.into(),
-            aes::GcmMode::GcmTag12 { nonce: iv.clone().try_into().unwrap() },
+            aes::GcmMode::GcmTag12 {
+                nonce: iv.clone().try_into().unwrap(),
+            },
             SymmetricOperation::Decrypt,
         ) {
             Ok(c) => c,
@@ -465,7 +483,9 @@ pub fn test_aes_gcm<A: Aes>(aes: A) {
         let aes_key = aes::Key::new(key).unwrap();
         let mut op = match aes.begin_aead(
             aes_key.into(),
-            aes::GcmMode::GcmTag12 { nonce: iv.try_into().unwrap() },
+            aes::GcmMode::GcmTag12 {
+                nonce: iv.try_into().unwrap(),
+            },
             SymmetricOperation::Decrypt,
         ) {
             Ok(c) => c,
@@ -505,14 +525,22 @@ pub fn test_des<D: Des>(des: D) {
 
         let des_key = des::Key::new(key.clone()).unwrap();
         let mut op = des
-            .begin(des_key.clone().into(), des::Mode::EcbNoPadding, SymmetricOperation::Encrypt)
+            .begin(
+                des_key.clone().into(),
+                des::Mode::EcbNoPadding,
+                SymmetricOperation::Encrypt,
+            )
             .unwrap();
         let mut got_ct = op.update(&msg).unwrap();
         got_ct.extend_from_slice(&op.finish().unwrap());
         assert_eq!(test.ct, hex::encode(&got_ct));
 
         let mut op = des
-            .begin(des_key.into(), des::Mode::EcbNoPadding, SymmetricOperation::Decrypt)
+            .begin(
+                des_key.into(),
+                des::Mode::EcbNoPadding,
+                SymmetricOperation::Decrypt,
+            )
             .unwrap();
         let mut got_pt = op.update(&got_ct).unwrap();
         got_pt.extend_from_slice(&op.finish().unwrap());
@@ -538,7 +566,12 @@ pub fn test_sha256<S: Sha256>(sha256: S) {
     ];
     for test in tests {
         let got = sha256.hash(test.msg).unwrap();
-        assert_eq!(hex::encode(got), test.want, "for input {}", hex::encode(test.msg));
+        assert_eq!(
+            hex::encode(got),
+            test.want,
+            "for input {}",
+            hex::encode(test.msg)
+        );
     }
 }
 
@@ -546,12 +579,16 @@ pub fn test_sha256<S: Sha256>(sha256: S) {
 ///
 /// Warning: this test will use slots in the provided manager, and may leak slots on failure.
 pub fn test_sdd_mgr<M: keyblob::SecureDeletionSecretManager, R: Rng>(mut sdd_mgr: M, mut rng: R) {
-    let (slot1, sdd1) = sdd_mgr.new_secret(&mut rng, SlotPurpose::KeyGeneration).unwrap();
+    let (slot1, sdd1) = sdd_mgr
+        .new_secret(&mut rng, SlotPurpose::KeyGeneration)
+        .unwrap();
     assert!(sdd_mgr.get_secret(slot1).unwrap() == sdd1);
     assert!(sdd_mgr.get_secret(slot1).unwrap() == sdd1);
 
     // A second instance should share factory reset secret but not per-key secret.
-    let (slot2, sdd2) = sdd_mgr.new_secret(&mut rng, SlotPurpose::KeyGeneration).unwrap();
+    let (slot2, sdd2) = sdd_mgr
+        .new_secret(&mut rng, SlotPurpose::KeyGeneration)
+        .unwrap();
     assert!(sdd_mgr.get_secret(slot2).unwrap() == sdd2);
     assert_eq!(sdd1.factory_reset_secret, sdd2.factory_reset_secret);
     assert_ne!(sdd1.secure_deletion_secret, sdd2.secure_deletion_secret);
@@ -622,11 +659,25 @@ pub fn test_retrieve_rpc_artifacts<T: kmr_ta::device::RetrieveRpcArtifacts>(
     assert!(rpc.get_dice_info(rpc::TestMode(false)).is_ok());
 
     let context = b"abcdef";
-    let data1 = rpc.derive_bytes_from_hbk(hkdf, context, 16).expect("failed to derive from HBK");
-    let data2 = rpc.derive_bytes_from_hbk(hkdf, context, 16).expect("failed to derive from HBK");
-    assert_eq!(data1, data2, "derive_bytes_from_hbk() method should be deterministic");
+    let data1 = rpc
+        .derive_bytes_from_hbk(hkdf, context, 16)
+        .expect("failed to derive from HBK");
+    let data2 = rpc
+        .derive_bytes_from_hbk(hkdf, context, 16)
+        .expect("failed to derive from HBK");
+    assert_eq!(
+        data1, data2,
+        "derive_bytes_from_hbk() method should be deterministic"
+    );
 
-    let data1 = rpc.compute_hmac_sha256(hmac, hkdf, context).expect("failed to perform HMAC");
-    let data2 = rpc.compute_hmac_sha256(hmac, hkdf, context).expect("failed to perform HMAC");
-    assert_eq!(data1, data2, "compute_hmac_sha256() method should be deterministic");
+    let data1 = rpc
+        .compute_hmac_sha256(hmac, hkdf, context)
+        .expect("failed to perform HMAC");
+    let data2 = rpc
+        .compute_hmac_sha256(hmac, hkdf, context)
+        .expect("failed to perform HMAC");
+    assert_eq!(
+        data1, data2,
+        "compute_hmac_sha256() method should be deterministic"
+    );
 }

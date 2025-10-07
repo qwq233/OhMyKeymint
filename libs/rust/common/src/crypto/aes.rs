@@ -67,7 +67,11 @@ impl Key {
             16 => Ok(Key::Aes128(data.try_into().unwrap())), // safe: len checked
             24 => Ok(Key::Aes192(data.try_into().unwrap())), // safe: len checked
             32 => Ok(Key::Aes256(data.try_into().unwrap())), // safe: len checked
-            l => Err(km_err!(UnsupportedKeySize, "AES keys must be 16, 24 or 32 bytes not {}", l)),
+            l => Err(km_err!(
+                UnsupportedKeySize,
+                "AES keys must be 16, 24 or 32 bytes not {}",
+                l
+            )),
         }
     }
     /// Create a new [`Key`] from raw data, which must be 16, 24 or 32 bytes long.
@@ -143,7 +147,10 @@ impl Mode {
         match mode {
             BlockMode::Ecb => {
                 if caller_nonce.is_some() {
-                    return Err(km_err!(InvalidNonce, "nonce unexpectedly provided for AES-ECB"));
+                    return Err(km_err!(
+                        InvalidNonce,
+                        "nonce unexpectedly provided for AES-ECB"
+                    ));
                 }
                 match padding {
                     PaddingMode::None => Ok(Mode::Cipher(CipherMode::EcbNoPadding)),
@@ -155,8 +162,9 @@ impl Mode {
                 }
             }
             BlockMode::Cbc => {
-                let nonce: [u8; BLOCK_SIZE] =
-                    nonce(BLOCK_SIZE, caller_nonce, rng)?.try_into().map_err(|_e| {
+                let nonce: [u8; BLOCK_SIZE] = nonce(BLOCK_SIZE, caller_nonce, rng)?
+                    .try_into()
+                    .map_err(|_e| {
                         km_err!(InvalidNonce, "want {} byte nonce for AES-CBC", BLOCK_SIZE)
                     })?;
                 match padding {
@@ -175,8 +183,9 @@ impl Mode {
                         "expected NONE padding for AES-CTR"
                     ));
                 }
-                let nonce: [u8; BLOCK_SIZE] =
-                    nonce(BLOCK_SIZE, caller_nonce, rng)?.try_into().map_err(|_e| {
+                let nonce: [u8; BLOCK_SIZE] = nonce(BLOCK_SIZE, caller_nonce, rng)?
+                    .try_into()
+                    .map_err(|_e| {
                         km_err!(InvalidNonce, "want {} byte nonce for AES-CTR", BLOCK_SIZE)
                     })?;
                 Ok(Mode::Cipher(CipherMode::Ctr { nonce }))

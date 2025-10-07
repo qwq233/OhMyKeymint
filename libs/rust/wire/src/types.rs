@@ -395,6 +395,8 @@ pub struct AttestationIdInfo {
     pub model: Vec<u8>,
 }
 
+unsafe impl Sync for AttestationIdInfo {}
+
 // Provisioner->TA at device provisioning time.
 #[derive(Debug, AsCborValue)]
 pub struct SetAttestationIdsRequest {

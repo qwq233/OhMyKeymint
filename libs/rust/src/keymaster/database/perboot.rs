@@ -82,7 +82,10 @@ impl PerbootDB {
     /// Add a new auth token + timestamp to the database, replacing any which
     /// match all of user_id, auth_id, and auth_type.
     pub fn insert_auth_token_entry(&self, entry: AuthTokenEntry) {
-        self.auth_tokens.write().unwrap().replace(AuthTokenEntryWrap(entry));
+        self.auth_tokens
+            .write()
+            .unwrap()
+            .replace(AuthTokenEntryWrap(entry));
     }
     /// Locate an auth token entry which matches the predicate with the most
     /// recent update time.
@@ -102,6 +105,12 @@ impl PerbootDB {
     #[cfg(test)]
     /// For testing, return all auth tokens currently tracked.
     pub fn get_all_auth_token_entries(&self) -> Vec<AuthTokenEntry> {
-        self.auth_tokens.read().unwrap().iter().cloned().map(|x| x.0).collect()
+        self.auth_tokens
+            .read()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(|x| x.0)
+            .collect()
     }
 }

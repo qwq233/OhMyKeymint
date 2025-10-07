@@ -19,14 +19,13 @@
 
 use crate::proto::storage;
 use kmr_common::{crypto, keyblob, km_err, Error};
+use log::error;
 use log::info;
 use prost::Message;
 use std::fs;
 use std::io::BufRead;
 use std::io::Write;
 use std::path;
-
-use crate::error;
 
 const SECURE_DELETION_DATA_FILE: &str = "./omk/data/keymint_secure_deletion_data";
 
@@ -59,14 +58,15 @@ fn read_sdd_file() -> Result<storage::SecureDeletionData, Error> {
 }
 
 fn write_sdd_file(data: &storage::SecureDeletionData) -> Result<(), Error> {
-    fs::create_dir_all(path::Path::new(SECURE_DELETION_DATA_FILE).parent().unwrap())
-        .map_err(|e| {
+    fs::create_dir_all(path::Path::new(SECURE_DELETION_DATA_FILE).parent().unwrap()).map_err(
+        |e| {
             km_err!(
                 SecureHwCommunicationFailed,
                 "failed to create directory for secure deletion data file: {:?}",
                 e
             )
-        })?;
+        },
+    )?;
     let mut f = fs::File::create(SECURE_DELETION_DATA_FILE).map_err(|e| {
         km_err!(
             SecureHwCommunicationFailed,

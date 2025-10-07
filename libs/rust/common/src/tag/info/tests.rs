@@ -25,7 +25,10 @@ fn test_auto_added_const() {
         }
     }
     let got: BTreeSet<Tag> = AUTO_ADDED_CHARACTERISTICS.iter().cloned().collect();
-    assert_eq!(want, got, "AUTO_ADDED_CHARACTERISTICS constant doesn't match INFO contents");
+    assert_eq!(
+        want, got,
+        "AUTO_ADDED_CHARACTERISTICS constant doesn't match INFO contents"
+    );
 }
 
 #[test]
@@ -37,7 +40,10 @@ fn test_keystore_enforced_const() {
         }
     }
     let got: BTreeSet<Tag> = KEYSTORE_ENFORCED_CHARACTERISTICS.iter().cloned().collect();
-    assert_eq!(want, got, "KEYSTORE_ENFORCED_CHARACTERISTICS constant doesn't match INFO contents");
+    assert_eq!(
+        want, got,
+        "KEYSTORE_ENFORCED_CHARACTERISTICS constant doesn't match INFO contents"
+    );
 }
 
 #[test]
@@ -49,7 +55,10 @@ fn test_keymint_enforced_const() {
         }
     }
     let got: BTreeSet<Tag> = KEYMINT_ENFORCED_CHARACTERISTICS.iter().cloned().collect();
-    assert_eq!(want, got, "KEYMINT_ENFORCED_CHARACTERISTICS constant doesn't match INFO contents");
+    assert_eq!(
+        want, got,
+        "KEYMINT_ENFORCED_CHARACTERISTICS constant doesn't match INFO contents"
+    );
 }
 
 #[test]
@@ -75,7 +84,10 @@ fn test_tag_tracker() {
         (true, vec![Tag::BlockMode, Tag::Padding, Tag::BlockMode]),
         (true, vec![Tag::BlockMode, Tag::EcCurve]),
         (true, vec![Tag::BlockMode, Tag::EcCurve, Tag::BlockMode]),
-        (false, vec![Tag::BlockMode, Tag::EcCurve, Tag::BlockMode, Tag::EcCurve]),
+        (
+            false,
+            vec![Tag::BlockMode, Tag::EcCurve, Tag::BlockMode, Tag::EcCurve],
+        ),
     ];
     for (valid, list) in tests {
         let mut tracker = DuplicateTagChecker::default();

@@ -56,7 +56,9 @@ pub const NEXT_MESSAGE_SIGNAL_FALSE: u8 = 0b00000000u8;
 pub const UNDEFINED_NOT_BEFORE: DateTime = DateTime { ms_since_epoch: 0 };
 /// Per RFC 5280 4.1.2.5, an undefined expiration (not-after) field should be set to
 /// 9999-12-31T23:59:59Z.
-pub const UNDEFINED_NOT_AFTER: DateTime = DateTime { ms_since_epoch: 253402300799000 };
+pub const UNDEFINED_NOT_AFTER: DateTime = DateTime {
+    ms_since_epoch: 253402300799000,
+};
 
 /// Possible verified boot state values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, N, AsCborValue)]
@@ -110,7 +112,9 @@ pub struct DateTime {
 impl AsCborValue for DateTime {
     fn from_cbor_value(value: cbor::value::Value) -> Result<Self, CborError> {
         let val = <i64>::from_cbor_value(value)?;
-        Ok(Self { ms_since_epoch: val })
+        Ok(Self {
+            ms_since_epoch: val,
+        })
     }
     fn to_cbor_value(self) -> Result<cbor::value::Value, CborError> {
         self.ms_since_epoch.to_cbor_value()
@@ -709,7 +713,10 @@ impl crate::AsCborValue for KeyParam {
             #[cfg(feature = "hal_v4")]
             KeyParam::ModuleHash(v) => (Tag::ModuleHash, v.to_cbor_value()?),
         };
-        Ok(cbor::value::Value::Array(vec_try![tag.to_cbor_value()?, val]?))
+        Ok(cbor::value::Value::Array(vec_try![
+            tag.to_cbor_value()?,
+            val
+        ]?))
     }
     fn cddl_typename() -> Option<String> {
         Some("KeyParam".to_string())
@@ -735,8 +742,12 @@ impl crate::AsCborValue for KeyParam {
             PaddingMode::cddl_ref(),
             "Tag_Padding",
         );
-        result +=
-            &format!("    [{}, {}], ; {}\n", Tag::Digest as i32, Digest::cddl_ref(), "Tag_Digest",);
+        result += &format!(
+            "    [{}, {}], ; {}\n",
+            Tag::Digest as i32,
+            Digest::cddl_ref(),
+            "Tag_Digest",
+        );
         result += &format!(
             "    [{}, {}], ; {}\n",
             Tag::EcCurve as i32,
@@ -839,8 +850,12 @@ impl crate::AsCborValue for KeyParam {
             u32::cddl_ref(),
             "Tag_UsageCountLimit",
         );
-        result +=
-            &format!("    [{}, {}], ; {}\n", Tag::UserId as i32, u32::cddl_ref(), "Tag_UserId",);
+        result += &format!(
+            "    [{}, {}], ; {}\n",
+            Tag::UserId as i32,
+            u32::cddl_ref(),
+            "Tag_UserId",
+        );
         result += &format!(
             "    [{}, {}], ; {}\n",
             Tag::UserSecureId as i32,
@@ -1012,8 +1027,12 @@ impl crate::AsCborValue for KeyParam {
             "true",
             "Tag_DeviceUniqueAttestation",
         );
-        result +=
-            &format!("    [{}, {}], ; {}\n", Tag::StorageKey as i32, "true", "Tag_StorageKey",);
+        result += &format!(
+            "    [{}, {}], ; {}\n",
+            Tag::StorageKey as i32,
+            "true",
+            "Tag_StorageKey",
+        );
         result += &format!(
             "    [{}, {}], ; {}\n",
             Tag::Nonce as i32,

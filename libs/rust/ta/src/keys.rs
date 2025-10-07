@@ -15,9 +15,7 @@
 //! TA functionality related to key generation/import/upgrade.
 
 use crate::{cert, device, AttestationChainInfo};
-use Vec;
 use core::{borrow::Borrow, cmp::Ordering, convert::TryFrom};
-use std::collections::btree_map::Entry;
 use der::{referenced::RefToOwned, Decode, Sequence};
 use kmr_common::{
     crypto::{self, aes, rsa, KeyMaterial, OpaqueOr},
@@ -34,7 +32,9 @@ use kmr_wire::{
 };
 use log::{error, warn};
 use spki::SubjectPublicKeyInfoOwned;
+use std::collections::btree_map::Entry;
 use x509_cert::ext::pkix::KeyUsages;
+use Vec;
 
 /// Maximum size of an attestation challenge value.
 const MAX_ATTESTATION_CHALLENGE_LEN: usize = 128;
@@ -112,9 +112,12 @@ impl crate::KeyMintTa {
     pub(crate) fn get_signing_info(
         &self,
         key_type: device::SigningKeyType,
-    ) -> Result<SigningInfo, Error> {
+    ) -> Result<SigningInfo<'_>, Error> {
         let sign_info = self.dev.sign_info.as_ref().ok_or_else(|| {
-            km_err!(AttestationKeysNotProvisioned, "batch attestation keys not available")
+            km_err!(
+                AttestationKeysNotProvisioned,
+                "batch attestation keys not available"
+            )
         })?;
         // Retrieve the chain and issuer information, which is cached after first retrieval.
         let mut attestation_chain_info = self.attestation_chain_info.borrow_mut();
@@ -156,41 +159,51 @@ impl crate::KeyMintTa {
 
         // Build and encode basic constraints extension value, based on the key usage extension
         // value
-        let basic_constraints_ext_val =
-            if (key_usage_ext_bits.0 & KeyUsages::KeyCertSign).bits().count_ones() != 0 {
-                let basic_constraints = cert::basic_constraints_ext_value(true);
-                Some(cert::asn1_der_encode(&basic_constraints).map_err(|e| {
-                    der_err!(e, "failed to encode basic constraints {:?}", basic_constraints)
-                })?)
-            } else {
-                None
-            };
+        let basic_constraints_ext_val = if (key_usage_ext_bits.0 & KeyUsages::KeyCertSign)
+            .bits()
+            .count_ones()
+            != 0
+        {
+            let basic_constraints = cert::basic_constraints_ext_value(true);
+            Some(cert::asn1_der_encode(&basic_constraints).map_err(|e| {
+                der_err!(
+                    e,
+                    "failed to encode basic constraints {:?}",
+                    basic_constraints
+                )
+            })?)
+        } else {
+            None
+        };
 
         // Build and encode attestation extension if present
         let id_info = self.get_attestation_ids();
-        let attest_ext_val =
-            if let Some(SigningInfo { attestation_info: Some((challenge, app_id)), .. }) = &info {
-                let unique_id = self.calculate_unique_id(app_id, params)?;
-                let boot_info = self.boot_info_hashed_key()?;
-                let attest_ext = cert::attestation_extension(
-                    self.aidl_version as i32,
-                    challenge,
-                    app_id,
-                    self.hw_info.security_level,
-                    id_info.as_ref().map(|v| v.borrow()),
-                    params,
-                    chars,
-                    &unique_id,
-                    &boot_info,
-                    &self.additional_attestation_info,
-                )?;
-                Some(
-                    cert::asn1_der_encode(&attest_ext)
-                        .map_err(|e| der_err!(e, "failed to encode attestation extension"))?,
-                )
-            } else {
-                None
-            };
+        let attest_ext_val = if let Some(SigningInfo {
+            attestation_info: Some((challenge, app_id)),
+            ..
+        }) = &info
+        {
+            let unique_id = self.calculate_unique_id(app_id, params)?;
+            let boot_info = self.boot_info_hashed_key()?;
+            let attest_ext = cert::attestation_extension(
+                self.aidl_version as i32,
+                challenge,
+                app_id,
+                self.hw_info.security_level,
+                id_info.as_ref().map(|v| v.borrow()),
+                params,
+                chars,
+                &unique_id,
+                &boot_info,
+                &self.additional_attestation_info,
+            )?;
+            Some(
+                cert::asn1_der_encode(&attest_ext)
+                    .map_err(|e| der_err!(e, "failed to encode attestation extension"))?,
+            )
+        } else {
+            None
+        };
 
         let tbs_cert = cert::tbs_certificate(
             &info,
@@ -212,7 +225,9 @@ impl crate::KeyMintTa {
         let cert = cert::certificate(tbs_cert, &sig_data)?;
         let cert_data = cert::asn1_der_encode(&cert)
             .map_err(|e| der_err!(e, "failed to encode certificate"))?;
-        Ok(keymint::Certificate { encoded_certificate: cert_data })
+        Ok(keymint::Certificate {
+            encoded_certificate: cert_data,
+        })
     }
 
     /// Perform a complete signing operation using default modes.
@@ -237,7 +252,10 @@ impl crate::KeyMintTa {
                 op.update(tbs_data)?;
                 op.finish()
             }
-            _ => Err(km_err!(IncompatibleAlgorithm, "unexpected cert signing key type")),
+            _ => Err(km_err!(
+                IncompatibleAlgorithm,
+                "unexpected cert signing key type"
+            )),
         }
     }
 
@@ -291,26 +309,36 @@ impl crate::KeyMintTa {
         self.add_keymint_tags(&mut chars, KeyOrigin::Generated)?;
         let key_material = match keygen_info {
             crypto::KeyGenInfo::Aes(variant) => {
-                self.imp.aes.generate_key(&mut *self.imp.rng, variant, params)?
+                self.imp
+                    .aes
+                    .generate_key(&mut *self.imp.rng, variant, params)?
             }
             crypto::KeyGenInfo::TripleDes => {
                 self.imp.des.generate_key(&mut *self.imp.rng, params)?
             }
             crypto::KeyGenInfo::Hmac(key_size) => {
-                self.imp.hmac.generate_key(&mut *self.imp.rng, key_size, params)?
+                self.imp
+                    .hmac
+                    .generate_key(&mut *self.imp.rng, key_size, params)?
             }
             crypto::KeyGenInfo::Rsa(key_size, pub_exponent) => {
-                self.imp.rsa.generate_key(&mut *self.imp.rng, key_size, pub_exponent, params)?
+                self.imp
+                    .rsa
+                    .generate_key(&mut *self.imp.rng, key_size, pub_exponent, params)?
             }
             crypto::KeyGenInfo::NistEc(curve) => {
-                self.imp.ec.generate_nist_key(&mut *self.imp.rng, curve, params)?
+                self.imp
+                    .ec
+                    .generate_nist_key(&mut *self.imp.rng, curve, params)?
             }
-            crypto::KeyGenInfo::Ed25519 => {
-                self.imp.ec.generate_ed25519_key(&mut *self.imp.rng, params)?
-            }
-            crypto::KeyGenInfo::X25519 => {
-                self.imp.ec.generate_x25519_key(&mut *self.imp.rng, params)?
-            }
+            crypto::KeyGenInfo::Ed25519 => self
+                .imp
+                .ec
+                .generate_ed25519_key(&mut *self.imp.rng, params)?,
+            crypto::KeyGenInfo::X25519 => self
+                .imp
+                .ec
+                .generate_x25519_key(&mut *self.imp.rng, params)?,
         };
         Ok((key_material, chars))
     }
@@ -324,7 +352,10 @@ impl crate::KeyMintTa {
         import_type: KeyImport,
     ) -> Result<KeyCreationResult, Error> {
         if !self.in_early_boot && get_bool_tag_value!(params, EarlyBootOnly)? {
-            return Err(km_err!(EarlyBootEnded, "attempt to use EARLY_BOOT key after early boot"));
+            return Err(km_err!(
+                EarlyBootEnded,
+                "attempt to use EARLY_BOOT key after early boot"
+            ));
         }
 
         let (mut chars, key_material) = tag::extract_key_import_characteristics(
@@ -443,8 +474,10 @@ impl crate::KeyMintTa {
                         _ => return Err(km_err!(InvalidArgument, "unexpected key type!")),
                     };
 
-                    let mut info = self
-                        .get_signing_info(device::SigningKeyType { which: which_key, algo_hint })?;
+                    let mut info = self.get_signing_info(device::SigningKeyType {
+                        which: which_key,
+                        algo_hint,
+                    })?;
                     info.attestation_info = attestation_info;
                     Some(info)
                 }
@@ -529,14 +562,20 @@ impl crate::KeyMintTa {
     ) -> Result<KeyCreationResult, Error> {
         // Decrypt the wrapping key blob
         let (wrapping_key, _) = self.keyblob_parse_decrypt(wrapping_key_blob, unwrapping_params)?;
-        let keyblob::PlaintextKeyBlob { characteristics, key_material } = wrapping_key;
+        let keyblob::PlaintextKeyBlob {
+            characteristics,
+            key_material,
+        } = wrapping_key;
 
         // Decode the ASN.1 DER encoded `SecureKeyWrapper`.
         let mut secure_key_wrapper = SecureKeyWrapper::from_der(wrapped_key_data)
             .map_err(|e| der_err!(e, "failed to parse SecureKeyWrapper"))?;
 
         if secure_key_wrapper.version != SECURE_KEY_WRAPPER_VERSION {
-            return Err(km_err!(InvalidArgument, "invalid version in Secure Key Wrapper."));
+            return Err(km_err!(
+                InvalidArgument,
+                "invalid version in Secure Key Wrapper."
+            ));
         }
 
         // Decrypt the masked transport key, using an RSA key. (Only RSA wrapping keys are supported
@@ -551,11 +590,16 @@ impl crate::KeyMintTa {
 
                 // Decrypt the masked and encrypted transport key
                 let mut crypto_op = self.imp.rsa.begin_decrypt(key, decrypt_mode)?;
-                crypto_op.as_mut().update(secure_key_wrapper.encrypted_transport_key)?;
+                crypto_op
+                    .as_mut()
+                    .update(secure_key_wrapper.encrypted_transport_key)?;
                 crypto_op.finish()?
             }
             _ => {
-                return Err(km_err!(InvalidArgument, "invalid key algorithm for transport key"));
+                return Err(km_err!(
+                    InvalidArgument,
+                    "invalid key algorithm for transport key"
+                ));
             }
         };
 
@@ -568,8 +612,11 @@ impl crate::KeyMintTa {
             ));
         }
 
-        let unmasked_transport_key: Vec<u8> =
-            masked_transport_key.iter().zip(masking_key).map(|(x, y)| x ^ y).collect();
+        let unmasked_transport_key: Vec<u8> = masked_transport_key
+            .iter()
+            .zip(masking_key)
+            .map(|(x, y)| x ^ y)
+            .collect();
 
         let aes_transport_key =
             aes::Key::Aes256(unmasked_transport_key.try_into().map_err(|_e| {

@@ -147,12 +147,22 @@ impl AuthInfo {
             Ok(None)
         } else if let Some(auth_type) = auth_type {
             if no_auth_required {
-                Err(km_err!(InvalidKeyBlob, "found both NO_AUTH_REQUIRED and USER_SECURE_ID"))
+                Err(km_err!(
+                    InvalidKeyBlob,
+                    "found both NO_AUTH_REQUIRED and USER_SECURE_ID"
+                ))
             } else {
-                Ok(Some(AuthInfo { secure_ids, auth_type, timeout_secs }))
+                Ok(Some(AuthInfo {
+                    secure_ids,
+                    auth_type,
+                    timeout_secs,
+                }))
             }
         } else {
-            Err(km_err!(KeyUserNotAuthenticated, "found USER_SECURE_ID but no USER_AUTH_TYPE"))
+            Err(km_err!(
+                KeyUserNotAuthenticated,
+                "found USER_SECURE_ID but no USER_AUTH_TYPE"
+            ))
         }
     }
 }
@@ -169,7 +179,10 @@ impl crate::KeyMintTa {
 
         // Parse and decrypt the keyblob, which requires extra hidden params.
         let (keyblob, sdd_slot) = self.keyblob_parse_decrypt(key_blob, &params)?;
-        let keyblob::PlaintextKeyBlob { characteristics, key_material } = keyblob;
+        let keyblob::PlaintextKeyBlob {
+            characteristics,
+            key_material,
+        } = keyblob;
 
         // Validate parameters.
         let key_chars =
@@ -423,7 +436,11 @@ impl crate::KeyMintTa {
             info!("this operation requires proof-of-presence");
             self.presence_required_op = Some(op_handle);
         }
-        Ok(InternalBeginResult { challenge, params: ret_params, op_handle: op_handle.0 })
+        Ok(InternalBeginResult {
+            challenge,
+            params: ret_params,
+            op_handle: op_handle.0,
+        })
     }
 
     pub(crate) fn op_update_aad(
@@ -439,7 +456,10 @@ impl crate::KeyMintTa {
             }
             match &mut op.crypto_op {
                 CryptoOperation::AesGcm(op) => op.update_aad(data),
-                _ => Err(km_err!(InvalidOperation, "operation does not support update_aad")),
+                _ => Err(km_err!(
+                    InvalidOperation,
+                    "operation does not support update_aad"
+                )),
             }
         })
     }
@@ -546,17 +566,29 @@ impl crate::KeyMintTa {
         op.check_size(data.map_or(0, |v| v.len()))?;
         let result = match op.crypto_op {
             CryptoOperation::Aes(mut op) => {
-                let mut result = if let Some(data) = data { op.update(data)? } else { Vec::new() };
+                let mut result = if let Some(data) = data {
+                    op.update(data)?
+                } else {
+                    Vec::new()
+                };
                 result.try_extend_from_slice(&op.finish()?)?;
                 Ok(result)
             }
             CryptoOperation::AesGcm(mut op) => {
-                let mut result = if let Some(data) = data { op.update(data)? } else { Vec::new() };
+                let mut result = if let Some(data) = data {
+                    op.update(data)?
+                } else {
+                    Vec::new()
+                };
                 result.try_extend_from_slice(&op.finish()?)?;
                 Ok(result)
             }
             CryptoOperation::Des(mut op) => {
-                let mut result = if let Some(data) = data { op.update(data)? } else { Vec::new() };
+                let mut result = if let Some(data) = data {
+                    op.update(data)?
+                } else {
+                    Vec::new()
+                };
                 result.try_extend_from_slice(&op.finish()?)?;
                 Ok(result)
             }
@@ -649,7 +681,10 @@ impl crate::KeyMintTa {
             ));
         }
         if !self.in_early_boot && get_bool_tag_value!(key_chars, EarlyBootOnly)? {
-            return Err(km_err!(EarlyBootEnded, "attempt to use EARLY_BOOT key after early boot"));
+            return Err(km_err!(
+                EarlyBootEnded,
+                "attempt to use EARLY_BOOT key after early boot"
+            ));
         }
 
         if let Some(max_uses) = get_opt_tag_value!(key_chars, MaxUsesPerBoot)? {
@@ -672,7 +707,10 @@ impl crate::KeyMintTa {
         // Common check: confirm the HMAC tag in the token is valid.
         let mac_input = crate::hardware_auth_token_mac_input(&auth_token)?;
         if !self.verify_device_hmac(&mac_input, &auth_token.mac)? {
-            return Err(km_err!(KeyUserNotAuthenticated, "failed to authenticate auth_token"));
+            return Err(km_err!(
+                KeyUserNotAuthenticated,
+                "failed to authenticate auth_token"
+            ));
         }
         // Common check: token's auth type should match key's USER_AUTH_TYPE.
         if (auth_token.authenticator_type as u32 & auth_info.auth_type) == 0 {
@@ -729,22 +767,39 @@ impl crate::KeyMintTa {
                 ));
             }
             if self.verify_device_hmac(data, token).map_err(|e| {
-                km_err!(VerificationFailed, "failed to perform HMAC on confirmation token: {:?}", e)
+                km_err!(
+                    VerificationFailed,
+                    "failed to perform HMAC on confirmation token: {:?}",
+                    e
+                )
             })? {
                 Ok(())
             } else {
-                Err(km_err!(NoUserConfirmation, "trusted confirmation token did not match"))
+                Err(km_err!(
+                    NoUserConfirmation,
+                    "trusted confirmation token did not match"
+                ))
             }
         } else {
-            Err(km_err!(NoUserConfirmation, "no trusted confirmation token provided"))
+            Err(km_err!(
+                NoUserConfirmation,
+                "no trusted confirmation token provided"
+            ))
         }
     }
 
     /// Return the index of a free slot in the operations table.
     fn new_operation_index(&mut self) -> Result<usize, Error> {
-        self.operations.iter().position(Option::is_none).ok_or_else(|| {
-            km_err!(TooManyOperations, "current op count {} >= limit", self.operations.len())
-        })
+        self.operations
+            .iter()
+            .position(Option::is_none)
+            .ok_or_else(|| {
+                km_err!(
+                    TooManyOperations,
+                    "current op count {} >= limit",
+                    self.operations.len()
+                )
+            })
     }
 
     /// Return a new operation handle value that is not currently in use in the
@@ -768,7 +823,13 @@ impl crate::KeyMintTa {
                 Some(_op) => false,
                 None => false,
             })
-            .ok_or_else(|| km_err!(InvalidOperation, "operation handle {:?} not found", op_handle))
+            .ok_or_else(|| {
+                km_err!(
+                    InvalidOperation,
+                    "operation handle {:?} not found",
+                    op_handle
+                )
+            })
     }
 
     /// Execute the provided lambda over the associated [`Operation`], handling

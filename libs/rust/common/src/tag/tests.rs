@@ -19,8 +19,14 @@ use kmr_wire::{keymint::KeyParam, KeySizeInBits};
 #[test]
 fn test_characteristics_invalid() {
     let tests = vec![
-        (vec![KeyParam::UsageCountLimit(42), KeyParam::UsageCountLimit(43)], "duplicate value"),
-        (vec![KeyParam::Nonce(vec![1, 2])], "not a valid key characteristic"),
+        (
+            vec![KeyParam::UsageCountLimit(42), KeyParam::UsageCountLimit(43)],
+            "duplicate value",
+        ),
+        (
+            vec![KeyParam::Nonce(vec![1, 2])],
+            "not a valid key characteristic",
+        ),
     ];
     for (characteristics, msg) in tests {
         let result = crate::tag::characteristics_valid(&characteristics);
@@ -80,7 +86,11 @@ fn test_check_begin_params_fail() {
             vec![KeyParam::Digest(Digest::Sha256), KeyParam::MacLength(160)],
             "invalid purpose Encrypt",
         ),
-        (KeyPurpose::Sign, vec![KeyParam::Digest(Digest::Sha256)], "MissingMacLength"),
+        (
+            KeyPurpose::Sign,
+            vec![KeyParam::Digest(Digest::Sha256)],
+            "MissingMacLength",
+        ),
         (
             KeyPurpose::Sign,
             vec![KeyParam::Digest(Digest::Sha512), KeyParam::MacLength(160)],
@@ -96,7 +106,11 @@ fn test_check_begin_params_fail() {
 fn test_copyable_tags() {
     for tag in UNPOLICED_COPYABLE_TAGS {
         let info = info(*tag).unwrap();
-        assert!(info.user_can_specify.0, "tag {:?} not listed as user-specifiable", tag);
+        assert!(
+            info.user_can_specify.0,
+            "tag {:?} not listed as user-specifiable",
+            tag
+        );
         assert!(
             info.characteristic == info::Characteristic::KeyMintEnforced
                 || info.characteristic == info::Characteristic::KeystoreEnforced
@@ -110,7 +124,12 @@ fn test_copyable_tags() {
 
 #[test]
 fn test_luhn_checksum() {
-    let tests = vec![(0, 0), (7992739871, 3), (735423462345, 6), (721367498765427, 4)];
+    let tests = vec![
+        (0, 0),
+        (7992739871, 3),
+        (735423462345, 6),
+        (721367498765427, 4),
+    ];
     for (input, want) in tests {
         let got = luhn_checksum(input);
         assert_eq!(got, want, "mismatch for input {}", input);
@@ -127,7 +146,10 @@ fn test_increment_imei() {
         ("7576", ""),
         ("c328", ""), // Invalid UTF-8
         // 721367498765404 => 721367498765412
-        ("373231333637343938373635343034", "373231333637343938373635343132"),
+        (
+            "373231333637343938373635343034",
+            "373231333637343938373635343132",
+        ),
         ("39393930", "3130303039"), // String gets longer
     ];
     for (input, want) in tests {

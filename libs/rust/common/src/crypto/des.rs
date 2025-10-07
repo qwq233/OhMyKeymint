@@ -42,16 +42,16 @@ pub struct Key(pub [u8; KEY_SIZE_BYTES]);
 impl Key {
     /// Create a new 3-DES key from 24 bytes of data.
     pub fn new(data: Vec<u8>) -> Result<Key, Error> {
-        Ok(Key(data
-            .try_into()
-            .map_err(|_e| km_err!(UnsupportedKeySize, "3-DES key size wrong"))?))
+        Ok(Key(data.try_into().map_err(|_e| {
+            km_err!(UnsupportedKeySize, "3-DES key size wrong")
+        })?))
     }
     /// Create a new 3-DES key from 24 bytes of data.
     pub fn new_from(data: &[u8]) -> Result<Key, Error> {
         let data = try_to_vec(data)?;
-        Ok(Key(data
-            .try_into()
-            .map_err(|_e| km_err!(UnsupportedKeySize, "3-DES key size wrong"))?))
+        Ok(Key(data.try_into().map_err(|_e| {
+            km_err!(UnsupportedKeySize, "3-DES key size wrong")
+        })?))
     }
 }
 

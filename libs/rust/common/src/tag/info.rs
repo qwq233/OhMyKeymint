@@ -89,8 +89,13 @@ pub const KEYMINT_ENFORCED_CHARACTERISTICS: &[Tag] = &[
 ];
 
 /// The set of characteristics that are automatically added by KeyMint on key generation.
-pub const AUTO_ADDED_CHARACTERISTICS: &[Tag] =
-    &[Tag::Origin, Tag::OsVersion, Tag::OsPatchlevel, Tag::VendorPatchlevel, Tag::BootPatchlevel];
+pub const AUTO_ADDED_CHARACTERISTICS: &[Tag] = &[
+    Tag::Origin,
+    Tag::OsVersion,
+    Tag::OsPatchlevel,
+    Tag::VendorPatchlevel,
+    Tag::BootPatchlevel,
+];
 
 /// Indicate the allowed use of the tag as a parameter for an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
