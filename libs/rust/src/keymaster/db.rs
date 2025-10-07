@@ -1657,7 +1657,7 @@ impl FromSql for EncryptedBy {
 /// A database representation of wall clock time. DateTime stores unix epoch time as
 /// i64 in milliseconds.
 #[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Ord, PartialOrd)]
-pub struct DateTime(i64);
+pub struct DateTime(pub(crate) i64);
 
 /// Error type returned when creating DateTime or converting it from and to
 /// SystemTime.

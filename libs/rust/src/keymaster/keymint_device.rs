@@ -14,8 +14,10 @@
 
 //! Provide the [`KeyMintDevice`] wrapper for operating directly on a KeyMint device.
 
+use std::cell::RefCell;
 use std::sync::{Arc, OnceLock};
 
+use crate::android::hardware::security::keymint::KeyParameterValue::KeyParameterValue;
 use crate::android::hardware::security::keymint::{
     HardwareAuthToken::HardwareAuthToken, IKeyMintDevice::IKeyMintDevice,
     IKeyMintOperation::IKeyMintOperation, KeyCharacteristics::KeyCharacteristics,
@@ -41,17 +43,18 @@ use crate::{
     },
     watchdog as wd,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context, Ok, Result};
 use kmr_crypto_boring::ec::BoringEc;
 use kmr_crypto_boring::hmac::BoringHmac;
 use kmr_crypto_boring::rng::BoringRng;
 use kmr_crypto_boring::rsa::BoringRsa;
 use kmr_ta::device::CsrSigningAlgorithm;
 use kmr_ta::{HardwareInfo, KeyMintTa, RpcInfo, RpcInfoV3};
-use kmr_wire::keymint::KeyMintHardwareInfo;
+use kmr_wire::keymint::{KeyMintHardwareInfo, KeyParam};
 use kmr_wire::rpc::MINIMUM_SUPPORTED_KEYS_IN_CSR;
+use kmr_wire::*;
 use log::error;
-use rsbinder::Strong;
+use rsbinder::{Interface, Strong};
 
 /// Wrapper for operating directly on a KeyMint device.
 /// These methods often mirror methods in [`crate::security_level`]. However
@@ -330,7 +333,7 @@ static mut KM_WRAPPER_STRONGBOX: OnceLock<KeyMintWrapper> = OnceLock::new();
 static mut KM_WRAPPER_TEE: OnceLock<KeyMintWrapper> = OnceLock::new();
 
 struct KeyMintWrapper {
-    km: KeyMintTa,
+    km: RefCell<KeyMintTa>,
     security_level: SecurityLevel,
 }
 
@@ -339,7 +342,7 @@ unsafe impl Sync for KeyMintWrapper {}
 impl KeyMintWrapper {
     fn new(security_level: SecurityLevel) -> Result<Self> {
         Ok(KeyMintWrapper {
-            km: init_keymint_ta(security_level)?,
+            km: RefCell::new(init_keymint_ta(security_level)?),
             security_level: security_level.clone(),
         })
     }
@@ -350,18 +353,30 @@ impl KeyMintWrapper {
         key_blob: &[u8],
         params: &[KeyParameter],
         auth_token: Option<&HardwareAuthToken>,
-    ) -> Result<crate::android::hardware::security::keymint::KeyMintOperationResult> {
-        let calling_context = CallingContext::get();
-        self.km
-            .begin(
-                &calling_context,
-                purpose,
-                key_blob,
-                params,
-                auth_token,
-                None,
-            )
-            .map_err(|e| anyhow!(err!("KeyMintWrapper::begin failed: {:?}", e)))
+    ) -> Result<(), Error> {
+        let km_params: Result<Vec<KeyParam>> = params.iter().cloned().map(|p| p.to_km()).collect();
+
+        let req = PerformOpReq::DeviceBegin(BeginRequest {
+            purpose: kmr_wire::keymint::KeyPurpose::try_from(purpose.0)
+                .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))?,
+            key_blob: key_blob.to_vec(),
+            params: km_params.map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))?,
+            auth_token: auth_token
+                .map(|at| at.to_km())
+                .transpose()
+                .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))?,
+        });
+
+        let result = self.km.borrow_mut().process_req(req);
+        if let None = result.rsp {
+            return Err(Error::Km(ErrorCode::UNIMPLEMENTED));
+        }
+        let result: InternalBeginResult = match result.rsp.unwrap() {
+            PerformOpRsp::DeviceBegin(rsp) => rsp.ret,
+            _ => return Err(Error::Km(ErrorCode::UNIMPLEMENTED)),
+        };
+
+        Err(Error::Km(ErrorCode::UNIMPLEMENTED))
     }
 }
 
@@ -481,6 +496,7 @@ fn get_keymint_device(
             };
             let info = strongbox
                 .km
+                .borrow_mut()
                 .get_hardware_info()
                 .expect(err!("Failed to get hardware info"));
             Ok((strongbox, info))
@@ -494,6 +510,7 @@ fn get_keymint_device(
             };
             let info = tee
                 .km
+                .borrow_mut()
                 .get_hardware_info()
                 .expect(err!("Failed to get hardware info"));
             Ok((tee, info))

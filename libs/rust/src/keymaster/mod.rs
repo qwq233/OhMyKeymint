@@ -7,6 +7,7 @@ pub mod enforcements;
 pub mod error;
 pub mod key_parameter;
 pub mod keymint_device;
+pub mod keymint_operation;
 pub mod permission;
 pub mod security_level;
 pub mod super_key;
