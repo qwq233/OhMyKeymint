@@ -16,6 +16,3 @@ env_logger = "*"
 ctrlc = "*"
 anyhow = "*"
 clap = "*"
-
-[[example]]
-name = "example_service"

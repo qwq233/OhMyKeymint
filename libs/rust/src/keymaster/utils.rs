@@ -134,18 +134,20 @@ pub fn key_parameters_to_authorizations(
 }
 
 impl crate::android::hardware::security::keymint::HardwareAuthToken::HardwareAuthToken {
-    pub fn to_km(&self) -> Result<kmr_wire::keymint::HardwareAuthToken> {
-        Ok(kmr_wire::keymint::HardwareAuthToken {
-            challenge: self.challenge,
-            user_id: self.userId,
-            authenticator_id: self.authenticatorId,
-            authenticator_type: kmr_wire::keymint::HardwareAuthenticatorType::try_from(self.authenticatorType.0)
-                .map_err(|e| anyhow!("Failed to convert authenticator type: {:?}", e))?,
-            timestamp: kmr_wire::secureclock::Timestamp {
-                milliseconds: self.timestamp.milliSeconds,
-            },
-            mac: self.mac.clone(),
-        })
+    pub fn to_km(&self) -> Result<kmr_wire::keymint::HardwareAuthToken, Error> {
+        core::result::Result::Ok(
+            kmr_wire::keymint::HardwareAuthToken {
+                challenge: self.challenge,
+                user_id: self.userId,
+                authenticator_id: self.authenticatorId,
+                authenticator_type: kmr_wire::keymint::HardwareAuthenticatorType::try_from(self.authenticatorType.0)
+                    .map_err(|_| Error::Km(crate::android::hardware::security::keymint::ErrorCode::ErrorCode::INVALID_ARGUMENT))?,
+                timestamp: kmr_wire::secureclock::Timestamp {
+                    milliseconds: self.timestamp.milliSeconds,
+                },
+                mac: self.mac.clone(),
+            }
+        )
     }
 }
 

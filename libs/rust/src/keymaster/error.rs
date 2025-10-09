@@ -52,3 +52,23 @@ pub fn map_binder_status<T>(r: rsbinder::status::Result<T>) -> Result<T, KsError
         }),
     }
 }
+
+pub fn map_ks_error(r: KsError) -> Status {
+    match r {
+        KsError::Rc(rc) => {
+            Status::new_service_specific_error(rc.0, format!("KeystoreError: {:?}", rc).into())
+        }
+        KsError::Km(ec) => {
+            Status::new_service_specific_error(ec.0, format!("KeymintError: {:?}", ec).into())
+        }
+        KsError::Binder(ec, se) => Status::from(ec),
+        KsError::BinderTransaction(sc) => Status::from(sc),
+    }
+}
+
+pub fn map_ks_result<T>(r: Result<T, KsError>) -> Result<T, Status> {
+    match r {
+        Ok(t) => Ok(t),
+        Err(e) => Err(map_ks_error(e)),
+    }
+}

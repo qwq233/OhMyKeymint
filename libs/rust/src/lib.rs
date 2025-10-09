@@ -1,4 +1,5 @@
 #![recursion_limit = "256"]
+#![feature(once_cell_get_mut)]
 
 use anyhow::Context;
 use lazy_static;
