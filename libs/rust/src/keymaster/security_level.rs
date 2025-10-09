@@ -3,9 +3,7 @@ use std::time::SystemTime;
 use crate::{
     android::{
         hardware::security::keymint::{
-            Algorithm::Algorithm, AttestationKey::AttestationKey, ErrorCode::ErrorCode,
-            KeyCreationResult::KeyCreationResult, KeyParameter::KeyParameter,
-            KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
+            Algorithm::Algorithm, AttestationKey::AttestationKey, ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice, KeyCreationResult::KeyCreationResult, KeyParameter::KeyParameter, KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag
         },
         system::keystore2::{
             Domain::Domain, KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata,
@@ -15,13 +13,13 @@ use crate::{
     err,
     global::{DB, SUPER_KEY, UNDEFINED_NOT_AFTER},
     keymaster::{
-        attestation_key_utils::{get_attest_key_info, AttestationKeyInfo},
+        attestation_key_utils::{AttestationKeyInfo, get_attest_key_info},
         db::{
             BlobInfo, BlobMetaEntry, CertificateInfo, DateTime, DateTimeError, KeyIdGuard,
             KeyMetaData, KeyMetaEntry, KeyType, SubComponentType, Uuid,
         },
-        error::KsError,
-        keymint_device::KeyMintDevice,
+        error::{KsError, map_binder_status},
+        keymint_device::{KeyMintDevice, KeyMintWrapper, get_keymint_wrapper},
         super_key::{KeyBlob, SuperKeyManager},
         utils::{key_characteristics_to_internal, key_parameters_to_authorizations, log_params},
     },
@@ -34,27 +32,26 @@ use crate::watchdog as wd;
 
 use anyhow::{anyhow, Context, Result};
 use kmr_ta::HardwareInfo;
-use rsbinder::thread_state::CallingContext;
+use rsbinder::{Strong, thread_state::CallingContext};
 
-pub struct KeystoreSecurityLevel {
+pub struct KeystoreSecurityLevel<'a> {
     security_level: SecurityLevel,
     hw_info: HardwareInfo,
     km_uuid: Uuid,
-    keymint: KeyMintDevice,
+    keymint: &'a dyn IKeyMintDevice,
 }
 
-impl KeystoreSecurityLevel {
+impl<'a> KeystoreSecurityLevel<'a> {
     pub fn new(
         security_level: SecurityLevel,
         hw_info: HardwareInfo,
         km_uuid: Uuid,
-        keymint: KeyMintDevice,
     ) -> Self {
         KeystoreSecurityLevel {
             security_level,
             hw_info,
             km_uuid,
-            keymint,
+            keymint: get_keymint_wrapper(security_level).unwrap(),
         }
     }
 
@@ -211,7 +208,7 @@ impl KeystoreSecurityLevel {
         F: Fn(&[u8]) -> Result<T, KsError>,
     {
         let (v, upgraded_blob) = crate::keymaster::utils::upgrade_keyblob_if_required_with(
-            &*self.keymint,
+            get_keymint_wrapper(self.security_level).unwrap(),
             self.hw_info.version_number,
             key_blob,
             params,
@@ -422,7 +419,8 @@ impl KeystoreSecurityLevel {
                             ),
                             5000, // Generate can take a little longer.
                         );
-                        self.keymint.generateKey(&params, attest_key.as_ref())
+                        let result = self.keymint.generateKey(&params, attest_key.as_ref());
+                        map_binder_status(result)
                     },
                 )
                 .context(err!(

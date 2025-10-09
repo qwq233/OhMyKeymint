@@ -4,6 +4,7 @@ cargo-features = ["profile-rustflags", "trim-paths"]
 name = "OhMyKeymint"
 version = "0.1.1"
 edition = "2021"
+license = "AGPL-3.0-or-later"
 
 [[bin]]
 name = "keymint"
