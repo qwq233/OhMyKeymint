@@ -162,7 +162,7 @@ pub struct SuperKey {
     reencrypt_with: Option<Arc<SuperKey>>,
 }
 
-trait AesGcm {
+pub trait AesGcm {
     fn decrypt(&self, data: &[u8], iv: &[u8], tag: &[u8]) -> Result<ZVec>;
     fn encrypt(&self, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)>;
 }

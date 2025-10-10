@@ -27,6 +27,7 @@ use std::io::BufRead;
 use std::io::Write;
 use std::path;
 
+#[cfg(not(target_os = "android"))]
 const SECURE_DELETION_DATA_FILE: &str = "./omk/data/keymint_secure_deletion_data";
 
 #[cfg(target_os = "android")]

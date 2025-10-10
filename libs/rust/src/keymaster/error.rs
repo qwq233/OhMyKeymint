@@ -72,3 +72,71 @@ pub fn map_ks_result<T>(r: Result<T, KsError>) -> Result<T, Status> {
         Err(e) => Err(map_ks_error(e)),
     }
 }
+
+/// Convert an [`anyhow::Error`] to a [`binder::Status`], logging the value
+/// along the way (except if it is `KEY_NOT_FOUND`).
+pub fn into_logged_binder(e: anyhow::Error) -> Status {
+    // Log everything except key not found.
+    if !matches!(
+        e.root_cause().downcast_ref::<KsError>(),
+        Some(KsError::Rc(ResponseCode::KEY_NOT_FOUND))
+    ) {
+        log::error!("{:?}", e);
+    }
+    into_binder(e)
+}
+
+/// This function turns an anyhow error into an optional CString.
+/// This is especially useful to add a message string to a service specific error.
+/// If the formatted string was not convertible because it contained a nul byte,
+/// None is returned and a warning is logged.
+pub fn anyhow_error_to_string(e: &anyhow::Error) -> Option<String> {
+    let formatted = format!("{:?}", e);
+    if formatted.contains('\0') {
+        log::warn!("Cannot convert error message to String. It contained a nul byte.");
+        None
+    } else {
+        Some(formatted)
+    }
+}
+
+/// This type is used to send error codes on the wire.
+///
+/// Errors are squashed into one number space using following rules:
+/// - All Keystore and Keymint errors codes are identity mapped. It's possible because by
+///   convention Keystore `ResponseCode` errors are positive, and Keymint `ErrorCode` errors are
+///   negative.
+/// - `selinux::Error::PermissionDenied` is mapped to `ResponseCode::PERMISSION_DENIED`.
+/// - All other error conditions, e.g. Binder errors, are mapped to `ResponseCode::SYSTEM_ERROR`.
+///
+/// The type should be used to forward all error codes to clients of Keystore AIDL interface and to
+/// metrics events.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SerializedError(pub i32);
+
+/// Returns a SerializedError given a reference to Error.
+pub fn error_to_serialized_error(e: &KsError) -> SerializedError {
+    match e {
+        KsError::Rc(rcode) => SerializedError(rcode.0),
+        KsError::Km(ec) => SerializedError(ec.0),
+        // Binder errors are reported as system error.
+        KsError::Binder(_, _) | KsError::BinderTransaction(_) => {
+            SerializedError(ResponseCode::SYSTEM_ERROR.0)
+        }
+    }
+}
+
+/// Returns a SerializedError given a reference to anyhow::Error.
+pub fn anyhow_error_to_serialized_error(e: &anyhow::Error) -> SerializedError {
+    let root_cause = e.root_cause();
+    match root_cause.downcast_ref::<KsError>() {
+        Some(e) => error_to_serialized_error(e),
+        None => SerializedError(ResponseCode::SYSTEM_ERROR.0),
+    }
+}
+
+/// Convert an [`anyhow::Error`] to a [`binder::Status`].
+pub fn into_binder(e: anyhow::Error) -> rsbinder::Status {
+    let rc = anyhow_error_to_serialized_error(&e);
+    rsbinder::Status::new_service_specific_error(rc.0, anyhow_error_to_string(&e))
+}

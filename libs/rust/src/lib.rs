@@ -3,10 +3,13 @@
 
 use anyhow::Context;
 use lazy_static;
-use std::sync::{Arc, Mutex};
+use std::{
+    panic,
+    sync::{Arc, Mutex},
+};
 
 use jni::JavaVM;
-use log::debug;
+use log::{debug, error};
 
 pub mod consts;
 pub mod global;
@@ -42,6 +45,11 @@ pub extern "C" fn JNI_OnLoad(
     logging::init_logger();
     rsbinder::ProcessState::init_default();
     debug!("Hello, OhMyKeymint!");
+
+    // Redirect panic messages to logcat.
+    panic::set_hook(Box::new(|panic_info| {
+        error!("{}", panic_info);
+    }));
 
     let class = env
         .find_class("top/qwq2333/ohmykeymint/Native")

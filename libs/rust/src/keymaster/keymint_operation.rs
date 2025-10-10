@@ -1,10 +1,18 @@
 use kmr_wire::keymint::KeyParam;
-use rsbinder::Interface;
+use rsbinder::{Interface, Strong};
 
-use crate::{android::hardware::security::keymint::{HardwareAuthToken::HardwareAuthToken, IKeyMintOperation::IKeyMintOperation, SecurityLevel::SecurityLevel}, keymaster::{error::map_ks_error, keymint_device::{KeyMintWrapper, get_keymint_wrapper}}};
+use crate::{
+    android::hardware::security::keymint::{
+        HardwareAuthToken::HardwareAuthToken, IKeyMintOperation::IKeyMintOperation,
+        SecurityLevel::SecurityLevel,
+    },
+    keymaster::{
+        error::map_ks_error,
+        keymint_device::{get_keymint_wrapper, KeyMintWrapper},
+    },
+};
 
-
-pub struct OKeyMintOperation {
+pub struct KeyMintOperation {
     security_level: SecurityLevel,
     pub challenge: i64,
     pub params: Vec<KeyParam>,
@@ -13,12 +21,16 @@ pub struct OKeyMintOperation {
     pub op_handle: i64,
 }
 
-impl Interface for OKeyMintOperation {
-}
+impl Interface for KeyMintOperation {}
 
-impl OKeyMintOperation {
-    pub fn new(security_level: SecurityLevel, challenge: i64, params: Vec<KeyParam>, op_handle: i64) -> Self {
-        OKeyMintOperation {
+impl KeyMintOperation {
+    pub fn new(
+        security_level: SecurityLevel,
+        challenge: i64,
+        params: Vec<KeyParam>,
+        op_handle: i64,
+    ) -> Self {
+        KeyMintOperation {
             security_level,
             challenge,
             params,
@@ -28,14 +40,18 @@ impl OKeyMintOperation {
 }
 
 #[allow(non_snake_case, unused_variables)]
-impl IKeyMintOperation for OKeyMintOperation {
+impl IKeyMintOperation for KeyMintOperation {
     fn r#updateAad(
         &self,
         input: &[u8],
         authToken: Option<&HardwareAuthToken>,
-        timeStampToken: Option<&crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken>,
+        timeStampToken: Option<
+            &crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken,
+        >,
     ) -> rsbinder::status::Result<()> {
-        get_keymint_wrapper(self.security_level).unwrap().op_update_aad(self.op_handle, input, authToken, timeStampToken)
+        get_keymint_wrapper(self.security_level)
+            .unwrap()
+            .op_update_aad(self.op_handle, input, authToken, timeStampToken)
             .map_err(|e| map_ks_error(e))?;
         Ok(())
     }
@@ -44,11 +60,15 @@ impl IKeyMintOperation for OKeyMintOperation {
         &self,
         input: &[u8],
         authToken: Option<&HardwareAuthToken>,
-        timeStampToken: Option<&crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken>,
+        timeStampToken: Option<
+            &crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken,
+        >,
     ) -> rsbinder::status::Result<Vec<u8>> {
-        get_keymint_wrapper(self.security_level).unwrap().op_update(self.op_handle, input, authToken, timeStampToken)
+        get_keymint_wrapper(self.security_level)
+            .unwrap()
+            .op_update(self.op_handle, input, authToken, timeStampToken)
             .map_err(|e| map_ks_error(e))
-            .and_then(|rsp: Vec<u8>| {Ok(rsp.to_vec())})
+            .and_then(|rsp: Vec<u8>| Ok(rsp.to_vec()))
     }
 
     fn r#finish(
@@ -56,17 +76,29 @@ impl IKeyMintOperation for OKeyMintOperation {
         input: Option<&[u8]>,
         signature: Option<&[u8]>,
         authToken: Option<&HardwareAuthToken>,
-        timestampToken: Option<&crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken>,
+        timestampToken: Option<
+            &crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken,
+        >,
         confirmationToken: Option<&[u8]>,
     ) -> rsbinder::status::Result<Vec<u8>> {
-        get_keymint_wrapper(self.security_level).unwrap().op_finish(self.op_handle, input, signature, authToken, timestampToken, confirmationToken)
+        get_keymint_wrapper(self.security_level)
+            .unwrap()
+            .op_finish(
+                self.op_handle,
+                input,
+                signature,
+                authToken,
+                timestampToken,
+                confirmationToken,
+            )
             .map_err(|e| map_ks_error(e))
-            .and_then(|rsp: Vec<u8>| {Ok(rsp.to_vec())})
+            .and_then(|rsp: Vec<u8>| Ok(rsp.to_vec()))
     }
 
     fn r#abort(&self) -> rsbinder::status::Result<()> {
-        get_keymint_wrapper(self.security_level).unwrap().op_abort(self.op_handle)
+        get_keymint_wrapper(self.security_level)
+            .unwrap()
+            .op_abort(self.op_handle)
             .map_err(|e| map_ks_error(e))
     }
 }
-

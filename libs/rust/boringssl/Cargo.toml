@@ -20,6 +20,9 @@ anyhow = "*"
 thiserror = "*"
 nix = "*"
 
+[target.'cfg(android)'.dependencies]
+boringssl = "0.0.5"
+
 [dev-dependencies]
 kmr-tests = "*"
 

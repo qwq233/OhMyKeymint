@@ -1,5 +1,7 @@
 use log::info;
 use rsproperties::PropertyConfig;
+
+#[cfg(not(target_os = "android"))]
 use rsproperties_service;
 
 use anyhow::{anyhow, Context, Ok, Result};
@@ -12,19 +14,19 @@ pub struct PropertyWatcher {
 }
 
 impl PropertyWatcher {
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub fn new(name: &str) -> anyhow::Result<Self> {
         HAS_INIT.call_once(|| {
-            init();
+            init().unwrap();
         });
         Ok(PropertyWatcher {
             name: name.to_string(),
         })
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "android")]
     pub fn new(name: &str) -> anyhow::Result<Self> {
-        Ok(PropertyWatcher { name })
+        Ok(PropertyWatcher { name: name.to_string() })
     }
 
     pub fn read(&self) -> Result<String> {
@@ -56,6 +58,7 @@ impl PropertyWatcher {
 }
 
 #[tokio::main]
+#[cfg(not(target_os = "android"))]
 async fn init() -> Result<()> {
     std::fs::create_dir_all("./omk/properties").unwrap();
     std::fs::create_dir_all("./omk/property_socket").unwrap();

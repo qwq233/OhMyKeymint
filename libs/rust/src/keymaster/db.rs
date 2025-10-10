@@ -9,13 +9,11 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use rand::random;
 use rusqlite::{
-    params,
-    types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Value, ValueRef},
-    Connection, OptionalExtension, ToSql, Transaction,
+    Connection, OptionalExtension, ToSql, Transaction, params, params_from_iter, types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Value, ValueRef}
 };
 
 use crate::{
-    android::hardware::security::keymint::ErrorCode::ErrorCode,
+    android::{hardware::security::keymint::ErrorCode::ErrorCode, security::metrics::{Storage::Storage as MetricsStorage, StorageStats::StorageStats}},
     keymaster::{database::perboot::PerbootDB, super_key::SuperKeyType},
     plat::utils::AID_USER_OFFSET,
     watchdog as wd,
@@ -23,6 +21,7 @@ use crate::{
 
 use TransactionBehavior::Immediate;
 
+#[cfg(not(target_os = "android"))]
 const DB_ROOT_PATH: &str = "./omk/data";
 
 #[cfg(target_os = "android")]
@@ -62,8 +61,7 @@ use crate::{
     android::{
         hardware::security::keymint::{
             HardwareAuthToken::HardwareAuthToken,
-            HardwareAuthenticatorType::HardwareAuthenticatorType,
-            KeyParameter::KeyParameter as KmKeyParameter, SecurityLevel::SecurityLevel, Tag::Tag,
+            HardwareAuthenticatorType::HardwareAuthenticatorType, SecurityLevel::SecurityLevel, Tag::Tag,
         },
         system::keystore2::{
             Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
@@ -77,7 +75,6 @@ use crate::{
         permission::KeyPermSet,
     },
     utils::get_current_time_in_milliseconds,
-    watchdog,
 };
 
 pub struct KeymasterDb {
@@ -1245,6 +1242,127 @@ impl KeymasterDb {
             .insert_auth_token_entry(AuthTokenEntry::new(auth_token.clone(), BootTime::now()))
     }
 
+    /// Load descriptor of a key by key id
+    pub fn load_key_descriptor(&mut self, key_id: i64) -> Result<Option<KeyDescriptor>> {
+        let _wp = wd::watch("KeystoreDB::load_key_descriptor");
+
+        self.with_transaction(TransactionBehavior::Deferred, |tx| {
+            tx.query_row(
+                "SELECT domain, namespace, alias FROM persistent.keyentry WHERE id = ?;",
+                params![key_id],
+                |row| {
+                    Ok(KeyDescriptor {
+                        domain: Domain(row.get(0)?),
+                        nspace: row.get(1)?,
+                        alias: row.get(2)?,
+                        blob: None,
+                    })
+                },
+            )
+            .optional()
+            .context("Trying to load key descriptor")
+        })
+        .context(err!())
+    }
+
+    fn do_table_size_query(
+        &mut self,
+        storage_type: MetricsStorage,
+        query: &str,
+        params: &[&str],
+    ) -> Result<StorageStats> {
+        let (total, unused) = self.with_transaction(TransactionBehavior::Deferred, |tx| {
+            tx.query_row(query, params_from_iter(params), |row| Ok((row.get(0)?, row.get(1)?)))
+                .with_context(|| {
+                    err!("get_storage_stat: Error size of storage type {}", storage_type.0)
+                })
+        })?;
+        Ok(StorageStats { storage_type, size: total, unused_size: unused })
+    }
+
+    fn get_total_size(&mut self) -> Result<StorageStats> {
+        self.do_table_size_query(
+            MetricsStorage::DATABASE,
+            "SELECT page_count * page_size, freelist_count * page_size
+             FROM pragma_page_count('persistent'),
+                  pragma_page_size('persistent'),
+                  persistent.pragma_freelist_count();",
+            &[],
+        )
+    }
+
+    fn get_table_size(
+        &mut self,
+        storage_type: MetricsStorage,
+        schema: &str,
+        table: &str,
+    ) -> Result<StorageStats> {
+        self.do_table_size_query(
+            storage_type,
+            "SELECT pgsize,unused FROM dbstat(?1)
+             WHERE name=?2 AND aggregate=TRUE;",
+            &[schema, table],
+        )
+    }
+
+
+    /// Fetches a storage statistics atom for a given storage type. For storage
+    /// types that map to a table, information about the table's storage is
+    /// returned. Requests for storage types that are not DB tables return None.
+    pub fn get_storage_stat(&mut self, storage_type: MetricsStorage) -> Result<StorageStats> {
+        let _wp = wd::watch_millis_with("KeystoreDB::get_storage_stat", 500, storage_type);
+
+        match storage_type {
+            MetricsStorage::DATABASE => self.get_total_size(),
+            MetricsStorage::KEY_ENTRY => {
+                self.get_table_size(storage_type, "persistent", "keyentry")
+            }
+            MetricsStorage::KEY_ENTRY_ID_INDEX => {
+                self.get_table_size(storage_type, "persistent", "keyentry_id_index")
+            }
+            MetricsStorage::KEY_ENTRY_DOMAIN_NAMESPACE_INDEX => {
+                self.get_table_size(storage_type, "persistent", "keyentry_domain_namespace_index")
+            }
+            MetricsStorage::BLOB_ENTRY => {
+                self.get_table_size(storage_type, "persistent", "blobentry")
+            }
+            MetricsStorage::BLOB_ENTRY_KEY_ENTRY_ID_INDEX => {
+                self.get_table_size(storage_type, "persistent", "blobentry_keyentryid_index")
+            }
+            MetricsStorage::KEY_PARAMETER => {
+                self.get_table_size(storage_type, "persistent", "keyparameter")
+            }
+            MetricsStorage::KEY_PARAMETER_KEY_ENTRY_ID_INDEX => {
+                self.get_table_size(storage_type, "persistent", "keyparameter_keyentryid_index")
+            }
+            MetricsStorage::KEY_METADATA => {
+                self.get_table_size(storage_type, "persistent", "keymetadata")
+            }
+            MetricsStorage::KEY_METADATA_KEY_ENTRY_ID_INDEX => {
+                self.get_table_size(storage_type, "persistent", "keymetadata_keyentryid_index")
+            }
+            MetricsStorage::GRANT => self.get_table_size(storage_type, "persistent", "grant"),
+            MetricsStorage::AUTH_TOKEN => {
+                // Since the table is actually a BTreeMap now, unused_size is not meaningfully
+                // reportable
+                // Size provided is only an approximation
+                Ok(StorageStats {
+                    storage_type,
+                    size: (self.perboot.auth_tokens_len() * std::mem::size_of::<AuthTokenEntry>())
+                        as i32,
+                    unused_size: 0,
+                })
+            }
+            MetricsStorage::BLOB_METADATA => {
+                self.get_table_size(storage_type, "persistent", "blobmetadata")
+            }
+            MetricsStorage::BLOB_METADATA_BLOB_ENTRY_ID_INDEX => {
+                self.get_table_size(storage_type, "persistent", "blobmetadata_blobentryid_index")
+            }
+            _ => Err(anyhow::Error::msg(format!("Unsupported storage type: {}", storage_type.0))),
+        }
+    }
+
     /// Decrements the usage count of a limited use key. This function first checks whether the
     /// usage has been exhausted, if not, decreases the usage count. If the usage count reaches
     /// zero, the key also gets marked unreferenced and scheduled for deletion.
@@ -1637,7 +1755,7 @@ pub enum EncryptedBy {
 }
 
 impl ToSql for EncryptedBy {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         match self {
             Self::Password => Ok(ToSqlOutput::Owned(Value::Null)),
             Self::KeyId(id) => id.to_sql(),

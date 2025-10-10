@@ -87,8 +87,8 @@ impl KeyMintDevice {
 
     /// Get a [`KeyMintDevice`] for the given [`SecurityLevel`]
     pub fn get(security_level: SecurityLevel) -> Result<KeyMintDevice> {
-        let km_dev =
-            get_keymint_device(security_level).context(err!("get_keymint_device failed: {:?}", security_level))?;
+        let km_dev = get_keymint_device(security_level)
+            .context(err!("get_keymint_device failed: {:?}", security_level))?;
         let hw_info = km_dev.get_hardware_info().unwrap();
 
         let km_uuid: Uuid = Default::default();
@@ -330,7 +330,11 @@ impl KeyMintDevice {
             .upgrade_keyblob_if_required_with(db, key_id_guard, key_blob, |blob| {
                 let _wp =
                     wd::watch("KeyMintDevice::use_key_in_one_step: calling IKeyMintDevice::begin");
-                let result: std::result::Result<crate::android::hardware::security::keymint::BeginResult::BeginResult, Status> = self.km_dev
+                let result: std::result::Result<
+                    crate::android::hardware::security::keymint::BeginResult::BeginResult,
+                    Status,
+                > = self
+                    .km_dev
                     .begin(purpose, blob, operation_parameters, auth_token);
                 map_binder_status(result)
             })
@@ -402,7 +406,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             }
         };
 
-        let operation = crate::keymaster::keymint_operation::OKeyMintOperation::new(
+        let operation = crate::keymaster::keymint_operation::KeyMintOperation::new(
             self.security_level.clone(),
             result.challenge,
             km_params,
@@ -839,7 +843,8 @@ pub fn get_keymint_device<'a>(security_level: SecurityLevel) -> Result<&'a mut K
         SecurityLevel::STRONGBOX => {
             let strongbox = unsafe {
                 KM_STRONGBOX.get_mut_or_init(|| {
-                    init_keymint_ta(security_level).expect(err!("Failed to init strongbox wrapper").as_str())
+                    init_keymint_ta(security_level)
+                        .expect(err!("Failed to init strongbox wrapper").as_str())
                 })
             };
 
@@ -848,7 +853,8 @@ pub fn get_keymint_device<'a>(security_level: SecurityLevel) -> Result<&'a mut K
         SecurityLevel::TRUSTED_ENVIRONMENT => {
             let tee = unsafe {
                 KM_TEE.get_mut_or_init(|| {
-                    init_keymint_ta(security_level).expect(err!("Failed to init tee wrapper").as_str())
+                    init_keymint_ta(security_level)
+                        .expect(err!("Failed to init tee wrapper").as_str())
                 })
             };
 

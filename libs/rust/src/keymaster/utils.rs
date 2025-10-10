@@ -1,14 +1,21 @@
 use crate::{
     android::hardware::security::keymint::{
         ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice,
-        KeyCharacteristics::KeyCharacteristics, KeyParameter::KeyParameter as KmKeyParameter, KeyParameterValue::KeyParameterValue,
-    }, consts, err, keymaster::{
+        KeyCharacteristics::KeyCharacteristics, KeyParameter::KeyParameter as KmKeyParameter,
+        KeyParameterValue::KeyParameterValue,
+    },
+    consts, err,
+    keymaster::{
         error::KsError as Error, key_parameter::KeyParameter, keymint_device::KeyMintDevice,
-    }, watchdog
+    },
+    watchdog,
 };
 
-use anyhow::{anyhow, Context, Result, Ok};
-use kmr_wire::{keymint::{self, KeyParam}, KeySizeInBits};
+use anyhow::{anyhow, Context, Ok, Result};
+use kmr_wire::{
+    keymint::{self, KeyParam},
+    KeySizeInBits,
+};
 
 pub fn log_params(params: &[KmKeyParameter]) -> Vec<KmKeyParameter> {
     params.iter().cloned().collect::<Vec<KmKeyParameter>>()
@@ -243,7 +250,9 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
                     _ => return Err(anyhow!("Mismatched key parameter value type")),
                 }?;
 
-                Ok(KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(value as u64)))
+                Ok(KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(
+                    value as u64,
+                )))
             }
             keymint::Tag::IncludeUniqueId => Ok(KeyParam::IncludeUniqueId),
             keymint::Tag::RsaOaepMgfDigest => {
@@ -493,7 +502,7 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
                 }?;
 
                 Ok(KeyParam::VendorPatchlevel(value as u32))
-            },
+            }
             keymint::Tag::BootPatchlevel => {
                 let value = match value {
                     KeyParameterValue::Integer(v) => Ok(v),
@@ -501,7 +510,7 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
                 }?;
 
                 Ok(KeyParam::BootPatchlevel(value as u32))
-            },
+            }
             keymint::Tag::DeviceUniqueAttestation => Ok(KeyParam::DeviceUniqueAttestation),
             keymint::Tag::IdentityCredentialKey => Err(anyhow!(err!("Not implemented"))),
             keymint::Tag::StorageKey => Ok(KeyParam::StorageKey),
@@ -521,7 +530,7 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
                 }?;
 
                 Ok(KeyParam::Nonce(value))
-            },
+            }
             keymint::Tag::MacLength => {
                 let value = match value {
                     KeyParameterValue::Integer(v) => Ok(v),
@@ -529,7 +538,7 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
                 }?;
 
                 Ok(KeyParam::MacLength(value as u32))
-            },
+            }
             keymint::Tag::ResetSinceIdRotation => Ok(KeyParam::ResetSinceIdRotation),
             keymint::Tag::ConfirmationToken => Err(anyhow!(err!("Not implemented"))),
             keymint::Tag::CertificateSerial => {
@@ -539,7 +548,7 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
                 }?;
 
                 Ok(KeyParam::CertificateSerial(value))
-            },
+            }
             keymint::Tag::CertificateSubject => {
                 let value = match value {
                     KeyParameterValue::Blob(v) => Ok(v),
@@ -547,17 +556,19 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
                 }?;
 
                 Ok(KeyParam::CertificateSubject(value))
-            },
+            }
             keymint::Tag::CertificateNotBefore => {
                 let value = match value {
                     KeyParameterValue::DateTime(v) => Ok(v),
                     _ => return Err(anyhow!("Mismatched key parameter value type")),
                 }?;
 
-                Ok(KeyParam::CertificateNotBefore(kmr_wire::keymint::DateTime {
-                    ms_since_epoch: value,
-                }))
-            },
+                Ok(KeyParam::CertificateNotBefore(
+                    kmr_wire::keymint::DateTime {
+                        ms_since_epoch: value,
+                    },
+                ))
+            }
             keymint::Tag::CertificateNotAfter => {
                 let value = match value {
                     KeyParameterValue::DateTime(v) => Ok(v),
@@ -567,7 +578,7 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
                 Ok(KeyParam::CertificateNotAfter(kmr_wire::keymint::DateTime {
                     ms_since_epoch: value,
                 }))
-            },
+            }
             keymint::Tag::MaxBootLevel => {
                 let value = match value {
                     KeyParameterValue::Integer(v) => Ok(v),
@@ -575,7 +586,7 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
                 }?;
 
                 Ok(KeyParam::MaxBootLevel(value as u32))
-            },
+            }
             keymint::Tag::ModuleHash => {
                 let value = match value {
                     KeyParameterValue::Blob(v) => Ok(v),
@@ -583,7 +594,7 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
                 }?;
 
                 Ok(KeyParam::ModuleHash(value))
-            },
+            }
         }
     }
 }
