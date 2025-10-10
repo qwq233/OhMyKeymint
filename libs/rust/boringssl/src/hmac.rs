@@ -52,6 +52,7 @@ impl crypto::Hmac for BoringHmac {
 
         // Safety: `op.ctx` is known non-null and valid, as is the result of
         // `digest_into_openssl_ffi()`.  `key_len` is length of `key.0`, which is a valid `Vec<u8>`.
+        #[cfg(not(target_os = "android"))]
         let result = unsafe {
             ffi::HMAC_Init_ex(
                 op.ctx.0,
@@ -61,6 +62,18 @@ impl crypto::Hmac for BoringHmac {
                 core::ptr::null_mut(),
             )
         };
+
+        #[cfg(target_os = "android")]
+        let result = unsafe {
+            ffi::HMAC_Init_ex(
+                op.ctx.0,
+                key.0.as_ptr() as *const libc::c_void,
+                key_len as usize,
+                digest,
+                core::ptr::null_mut(),
+            )
+        };
+
         if result != 1 {
             error!("Failed to HMAC_Init_ex()");
             return Err(openssl_last_err());

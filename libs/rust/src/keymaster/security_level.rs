@@ -9,15 +9,28 @@ use crate::{
             KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
         },
         system::keystore2::{
-            AuthenticatorSpec::AuthenticatorSpec, CreateOperationResponse::CreateOperationResponse, Domain::Domain, EphemeralStorageKeyResponse::EphemeralStorageKeyResponse, IKeystoreOperation::IKeystoreOperation, IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata, KeyParameters::KeyParameters, ResponseCode::ResponseCode
+            AuthenticatorSpec::AuthenticatorSpec, CreateOperationResponse::CreateOperationResponse,
+            Domain::Domain, EphemeralStorageKeyResponse::EphemeralStorageKeyResponse,
+            IKeystoreOperation::IKeystoreOperation, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
+            KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata, KeyParameters::KeyParameters,
+            ResponseCode::ResponseCode,
         },
     },
     err,
     global::{DB, ENFORCEMENTS, SUPER_KEY, UNDEFINED_NOT_AFTER},
     keymaster::{
-        attestation_key_utils::{AttestationKeyInfo, get_attest_key_info}, db::{
-            BlobInfo, BlobMetaData, BlobMetaEntry, CertificateInfo, DateTime, KeyEntry, KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType, SubComponentType, Uuid
-        }, error::{KsError, into_logged_binder, map_binder_status}, keymint_device::get_keymint_wrapper, metrics_store::log_key_creation_event_stats, operation::{KeystoreOperation, LoggingInfo, OperationDb}, super_key::{KeyBlob, SuperKeyManager}, utils::{key_characteristics_to_internal, key_parameters_to_authorizations, log_params}
+        attestation_key_utils::{get_attest_key_info, AttestationKeyInfo},
+        db::{
+            BlobInfo, BlobMetaData, BlobMetaEntry, CertificateInfo, DateTime, KeyEntry,
+            KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType, SubComponentType,
+            Uuid,
+        },
+        error::{into_logged_binder, map_binder_status, KsError},
+        keymint_device::get_keymint_wrapper,
+        metrics_store::log_key_creation_event_stats,
+        operation::{KeystoreOperation, LoggingInfo, OperationDb},
+        super_key::{KeyBlob, SuperKeyManager},
+        utils::{key_characteristics_to_internal, key_parameters_to_authorizations, log_params},
     },
     plat::utils::multiuser_get_user_id,
 };
@@ -30,7 +43,7 @@ use crate::watchdog as wd;
 use anyhow::{anyhow, Context, Result};
 use kmr_ta::HardwareInfo;
 use log::debug;
-use rsbinder::{Interface, Status, thread_state::CallingContext};
+use rsbinder::{thread_state::CallingContext, Interface, Status};
 
 // Blob of 32 zeroes used as empty masking key.
 static ZERO_BLOB_32: &[u8] = &[0; 32];
@@ -744,24 +757,26 @@ impl<'a> KeystoreSecurityLevel<'a> {
                     .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
                 let (key_id_guard, mut key_entry) = DB
                     .with::<_, Result<(KeyIdGuard, KeyEntry)>>(|db| {
-                            db.borrow_mut().load_key_entry(
-                                key,
-                                KeyType::Client,
-                                KeyEntryLoadBits::KM,
-                                caller_uid,
-                                // |k, av| {
-                                //     check_key_permission(KeyPerm::Use, k, &av)?;
-                                //     if forced {
-                                //         check_key_permission(KeyPerm::ReqForcedOp, k, &av)?;
-                                //     }
-                                //     Ok(())
-                                // },
-                            )
+                        db.borrow_mut().load_key_entry(
+                            key,
+                            KeyType::Client,
+                            KeyEntryLoadBits::KM,
+                            caller_uid,
+                            // |k, av| {
+                            //     check_key_permission(KeyPerm::Use, k, &av)?;
+                            //     if forced {
+                            //         check_key_permission(KeyPerm::ReqForcedOp, k, &av)?;
+                            //     }
+                            //     Ok(())
+                            // },
+                        )
                     })
                     .context(err!("Failed to load key blob."))?;
 
-                let (blob, blob_metadata) =
-                    key_entry.take_key_blob_info().ok_or_else(KsError::sys).context(err!(
+                let (blob, blob_metadata) = key_entry
+                    .take_key_blob_info()
+                    .ok_or_else(KsError::sys)
+                    .context(err!(
                         "Successfully loaded key entry, \
                         but KM blob was missing."
                     ))?;
@@ -776,20 +791,26 @@ impl<'a> KeystoreSecurityLevel<'a> {
             }
         };
 
-        let purpose = operation_parameters.iter().find(|p| p.tag == Tag::PURPOSE).map_or(
-            Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
-                .context(err!("No operation purpose specified.")),
-            |kp| match kp.value {
-                KeyParameterValue::KeyPurpose(p) => Ok(p),
-                _ => Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
-                    .context(err!("Malformed KeyParameter.")),
-            },
-        )?;
+        let purpose = operation_parameters
+            .iter()
+            .find(|p| p.tag == Tag::PURPOSE)
+            .map_or(
+                Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+                    .context(err!("No operation purpose specified.")),
+                |kp| match kp.value {
+                    KeyParameterValue::KeyPurpose(p) => Ok(p),
+                    _ => Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+                        .context(err!("Malformed KeyParameter.")),
+                },
+            )?;
 
         // Remove Tag::PURPOSE from the operation_parameters, since some keymaster devices return
         // an error on begin() if Tag::PURPOSE is in the operation_parameters.
-        let op_params: Vec<KeyParameter> =
-            operation_parameters.iter().filter(|p| p.tag != Tag::PURPOSE).cloned().collect();
+        let op_params: Vec<KeyParameter> = operation_parameters
+            .iter()
+            .filter(|p| p.tag != Tag::PURPOSE)
+            .cloned()
+            .collect();
         let operation_parameters = op_params.as_slice();
 
         let (immediate_hat, mut auth_info) = ENFORCEMENTS
@@ -857,7 +878,12 @@ impl<'a> KeystoreSecurityLevel<'a> {
                 caller_uid,
                 auth_info,
                 forced,
-                LoggingInfo::new(self.security_level, purpose, op_params, upgraded_blob.is_some()),
+                LoggingInfo::new(
+                    self.security_level,
+                    purpose,
+                    op_params,
+                    upgraded_blob.is_some(),
+                ),
             ),
             None => {
                 return Err(KsError::sys()).context(err!(
@@ -878,12 +904,18 @@ impl<'a> KeystoreSecurityLevel<'a> {
             operationChallenge: operation_challenge,
             parameters: match begin_result.params.len() {
                 0 => None,
-                _ => Some(KeyParameters { keyParameter: begin_result.params }),
+                _ => Some(KeyParameters {
+                    keyParameter: begin_result.params,
+                }),
             },
             // An upgraded blob should only be returned if the caller has permission
             // to use Domain::BLOB keys. If we got to this point, we already checked
             // that the caller had that permission.
-            upgradedBlob: if key.domain == Domain::BLOB { upgraded_blob } else { None },
+            upgradedBlob: if key.domain == Domain::BLOB {
+                upgraded_blob
+            } else {
+                None
+            },
         })
     }
 
@@ -921,7 +953,8 @@ impl<'a> IKeystoreSecurityLevel for KeystoreSecurityLevel<'a> {
         forced: bool,
     ) -> Result<CreateOperationResponse, Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::createOperation");
-        Ok(self.create_operation(key, operation_parameters, forced)
+        Ok(self
+            .create_operation(key, operation_parameters, forced)
             .map_err(into_logged_binder)?)
     }
 
@@ -938,7 +971,11 @@ impl<'a> IKeystoreSecurityLevel for KeystoreSecurityLevel<'a> {
         let _wp = self.watch_millis("IKeystoreSecurityLevel::generateKey", 5000);
         let result = self.generate_key(key, attestation_key, params, flags, entropy);
         log_key_creation_event_stats(self.security_level, params, &result);
-        debug!("generateKey: calling uid: {}, result: {:?}", CallingContext::default().uid, result);
+        debug!(
+            "generateKey: calling uid: {}, result: {:?}",
+            CallingContext::default().uid,
+            result
+        );
         result.map_err(into_logged_binder)
     }
 
@@ -953,7 +990,11 @@ impl<'a> IKeystoreSecurityLevel for KeystoreSecurityLevel<'a> {
         let _wp = self.watch("IKeystoreSecurityLevel::importKey");
         let result = self.import_key(key, attestation_key, params, flags, key_data);
         log_key_creation_event_stats(self.security_level, params, &result);
-        debug!("importKey: calling uid: {}, result: {:?}", CallingContext::default().uid, result);
+        debug!(
+            "importKey: calling uid: {}, result: {:?}",
+            CallingContext::default().uid,
+            result
+        );
         result.map_err(into_logged_binder)
     }
     fn importWrappedKey(
@@ -968,7 +1009,11 @@ impl<'a> IKeystoreSecurityLevel for KeystoreSecurityLevel<'a> {
         let result =
             self.import_wrapped_key(key, wrapping_key, masking_key, params, authenticators);
         log_key_creation_event_stats(self.security_level, params, &result);
-        debug!("importWrappedKey: calling uid: {}, result: {:?}", CallingContext::default().uid, result);
+        debug!(
+            "importWrappedKey: calling uid: {}, result: {:?}",
+            CallingContext::default().uid,
+            result
+        );
         result.map_err(into_logged_binder)
     }
     fn convertStorageKeyToEphemeral(
@@ -982,7 +1027,11 @@ impl<'a> IKeystoreSecurityLevel for KeystoreSecurityLevel<'a> {
     fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::deleteKey");
         let result = self.delete_key(key);
-        debug!("deleteKey: calling uid: {}, result: {:?}", CallingContext::default().uid, result);
+        debug!(
+            "deleteKey: calling uid: {}, result: {:?}",
+            CallingContext::default().uid,
+            result
+        );
         result.map_err(into_logged_binder)
     }
 }

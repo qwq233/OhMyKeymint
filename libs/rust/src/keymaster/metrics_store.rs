@@ -17,12 +17,6 @@
 //!    stores them in an in-memory store.
 //! 2. Returns the collected metrics when requested by the statsd proxy.
 
-use crate::keymaster::error::anyhow_error_to_serialized_error;
-use crate::global::DB;
-use crate::keymaster::key_parameter::KeyParameterValue as KsKeyParamValue;
-use crate::err;
-use crate::keymaster::operation::Outcome;
-use crate::watchdog as wd;
 use crate::android::hardware::security::keymint::{
     Algorithm::Algorithm, BlockMode::BlockMode, Digest::Digest, EcCurve::EcCurve,
     HardwareAuthenticatorType::HardwareAuthenticatorType, KeyOrigin::KeyOrigin,
@@ -44,6 +38,12 @@ use crate::android::security::metrics::{
     RkpError::RkpError as MetricsRkpError, RkpErrorStats::RkpErrorStats,
     SecurityLevel::SecurityLevel as MetricsSecurityLevel, Storage::Storage as MetricsStorage,
 };
+use crate::err;
+use crate::global::DB;
+use crate::keymaster::error::anyhow_error_to_serialized_error;
+use crate::keymaster::key_parameter::KeyParameterValue as KsKeyParamValue;
+use crate::keymaster::operation::Outcome;
+use crate::watchdog as wd;
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -124,12 +124,17 @@ impl MetricsStore {
         }
 
         let metrics_store_guard = self.metrics_store.lock().unwrap();
-        metrics_store_guard.get(&atom_id).map_or(Ok(Vec::<KeystoreAtom>::new()), |atom_count_map| {
-            Ok(atom_count_map
-                .iter()
-                .map(|(atom, count)| KeystoreAtom { payload: atom.clone(), count: *count })
-                .collect())
-        })
+        metrics_store_guard
+            .get(&atom_id)
+            .map_or(Ok(Vec::<KeystoreAtom>::new()), |atom_count_map| {
+                Ok(atom_count_map
+                    .iter()
+                    .map(|(atom, count)| KeystoreAtom {
+                        payload: atom.clone(),
+                        count: *count,
+                    })
+                    .collect())
+            })
     }
 
     /// Insert an atom object to the metrics_store indexed by the atom ID.
@@ -141,13 +146,16 @@ impl MetricsStore {
             *atom_count += 1;
         } else {
             // Insert an overflow atom
-            let overflow_atom_count_map =
-                metrics_store_guard.entry(AtomID::KEYSTORE2_ATOM_WITH_OVERFLOW).or_default();
+            let overflow_atom_count_map = metrics_store_guard
+                .entry(AtomID::KEYSTORE2_ATOM_WITH_OVERFLOW)
+                .or_default();
 
             if overflow_atom_count_map.len() < MetricsStore::SINGLE_ATOM_STORE_MAX_SIZE {
                 let overflow_atom = Keystore2AtomWithOverflow { atom_id };
                 let atom_count = overflow_atom_count_map
-                    .entry(KeystoreAtomPayload::Keystore2AtomWithOverflow(overflow_atom))
+                    .entry(KeystoreAtomPayload::Keystore2AtomWithOverflow(
+                        overflow_atom,
+                    ))
                     .or_insert(0);
                 *atom_count += 1;
             } else {
@@ -170,9 +178,14 @@ pub fn log_key_creation_event_stats<U>(
         key_creation_with_purpose_and_modes_info,
     ) = process_key_creation_event_stats(sec_level, key_params, result);
 
-    METRICS_STORE
-        .insert_atom(AtomID::KEY_CREATION_WITH_GENERAL_INFO, key_creation_with_general_info);
-    METRICS_STORE.insert_atom(AtomID::KEY_CREATION_WITH_AUTH_INFO, key_creation_with_auth_info);
+    METRICS_STORE.insert_atom(
+        AtomID::KEY_CREATION_WITH_GENERAL_INFO,
+        key_creation_with_general_info,
+    );
+    METRICS_STORE.insert_atom(
+        AtomID::KEY_CREATION_WITH_AUTH_INFO,
+        key_creation_with_auth_info,
+    );
     METRICS_STORE.insert_atom(
         AtomID::KEY_CREATION_WITH_PURPOSE_AND_MODES_INFO,
         key_creation_with_purpose_and_modes_info,
@@ -186,7 +199,11 @@ fn process_key_creation_event_stats<U>(
     sec_level: SecurityLevel,
     key_params: &[KeyParameter],
     result: &Result<U>,
-) -> (KeystoreAtomPayload, KeystoreAtomPayload, KeystoreAtomPayload) {
+) -> (
+    KeystoreAtomPayload,
+    KeystoreAtomPayload,
+    KeystoreAtomPayload,
+) {
     // In the default atom objects, fields represented by bitmaps and i32 fields
     // will take 0, except error_code which defaults to 1 indicating NO_ERROR and key_size,
     // and auth_time_out which defaults to -1.
@@ -337,8 +354,10 @@ pub fn log_key_operation_event_stats(
             op_outcome,
             key_upgraded,
         );
-    METRICS_STORE
-        .insert_atom(AtomID::KEY_OPERATION_WITH_GENERAL_INFO, key_operation_with_general_info);
+    METRICS_STORE.insert_atom(
+        AtomID::KEY_OPERATION_WITH_GENERAL_INFO,
+        key_operation_with_general_info,
+    );
     METRICS_STORE.insert_atom(
         AtomID::KEY_OPERATION_WITH_PURPOSE_AND_MODES_INFO,
         key_operation_with_purpose_and_modes_info,
@@ -544,7 +563,10 @@ pub(crate) fn pull_storage_stats() -> Result<Vec<KeystoreAtom>> {
                 ..Default::default()
             }),
             Err(error) => {
-                log::error!("pull_metrics_callback: Error getting storage stat: {}", error)
+                log::error!(
+                    "pull_metrics_callback: Error getting storage stat: {}",
+                    error
+                )
             }
         };
     };
@@ -598,9 +620,7 @@ pub fn update_keystore_crash_sysprop() {
             return;
         }
     };
-    if let Err(e) =
-        rsproperties::set(KEYSTORE_CRASH_COUNT_PROPERTY, &new_count.to_string())
-    {
+    if let Err(e) = rsproperties::set(KEYSTORE_CRASH_COUNT_PROPERTY, &new_count.to_string()) {
         log::error!(
             concat!(
                 "In update_keystore_crash_sysprop:: ",
@@ -613,7 +633,8 @@ pub fn update_keystore_crash_sysprop() {
 
 /// Read the system property: keystore.crash_count.
 pub fn read_keystore_crash_count() -> Result<Option<i32>> {
-    let sp: std::result::Result<String, rsproperties::Error> = rsproperties::get(KEYSTORE_CRASH_COUNT_PROPERTY);
+    let sp: std::result::Result<String, rsproperties::Error> =
+        rsproperties::get(KEYSTORE_CRASH_COUNT_PROPERTY);
     match sp {
         Ok(count_str) => {
             let count = count_str.parse::<i32>()?;
@@ -916,7 +937,12 @@ impl Summary for KeystoreAtomPayload {
     fn show(&self) -> String {
         match self {
             KeystoreAtomPayload::StorageStats(v) => {
-                format!("{} sz={} unused={}", v.storage_type.show(), v.size, v.unused_size)
+                format!(
+                    "{} sz={} unused={}",
+                    v.storage_type.show(),
+                    v.size,
+                    v.unused_size
+                )
             }
             KeystoreAtomPayload::KeyCreationWithGeneralInfo(v) => {
                 format!(

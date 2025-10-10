@@ -76,6 +76,8 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> Result<Vec<u8>, Error> {
     // pair.
     let digest = unsafe { ffi::EVP_sha256() };
     let mut out_len = tag.len() as u32;
+
+    #[cfg(not(target_os = "android"))]
     let result = unsafe {
         ffi::HMAC(
             digest,
@@ -87,6 +89,20 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> Result<Vec<u8>, Error> {
             &mut out_len,
         )
     };
+
+    #[cfg(target_os = "android")]
+    let result = unsafe {
+        ffi::HMAC(
+            digest,
+            key.as_ptr() as *const std::ffi::c_void,
+            key.len(),
+            msg.as_ptr(),
+            msg.len(),
+            tag.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
+
     if !result.is_null() {
         Ok(tag)
     } else {

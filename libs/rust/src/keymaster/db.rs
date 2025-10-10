@@ -9,11 +9,16 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use rand::random;
 use rusqlite::{
-    Connection, OptionalExtension, ToSql, Transaction, params, params_from_iter, types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Value, ValueRef}
+    params, params_from_iter,
+    types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Value, ValueRef},
+    Connection, OptionalExtension, ToSql, Transaction,
 };
 
 use crate::{
-    android::{hardware::security::keymint::ErrorCode::ErrorCode, security::metrics::{Storage::Storage as MetricsStorage, StorageStats::StorageStats}},
+    android::{
+        hardware::security::keymint::ErrorCode::ErrorCode,
+        security::metrics::{Storage::Storage as MetricsStorage, StorageStats::StorageStats},
+    },
     keymaster::{database::perboot::PerbootDB, super_key::SuperKeyType},
     plat::utils::AID_USER_OFFSET,
     watchdog as wd,
@@ -61,7 +66,8 @@ use crate::{
     android::{
         hardware::security::keymint::{
             HardwareAuthToken::HardwareAuthToken,
-            HardwareAuthenticatorType::HardwareAuthenticatorType, SecurityLevel::SecurityLevel, Tag::Tag,
+            HardwareAuthenticatorType::HardwareAuthenticatorType, SecurityLevel::SecurityLevel,
+            Tag::Tag,
         },
         system::keystore2::{
             Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
@@ -1272,12 +1278,21 @@ impl KeymasterDb {
         params: &[&str],
     ) -> Result<StorageStats> {
         let (total, unused) = self.with_transaction(TransactionBehavior::Deferred, |tx| {
-            tx.query_row(query, params_from_iter(params), |row| Ok((row.get(0)?, row.get(1)?)))
-                .with_context(|| {
-                    err!("get_storage_stat: Error size of storage type {}", storage_type.0)
-                })
+            tx.query_row(query, params_from_iter(params), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .with_context(|| {
+                err!(
+                    "get_storage_stat: Error size of storage type {}",
+                    storage_type.0
+                )
+            })
         })?;
-        Ok(StorageStats { storage_type, size: total, unused_size: unused })
+        Ok(StorageStats {
+            storage_type,
+            size: total,
+            unused_size: unused,
+        })
     }
 
     fn get_total_size(&mut self) -> Result<StorageStats> {
@@ -1305,7 +1320,6 @@ impl KeymasterDb {
         )
     }
 
-
     /// Fetches a storage statistics atom for a given storage type. For storage
     /// types that map to a table, information about the table's storage is
     /// returned. Requests for storage types that are not DB tables return None.
@@ -1320,9 +1334,11 @@ impl KeymasterDb {
             MetricsStorage::KEY_ENTRY_ID_INDEX => {
                 self.get_table_size(storage_type, "persistent", "keyentry_id_index")
             }
-            MetricsStorage::KEY_ENTRY_DOMAIN_NAMESPACE_INDEX => {
-                self.get_table_size(storage_type, "persistent", "keyentry_domain_namespace_index")
-            }
+            MetricsStorage::KEY_ENTRY_DOMAIN_NAMESPACE_INDEX => self.get_table_size(
+                storage_type,
+                "persistent",
+                "keyentry_domain_namespace_index",
+            ),
             MetricsStorage::BLOB_ENTRY => {
                 self.get_table_size(storage_type, "persistent", "blobentry")
             }
@@ -1359,7 +1375,10 @@ impl KeymasterDb {
             MetricsStorage::BLOB_METADATA_BLOB_ENTRY_ID_INDEX => {
                 self.get_table_size(storage_type, "persistent", "blobmetadata_blobentryid_index")
             }
-            _ => Err(anyhow::Error::msg(format!("Unsupported storage type: {}", storage_type.0))),
+            _ => Err(anyhow::Error::msg(format!(
+                "Unsupported storage type: {}",
+                storage_type.0
+            ))),
         }
     }
 

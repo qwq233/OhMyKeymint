@@ -18,7 +18,6 @@ pub fn init_logger() {
     log4rs::init_config(config).unwrap();
 }
 
-
 #[cfg(target_os = "android")]
 pub fn init_logger() {
     android_logger::init_once(

@@ -26,7 +26,9 @@ impl PropertyWatcher {
 
     #[cfg(target_os = "android")]
     pub fn new(name: &str) -> anyhow::Result<Self> {
-        Ok(PropertyWatcher { name: name.to_string() })
+        Ok(PropertyWatcher {
+            name: name.to_string(),
+        })
     }
 
     pub fn read(&self) -> Result<String> {
