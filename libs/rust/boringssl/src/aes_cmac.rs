@@ -92,9 +92,15 @@ impl core::ops::Drop for BoringAesCmacOperation {
 impl crypto::AccumulatingOperation for BoringAesCmacOperation {
     fn update(&mut self, data: &[u8]) -> Result<(), Error> {
         // Safety: `self.ctx` is non-null and valid, and `data` is a valid slice.
+
+        #[cfg(not(target_os = "android"))]
         let result = unsafe {
             ffi::CMAC_Update(self.ctx.0, data.as_ptr() as *const libc::c_void, data.len())
         };
+
+        #[cfg(target_os = "android")]
+        let result = unsafe { ffi::CMAC_Update(self.ctx.0, data.as_ptr(), data.len()) };
+
         if result != 1 {
             return Err(openssl_last_err());
         }

@@ -9,19 +9,22 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-ffi = { package = "openssl-sys", version = "^0.9.75", features = ["bindgen"]  }
 foreign-types = "0.3.1"
 kmr-common = "*"
 kmr-wire = "*"
 libc = "^0.2.112"
 log = "^0.4"
-openssl = "^0.10.36"
 anyhow = "*"
 thiserror = "*"
 nix = "*"
 
-[target.'cfg(android)'.dependencies]
-boringssl = "0.0.5"
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = "^0.10.36"
+ffi = { package = "openssl-sys", version = "^0.9.75", features = ["bindgen"]  }
+
+[target.'cfg(target_os = "android")'.dependencies]
+openssl = { package = "openssl", version = "*", features = ["unstable_boringssl", "bindgen"] }
+ffi = { package = "openssl-sys", version = "^0.9.75", features = ["bindgen"]  }
 
 [dev-dependencies]
 kmr-tests = "*"
