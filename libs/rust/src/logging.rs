@@ -5,6 +5,7 @@ use log4rs::encode::pattern::PatternEncoder;
 
 const PATTERN: &str = "{d(%Y-%m-%d %H:%M:%S %Z)(utc)} [{h({l})}] {M} - {m}{n}";
 
+#[cfg(not(target_os = "android"))]
 pub fn init_logger() {
     let stdout = ConsoleAppender::builder()
         .encoder(Box::new(PatternEncoder::new(PATTERN)))
@@ -17,13 +18,11 @@ pub fn init_logger() {
     log4rs::init_config(config).unwrap();
 }
 
-#[cfg(target_os = "android")]
-use android_logger::Config;
 
 #[cfg(target_os = "android")]
 pub fn init_logger() {
     android_logger::init_once(
-        Config::default()
+        android_logger::Config::default()
             .with_max_level(LevelFilter::Trace)
             .with_tag("OhMyKeymint"),
     );

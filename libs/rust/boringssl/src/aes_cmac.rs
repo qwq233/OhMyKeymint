@@ -15,8 +15,8 @@
 //! BoringSSL-based implementation of AES-CMAC.
 use crate::types::CmacCtx;
 use crate::{malloc_err, openssl_last_err};
-#[cfg(target_os = "android")]
-use bssl_sys as ffi;
+// #[cfg(target_os = "android")]
+// use boringssl::ffi as ffi;
 use ffi;
 use kmr_common::{crypto, crypto::OpaqueOr, explicit, km_err, vec_try, Error};
 use log::error;

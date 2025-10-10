@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
 #![feature(once_cell_get_mut)]
 
-use std::io::Read;
+use std::{io::Read, panic};
 
 use kmr_common::crypto::{self, MonotonicClock};
 use kmr_crypto_boring::{
@@ -51,10 +51,13 @@ fn main() {
     let db = keymaster::db::KeymasterDb::new().unwrap();
     db.close().unwrap();
 
+    // Redirect panic messages to logcat.
+    panic::set_hook(Box::new(|panic_info| {
+        error!("{}", panic_info);
+    }));
+
     debug!("Hello, OhMyKeymint!");
 
-    #[cfg(target_os = "android")]
-    logi!(TAG, "Application started");
     let security_level: SecurityLevel = SecurityLevel::TrustedEnvironment;
     let hw_info = HardwareInfo {
         version_number: 2,

@@ -3,26 +3,23 @@ use std::time::SystemTime;
 use crate::{
     android::{
         hardware::security::keymint::{
-            Algorithm::Algorithm, AttestationKey::AttestationKey, ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice, KeyCreationResult::KeyCreationResult, KeyParameter::KeyParameter, KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag
+            Algorithm::Algorithm, AttestationKey::AttestationKey, ErrorCode::ErrorCode,
+            HardwareAuthenticatorType::HardwareAuthenticatorType, IKeyMintDevice::IKeyMintDevice,
+            KeyCreationResult::KeyCreationResult, KeyFormat::KeyFormat, KeyParameter::KeyParameter,
+            KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
         },
         system::keystore2::{
-            Domain::Domain, KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata,
-            ResponseCode::ResponseCode,
+            AuthenticatorSpec::AuthenticatorSpec, CreateOperationResponse::CreateOperationResponse, Domain::Domain, EphemeralStorageKeyResponse::EphemeralStorageKeyResponse, IKeystoreOperation::IKeystoreOperation, IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata, KeyParameters::KeyParameters, ResponseCode::ResponseCode
         },
     },
     err,
-    global::{DB, SUPER_KEY, UNDEFINED_NOT_AFTER},
+    global::{DB, ENFORCEMENTS, SUPER_KEY, UNDEFINED_NOT_AFTER},
     keymaster::{
-        attestation_key_utils::{AttestationKeyInfo, get_attest_key_info},
-        db::{
-            BlobInfo, BlobMetaEntry, CertificateInfo, DateTime, DateTimeError, KeyIdGuard,
-            KeyMetaData, KeyMetaEntry, KeyType, SubComponentType, Uuid,
-        },
-        error::{KsError, map_binder_status},
-        keymint_device::{KeyMintDevice, KeyMintWrapper, get_keymint_wrapper},
-        super_key::{KeyBlob, SuperKeyManager},
-        utils::{key_characteristics_to_internal, key_parameters_to_authorizations, log_params},
+        attestation_key_utils::{AttestationKeyInfo, get_attest_key_info}, db::{
+            BlobInfo, BlobMetaData, BlobMetaEntry, CertificateInfo, DateTime, KeyEntry, KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType, SubComponentType, Uuid
+        }, error::{KsError, into_logged_binder, map_binder_status}, keymint_device::get_keymint_wrapper, metrics_store::log_key_creation_event_stats, operation::{KeystoreOperation, LoggingInfo, OperationDb}, super_key::{KeyBlob, SuperKeyManager}, utils::{key_characteristics_to_internal, key_parameters_to_authorizations, log_params}
     },
+    plat::utils::multiuser_get_user_id,
 };
 
 use crate::keymaster::key_parameter::KeyParameter as KsKeyParam;
@@ -32,25 +29,27 @@ use crate::watchdog as wd;
 
 use anyhow::{anyhow, Context, Result};
 use kmr_ta::HardwareInfo;
-use rsbinder::{Strong, thread_state::CallingContext};
+use log::debug;
+use rsbinder::{Interface, Status, thread_state::CallingContext};
+
+// Blob of 32 zeroes used as empty masking key.
+static ZERO_BLOB_32: &[u8] = &[0; 32];
 
 pub struct KeystoreSecurityLevel<'a> {
     security_level: SecurityLevel,
     hw_info: HardwareInfo,
     km_uuid: Uuid,
+    operation_db: OperationDb,
     keymint: &'a dyn IKeyMintDevice,
 }
 
 impl<'a> KeystoreSecurityLevel<'a> {
-    pub fn new(
-        security_level: SecurityLevel,
-        hw_info: HardwareInfo,
-        km_uuid: Uuid,
-    ) -> Self {
+    pub fn new(security_level: SecurityLevel, hw_info: HardwareInfo, km_uuid: Uuid) -> Self {
         KeystoreSecurityLevel {
             security_level,
             hw_info,
             km_uuid,
+            operation_db: OperationDb::new(),
             keymint: get_keymint_wrapper(security_level).unwrap(),
         }
     }
@@ -447,8 +446,543 @@ impl<'a> KeystoreSecurityLevel<'a> {
             _ => unreachable!(), // Other branches of get_attest_key_info are not possible here.
         }?;
 
-        let user_id = crate::plat::utils::uid_to_android_user(calling_uid);
+        let user_id = crate::plat::utils::multiuser_get_user_id(calling_uid);
         self.store_new_key(key, creation_result, user_id, Some(flags))
             .context(err!())
+    }
+
+    fn import_key(
+        &self,
+        key: &KeyDescriptor,
+        _attestation_key: Option<&KeyDescriptor>,
+        params: &[KeyParameter],
+        flags: i32,
+        key_data: &[u8],
+    ) -> Result<KeyMetadata> {
+        if key.domain != Domain::BLOB && key.alias.is_none() {
+            return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+                .context(err!("Alias must be specified"));
+        }
+
+        let calling_context = rsbinder::thread_state::CallingContext::default();
+        let caller_uid = calling_context.uid;
+
+        let key = match key.domain {
+            Domain::APP => KeyDescriptor {
+                domain: key.domain,
+                nspace: caller_uid as i64,
+                alias: key.alias.clone(),
+                blob: None,
+            },
+            _ => key.clone(),
+        };
+
+        // import_key requires the rebind permission.
+        // check_key_permission(KeyPerm::Rebind, &key, &None).context(err!("In import_key."))?;
+
+        let params = self
+            .add_required_parameters(caller_uid, params, &key)
+            .context(err!("Trying to get aaid."))?;
+
+        let format = params
+            .iter()
+            .find(|p| p.tag == Tag::ALGORITHM)
+            .ok_or(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+            .context(err!("No KeyParameter 'Algorithm'."))
+            .and_then(|p| match &p.value {
+                KeyParameterValue::Algorithm(Algorithm::AES)
+                | KeyParameterValue::Algorithm(Algorithm::HMAC)
+                | KeyParameterValue::Algorithm(Algorithm::TRIPLE_DES) => Ok(KeyFormat::RAW),
+                KeyParameterValue::Algorithm(Algorithm::RSA)
+                | KeyParameterValue::Algorithm(Algorithm::EC) => Ok(KeyFormat::PKCS8),
+                v => Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+                    .context(err!("Unknown Algorithm {:?}.", v)),
+            })
+            .context(err!())?;
+
+        let km_dev = &self.keymint;
+        let creation_result = map_binder_status({
+            let _wp =
+                self.watch("KeystoreSecurityLevel::import_key: calling IKeyMintDevice::importKey.");
+            km_dev.importKey(&params, format, key_data, None /* attestKey */)
+        })
+        .context(err!("Trying to call importKey"))?;
+
+        let user_id = multiuser_get_user_id(caller_uid);
+        self.store_new_key(key, creation_result, user_id, Some(flags))
+            .context(err!())
+    }
+
+    fn import_wrapped_key(
+        &self,
+        key: &KeyDescriptor,
+        wrapping_key: &KeyDescriptor,
+        masking_key: Option<&[u8]>,
+        params: &[KeyParameter],
+        authenticators: &[AuthenticatorSpec],
+    ) -> Result<KeyMetadata> {
+        let wrapped_data: &[u8] = match key {
+            KeyDescriptor {
+                domain: Domain::APP,
+                blob: Some(ref blob),
+                alias: Some(_),
+                ..
+            }
+            | KeyDescriptor {
+                domain: Domain::SELINUX,
+                blob: Some(ref blob),
+                alias: Some(_),
+                ..
+            } => blob,
+            _ => {
+                return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT)).context(err!(
+                    "Alias and blob must be specified and domain must be APP or SELINUX. {:?}",
+                    key
+                ));
+            }
+        };
+
+        if wrapping_key.domain == Domain::BLOB {
+            return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT)).context(err!(
+                "Import wrapped key not supported for self managed blobs."
+            ));
+        }
+
+        let calling_context = rsbinder::thread_state::CallingContext::default();
+        let caller_uid = calling_context.uid;
+        let user_id = multiuser_get_user_id(caller_uid);
+
+        let key = match key.domain {
+            Domain::APP => KeyDescriptor {
+                domain: key.domain,
+                nspace: caller_uid as i64,
+                alias: key.alias.clone(),
+                blob: None,
+            },
+            Domain::SELINUX => KeyDescriptor {
+                domain: Domain::SELINUX,
+                nspace: key.nspace,
+                alias: key.alias.clone(),
+                blob: None,
+            },
+            _ => panic!("Unreachable."),
+        };
+
+        // Import_wrapped_key requires the rebind permission for the new key.
+        // check_key_permission(KeyPerm::Rebind, &key, &None).context(err!())?;
+
+        let super_key = SUPER_KEY
+            .read()
+            .unwrap()
+            .get_after_first_unlock_key_by_user_id(user_id);
+
+        let (wrapping_key_id_guard, mut wrapping_key_entry) = DB
+            .with(|db| {
+                db.borrow_mut().load_key_entry(
+                    wrapping_key,
+                    KeyType::Client,
+                    KeyEntryLoadBits::KM,
+                    caller_uid,
+                )
+            })
+            .context(err!("Failed to load wrapping key."))?;
+
+        let (wrapping_key_blob, wrapping_blob_metadata) = wrapping_key_entry
+            .take_key_blob_info()
+            .ok_or_else(KsError::sys)
+            .context(err!(
+                "No km_blob after successfully loading key. This should never happen."
+            ))?;
+
+        let wrapping_key_blob = SUPER_KEY
+            .read()
+            .unwrap()
+            .unwrap_key_if_required(&wrapping_blob_metadata, &wrapping_key_blob)
+            .context(err!("Failed to handle super encryption for wrapping key."))?;
+
+        // km_dev.importWrappedKey does not return a certificate chain.
+        // TODO Do we assume that all wrapped keys are symmetric?
+        // let certificate_chain: Vec<KmCertificate> = Default::default();
+
+        let pw_sid = authenticators
+            .iter()
+            .find_map(|a| match a.authenticatorType {
+                HardwareAuthenticatorType::PASSWORD => Some(a.authenticatorId),
+                _ => None,
+            })
+            .unwrap_or(-1);
+
+        let fp_sid = authenticators
+            .iter()
+            .find_map(|a| match a.authenticatorType {
+                HardwareAuthenticatorType::FINGERPRINT => Some(a.authenticatorId),
+                _ => None,
+            })
+            .unwrap_or(-1);
+
+        let masking_key = masking_key.unwrap_or(ZERO_BLOB_32);
+
+        let (creation_result, _) = self
+            .upgrade_keyblob_if_required_with(
+                Some(wrapping_key_id_guard),
+                &wrapping_key_blob,
+                wrapping_blob_metadata.km_uuid().copied(),
+                &[],
+                |wrapping_blob| {
+                    let _wp = self.watch(
+                        "KeystoreSecurityLevel::import_wrapped_key: calling IKeyMintDevice::importWrappedKey.",
+                    );
+                    let creation_result = map_binder_status(self.keymint.importWrappedKey(
+                        wrapped_data,
+                        wrapping_blob,
+                        masking_key,
+                        params,
+                        pw_sid,
+                        fp_sid,
+                    ))?;
+                    Ok(creation_result)
+                },
+            )
+            .context(err!())?;
+
+        self.store_new_key(key, creation_result, user_id, None)
+            .context(err!("Trying to store the new key."))
+    }
+
+    fn convert_storage_key_to_ephemeral(
+        &self,
+        storage_key: &KeyDescriptor,
+    ) -> Result<EphemeralStorageKeyResponse> {
+        if storage_key.domain != Domain::BLOB {
+            return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+                .context(err!("Key must be of Domain::BLOB"));
+        }
+        let key_blob = storage_key
+            .blob
+            .as_ref()
+            .ok_or(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+            .context(err!("No key blob specified"))?;
+
+        // convert_storage_key_to_ephemeral requires the associated permission
+        // check_key_permission(KeyPerm::ConvertStorageKeyToEphemeral, storage_key, &None)
+        //     .context(err!("Check permission"))?;
+
+        let km_dev = &self.keymint;
+        let res = {
+            let _wp = self.watch(concat!(
+                "IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: ",
+                "calling IKeyMintDevice::convertStorageKeyToEphemeral (1)"
+            ));
+            map_binder_status(km_dev.convertStorageKeyToEphemeral(key_blob))
+        };
+        match res {
+            Ok(result) => Ok(EphemeralStorageKeyResponse {
+                ephemeralKey: result,
+                upgradedBlob: None,
+            }),
+            Err(KsError::Km(ErrorCode::KEY_REQUIRES_UPGRADE)) => {
+                let upgraded_blob = {
+                    let _wp = self.watch("IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: calling IKeyMintDevice::upgradeKey");
+                    map_binder_status(km_dev.upgradeKey(key_blob, &[]))
+                }
+                .context(err!("Failed to upgrade key blob."))?;
+                let ephemeral_key = {
+                    let _wp = self.watch(concat!(
+                        "IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: ",
+                        "calling IKeyMintDevice::convertStorageKeyToEphemeral (2)"
+                    ));
+                    map_binder_status(km_dev.convertStorageKeyToEphemeral(&upgraded_blob))
+                }
+                .context(err!("Failed to retrieve ephemeral key (after upgrade)."))?;
+                Ok(EphemeralStorageKeyResponse {
+                    ephemeralKey: ephemeral_key,
+                    upgradedBlob: Some(upgraded_blob),
+                })
+            }
+            Err(e) => Err(e).context(err!("Failed to retrieve ephemeral key.")),
+        }
+    }
+
+    fn create_operation(
+        &self,
+        key: &KeyDescriptor,
+        operation_parameters: &[KeyParameter],
+        forced: bool,
+    ) -> Result<CreateOperationResponse> {
+        let caller_uid = CallingContext::default().uid;
+        // We use `scoping_blob` to extend the life cycle of the blob loaded from the database,
+        // so that we can use it by reference like the blob provided by the key descriptor.
+        // Otherwise, we would have to clone the blob from the key descriptor.
+        let scoping_blob: Vec<u8>;
+        let (km_blob, key_properties, key_id_guard, blob_metadata) = match key.domain {
+            Domain::BLOB => {
+                // check_key_permission(KeyPerm::Use, key, &None)
+                //     .context(err!("checking use permission for Domain::BLOB."))?;
+                // if forced {
+                //     check_key_permission(KeyPerm::ReqForcedOp, key, &None)
+                //         .context(err!("checking forced permission for Domain::BLOB."))?;
+                // }
+                (
+                    match &key.blob {
+                        Some(blob) => blob,
+                        None => {
+                            return Err(KsError::sys()).context(err!(
+                                "Key blob must be specified when \
+                                using Domain::BLOB."
+                            ));
+                        }
+                    },
+                    None,
+                    None,
+                    BlobMetaData::new(),
+                )
+            }
+            _ => {
+                let super_key = SUPER_KEY
+                    .read()
+                    .unwrap()
+                    .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
+                let (key_id_guard, mut key_entry) = DB
+                    .with::<_, Result<(KeyIdGuard, KeyEntry)>>(|db| {
+                            db.borrow_mut().load_key_entry(
+                                key,
+                                KeyType::Client,
+                                KeyEntryLoadBits::KM,
+                                caller_uid,
+                                // |k, av| {
+                                //     check_key_permission(KeyPerm::Use, k, &av)?;
+                                //     if forced {
+                                //         check_key_permission(KeyPerm::ReqForcedOp, k, &av)?;
+                                //     }
+                                //     Ok(())
+                                // },
+                            )
+                    })
+                    .context(err!("Failed to load key blob."))?;
+
+                let (blob, blob_metadata) =
+                    key_entry.take_key_blob_info().ok_or_else(KsError::sys).context(err!(
+                        "Successfully loaded key entry, \
+                        but KM blob was missing."
+                    ))?;
+                scoping_blob = blob;
+
+                (
+                    &scoping_blob,
+                    Some((key_id_guard.id(), key_entry.into_key_parameters())),
+                    Some(key_id_guard),
+                    blob_metadata,
+                )
+            }
+        };
+
+        let purpose = operation_parameters.iter().find(|p| p.tag == Tag::PURPOSE).map_or(
+            Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+                .context(err!("No operation purpose specified.")),
+            |kp| match kp.value {
+                KeyParameterValue::KeyPurpose(p) => Ok(p),
+                _ => Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+                    .context(err!("Malformed KeyParameter.")),
+            },
+        )?;
+
+        // Remove Tag::PURPOSE from the operation_parameters, since some keymaster devices return
+        // an error on begin() if Tag::PURPOSE is in the operation_parameters.
+        let op_params: Vec<KeyParameter> =
+            operation_parameters.iter().filter(|p| p.tag != Tag::PURPOSE).cloned().collect();
+        let operation_parameters = op_params.as_slice();
+
+        let (immediate_hat, mut auth_info) = ENFORCEMENTS
+            .authorize_create(
+                purpose,
+                key_properties.as_ref(),
+                operation_parameters.as_ref(),
+                false,
+            )
+            .context(err!())?;
+
+        let km_blob = SUPER_KEY
+            .read()
+            .unwrap()
+            .unwrap_key_if_required(&blob_metadata, km_blob)
+            .context(err!("Failed to handle super encryption."))?;
+
+        let (begin_result, upgraded_blob) = self
+            .upgrade_keyblob_if_required_with(
+                key_id_guard,
+                &km_blob,
+                blob_metadata.km_uuid().copied(),
+                operation_parameters,
+                |blob| loop {
+                    match map_binder_status({
+                        let _wp = self.watch(
+                            "KeystoreSecurityLevel::create_operation: calling IKeyMintDevice::begin",
+                        );
+                        self.keymint.begin(
+                            purpose,
+                            blob,
+                            operation_parameters,
+                            immediate_hat.as_ref(),
+                        )
+                    }) {
+                        Err(KsError::Km(ErrorCode::TOO_MANY_OPERATIONS)) => {
+                            self.operation_db.prune(caller_uid, forced)?;
+                            continue;
+                        }
+                        v @ Err(KsError::Km(ErrorCode::INVALID_KEY_BLOB)) => {
+                            if let Some((key_id, _)) = key_properties {
+                                if let Ok(Some(key)) =
+                                    DB.with(|db| db.borrow_mut().load_key_descriptor(key_id))
+                                {
+                                    log::error!("Key integrity violation detected for key id {}", key_id);
+                                } else {
+                                    log::error!("Failed to load key descriptor for audit log");
+                                }
+                            }
+                            return v;
+                        }
+                        v => return v,
+                    }
+                },
+            )
+            .context(err!("Failed to begin operation."))?;
+
+        let operation_challenge = auth_info.finalize_create_authorization(begin_result.challenge);
+
+        let op_params: Vec<KeyParameter> = operation_parameters.to_vec();
+
+        let operation = match begin_result.operation {
+            Some(km_op) => self.operation_db.create_operation(
+                km_op,
+                caller_uid,
+                auth_info,
+                forced,
+                LoggingInfo::new(self.security_level, purpose, op_params, upgraded_blob.is_some()),
+            ),
+            None => {
+                return Err(KsError::sys()).context(err!(
+                    "Begin operation returned successfully, \
+                    but did not return a valid operation."
+                ));
+            }
+        };
+
+        let op_binder: rsbinder::Strong<dyn IKeystoreOperation> =
+            KeystoreOperation::new_native_binder(operation)
+                .as_binder()
+                .into_interface()
+                .context(err!("Failed to create IKeystoreOperation."))?;
+
+        Ok(CreateOperationResponse {
+            iOperation: Some(op_binder),
+            operationChallenge: operation_challenge,
+            parameters: match begin_result.params.len() {
+                0 => None,
+                _ => Some(KeyParameters { keyParameter: begin_result.params }),
+            },
+            // An upgraded blob should only be returned if the caller has permission
+            // to use Domain::BLOB keys. If we got to this point, we already checked
+            // that the caller had that permission.
+            upgradedBlob: if key.domain == Domain::BLOB { upgraded_blob } else { None },
+        })
+    }
+
+    fn delete_key(&self, key: &KeyDescriptor) -> Result<()> {
+        if key.domain != Domain::BLOB {
+            return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+                .context(err!("delete_key: Key must be of Domain::BLOB"));
+        }
+
+        let key_blob = key
+            .blob
+            .as_ref()
+            .ok_or(KsError::Km(ErrorCode::INVALID_ARGUMENT))
+            .context(err!("delete_key: No key blob specified"))?;
+
+        // check_key_permission(KeyPerm::Delete, key, &None)
+        //     .context(err!("delete_key: Checking delete permissions"))?;
+
+        let km_dev = &self.keymint;
+        {
+            let _wp =
+                self.watch("KeystoreSecuritylevel::delete_key: calling IKeyMintDevice::deleteKey");
+            map_binder_status(km_dev.deleteKey(key_blob)).context(err!("keymint device deleteKey"))
+        }
+    }
+}
+
+impl<'a> Interface for KeystoreSecurityLevel<'a> {}
+
+impl<'a> IKeystoreSecurityLevel for KeystoreSecurityLevel<'a> {
+    fn createOperation(
+        &self,
+        key: &KeyDescriptor,
+        operation_parameters: &[KeyParameter],
+        forced: bool,
+    ) -> Result<CreateOperationResponse, Status> {
+        let _wp = self.watch("IKeystoreSecurityLevel::createOperation");
+        Ok(self.create_operation(key, operation_parameters, forced)
+            .map_err(into_logged_binder)?)
+    }
+
+    fn generateKey(
+        &self,
+        key: &KeyDescriptor,
+        attestation_key: Option<&KeyDescriptor>,
+        params: &[KeyParameter],
+        flags: i32,
+        entropy: &[u8],
+    ) -> Result<KeyMetadata, Status> {
+        // Duration is set to 5 seconds, because generateKey - especially for RSA keys, takes more
+        // time than other operations
+        let _wp = self.watch_millis("IKeystoreSecurityLevel::generateKey", 5000);
+        let result = self.generate_key(key, attestation_key, params, flags, entropy);
+        log_key_creation_event_stats(self.security_level, params, &result);
+        debug!("generateKey: calling uid: {}, result: {:?}", CallingContext::default().uid, result);
+        result.map_err(into_logged_binder)
+    }
+
+    fn importKey(
+        &self,
+        key: &KeyDescriptor,
+        attestation_key: Option<&KeyDescriptor>,
+        params: &[KeyParameter],
+        flags: i32,
+        key_data: &[u8],
+    ) -> Result<KeyMetadata, Status> {
+        let _wp = self.watch("IKeystoreSecurityLevel::importKey");
+        let result = self.import_key(key, attestation_key, params, flags, key_data);
+        log_key_creation_event_stats(self.security_level, params, &result);
+        debug!("importKey: calling uid: {}, result: {:?}", CallingContext::default().uid, result);
+        result.map_err(into_logged_binder)
+    }
+    fn importWrappedKey(
+        &self,
+        key: &KeyDescriptor,
+        wrapping_key: &KeyDescriptor,
+        masking_key: Option<&[u8]>,
+        params: &[KeyParameter],
+        authenticators: &[AuthenticatorSpec],
+    ) -> Result<KeyMetadata, Status> {
+        let _wp = self.watch("IKeystoreSecurityLevel::importWrappedKey");
+        let result =
+            self.import_wrapped_key(key, wrapping_key, masking_key, params, authenticators);
+        log_key_creation_event_stats(self.security_level, params, &result);
+        debug!("importWrappedKey: calling uid: {}, result: {:?}", CallingContext::default().uid, result);
+        result.map_err(into_logged_binder)
+    }
+    fn convertStorageKeyToEphemeral(
+        &self,
+        storage_key: &KeyDescriptor,
+    ) -> Result<EphemeralStorageKeyResponse, Status> {
+        let _wp = self.watch("IKeystoreSecurityLevel::convertStorageKeyToEphemeral");
+        self.convert_storage_key_to_ephemeral(storage_key)
+            .map_err(into_logged_binder)
+    }
+    fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
+        let _wp = self.watch("IKeystoreSecurityLevel::deleteKey");
+        let result = self.delete_key(key);
+        debug!("deleteKey: calling uid: {}, result: {:?}", CallingContext::default().uid, result);
+        result.map_err(into_logged_binder)
     }
 }

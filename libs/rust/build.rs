@@ -31,6 +31,7 @@ fn main() {
     let dirs = vec![
         "aidl/android/system/keystore2",
         "aidl/android/hardware/security/keymint",
+        "aidl/android/security/metrics",
     ];
     for dir in dirs {
         println!("Processing AIDL files in directory: {}", dir);
