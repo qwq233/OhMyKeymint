@@ -19,7 +19,7 @@ use crate::{
         hardware::security::keymint::ErrorCode::ErrorCode,
         security::metrics::{Storage::Storage as MetricsStorage, StorageStats::StorageStats},
     },
-    keymaster::{database::perboot::PerbootDB, super_key::SuperKeyType},
+    keymaster::{database::perboot::PerbootDB, gc::Gc, super_key::SuperKeyType},
     plat::utils::AID_USER_OFFSET,
     watchdog as wd,
 };
@@ -83,15 +83,56 @@ use crate::{
     utils::get_current_time_in_milliseconds,
 };
 
+/// This trait is private to the database module. It is used to convey whether or not the garbage
+/// collector shall be invoked after a database access. All closures passed to
+/// `KeystoreDB::with_transaction` return a tuple (bool, T) where the bool indicates if the
+/// gc needs to be triggered. This convenience function allows to turn any anyhow::Result<T>
+/// into anyhow::Result<(bool, T)> by simply appending one of `.do_gc(bool)`, `.no_gc()`, or
+/// `.need_gc()`.
+trait DoGc<T> {
+    fn do_gc(self, need_gc: bool) -> Result<(bool, T)>;
+
+    fn no_gc(self) -> Result<(bool, T)>;
+
+    fn need_gc(self) -> Result<(bool, T)>;
+}
+
+impl<T> DoGc<T> for Result<T> {
+    fn do_gc(self, need_gc: bool) -> Result<(bool, T)> {
+        self.map(|r| (need_gc, r))
+    }
+
+    fn no_gc(self) -> Result<(bool, T)> {
+        self.do_gc(false)
+    }
+
+    fn need_gc(self) -> Result<(bool, T)> {
+        self.do_gc(true)
+    }
+}
+
+/// Information about a superseded blob (a blob that is no longer the
+/// most recent blob of that type for a given key, due to upgrade or
+/// replacement).
+pub struct SupersededBlob {
+    /// ID
+    pub blob_id: i64,
+    /// Contents.
+    pub blob: Vec<u8>,
+    /// Metadata.
+    pub metadata: BlobMetaData,
+}
+
 pub struct KeymasterDb {
     conn: Connection,
+    gc: Option<Arc<Gc>>,
     perboot: Arc<PerbootDB>,
 }
 
 impl KeymasterDb {
     const UNASSIGNED_KEY_ID: i64 = -1i64;
 
-    pub fn new() -> Result<Self> {
+    pub fn new(gc: Option<Arc<Gc>>) -> Result<Self> {
         let _wp = wd::watch("KeystoreDB::new");
 
         let path = format!("{}/{}", DB_ROOT_PATH, PERSISTENT_DB_FILENAME);
@@ -103,13 +144,14 @@ impl KeymasterDb {
         let init_table = conn.transaction().context(err!(
             "Failed to create transaction for initializing database."
         ))?;
-        Self::init_tables(&init_table)?;
+        Self::init_tables(&init_table).no_gc()?;
         init_table.commit().context(err!(
             "Failed to commit transaction for initializing database."
         ))?;
 
         Ok(KeymasterDb {
             conn,
+            gc,
             perboot: crate::keymaster::database::perboot::PERBOOT_DB.clone(),
         })
     }
@@ -289,19 +331,21 @@ impl KeymasterDb {
     /// or DatabaseLocked is encountered.
     fn with_transaction<T, F>(&mut self, behavior: TransactionBehavior, f: F) -> Result<T>
     where
-        F: Fn(&Transaction) -> Result<T>,
+        F: Fn(&Transaction) -> Result<(bool, T)>,
     {
-        let name = behavior.name().unwrap_or("<unnamed>");
+        let name = behavior.name();
         loop {
             let result = self
                 .conn
                 .transaction_with_behavior(behavior.into())
-                .context("Failed to create transaction.")
+                .context(err!())
                 .and_then(|tx| {
-                    let value = f(&tx)?;
-                    tx.commit()
-                        .context(err!("Failed to commit transaction: {}", name))?;
-                    Ok(value)
+                    let _wp = name.map(wd::watch);
+                    f(&tx).map(|result| (result, tx))
+                })
+                .and_then(|(result, tx)| {
+                    tx.commit().context(err!("Failed to commit transaction."))?;
+                    Ok(result)
                 });
             match result {
                 Ok(result) => break Ok(result),
@@ -310,11 +354,161 @@ impl KeymasterDb {
                         std::thread::sleep(DB_BUSY_RETRY_INTERVAL);
                         continue;
                     } else {
-                        return Err(e).context(err!("Failed to process transaction: {}", name));
+                        return Err(e).context(err!());
                     }
                 }
             }
         }
+        .map(|(need_gc, result)| {
+            if need_gc {
+                if let Some(ref gc) = self.gc {
+                    gc.notify_gc();
+                }
+            }
+            result
+        })
+    }
+
+    fn cleanup_unreferenced(tx: &Transaction) -> Result<()> {
+        let _wp = wd::watch("KeystoreDB::cleanup_unreferenced");
+        {
+            tx.execute(
+                "DELETE FROM persistent.keymetadata
+            WHERE keyentryid IN (
+                SELECT id FROM persistent.keyentry
+                WHERE state = ?
+            );",
+                params![KeyLifeCycle::Unreferenced],
+            )
+            .context("Trying to delete keymetadata.")?;
+            tx.execute(
+                "DELETE FROM persistent.keyparameter
+            WHERE keyentryid IN (
+                SELECT id FROM persistent.keyentry
+                WHERE state = ?
+            );",
+                params![KeyLifeCycle::Unreferenced],
+            )
+            .context("Trying to delete keyparameters.")?;
+            tx.execute(
+                "DELETE FROM persistent.grant
+            WHERE keyentryid IN (
+                SELECT id FROM persistent.keyentry
+                WHERE state = ?
+            );",
+                params![KeyLifeCycle::Unreferenced],
+            )
+            .context("Trying to delete grants.")?;
+            tx.execute(
+                "DELETE FROM persistent.keyentry
+                WHERE state = ?;",
+                params![KeyLifeCycle::Unreferenced],
+            )
+            .context("Trying to delete keyentry.")?;
+            Result::<()>::Ok(())
+        }
+        .context(err!())
+    }
+
+    /// This function is intended to be used by the garbage collector.
+    /// It deletes the blobs given by `blob_ids_to_delete`. It then tries to find up to `max_blobs`
+    /// superseded key blobs that might need special handling by the garbage collector.
+    /// If no further superseded blobs can be found it deletes all other superseded blobs that don't
+    /// need special handling and returns None.
+    pub fn handle_next_superseded_blobs(
+        &mut self,
+        blob_ids_to_delete: &[i64],
+        max_blobs: usize,
+    ) -> Result<Vec<SupersededBlob>> {
+        let _wp = wd::watch("KeystoreDB::handle_next_superseded_blob");
+        let result = self
+            .with_transaction(Immediate("TX_handle_next_superseded_blob"), |tx| {
+                // Delete the given blobs.
+                for blob_id in blob_ids_to_delete {
+                    tx.execute(
+                        "DELETE FROM persistent.blobmetadata WHERE blobentryid = ?;",
+                        params![blob_id],
+                    )
+                    .context(err!("Trying to delete blob metadata: {:?}", blob_id))?;
+                    tx.execute(
+                        "DELETE FROM persistent.blobentry WHERE id = ?;",
+                        params![blob_id],
+                    )
+                    .context(err!("Trying to delete blob: {:?}", blob_id))?;
+                }
+
+                Self::cleanup_unreferenced(tx).context("Trying to cleanup unreferenced.")?;
+
+                // Find up to `max_blobs` more out-of-date key blobs, load their metadata and return it.
+                let _wp = wd::watch("KeystoreDB::handle_next_superseded_blob find_next v1");
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT id, blob FROM persistent.blobentry
+                        WHERE subcomponent_type = ?
+                        AND (
+                            id NOT IN (
+                                SELECT MAX(id) FROM persistent.blobentry
+                                WHERE subcomponent_type = ?
+                                GROUP BY keyentryid, subcomponent_type
+                            )
+                        OR keyentryid NOT IN (SELECT id FROM persistent.keyentry)
+                    ) LIMIT ?;",
+                    )
+                    .context("Trying to prepare query for superseded blobs.")?;
+
+                let rows = stmt
+                    .query_map(
+                        params![
+                            SubComponentType::KEY_BLOB,
+                            SubComponentType::KEY_BLOB,
+                            max_blobs as i64,
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .context("Trying to query superseded blob.")?;
+
+                let result = rows
+                    .collect::<Result<Vec<(i64, Vec<u8>)>, rusqlite::Error>>()
+                    .context("Trying to extract superseded blobs.")?;
+
+                let _wp = wd::watch("KeystoreDB::handle_next_superseded_blob load_metadata");
+                let result = result
+                    .into_iter()
+                    .map(|(blob_id, blob)| {
+                        Ok(SupersededBlob {
+                            blob_id,
+                            blob,
+                            metadata: BlobMetaData::load_from_db(blob_id, tx)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .context("Trying to load blob metadata.")?;
+                if !result.is_empty() {
+                    return Ok(result).no_gc();
+                }
+
+                // We did not find any out-of-date key blobs, so let's remove other types of superseded
+                // blob in one transaction.
+                let _wp = wd::watch("KeystoreDB::handle_next_superseded_blob delete v1");
+                tx.execute(
+                    "DELETE FROM persistent.blobentry
+                    WHERE NOT subcomponent_type = ?
+                    AND (
+                        id NOT IN (
+                           SELECT MAX(id) FROM persistent.blobentry
+                           WHERE NOT subcomponent_type = ?
+                           GROUP BY keyentryid, subcomponent_type
+                        ) OR keyentryid NOT IN (SELECT id FROM persistent.keyentry)
+                    );",
+                    params![SubComponentType::KEY_BLOB, SubComponentType::KEY_BLOB],
+                )
+                .context("Trying to purge superseded blobs.")?;
+
+                Ok(vec![]).no_gc()
+            })
+            .context(err!())?;
+
+        Result::Ok(result)
     }
 
     /// This maintenance function should be called only once before the database is used for the
@@ -332,6 +526,7 @@ impl KeymasterDb {
                 params![KeyLifeCycle::Unreferenced, KeyLifeCycle::Existing],
             )
             .context("Failed to execute query.")
+            .need_gc()
         })
         .context("Failed to cleanup leftovers.")
     }
@@ -370,13 +565,11 @@ impl KeymasterDb {
             "DELETE FROM persistent.grant WHERE keyentryid = ?;",
             params![key_id],
         )
-        .context("Trying to delete grants to other apps.")?;
+        .context("Trying to delete grants.")?;
         // The associated blobentry rows are not immediately deleted when the owning keyentry is
         // removed, because a KeyMint `deleteKey()` invocation is needed (specifically for the
-        // `KEY_BLOB`).  That should not be done from within the database transaction.  Also, calls
-        // to `deleteKey()` need to be delayed until the boot has completed, to avoid making
-        // permanent changes during an OTA before the point of no return.  Mark the affected rows
-        // with `state=Orphaned` so a subsequent garbage collection can do the `deleteKey()`.
+        // `KEY_BLOB`).  Mark the affected rows with `state=Orphaned` so a subsequent garbage
+        // collection can do this.
         tx.execute(
             "UPDATE persistent.blobentry SET state = ? WHERE keyentryid = ?",
             params![BlobState::Orphaned, key_id],
@@ -558,7 +751,11 @@ impl KeymasterDb {
                 .get(0)
                 .context("Failed to unpack id.")
         })
-        .context(err!("In load_key_entry_id: Failed to load key entry id."))
+        .context(err!(
+            "In load_key_entry_id: Failed to load key entry id. keyType={:?} key={:?}",
+            key_type,
+            key
+        ))
     }
 
     /// Checks if a key exists with given key type and key descriptor properties.
@@ -584,6 +781,7 @@ impl KeymasterDb {
                     _ => Err(error).context(err!("Failed to find if the key exists.")),
                 },
             }
+            .no_gc()
         })
         .context(err!("Failed to check if key exists."))
     }
@@ -932,7 +1130,13 @@ impl KeymasterDb {
                 "UPDATE persistent.keyentry
                  SET alias = NULL, domain = NULL, namespace = NULL, state = ?
                  WHERE alias = ? AND domain = ? AND namespace = ? AND key_type = ?;",
-                params![KeyLifeCycle::Unreferenced, alias, domain.0 as u32, namespace, key_type],
+                params![
+                    KeyLifeCycle::Unreferenced,
+                    alias,
+                    domain.0 as u32,
+                    namespace,
+                    key_type
+                ],
             )
             .context(err!("Failed to rebind existing entry."))?;
         let result = tx
@@ -959,7 +1163,6 @@ impl KeymasterDb {
         }
         Ok(updated != 0)
     }
-
 
     /// Store a new key in a single transaction.
     /// The function creates a new key entry, populates the blob, key parameter, and metadata
@@ -1010,6 +1213,19 @@ impl KeymasterDb {
             // database here and then immediately replaced by the superseding blob.
             // The garbage collector will then subject the blob to deleteKey of the
             // KM back end to permanently invalidate the key.
+            let need_gc = if let Some((blob, blob_metadata)) = superseded_blob {
+                Self::set_blob_internal(
+                    tx,
+                    key_id.id(),
+                    SubComponentType::KEY_BLOB,
+                    Some(blob),
+                    Some(blob_metadata),
+                )
+                .context("Trying to insert superseded key blob.")?;
+                true
+            } else {
+                false
+            };
 
             Self::set_blob_internal(
                 tx,
@@ -1038,8 +1254,10 @@ impl KeymasterDb {
             metadata
                 .store_in_db(key_id.id(), tx)
                 .context("Trying to insert key metadata.")?;
-
-            Ok(key_id)
+            let need_gc = Self::rebind_alias(tx, &key_id, alias, &domain, namespace, key_type)
+                .context("Trying to rebind alias.")?
+                || need_gc;
+            Ok(key_id).do_gc(need_gc)
         })
         .context(err!())
     }
@@ -1057,10 +1275,18 @@ impl KeymasterDb {
         let _wp = wd::watch("KeystoreDB::store_new_certificate");
 
         let (alias, domain, namespace) = match key {
-            KeyDescriptor { alias: Some(alias), domain: Domain::APP, nspace, blob: None }
-            | KeyDescriptor { alias: Some(alias), domain: Domain::SELINUX, nspace, blob: None } => {
-                (alias, key.domain, nspace)
+            KeyDescriptor {
+                alias: Some(alias),
+                domain: Domain::APP,
+                nspace,
+                blob: None,
             }
+            | KeyDescriptor {
+                alias: Some(alias),
+                domain: Domain::SELINUX,
+                nspace,
+                blob: None,
+            } => (alias, key.domain, nspace),
             _ => {
                 return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
                     .context(err!("Need alias and domain must be APP or SELINUX."));
@@ -1084,15 +1310,16 @@ impl KeymasterDb {
                 DateTime::now().context("Trying to make creation time.")?,
             ));
 
-            metadata.store_in_db(key_id.id(), tx).context("Trying to insert key metadata.")?;
+            metadata
+                .store_in_db(key_id.id(), tx)
+                .context("Trying to insert key metadata.")?;
 
             let need_gc = Self::rebind_alias(tx, &key_id, alias, &domain, namespace, key_type)
                 .context("Trying to rebind alias.")?;
-            Ok(key_id)
+            Ok(key_id).do_gc(need_gc)
         })
         .context(err!())
     }
-
 
     /// Loads super key of a given user, if exists
     pub fn load_super_key(
@@ -1121,6 +1348,7 @@ impl KeymasterDb {
                     _ => Err(error).context(err!()),
                 },
             }
+            .no_gc()
         })
         .context(err!())
     }
@@ -1170,6 +1398,7 @@ impl KeymasterDb {
 
             Self::load_key_components(tx, KeyEntryLoadBits::KM, key_id)
                 .context("Trying to load key components.")
+                .no_gc()
         })
         .context(err!())
     }
@@ -1248,7 +1477,7 @@ impl KeymasterDb {
         let _wp = wd::watch("KeystoreDB::set_blob");
 
         self.with_transaction(Immediate("TX_set_blob"), |tx| {
-            Self::set_blob_internal(tx, key_id.0, sc_type, blob, blob_metadata)
+            Self::set_blob_internal(tx, key_id.0, sc_type, blob, blob_metadata).need_gc()
         })
         .context(err!())
     }
@@ -1271,11 +1500,6 @@ impl KeymasterDb {
         let _wp = wd::watch("KeystoreDB::unbind_keys_for_user");
 
         self.with_transaction(Immediate("TX_unbind_keys_for_user"), |tx| {
-            Self::delete_received_grants(tx, user_id).context(format!(
-                "In unbind_keys_for_user. Failed to delete received grants for user ID {:?}.",
-                user_id
-            ))?;
-
             let mut stmt = tx
                 .prepare(&format!(
                     "SELECT id from persistent.keyentry
@@ -1320,7 +1544,13 @@ impl KeymasterDb {
             })
             .context(err!())?;
 
-            Ok(())
+            let mut notify_gc = false;
+            for key_id in key_ids {
+                notify_gc = Self::mark_unreferenced(tx, key_id)
+                    .context("In unbind_keys_for_user.")?
+                    || notify_gc;
+            }
+            Ok(()).do_gc(notify_gc)
         })
         .context(err!())
     }
@@ -1358,6 +1588,7 @@ impl KeymasterDb {
             )
             .optional()
             .context("Trying to load key descriptor")
+            .no_gc()
         })
         .context(err!())
     }
@@ -1378,6 +1609,7 @@ impl KeymasterDb {
                     storage_type.0
                 )
             })
+            .no_gc()
         })?;
         Ok(StorageStats {
             storage_type,
@@ -1438,7 +1670,11 @@ impl KeymasterDb {
                      {}
                      ORDER BY alias ASC
                      LIMIT 10000;",
-            if start_past_alias.is_some() { " AND alias > ?" } else { "" }
+            if start_past_alias.is_some() {
+                " AND alias > ?"
+            } else {
+                ""
+            }
         );
 
         self.with_transaction(TransactionBehavior::Deferred, |tx| {
@@ -1455,7 +1691,12 @@ impl KeymasterDb {
                     ])
                     .context(err!("Failed to query."))?,
                 None => stmt
-                    .query(params![domain.0 as u32, namespace, KeyLifeCycle::Live, key_type,])
+                    .query(params![
+                        domain.0 as u32,
+                        namespace,
+                        KeyLifeCycle::Live,
+                        key_type,
+                    ])
                     .context(err!("Failed to query."))?,
             };
 
@@ -1470,10 +1711,9 @@ impl KeymasterDb {
                 Ok(())
             })
             .context(err!("Failed to extract rows."))?;
-            Ok(descriptors)
+            Ok(descriptors).no_gc()
         })
     }
-
 
     /// Returns a number of KeyDescriptors in the selected domain/namespace.
     /// Domain must be APP or SELINUX, the caller must make sure of that.
@@ -1497,10 +1737,10 @@ impl KeymasterDb {
                 |row| row.get(0),
             )
             .context(err!("Failed to count number of keys."))
+            .no_gc()
         })?;
         Ok(num_keys)
     }
-
 
     /// Adds a grant to the grant table.
     /// Like `load_key_entry` this function loads the access tuple before
@@ -1567,7 +1807,13 @@ impl KeymasterDb {
                 .context(err!())?
             };
 
-            Ok(KeyDescriptor { domain: Domain::GRANT, nspace: grant_id, alias: None, blob: None })
+            Ok(KeyDescriptor {
+                domain: Domain::GRANT,
+                nspace: grant_id,
+                alias: None,
+                blob: None,
+            })
+            .no_gc()
         })
     }
 
@@ -1598,7 +1844,7 @@ impl KeymasterDb {
             )
             .context("Failed to delete grant.")?;
 
-            Ok(())
+            Ok(()).no_gc()
         })
     }
 
@@ -1612,7 +1858,7 @@ impl KeymasterDb {
     ) -> Result<()> {
         let _wp = wd::watch("KeystoreDB::unbind_key");
 
-        let _result = self.with_transaction(Immediate("TX_unbind_key"), |tx| {
+        self.with_transaction(Immediate("TX_unbind_key"), |tx| {
             let access = Self::load_access_tuple(tx, key, key_type, caller_uid)
                 .context("Trying to get access tuple.")?;
 
@@ -1622,11 +1868,10 @@ impl KeymasterDb {
             //     .context("While checking permission.")?;
 
             Self::mark_unreferenced(tx, access.key_id)
+                .map(|need_gc| (need_gc, ()))
                 .context("Trying to mark the key unreferenced.")
         })
-        .context(err!())?;
-
-        Ok(())
+        .context(err!())
     }
 
     /// Delete all artifacts belonging to the namespace given by the domain-namespace tuple.
@@ -1671,11 +1916,10 @@ impl KeymasterDb {
                 params![domain.0, namespace, KeyType::Client],
             )
             .context("Trying to delete keyentry.")?;
-            Ok(())
+            Ok(()).need_gc()
         })
         .context(err!())
     }
-
 
     /// Fetches a storage statistics atom for a given storage type. For storage
     /// types that map to a table, information about the table's storage is
@@ -1769,13 +2013,11 @@ impl KeymasterDb {
             .context("Failed to update key usage count.")?;
 
             match limit {
-                1 => {
-                    Self::mark_unreferenced(tx, key_id)
-                        .context("Trying to mark limited use key for deletion.")?;
-                    Ok(())
-                }
+                1 => Self::mark_unreferenced(tx, key_id)
+                    .map(|need_gc| (need_gc, ()))
+                    .context("Trying to mark limited use key for deletion."),
                 0 => Err(KsError::Km(ErrorCode::INVALID_KEY_BLOB)).context("Key is exhausted."),
-                _ => Ok(()),
+                _ => Ok(()).no_gc(),
             }
         })
         .context(err!())
@@ -2084,7 +2326,7 @@ impl BlobMetaData {
 /// Right now it can only be initialized from SecurityLevel.
 /// Once KeyMint provides a UUID type a corresponding From impl shall be added.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Uuid([u8; 16]);
+pub struct Uuid(pub(crate) [u8; 16]);
 
 impl From<SecurityLevel> for Uuid {
     fn from(sec_level: SecurityLevel) -> Self {

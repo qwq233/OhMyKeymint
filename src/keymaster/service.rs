@@ -140,6 +140,8 @@ impl KeystoreService {
     fn get_key_entry(&self, key: &KeyDescriptor) -> Result<KeyEntryResponse> {
         let caller_uid = CallingContext::default().uid;
 
+        debug!("get_key_entry: key={:?}, uid={}", key, caller_uid);
+
         let super_key = SUPER_KEY
             .read()
             .unwrap()
