@@ -318,7 +318,7 @@ impl KeyMintTa {
         Self {
             imp,
             dev,
-            in_early_boot: true,
+            in_early_boot: false,
             device_hmac: None,
             rot_challenge: [0; 16],
             // Work around Rust limitation that `vec![None; n]` doesn't work.
@@ -329,7 +329,13 @@ impl KeyMintTa {
             hw_info,
             rpc_info,
             aidl_version: KEYMINT_CURRENT_VERSION,
-            boot_info: None,
+            boot_info: Some(keymint::BootInfo {
+                verified_boot_key: vec![],
+                device_boot_locked: false,
+                verified_boot_state: VerifiedBootState::Verified,
+                verified_boot_hash: vec![],
+                boot_patchlevel: 20250605,
+            }),
             rot_data: None,
             hal_info: None,
             attestation_chain_info: RefCell::new(BTreeMap::new()),
@@ -578,43 +584,18 @@ impl KeyMintTa {
     /// method when this information arrives from the bootloader (which happens in an
     /// implementation-specific manner).
     pub fn set_boot_info(&mut self, boot_info: keymint::BootInfo) -> Result<(), Error> {
-        if !self.in_early_boot {
-            error!(
-                "Rejecting attempt to set boot info {:?} after early boot",
-                boot_info
-            );
-            return Err(km_err!(
-                EarlyBootEnded,
-                "attempt to set boot info to {boot_info:?} after early boot"
-            ));
-        }
-        if let Some(existing_boot_info) = &self.boot_info {
-            if *existing_boot_info == boot_info {
-                warn!(
-                    "Boot info already set, ignoring second attempt to set same values {:?}",
-                    boot_info
-                );
-            } else {
-                return Err(km_err!(
-                    RootOfTrustAlreadySet,
-                    "attempt to set boot info to {:?} but already set to {:?}",
-                    boot_info,
-                    existing_boot_info
-                ));
-            }
-        } else {
-            info!("Setting boot_info to {:?}", boot_info);
-            let rot_info = RootOfTrustInfo {
-                verified_boot_key: boot_info.verified_boot_key.clone(),
-                device_boot_locked: boot_info.device_boot_locked,
-                verified_boot_state: boot_info.verified_boot_state,
-            };
-            self.boot_info = Some(boot_info);
-            self.rot_data =
-                Some(rot_info.into_vec().map_err(|e| {
-                    km_err!(EncodingError, "failed to encode root-of-trust: {:?}", e)
-                })?);
-        }
+        info!("Setting boot_info to {:?}", boot_info);
+        let rot_info = RootOfTrustInfo {
+            verified_boot_key: boot_info.verified_boot_key.clone(),
+            device_boot_locked: boot_info.device_boot_locked,
+            verified_boot_state: boot_info.verified_boot_state,
+        };
+        self.boot_info = Some(boot_info);
+        self.rot_data = Some(
+            rot_info
+                .into_vec()
+                .map_err(|e| km_err!(EncodingError, "failed to encode root-of-trust: {:?}", e))?,
+        );
         Ok(())
     }
 

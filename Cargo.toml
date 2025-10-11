@@ -31,7 +31,7 @@ prost-types = "0.14.1"
 hex = "0.4.3"
 log4rs = "1.4.0"
 log = "0.4.28"
-rsbinder = "0.4.2"
+rsbinder = { version = "0.4.2", features = ["android_12_plus"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 anyhow = "1.0.100"
 async-trait = "0.1.89"
