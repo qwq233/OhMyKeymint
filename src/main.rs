@@ -5,10 +5,11 @@
 use std::panic;
 
 use log::{debug, error};
+use rsbinder::hub;
 
-use crate::
+use crate::{
     android::system::keystore2::
-        IKeystoreOperation
+        IKeystoreOperation, keymaster::service::KeystoreService}
     
 ;
 
@@ -31,17 +32,26 @@ const TAG: &str = "OhMyKeymint";
 
 fn main() {
     logging::init_logger();
+    debug!("Hello, OhMyKeymint!");
+    debug!("Initial process state");
     rsbinder::ProcessState::init_default();
-    let db = keymaster::db::KeymasterDb::new().unwrap();
-    db.close().unwrap();
 
     // Redirect panic messages to logcat.
     panic::set_hook(Box::new(|panic_info| {
         error!("{}", panic_info);
     }));
 
-    debug!("Hello, OhMyKeymint!");
+    debug!("Starting thread pool");
+    rsbinder::ProcessState::start_thread_pool();
 
+    debug!("Creating keystore service");
+    let service = KeystoreService::new_native_binder().unwrap();
+
+    debug!("Adding service to hub");
+    hub::add_service("omk", service.as_binder()).unwrap();
+
+    debug!("Joining thread pool");
+    rsbinder::ProcessState::join_thread_pool().unwrap();
 }
 
 #[derive(Clone)]

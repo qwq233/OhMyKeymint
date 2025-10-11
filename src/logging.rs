@@ -22,7 +22,7 @@ pub fn init_logger() {
 pub fn init_logger() {
     android_logger::init_once(
         android_logger::Config::default()
-            .with_max_level(LevelFilter::Trace)
+            .with_max_level(LevelFilter::Debug)
             .with_tag("OhMyKeymint"),
     );
 }

@@ -50,6 +50,7 @@ use kmr_crypto_boring::ec::BoringEc;
 use kmr_crypto_boring::hmac::BoringHmac;
 use kmr_crypto_boring::rng::BoringRng;
 use kmr_crypto_boring::rsa::BoringRsa;
+use kmr_common::crypto::Rng;
 use kmr_ta::device::CsrSigningAlgorithm;
 use kmr_ta::{HardwareInfo, KeyMintTa, RpcInfo, RpcInfoV3};
 use kmr_wire::keymint::{AttestationKey, KeyParam};
@@ -1227,7 +1228,39 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
         rpc,
     };
 
-    Ok(KeyMintTa::new(hw_info, RpcInfo::V3(rpc_info_v3), imp, dev))
+    let mut ta = KeyMintTa::new(hw_info, RpcInfo::V3(rpc_info_v3), imp, dev);
+
+    let mut rng = BoringRng {};
+
+    let mut vb_hash = vec![0u8; 32];
+    rng.fill_bytes(&mut vb_hash);
+    let mut vb_key = vec![0u8; 32];
+    rng.fill_bytes(&mut vb_key);
+
+    let req = PerformOpReq::SetBootInfo(kmr_wire::SetBootInfoRequest {
+        verified_boot_state: 0, // Verified
+        verified_boot_hash: vb_hash,
+        verified_boot_key: vb_key,
+        device_boot_locked: true,
+        boot_patchlevel: 20250605,
+    });
+    let resp = ta.process_req(req);
+    if resp.error_code != 0 {
+        return Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
+            .context(err!("Failed to set boot info"));
+    }
+    let req = PerformOpReq::SetHalInfo(kmr_wire::SetHalInfoRequest {
+        os_version: 35,
+        os_patchlevel: 202506,
+        vendor_patchlevel: 202506,
+    });
+    let resp = ta.process_req(req);
+    if resp.error_code != 0 {
+        return Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
+            .context(err!("Failed to set HAL info"));
+    }
+
+    Ok(ta)
 }
 
 pub fn get_keymint_device<'a>(

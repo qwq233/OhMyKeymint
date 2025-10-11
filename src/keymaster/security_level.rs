@@ -19,18 +19,18 @@ use crate::{
     err,
     global::{DB, ENFORCEMENTS, SUPER_KEY, UNDEFINED_NOT_AFTER},
     keymaster::{
-        attestation_key_utils::{get_attest_key_info, AttestationKeyInfo},
+        attestation_key_utils::{AttestationKeyInfo, get_attest_key_info},
         db::{
             BlobInfo, BlobMetaData, BlobMetaEntry, CertificateInfo, DateTime, KeyEntry,
             KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType, SubComponentType,
             Uuid,
         },
-        error::{into_logged_binder, map_binder_status, KsError},
+        error::{KsError, into_logged_binder, map_binder_status},
         keymint_device::get_keymint_wrapper,
         metrics_store::log_key_creation_event_stats,
         operation::{KeystoreOperation, LoggingInfo, OperationDb},
         super_key::{KeyBlob, SuperKeyManager},
-        utils::{key_characteristics_to_internal, key_parameters_to_authorizations, log_params},
+        utils::{key_characteristics_to_internal, key_param_to_aidl, key_parameters_to_authorizations, log_params},
     },
     plat::utils::multiuser_get_user_id,
 };
@@ -41,7 +41,7 @@ use crate::keymaster::key_parameter::KeyParameterValue as KsKeyParamValue;
 use crate::watchdog as wd;
 
 use anyhow::{anyhow, Context, Result};
-use kmr_wire::keymint::KeyMintHardwareInfo;
+use kmr_wire::keymint::{KeyMintHardwareInfo, KeyParam};
 use log::debug;
 use rsbinder::{thread_state::CallingContext, Interface, Status};
 
@@ -113,8 +113,13 @@ impl KeystoreSecurityLevel {
         &self,
         uid: u32,
         params: &[KeyParameter],
-        _key: &KeyDescriptor,
+        key: &KeyDescriptor,
     ) -> Result<Vec<KeyParameter>> {
+        debug!(
+            "KeystoreSecurityLevel::add_required_parameters: params={:?}, key={:?}",
+            log_params(params),
+            key
+        );
         let mut result = params.to_vec();
 
         // Prevent callers from specifying the CREATION_DATETIME tag.
@@ -152,6 +157,8 @@ impl KeystoreSecurityLevel {
 
         // If there is an attestation challenge we need to get an application id.
         if params.iter().any(|kp| kp.tag == Tag::ATTESTATION_CHALLENGE) {
+            let _wp =
+                self.watch(" KeystoreSecurityLevel::add_required_parameters: calling get_aaid");
             match crate::plat::utils::get_aaid(uid) {
                 Ok(aaid_ok) => {
                     result.push(KeyParameter {
@@ -159,7 +166,9 @@ impl KeystoreSecurityLevel {
                         value: KeyParameterValue::Blob(aaid_ok.into_bytes()),
                     });
                 }
-                Err(e) => return Err(anyhow!(e)).context(err!("Attestation ID retrieval error.")),
+                Err(e) => {
+                    return Err(anyhow!(e)).context(err!("Attestation ID retrieval error."))
+                }
             }
         }
 
@@ -170,6 +179,16 @@ impl KeystoreSecurityLevel {
         //         return Err(Error::perm()).context(err!(
         //             "Caller does not have the permission to generate a unique ID"
         //         ));
+        //     }
+        //     if self
+        //         .id_rotation_state
+        //         .had_factory_reset_since_id_rotation(&creation_datetime)
+        //         .context(err!("Call to had_factory_reset_since_id_rotation failed."))?
+        //     {
+        //         result.push(KeyParameter {
+        //             tag: Tag::RESET_SINCE_ID_ROTATION,
+        //             value: KeyParameterValue::BoolValue(true),
+        //         })
         //     }
         // }
 
@@ -184,18 +203,9 @@ impl KeystoreSecurityLevel {
         // If we are generating/importing an asymmetric key, we need to make sure
         // that NOT_BEFORE and NOT_AFTER are present.
         match params.iter().find(|kp| kp.tag == Tag::ALGORITHM) {
-            Some(KeyParameter {
-                tag: _,
-                value: KeyParameterValue::Algorithm(Algorithm::RSA),
-            })
-            | Some(KeyParameter {
-                tag: _,
-                value: KeyParameterValue::Algorithm(Algorithm::EC),
-            }) => {
-                if !params
-                    .iter()
-                    .any(|kp| kp.tag == Tag::CERTIFICATE_NOT_BEFORE)
-                {
+            Some(KeyParameter { tag: _, value: KeyParameterValue::Algorithm(Algorithm::RSA) })
+            | Some(KeyParameter { tag: _, value: KeyParameterValue::Algorithm(Algorithm::EC) }) => {
+                if !params.iter().any(|kp| kp.tag == Tag::CERTIFICATE_NOT_BEFORE) {
                     result.push(KeyParameter {
                         tag: Tag::CERTIFICATE_NOT_BEFORE,
                         value: KeyParameterValue::DateTime(0),
@@ -379,6 +389,8 @@ impl KeystoreSecurityLevel {
         }
         let calling_context = CallingContext::default();
         let calling_uid = calling_context.uid;
+
+        debug!("KeystoreSecurityLevel::generate_key: uid={:?} key={:?}, attest_key_descriptor={:?}, params={:?}, flags={}", calling_uid, key, attest_key_descriptor, log_params(params), flags);
 
         let key = match key.domain {
             Domain::APP => KeyDescriptor {
