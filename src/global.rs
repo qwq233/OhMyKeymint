@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    sync::{Arc, LazyLock, Mutex, Once, RwLock},
+    sync::{Arc, LazyLock, Mutex, Once, RwLock, OnceLock},
 };
 
 use rsbinder::Strong;
@@ -60,6 +60,9 @@ thread_local! {
 pub static ENFORCEMENTS: LazyLock<Enforcements> = LazyLock::new(Default::default);
 
 pub static SUPER_KEY: LazyLock<Arc<RwLock<SuperKeyManager>>> = LazyLock::new(Default::default);
+
+/// DER-encoded module information returned by `getSupplementaryAttestationInfo(Tag.MODULE_HASH)`.
+pub static ENCODED_MODULE_INFO: OnceLock<Vec<u8>> = OnceLock::new();
 
 /// Timestamp service.
 static TIME_STAMP_DEVICE: Mutex<Option<Strong<dyn ISecureClock>>> = Mutex::new(None);

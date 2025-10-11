@@ -1,19 +1,15 @@
-use std::result;
 
 use crate::{
-    android::hardware::security::{
-        self,
-        keymint::{
+    android::hardware::security::keymint::{
             ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice,
             KeyCharacteristics::KeyCharacteristics, KeyParameter::KeyParameter as KmKeyParameter,
-            KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
+            KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel,
         },
-    },
     consts, err,
     keymaster::{
-        error::{KsError as Error, map_ks_error},
+        error::{map_ks_error, KsError as Error},
         key_parameter::KeyParameter,
-        keymint_device::{KeyMintDevice, get_keymint_wrapper},
+        keymint_device::{get_keymint_wrapper, KeyMintDevice},
     },
     watchdog,
 };
@@ -609,11 +605,12 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
 
 pub fn key_creation_result_to_aidl(
     result: kmr_wire::keymint::KeyCreationResult,
-) -> Result<crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult, rsbinder::Status> {
-
-        let certificates: Vec<
-            crate::android::hardware::security::keymint::Certificate::Certificate,
-        > = result
+) -> Result<
+    crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
+    rsbinder::Status,
+> {
+    let certificates: Vec<crate::android::hardware::security::keymint::Certificate::Certificate> =
+        result
             .certificate_chain
             .iter()
             .map(
@@ -623,7 +620,7 @@ pub fn key_creation_result_to_aidl(
             )
             .collect();
 
-        let key_characteristics: Result<Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>, rsbinder::Status> = result.key_characteristics.iter().map(|kc| {
+    let key_characteristics: Result<Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>, rsbinder::Status> = result.key_characteristics.iter().map(|kc| {
             let params: Result<Vec<crate::android::hardware::security::keymint::KeyParameter::KeyParameter>, rsbinder::Status> = kc.authorizations.iter().map(|p| {
                     key_param_to_aidl(p.clone())
                         .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
@@ -649,16 +646,15 @@ pub fn key_creation_result_to_aidl(
             })
 
         }).collect();
-        let key_characteristics = key_characteristics?;
+    let key_characteristics = key_characteristics?;
 
-        let resp =
-            crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult {
-                keyBlob: result.key_blob,
-                keyCharacteristics: key_characteristics,
-                certificateChain: certificates,
-            };
+    let resp = crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult {
+        keyBlob: result.key_blob,
+        keyCharacteristics: key_characteristics,
+        certificateChain: certificates,
+    };
 
-        Result::Ok(resp)
+    Result::Ok(resp)
 }
 
 pub fn key_param_to_aidl(

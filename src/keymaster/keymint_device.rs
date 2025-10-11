@@ -29,7 +29,6 @@ use crate::android::system::keystore2::{
 use crate::global::AID_KEYSTORE;
 use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_binder_status, map_ks_error, map_ks_result};
-use crate::keymaster::key_parameter;
 use crate::keymaster::utils::{key_creation_result_to_aidl, key_param_to_aidl};
 use crate::keymint::{clock, sdd, soft};
 use crate::{
@@ -57,7 +56,6 @@ use kmr_wire::keymint::{AttestationKey, KeyParam};
 use kmr_wire::rpc::MINIMUM_SUPPORTED_KEYS_IN_CSR;
 use kmr_wire::*;
 use log::error;
-use rand::rand_core::le;
 use rsbinder::{ExceptionCode, Interface, Status, Strong};
 
 /// Wrapper for operating directly on a KeyMint device.
@@ -205,7 +203,7 @@ impl KeyMintDevice {
         key_type: KeyType,
         params: &[KeyParameter],
         validate_characteristics: F,
-    ) -> Result<(KeyIdGuard, KeyBlob)>
+    ) -> Result<(KeyIdGuard, KeyBlob<'_>)>
     where
         F: FnOnce(&[KeyCharacteristics]) -> bool,
     {
@@ -597,7 +595,7 @@ impl IKeyMintDevice for KeyMintWrapper {
                 ))
             }
         };
-        
+
         let resp = key_creation_result_to_aidl(result)?;
 
         Result::Ok(resp)
@@ -614,8 +612,11 @@ impl IKeyMintDevice for KeyMintWrapper {
     ) -> rsbinder::status::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
-        let unwrapping_params: Result<Vec<KeyParam>> =
-            unwrapping_params.iter().cloned().map(|p| p.to_km()).collect();
+        let unwrapping_params: Result<Vec<KeyParam>> = unwrapping_params
+            .iter()
+            .cloned()
+            .map(|p| p.to_km())
+            .collect();
         let unwrapping_params = unwrapping_params
             .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
             .map_err(map_ks_error)?;
@@ -635,9 +636,9 @@ impl IKeyMintDevice for KeyMintWrapper {
         if let None = result.rsp {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
-        
+
         let result = match result.rsp.unwrap() {
-            PerformOpRsp::DeviceImportWrappedKey(rsp) => rsp.ret,   
+            PerformOpRsp::DeviceImportWrappedKey(rsp) => rsp.ret,
             _ => {
                 return Err(Status::new_service_specific_error(
                     ErrorCode::UNKNOWN_ERROR.0,
@@ -652,73 +653,281 @@ impl IKeyMintDevice for KeyMintWrapper {
 
     fn upgradeKey(
         &self,
-        _arg_keyBlobToUpgrade: &[u8],
-        _arg_upgradeParams: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
+        key_blob_to_upgrade: &[u8],
+        upgrade_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
     ) -> rsbinder::status::Result<Vec<u8>> {
-        todo!()
+        let upgrade_params: Result<Vec<KeyParam>> =
+            upgrade_params.iter().cloned().map(|p| p.to_km()).collect();
+        let upgrade_params = upgrade_params
+            .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+            .map_err(map_ks_error)?;
+
+        let req = PerformOpReq::DeviceUpgradeKey(UpgradeKeyRequest {
+            key_blob_to_upgrade: key_blob_to_upgrade.to_vec(),
+            upgrade_params,
+        });
+
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+
+        if let None = result.rsp {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+        let result = match result.rsp.unwrap() {
+            PerformOpRsp::DeviceUpgradeKey(rsp) => rsp.ret,
+            _ => {
+                return Err(Status::new_service_specific_error(
+                    ErrorCode::UNKNOWN_ERROR.0,
+                    None,
+                ))
+            }
+        };
+
+        Result::Ok(result)
     }
 
-    fn deleteKey(&self, _arg_keyBlob: &[u8]) -> rsbinder::status::Result<()> {
-        todo!()
+    fn deleteKey(&self, key_blob: &[u8]) -> rsbinder::status::Result<()> {
+        let key_blob = key_blob.to_vec();
+        let req = PerformOpReq::DeviceDeleteKey(DeleteKeyRequest { key_blob });
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+
+        if result.error_code != 0 {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+
+        Result::Ok(())
     }
 
     fn deleteAllKeys(&self) -> rsbinder::status::Result<()> {
-        todo!()
+        let req = PerformOpReq::DeviceDeleteAllKeys(DeleteAllKeysRequest {});
+
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+
+        if result.error_code != 0 {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+
+        Result::Ok(())
     }
 
     fn destroyAttestationIds(&self) -> rsbinder::status::Result<()> {
-        todo!()
+        let req = PerformOpReq::DeviceDestroyAttestationIds(DestroyAttestationIdsRequest {});
+
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+
+        if result.error_code != 0 {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+
+        Result::Ok(())
     }
 
     fn deviceLocked(
         &self,
-        _arg_passwordOnly: bool,
-        _arg_timestampToken: Option<
+        _password_only: bool,
+        _timestamp_token: Option<
             &crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken,
         >,
     ) -> rsbinder::status::Result<()> {
-        todo!()
+        Result::Err(Status::from(ExceptionCode::UnsupportedOperation))
     }
 
     fn earlyBootEnded(&self) -> rsbinder::status::Result<()> {
-        todo!()
+        let req = PerformOpReq::DeviceEarlyBootEnded(EarlyBootEndedRequest {});
+
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+
+        if result.error_code != 0 {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+
+        Result::Ok(())
     }
 
     fn convertStorageKeyToEphemeral(
         &self,
-        _arg_storageKeyBlob: &[u8],
+        storage_key_blob: &[u8],
     ) -> rsbinder::status::Result<Vec<u8>> {
-        todo!()
+        let req =
+            PerformOpReq::DeviceConvertStorageKeyToEphemeral(ConvertStorageKeyToEphemeralRequest {
+                storage_key_blob: storage_key_blob.to_vec(),
+            });
+
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+        if let None = result.rsp {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+        let result = match result.rsp.unwrap() {
+            PerformOpRsp::DeviceConvertStorageKeyToEphemeral(rsp) => rsp.ret,
+            _ => {
+                return Err(Status::new_service_specific_error(
+                    ErrorCode::UNKNOWN_ERROR.0,
+                    None,
+                ))
+            }
+        };
+
+        Result::Ok(result)
     }
 
     fn getKeyCharacteristics(
         &self,
-        _arg_keyBlob: &[u8],
-        _arg_appId: &[u8],
-        _arg_appData: &[u8],
+        key_blob: &[u8],
+        app_id: &[u8],
+        app_data: &[u8],
     ) -> rsbinder::status::Result<
         Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>,
     > {
-        todo!()
+        let req = PerformOpReq::DeviceGetKeyCharacteristics(GetKeyCharacteristicsRequest {
+            key_blob: key_blob.to_vec(),
+            app_id: app_id.to_vec(),
+            app_data: app_data.to_vec(),
+        });
+
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+        if let None = result.rsp {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+        let result = match result.rsp.unwrap() {
+            PerformOpRsp::DeviceGetKeyCharacteristics(rsp) => rsp.ret,
+            _ => {
+                return Err(Status::new_service_specific_error(
+                    ErrorCode::UNKNOWN_ERROR.0,
+                    None,
+                ))
+            }
+        };
+
+        let result: Result<Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>, rsbinder::Status> = result.iter().map(|kc| {
+            let params: Result<Vec<crate::android::hardware::security::keymint::KeyParameter::KeyParameter>, rsbinder::Status> = kc.authorizations.iter().map(|p| {
+                    key_param_to_aidl(p.clone())
+                        .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+                        .map_err(|e| map_ks_error(e))
+            }).collect();
+            let params = params?;
+
+            Result::Ok(crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics {
+                authorizations: params,
+                securityLevel: match kc.security_level {
+                    kmr_wire::keymint::SecurityLevel::Software => SecurityLevel::SOFTWARE,
+                    kmr_wire::keymint::SecurityLevel::TrustedEnvironment => {
+                        SecurityLevel::TRUSTED_ENVIRONMENT
+                    }
+                    kmr_wire::keymint::SecurityLevel::Strongbox => SecurityLevel::STRONGBOX,
+                    _ => {
+                        return Err(rsbinder::Status::new_service_specific_error(
+                            ErrorCode::UNKNOWN_ERROR.0,
+                            None,
+                        ))
+                    }
+                },
+            })
+
+        }).collect();
+        let result = result?;
+
+        Result::Ok(result)
     }
 
     fn getRootOfTrustChallenge(&self) -> rsbinder::status::Result<[u8; 16]> {
-        todo!()
+        let req = PerformOpReq::GetRootOfTrustChallenge(GetRootOfTrustChallengeRequest {});
+
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+        if let None = result.rsp {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+        let result = match result.rsp.unwrap() {
+            PerformOpRsp::GetRootOfTrustChallenge(rsp) => rsp.ret,
+            _ => {
+                return Err(Status::new_service_specific_error(
+                    ErrorCode::UNKNOWN_ERROR.0,
+                    None,
+                ))
+            }
+        };
+
+        Result::Ok(result)
     }
 
-    fn getRootOfTrust(&self, _arg_challenge: &[u8; 16]) -> rsbinder::status::Result<Vec<u8>> {
-        todo!()
+    fn getRootOfTrust(&self, challenge: &[u8; 16]) -> rsbinder::status::Result<Vec<u8>> {
+        let req = PerformOpReq::GetRootOfTrust(GetRootOfTrustRequest {
+            challenge: *challenge,
+        });
+
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+
+        if let None = result.rsp {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+        let result = match result.rsp.unwrap() {
+            PerformOpRsp::GetRootOfTrust(rsp) => rsp.ret,
+            _ => {
+                return Err(Status::new_service_specific_error(
+                    ErrorCode::UNKNOWN_ERROR.0,
+                    None,
+                ))
+            }
+        };
+
+        Result::Ok(result)
     }
 
-    fn sendRootOfTrust(&self, _arg_rootOfTrust: &[u8]) -> rsbinder::status::Result<()> {
-        todo!()
+    fn sendRootOfTrust(&self, root_of_trust: &[u8]) -> rsbinder::status::Result<()> {
+        let req = PerformOpReq::SendRootOfTrust(SendRootOfTrustRequest {
+            root_of_trust: root_of_trust.to_vec(),
+        });
+
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+
+        if result.error_code != 0 {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+
+        Result::Ok(())
     }
 
     fn setAdditionalAttestationInfo(
         &self,
-        _arg_info: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
+        info: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
     ) -> rsbinder::status::Result<()> {
-        todo!()
+        let additional_info: Result<Vec<KeyParam>> =
+            info.iter().cloned().map(|p| p.to_km()).collect();
+        let additional_info = additional_info
+            .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+            .map_err(map_ks_error)?;
+
+        let req = PerformOpReq::SetAdditionalAttestationInfo(SetAdditionalAttestationInfoRequest {
+            info: additional_info,
+        });
+
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+
+        if result.error_code != 0 {
+            return Err(Status::new_service_specific_error(result.error_code, None));
+        }
+
+        Result::Ok(())
     }
 }
 
@@ -727,6 +936,15 @@ impl KeyMintWrapper {
         Ok(KeyMintWrapper {
             security_level: security_level.clone(),
         })
+    }
+
+    pub fn get_hardware_info(
+        &self,
+    ) -> Result<keymint::KeyMintHardwareInfo, Error> {
+        get_keymint_device(self.security_level)
+            .unwrap()
+            .get_hardware_info()
+            .map_err(|_| Error::Km(ErrorCode::UNKNOWN_ERROR))
     }
 
     pub fn op_update_aad(

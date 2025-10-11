@@ -38,7 +38,7 @@ use crate::{
     },
     plat::property_watcher::PropertyWatcher,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use kmr_common::crypto::AES_256_KEY_LENGTH;
 use kmr_crypto_boring::km::*;
 use kmr_crypto_boring::zvec::ZVec;

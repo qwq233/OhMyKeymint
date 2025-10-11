@@ -907,6 +907,60 @@ impl KeymasterDb {
         Ok(())
     }
 
+    /// Updates the alias column of the given key id `newid` with the given alias,
+    /// and atomically, removes the alias, domain, and namespace from another row
+    /// with the same alias-domain-namespace tuple if such row exits.
+    /// Returns Ok(true) if an old key was marked unreferenced as a hint to the garbage
+    /// collector.
+    fn rebind_alias(
+        tx: &Transaction,
+        newid: &KeyIdGuard,
+        alias: &str,
+        domain: &Domain,
+        namespace: &i64,
+        key_type: KeyType,
+    ) -> Result<bool> {
+        match *domain {
+            Domain::APP | Domain::SELINUX => {}
+            _ => {
+                return Err(KsError::sys())
+                    .context(err!("Domain {:?} must be either App or SELinux.", domain));
+            }
+        }
+        let updated = tx
+            .execute(
+                "UPDATE persistent.keyentry
+                 SET alias = NULL, domain = NULL, namespace = NULL, state = ?
+                 WHERE alias = ? AND domain = ? AND namespace = ? AND key_type = ?;",
+                params![KeyLifeCycle::Unreferenced, alias, domain.0 as u32, namespace, key_type],
+            )
+            .context(err!("Failed to rebind existing entry."))?;
+        let result = tx
+            .execute(
+                "UPDATE persistent.keyentry
+                    SET alias = ?, state = ?
+                    WHERE id = ? AND domain = ? AND namespace = ? AND state = ? AND key_type = ?;",
+                params![
+                    alias,
+                    KeyLifeCycle::Live,
+                    newid.0,
+                    domain.0 as u32,
+                    *namespace,
+                    KeyLifeCycle::Existing,
+                    key_type,
+                ],
+            )
+            .context(err!("Failed to set alias."))?;
+        if result != 1 {
+            return Err(KsError::sys()).context(err!(
+                "Expected to update a single entry but instead updated {}.",
+                result
+            ));
+        }
+        Ok(updated != 0)
+    }
+
+
     /// Store a new key in a single transaction.
     /// The function creates a new key entry, populates the blob, key parameter, and metadata
     /// fields, and rebinds the given alias to the new key.
@@ -989,6 +1043,56 @@ impl KeymasterDb {
         })
         .context(err!())
     }
+
+    /// Store a new certificate
+    /// The function creates a new key entry, populates the blob field and metadata, and rebinds
+    /// the given alias to the new cert.
+    pub fn store_new_certificate(
+        &mut self,
+        key: &KeyDescriptor,
+        key_type: KeyType,
+        cert: &[u8],
+        km_uuid: &Uuid,
+    ) -> Result<KeyIdGuard> {
+        let _wp = wd::watch("KeystoreDB::store_new_certificate");
+
+        let (alias, domain, namespace) = match key {
+            KeyDescriptor { alias: Some(alias), domain: Domain::APP, nspace, blob: None }
+            | KeyDescriptor { alias: Some(alias), domain: Domain::SELINUX, nspace, blob: None } => {
+                (alias, key.domain, nspace)
+            }
+            _ => {
+                return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
+                    .context(err!("Need alias and domain must be APP or SELINUX."));
+            }
+        };
+        self.with_transaction(Immediate("TX_store_new_certificate"), |tx| {
+            let key_id = Self::create_key_entry_internal(tx, &domain, namespace, key_type, km_uuid)
+                .context("Trying to create new key entry.")?;
+
+            Self::set_blob_internal(
+                tx,
+                key_id.id(),
+                SubComponentType::CERT_CHAIN,
+                Some(cert),
+                None,
+            )
+            .context("Trying to insert certificate.")?;
+
+            let mut metadata = KeyMetaData::new();
+            metadata.add(KeyMetaEntry::CreationDate(
+                DateTime::now().context("Trying to make creation time.")?,
+            ));
+
+            metadata.store_in_db(key_id.id(), tx).context("Trying to insert key metadata.")?;
+
+            let need_gc = Self::rebind_alias(tx, &key_id, alias, &domain, namespace, key_type)
+                .context("Trying to rebind alias.")?;
+            Ok(key_id)
+        })
+        .context(err!())
+    }
+
 
     /// Loads super key of a given user, if exists
     pub fn load_super_key(
@@ -1306,6 +1410,272 @@ impl KeymasterDb {
             &[schema, table],
         )
     }
+
+    /// Returns a list of KeyDescriptors in the selected domain/namespace whose
+    /// aliases are greater than the specified 'start_past_alias'. If no value
+    /// is provided, returns all KeyDescriptors.
+    /// The key descriptors will have the domain, nspace, and alias field set.
+    /// The returned list will be sorted by alias.
+    /// Domain must be APP or SELINUX, the caller must make sure of that.
+    /// Number of returned values is limited to 10,000 (which is empirically roughly
+    /// what will fit in a Binder message).
+    pub fn list_past_alias(
+        &mut self,
+        domain: Domain,
+        namespace: i64,
+        key_type: KeyType,
+        start_past_alias: Option<&str>,
+    ) -> Result<Vec<KeyDescriptor>> {
+        let _wp = wd::watch("KeystoreDB::list_past_alias");
+
+        let query = format!(
+            "SELECT DISTINCT alias FROM persistent.keyentry
+                     WHERE domain = ?
+                     AND namespace = ?
+                     AND alias IS NOT NULL
+                     AND state = ?
+                     AND key_type = ?
+                     {}
+                     ORDER BY alias ASC
+                     LIMIT 10000;",
+            if start_past_alias.is_some() { " AND alias > ?" } else { "" }
+        );
+
+        self.with_transaction(TransactionBehavior::Deferred, |tx| {
+            let mut stmt = tx.prepare(&query).context(err!("Failed to prepare."))?;
+
+            let mut rows = match start_past_alias {
+                Some(past_alias) => stmt
+                    .query(params![
+                        domain.0 as u32,
+                        namespace,
+                        KeyLifeCycle::Live,
+                        key_type,
+                        past_alias
+                    ])
+                    .context(err!("Failed to query."))?,
+                None => stmt
+                    .query(params![domain.0 as u32, namespace, KeyLifeCycle::Live, key_type,])
+                    .context(err!("Failed to query."))?,
+            };
+
+            let mut descriptors: Vec<KeyDescriptor> = Vec::new();
+            utils::with_rows_extract_all(&mut rows, |row| {
+                descriptors.push(KeyDescriptor {
+                    domain,
+                    nspace: namespace,
+                    alias: Some(row.get(0).context("Trying to extract alias.")?),
+                    blob: None,
+                });
+                Ok(())
+            })
+            .context(err!("Failed to extract rows."))?;
+            Ok(descriptors)
+        })
+    }
+
+
+    /// Returns a number of KeyDescriptors in the selected domain/namespace.
+    /// Domain must be APP or SELINUX, the caller must make sure of that.
+    pub fn count_keys(
+        &mut self,
+        domain: Domain,
+        namespace: i64,
+        key_type: KeyType,
+    ) -> Result<usize> {
+        let _wp = wd::watch("KeystoreDB::countKeys");
+
+        let num_keys = self.with_transaction(TransactionBehavior::Deferred, |tx| {
+            tx.query_row(
+                "SELECT COUNT(alias) FROM persistent.keyentry
+                     WHERE domain = ?
+                     AND namespace = ?
+                     AND alias IS NOT NULL
+                     AND state = ?
+                     AND key_type = ?;",
+                params![domain.0 as u32, namespace, KeyLifeCycle::Live, key_type],
+                |row| row.get(0),
+            )
+            .context(err!("Failed to count number of keys."))
+        })?;
+        Ok(num_keys)
+    }
+
+
+    /// Adds a grant to the grant table.
+    /// Like `load_key_entry` this function loads the access tuple before
+    /// it uses the callback for a permission check. Upon success,
+    /// it inserts the `grantee_uid`, `key_id`, and `access_vector` into the
+    /// grant table. The new row will have a randomized id, which is used as
+    /// grant id in the namespace field of the resulting KeyDescriptor.
+    pub fn grant(
+        &mut self,
+        key: &KeyDescriptor,
+        caller_uid: u32,
+        grantee_uid: u32,
+        access_vector: KeyPermSet,
+    ) -> Result<KeyDescriptor> {
+        let _wp = wd::watch("KeystoreDB::grant");
+
+        self.with_transaction(Immediate("TX_grant"), |tx| {
+            // Load the key_id and complete the access control tuple.
+            // We ignore the access vector here because grants cannot be granted.
+            // The access vector returned here expresses the permissions the
+            // grantee has if key.domain == Domain::GRANT. But this vector
+            // cannot include the grant permission by design, so there is no way the
+            // subsequent permission check can pass.
+            // We could check key.domain == Domain::GRANT and fail early.
+            // But even if we load the access tuple by grant here, the permission
+            // check denies the attempt to create a grant by grant descriptor.
+            let access =
+                Self::load_access_tuple(tx, key, KeyType::Client, caller_uid).context(err!())?;
+
+            // Perform access control. It is vital that we return here if the permission
+            // was denied. So do not touch that '?' at the end of the line.
+            // This permission check checks if the caller has the grant permission
+            // for the given key and in addition to all of the permissions
+            // expressed in `access_vector`.
+            // check_permission(&access.descriptor, &access_vector)
+            //     .context(err!("check_permission failed"))?;
+
+            let grant_id = if let Some(grant_id) = tx
+                .query_row(
+                    "SELECT id FROM persistent.grant
+                WHERE keyentryid = ? AND grantee = ?;",
+                    params![access.key_id, grantee_uid],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context(err!("Failed get optional existing grant id."))?
+            {
+                tx.execute(
+                    "UPDATE persistent.grant
+                    SET access_vector = ?
+                    WHERE id = ?;",
+                    params![i32::from(access_vector), grant_id],
+                )
+                .context(err!("Failed to update existing grant."))?;
+                grant_id
+            } else {
+                Self::insert_with_retry(|id| {
+                    tx.execute(
+                        "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
+                        VALUES (?, ?, ?, ?);",
+                        params![id, grantee_uid, access.key_id, i32::from(access_vector)],
+                    )
+                })
+                .context(err!())?
+            };
+
+            Ok(KeyDescriptor { domain: Domain::GRANT, nspace: grant_id, alias: None, blob: None })
+        })
+    }
+
+    /// This function checks permissions like `grant` and `load_key_entry`
+    /// before removing a grant from the grant table.
+    pub fn ungrant(
+        &mut self,
+        key: &KeyDescriptor,
+        caller_uid: u32,
+        grantee_uid: u32,
+    ) -> Result<()> {
+        let _wp = wd::watch("KeystoreDB::ungrant");
+
+        self.with_transaction(Immediate("TX_ungrant"), |tx| {
+            // Load the key_id and complete the access control tuple.
+            // We ignore the access vector here because grants cannot be granted.
+            let access =
+                Self::load_access_tuple(tx, key, KeyType::Client, caller_uid).context(err!())?;
+
+            // Perform access control. We must return here if the permission
+            // was denied. So do not touch the '?' at the end of this line.
+            // check_permission(&access.descriptor).context(err!("check_permission failed."))?;
+
+            tx.execute(
+                "DELETE FROM persistent.grant
+                WHERE keyentryid = ? AND grantee = ?;",
+                params![access.key_id, grantee_uid],
+            )
+            .context("Failed to delete grant.")?;
+
+            Ok(())
+        })
+    }
+
+    /// Marks the given key as unreferenced and removes all of the grants to this key.
+    /// Returns Ok(true) if a key was marked unreferenced as a hint for the garbage collector.
+    pub fn unbind_key(
+        &mut self,
+        key: &KeyDescriptor,
+        key_type: KeyType,
+        caller_uid: u32,
+    ) -> Result<()> {
+        let _wp = wd::watch("KeystoreDB::unbind_key");
+
+        let _result = self.with_transaction(Immediate("TX_unbind_key"), |tx| {
+            let access = Self::load_access_tuple(tx, key, key_type, caller_uid)
+                .context("Trying to get access tuple.")?;
+
+            // Perform access control. It is vital that we return here if the permission is denied.
+            // So do not touch that '?' at the end.
+            // check_permission(&access.descriptor, access.vector)
+            //     .context("While checking permission.")?;
+
+            Self::mark_unreferenced(tx, access.key_id)
+                .context("Trying to mark the key unreferenced.")
+        })
+        .context(err!())?;
+
+        Ok(())
+    }
+
+    /// Delete all artifacts belonging to the namespace given by the domain-namespace tuple.
+    /// This leaves all of the blob entries orphaned for subsequent garbage collection.
+    pub fn unbind_keys_for_namespace(&mut self, domain: Domain, namespace: i64) -> Result<()> {
+        let _wp = wd::watch("KeystoreDB::unbind_keys_for_namespace");
+
+        if !(domain == Domain::APP || domain == Domain::SELINUX) {
+            return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!());
+        }
+        self.with_transaction(Immediate("TX_unbind_keys_for_namespace"), |tx| {
+            tx.execute(
+                "DELETE FROM persistent.keymetadata
+                WHERE keyentryid IN (
+                    SELECT id FROM persistent.keyentry
+                    WHERE domain = ? AND namespace = ? AND key_type = ?
+                );",
+                params![domain.0, namespace, KeyType::Client],
+            )
+            .context("Trying to delete keymetadata.")?;
+            tx.execute(
+                "DELETE FROM persistent.keyparameter
+                WHERE keyentryid IN (
+                    SELECT id FROM persistent.keyentry
+                    WHERE domain = ? AND namespace = ? AND key_type = ?
+                );",
+                params![domain.0, namespace, KeyType::Client],
+            )
+            .context("Trying to delete keyparameters.")?;
+            tx.execute(
+                "DELETE FROM persistent.grant
+                WHERE keyentryid IN (
+                    SELECT id FROM persistent.keyentry
+                    WHERE domain = ? AND namespace = ? AND key_type = ?
+                );",
+                params![domain.0, namespace, KeyType::Client],
+            )
+            .context("Trying to delete grants.")?;
+            tx.execute(
+                "DELETE FROM persistent.keyentry
+                 WHERE domain = ? AND namespace = ? AND key_type = ?;",
+                params![domain.0, namespace, KeyType::Client],
+            )
+            .context("Trying to delete keyentry.")?;
+            Ok(())
+        })
+        .context(err!())
+    }
+
 
     /// Fetches a storage statistics atom for a given storage type. For storage
     /// types that map to a table, information about the table's storage is
@@ -1716,6 +2086,12 @@ impl BlobMetaData {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Uuid([u8; 16]);
 
+impl From<SecurityLevel> for Uuid {
+    fn from(sec_level: SecurityLevel) -> Self {
+        Self((sec_level.0 as u128).to_be_bytes())
+    }
+}
+
 impl Deref for Uuid {
     type Target = [u8; 16];
 
@@ -1725,7 +2101,7 @@ impl Deref for Uuid {
 }
 
 impl ToSql for Uuid {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         self.0.to_sql()
     }
 }
@@ -1824,7 +2200,7 @@ impl DateTime {
 }
 
 impl ToSql for DateTime {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::Owned(Value::Integer(self.0)))
     }
 }
@@ -1891,7 +2267,7 @@ enum BlobState {
 }
 
 impl ToSql for BlobState {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         match self {
             Self::Current => Ok(ToSqlOutput::Owned(Value::Integer(0))),
             Self::Superseded => Ok(ToSqlOutput::Owned(Value::Integer(1))),
@@ -2149,7 +2525,7 @@ impl SubComponentType {
 }
 
 impl ToSql for SubComponentType {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         self.0.to_sql()
     }
 }
