@@ -48,22 +48,20 @@ use rsbinder::{thread_state::CallingContext, Interface, Status};
 // Blob of 32 zeroes used as empty masking key.
 static ZERO_BLOB_32: &[u8] = &[0; 32];
 
-pub struct KeystoreSecurityLevel<'a> {
+pub struct KeystoreSecurityLevel {
     security_level: SecurityLevel,
     hw_info: HardwareInfo,
     km_uuid: Uuid,
     operation_db: OperationDb,
-    keymint: &'a dyn IKeyMintDevice,
 }
 
-impl<'a> KeystoreSecurityLevel<'a> {
+impl KeystoreSecurityLevel {
     pub fn new(security_level: SecurityLevel, hw_info: HardwareInfo, km_uuid: Uuid) -> Self {
         KeystoreSecurityLevel {
             security_level,
             hw_info,
             km_uuid,
             operation_db: OperationDb::new(),
-            keymint: get_keymint_wrapper(security_level).unwrap(),
         }
     }
 
@@ -220,7 +218,7 @@ impl<'a> KeystoreSecurityLevel<'a> {
         F: Fn(&[u8]) -> Result<T, KsError>,
     {
         let (v, upgraded_blob) = crate::keymaster::utils::upgrade_keyblob_if_required_with(
-            get_keymint_wrapper(self.security_level).unwrap(),
+            self.security_level,
             self.hw_info.version_number,
             key_blob,
             params,
@@ -431,7 +429,9 @@ impl<'a> KeystoreSecurityLevel<'a> {
                             ),
                             5000, // Generate can take a little longer.
                         );
-                        let result = self.keymint.generateKey(&params, attest_key.as_ref());
+                        let result = get_keymint_wrapper(self.security_level)
+                            .unwrap()
+                            .generateKey(&params, attest_key.as_ref());
                         map_binder_status(result)
                     },
                 )
@@ -449,7 +449,9 @@ impl<'a> KeystoreSecurityLevel<'a> {
                     ),
                     5000, // Generate can take a little longer.
                 );
-                self.keymint.generateKey(&params, None)
+                get_keymint_wrapper(self.security_level)
+                    .unwrap()
+                    .generateKey(&params, None)
             }
             .context(err!(
                 "While generating without a provided \
@@ -513,7 +515,7 @@ impl<'a> KeystoreSecurityLevel<'a> {
             })
             .context(err!())?;
 
-        let km_dev = &self.keymint;
+        let km_dev = get_keymint_wrapper(self.security_level).unwrap();
         let creation_result = map_binder_status({
             let _wp =
                 self.watch("KeystoreSecurityLevel::import_key: calling IKeyMintDevice::importKey.");
@@ -645,7 +647,8 @@ impl<'a> KeystoreSecurityLevel<'a> {
                     let _wp = self.watch(
                         "KeystoreSecurityLevel::import_wrapped_key: calling IKeyMintDevice::importWrappedKey.",
                     );
-                    let creation_result = map_binder_status(self.keymint.importWrappedKey(
+                    let km_dev = get_keymint_wrapper(self.security_level).unwrap();
+                    let creation_result = map_binder_status(km_dev.importWrappedKey(
                         wrapped_data,
                         wrapping_blob,
                         masking_key,
@@ -680,7 +683,7 @@ impl<'a> KeystoreSecurityLevel<'a> {
         // check_key_permission(KeyPerm::ConvertStorageKeyToEphemeral, storage_key, &None)
         //     .context(err!("Check permission"))?;
 
-        let km_dev = &self.keymint;
+        let km_dev = get_keymint_wrapper(self.security_level).unwrap();
         let res = {
             let _wp = self.watch(concat!(
                 "IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: ",
@@ -839,7 +842,8 @@ impl<'a> KeystoreSecurityLevel<'a> {
                         let _wp = self.watch(
                             "KeystoreSecurityLevel::create_operation: calling IKeyMintDevice::begin",
                         );
-                        self.keymint.begin(
+                        let km_dev = get_keymint_wrapper(self.security_level).unwrap();
+                        km_dev.begin(
                             purpose,
                             blob,
                             operation_parameters,
@@ -934,7 +938,7 @@ impl<'a> KeystoreSecurityLevel<'a> {
         // check_key_permission(KeyPerm::Delete, key, &None)
         //     .context(err!("delete_key: Checking delete permissions"))?;
 
-        let km_dev = &self.keymint;
+        let km_dev = get_keymint_wrapper(self.security_level).unwrap();
         {
             let _wp =
                 self.watch("KeystoreSecuritylevel::delete_key: calling IKeyMintDevice::deleteKey");
@@ -943,9 +947,9 @@ impl<'a> KeystoreSecurityLevel<'a> {
     }
 }
 
-impl<'a> Interface for KeystoreSecurityLevel<'a> {}
+impl Interface for KeystoreSecurityLevel {}
 
-impl<'a> IKeystoreSecurityLevel for KeystoreSecurityLevel<'a> {
+impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
     fn createOperation(
         &self,
         key: &KeyDescriptor,
