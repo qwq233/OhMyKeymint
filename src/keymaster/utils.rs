@@ -1,12 +1,19 @@
+use std::result;
+
 use crate::{
-    android::hardware::security::keymint::{
-        ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice,
-        KeyCharacteristics::KeyCharacteristics, KeyParameter::KeyParameter as KmKeyParameter,
-        KeyParameterValue::KeyParameterValue,
+    android::hardware::security::{
+        self,
+        keymint::{
+            ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice,
+            KeyCharacteristics::KeyCharacteristics, KeyParameter::KeyParameter as KmKeyParameter,
+            KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
+        },
     },
     consts, err,
     keymaster::{
-        error::KsError as Error, key_parameter::KeyParameter, keymint_device::KeyMintDevice,
+        error::{KsError as Error, map_ks_error},
+        key_parameter::KeyParameter,
+        keymint_device::{KeyMintDevice, get_keymint_wrapper},
     },
     watchdog,
 };
@@ -41,7 +48,7 @@ pub fn key_characteristics_to_internal(
 /// Upgrade a keyblob then invoke both the `new_blob_handler` and the `km_op` closures.  On success
 /// a tuple of the `km_op`s result and the optional upgraded blob is returned.
 fn upgrade_keyblob_and_perform_op<T, KmOp, NewBlobHandler>(
-    km_dev: &dyn IKeyMintDevice,
+    security_level: SecurityLevel,
     key_blob: &[u8],
     upgrade_params: &[KmKeyParameter],
     km_op: KmOp,
@@ -51,6 +58,7 @@ where
     KmOp: Fn(&[u8]) -> Result<T, Error>,
     NewBlobHandler: FnOnce(&[u8]) -> Result<()>,
 {
+    let km_dev = get_keymint_wrapper(security_level).unwrap();
     let upgraded_blob = {
         let _wp = watchdog::watch(
             "utils::upgrade_keyblob_and_perform_op: calling IKeyMintDevice::upgradeKey.",
@@ -73,7 +81,7 @@ where
 /// upgraded blob as argument. On success a tuple of the `km_op`s result and the
 /// optional upgraded blob is returned.
 pub fn upgrade_keyblob_if_required_with<T, KmOp, NewBlobHandler>(
-    km_dev: &dyn IKeyMintDevice,
+    security_level: SecurityLevel,
     km_dev_version: i32,
     key_blob: &[u8],
     upgrade_params: &[KmKeyParameter],
@@ -86,7 +94,7 @@ where
 {
     match km_op(key_blob) {
         Err(Error::Km(ErrorCode::KEY_REQUIRES_UPGRADE)) => upgrade_keyblob_and_perform_op(
-            km_dev,
+            security_level,
             key_blob,
             upgrade_params,
             km_op,
@@ -115,7 +123,7 @@ where
                 );
                 let inner_keyblob = &key_blob[consts::KEYMASTER_BLOB_HW_PREFIX.len()..];
                 upgrade_keyblob_and_perform_op(
-                    km_dev,
+                    security_level,
                     inner_keyblob,
                     upgrade_params,
                     km_op,
@@ -597,4 +605,339 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
             }
         }
     }
+}
+
+pub fn key_creation_result_to_aidl(
+    result: kmr_wire::keymint::KeyCreationResult,
+) -> Result<crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult, rsbinder::Status> {
+
+        let certificates: Vec<
+            crate::android::hardware::security::keymint::Certificate::Certificate,
+        > = result
+            .certificate_chain
+            .iter()
+            .map(
+                |c| crate::android::hardware::security::keymint::Certificate::Certificate {
+                    encodedCertificate: c.encoded_certificate.clone(),
+                },
+            )
+            .collect();
+
+        let key_characteristics: Result<Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>, rsbinder::Status> = result.key_characteristics.iter().map(|kc| {
+            let params: Result<Vec<crate::android::hardware::security::keymint::KeyParameter::KeyParameter>, rsbinder::Status> = kc.authorizations.iter().map(|p| {
+                    key_param_to_aidl(p.clone())
+                        .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+                        .map_err(|e| map_ks_error(e))
+            }).collect();
+            let params = params?;
+
+            Result::Ok(crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics {
+                authorizations: params,
+                securityLevel: match kc.security_level {
+                    kmr_wire::keymint::SecurityLevel::Software => SecurityLevel::SOFTWARE,
+                    kmr_wire::keymint::SecurityLevel::TrustedEnvironment => {
+                        SecurityLevel::TRUSTED_ENVIRONMENT
+                    }
+                    kmr_wire::keymint::SecurityLevel::Strongbox => SecurityLevel::STRONGBOX,
+                    _ => {
+                        return Err(rsbinder::Status::new_service_specific_error(
+                            ErrorCode::UNKNOWN_ERROR.0,
+                            None,
+                        ))
+                    }
+                },
+            })
+
+        }).collect();
+        let key_characteristics = key_characteristics?;
+
+        let resp =
+            crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult {
+                keyBlob: result.key_blob,
+                keyCharacteristics: key_characteristics,
+                certificateChain: certificates,
+            };
+
+        Result::Ok(resp)
+}
+
+pub fn key_param_to_aidl(
+    kp: KeyParam,
+) -> Result<crate::android::hardware::security::keymint::KeyParameter::KeyParameter> {
+    let tag = match kp.tag() {
+        keymint::Tag::Invalid => crate::android::hardware::security::keymint::Tag::Tag::INVALID,
+        keymint::Tag::Purpose => crate::android::hardware::security::keymint::Tag::Tag::PURPOSE,
+        keymint::Tag::Algorithm => crate::android::hardware::security::keymint::Tag::Tag::ALGORITHM,
+        keymint::Tag::KeySize => crate::android::hardware::security::keymint::Tag::Tag::KEY_SIZE,
+        keymint::Tag::BlockMode => {
+            crate::android::hardware::security::keymint::Tag::Tag::BLOCK_MODE
+        }
+        keymint::Tag::Digest => crate::android::hardware::security::keymint::Tag::Tag::DIGEST,
+        keymint::Tag::Padding => crate::android::hardware::security::keymint::Tag::Tag::PADDING,
+        keymint::Tag::CallerNonce => {
+            crate::android::hardware::security::keymint::Tag::Tag::CALLER_NONCE
+        }
+        keymint::Tag::MinMacLength => {
+            crate::android::hardware::security::keymint::Tag::Tag::MIN_MAC_LENGTH
+        }
+        keymint::Tag::EcCurve => crate::android::hardware::security::keymint::Tag::Tag::EC_CURVE,
+        keymint::Tag::RsaPublicExponent => {
+            crate::android::hardware::security::keymint::Tag::Tag::RSA_PUBLIC_EXPONENT
+        }
+        keymint::Tag::IncludeUniqueId => {
+            crate::android::hardware::security::keymint::Tag::Tag::INCLUDE_UNIQUE_ID
+        }
+        keymint::Tag::RsaOaepMgfDigest => {
+            crate::android::hardware::security::keymint::Tag::Tag::RSA_OAEP_MGF_DIGEST
+        }
+        keymint::Tag::BootloaderOnly => {
+            crate::android::hardware::security::keymint::Tag::Tag::BOOTLOADER_ONLY
+        }
+        keymint::Tag::RollbackResistance => {
+            crate::android::hardware::security::keymint::Tag::Tag::ROLLBACK_RESISTANCE
+        }
+        keymint::Tag::HardwareType => {
+            crate::android::hardware::security::keymint::Tag::Tag::HARDWARE_TYPE
+        }
+        keymint::Tag::EarlyBootOnly => {
+            crate::android::hardware::security::keymint::Tag::Tag::EARLY_BOOT_ONLY
+        }
+        keymint::Tag::ActiveDatetime => {
+            crate::android::hardware::security::keymint::Tag::Tag::ACTIVE_DATETIME
+        }
+        keymint::Tag::OriginationExpireDatetime => {
+            crate::android::hardware::security::keymint::Tag::Tag::ORIGINATION_EXPIRE_DATETIME
+        }
+        keymint::Tag::UsageExpireDatetime => {
+            crate::android::hardware::security::keymint::Tag::Tag::USAGE_EXPIRE_DATETIME
+        }
+        keymint::Tag::MinSecondsBetweenOps => {
+            crate::android::hardware::security::keymint::Tag::Tag::MIN_SECONDS_BETWEEN_OPS
+        }
+        keymint::Tag::MaxUsesPerBoot => {
+            crate::android::hardware::security::keymint::Tag::Tag::MAX_USES_PER_BOOT
+        }
+        keymint::Tag::UsageCountLimit => {
+            crate::android::hardware::security::keymint::Tag::Tag::USAGE_COUNT_LIMIT
+        }
+        keymint::Tag::UserId => crate::android::hardware::security::keymint::Tag::Tag::USER_ID,
+        keymint::Tag::UserSecureId => {
+            crate::android::hardware::security::keymint::Tag::Tag::USER_SECURE_ID
+        }
+        keymint::Tag::NoAuthRequired => {
+            crate::android::hardware::security::keymint::Tag::Tag::NO_AUTH_REQUIRED
+        }
+        keymint::Tag::UserAuthType => {
+            crate::android::hardware::security::keymint::Tag::Tag::USER_AUTH_TYPE
+        }
+        keymint::Tag::AuthTimeout => {
+            crate::android::hardware::security::keymint::Tag::Tag::AUTH_TIMEOUT
+        }
+        keymint::Tag::AllowWhileOnBody => {
+            crate::android::hardware::security::keymint::Tag::Tag::ALLOW_WHILE_ON_BODY
+        }
+        keymint::Tag::TrustedUserPresenceRequired => {
+            crate::android::hardware::security::keymint::Tag::Tag::TRUSTED_USER_PRESENCE_REQUIRED
+        }
+        keymint::Tag::TrustedConfirmationRequired => {
+            crate::android::hardware::security::keymint::Tag::Tag::TRUSTED_CONFIRMATION_REQUIRED
+        }
+        keymint::Tag::UnlockedDeviceRequired => {
+            crate::android::hardware::security::keymint::Tag::Tag::UNLOCKED_DEVICE_REQUIRED
+        }
+        keymint::Tag::ApplicationId => {
+            crate::android::hardware::security::keymint::Tag::Tag::APPLICATION_ID
+        }
+        keymint::Tag::ApplicationData => {
+            crate::android::hardware::security::keymint::Tag::Tag::APPLICATION_DATA
+        }
+        keymint::Tag::CreationDatetime => {
+            crate::android::hardware::security::keymint::Tag::Tag::CREATION_DATETIME
+        }
+        keymint::Tag::Origin => crate::android::hardware::security::keymint::Tag::Tag::ORIGIN,
+        keymint::Tag::RootOfTrust => {
+            crate::android::hardware::security::keymint::Tag::Tag::ROOT_OF_TRUST
+        }
+        keymint::Tag::OsVersion => {
+            crate::android::hardware::security::keymint::Tag::Tag::OS_VERSION
+        }
+        keymint::Tag::OsPatchlevel => {
+            crate::android::hardware::security::keymint::Tag::Tag::OS_PATCHLEVEL
+        }
+        keymint::Tag::UniqueId => crate::android::hardware::security::keymint::Tag::Tag::UNIQUE_ID,
+        keymint::Tag::AttestationChallenge => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_CHALLENGE
+        }
+        keymint::Tag::AttestationApplicationId => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_APPLICATION_ID
+        }
+        keymint::Tag::AttestationIdBrand => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_ID_BRAND
+        }
+        keymint::Tag::AttestationIdDevice => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_ID_DEVICE
+        }
+        keymint::Tag::AttestationIdProduct => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_ID_PRODUCT
+        }
+        keymint::Tag::AttestationIdSerial => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_ID_SERIAL
+        }
+        keymint::Tag::AttestationIdImei => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_ID_IMEI
+        }
+        keymint::Tag::AttestationIdMeid => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_ID_MEID
+        }
+        keymint::Tag::AttestationIdManufacturer => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_ID_MANUFACTURER
+        }
+        keymint::Tag::AttestationIdModel => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_ID_MODEL
+        }
+        keymint::Tag::VendorPatchlevel => {
+            crate::android::hardware::security::keymint::Tag::Tag::VENDOR_PATCHLEVEL
+        }
+        keymint::Tag::BootPatchlevel => {
+            crate::android::hardware::security::keymint::Tag::Tag::BOOT_PATCHLEVEL
+        }
+        keymint::Tag::DeviceUniqueAttestation => {
+            crate::android::hardware::security::keymint::Tag::Tag::DEVICE_UNIQUE_ATTESTATION
+        }
+        keymint::Tag::IdentityCredentialKey => {
+            crate::android::hardware::security::keymint::Tag::Tag::IDENTITY_CREDENTIAL_KEY
+        }
+        keymint::Tag::StorageKey => {
+            crate::android::hardware::security::keymint::Tag::Tag::STORAGE_KEY
+        }
+        keymint::Tag::AttestationIdSecondImei => {
+            crate::android::hardware::security::keymint::Tag::Tag::ATTESTATION_ID_SECOND_IMEI
+        }
+        keymint::Tag::AssociatedData => {
+            crate::android::hardware::security::keymint::Tag::Tag::ASSOCIATED_DATA
+        }
+        keymint::Tag::Nonce => crate::android::hardware::security::keymint::Tag::Tag::NONCE,
+        keymint::Tag::MacLength => {
+            crate::android::hardware::security::keymint::Tag::Tag::MAC_LENGTH
+        }
+        keymint::Tag::ResetSinceIdRotation => {
+            crate::android::hardware::security::keymint::Tag::Tag::RESET_SINCE_ID_ROTATION
+        }
+        keymint::Tag::ConfirmationToken => {
+            crate::android::hardware::security::keymint::Tag::Tag::CONFIRMATION_TOKEN
+        }
+        keymint::Tag::CertificateSerial => {
+            crate::android::hardware::security::keymint::Tag::Tag::CERTIFICATE_SERIAL
+        }
+        keymint::Tag::CertificateSubject => {
+            crate::android::hardware::security::keymint::Tag::Tag::CERTIFICATE_SUBJECT
+        }
+        keymint::Tag::CertificateNotBefore => {
+            crate::android::hardware::security::keymint::Tag::Tag::CERTIFICATE_NOT_BEFORE
+        }
+        keymint::Tag::CertificateNotAfter => {
+            crate::android::hardware::security::keymint::Tag::Tag::CERTIFICATE_NOT_AFTER
+        }
+        keymint::Tag::MaxBootLevel => {
+            crate::android::hardware::security::keymint::Tag::Tag::MAX_BOOT_LEVEL
+        }
+        keymint::Tag::ModuleHash => {
+            crate::android::hardware::security::keymint::Tag::Tag::MODULE_HASH
+        }
+    };
+
+    let value = match kp {
+        KeyParam::Purpose(v) => KeyParameterValue::KeyPurpose(
+            crate::android::hardware::security::keymint::KeyPurpose::KeyPurpose(v as i32),
+        ),
+        KeyParam::Algorithm(v) => KeyParameterValue::Algorithm(
+            crate::android::hardware::security::keymint::Algorithm::Algorithm(v as i32),
+        ),
+        KeyParam::KeySize(KeySizeInBits(v)) => KeyParameterValue::Integer(v as i32),
+        KeyParam::BlockMode(v) => KeyParameterValue::BlockMode(
+            crate::android::hardware::security::keymint::BlockMode::BlockMode(v as i32),
+        ),
+        KeyParam::Digest(v) => KeyParameterValue::Digest(
+            crate::android::hardware::security::keymint::Digest::Digest(v as i32),
+        ),
+        KeyParam::Padding(v) => KeyParameterValue::PaddingMode(
+            crate::android::hardware::security::keymint::PaddingMode::PaddingMode(v as i32),
+        ),
+        KeyParam::CallerNonce => KeyParameterValue::BoolValue(true),
+        KeyParam::MinMacLength(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::EcCurve(v) => KeyParameterValue::EcCurve(
+            crate::android::hardware::security::keymint::EcCurve::EcCurve(v as i32),
+        ),
+        KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(v)) => {
+            KeyParameterValue::LongInteger(v as i64)
+        }
+        KeyParam::IncludeUniqueId => KeyParameterValue::BoolValue(true),
+        KeyParam::RsaOaepMgfDigest(v) => KeyParameterValue::Digest(
+            crate::android::hardware::security::keymint::Digest::Digest(v as i32),
+        ),
+        KeyParam::BootloaderOnly => KeyParameterValue::BoolValue(true),
+        KeyParam::RollbackResistance => KeyParameterValue::BoolValue(true),
+        KeyParam::EarlyBootOnly => KeyParameterValue::BoolValue(true),
+        KeyParam::ActiveDatetime(kmr_wire::keymint::DateTime { ms_since_epoch }) => {
+            KeyParameterValue::DateTime(ms_since_epoch)
+        }
+        KeyParam::OriginationExpireDatetime(kmr_wire::keymint::DateTime { ms_since_epoch }) => {
+            KeyParameterValue::DateTime(ms_since_epoch)
+        }
+        KeyParam::UsageExpireDatetime(kmr_wire::keymint::DateTime { ms_since_epoch }) => {
+            KeyParameterValue::DateTime(ms_since_epoch)
+        }
+        KeyParam::MaxUsesPerBoot(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::UsageCountLimit(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::UserId(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::UserSecureId(v) => KeyParameterValue::LongInteger(v as i64),
+        KeyParam::NoAuthRequired => KeyParameterValue::BoolValue(true),
+        KeyParam::UserAuthType(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::AuthTimeout(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::AllowWhileOnBody => KeyParameterValue::BoolValue(true),
+        KeyParam::TrustedUserPresenceRequired => KeyParameterValue::BoolValue(true),
+        KeyParam::TrustedConfirmationRequired => KeyParameterValue::BoolValue(true),
+        KeyParam::UnlockedDeviceRequired => KeyParameterValue::BoolValue(true),
+        KeyParam::ApplicationId(v) => KeyParameterValue::Blob(v),
+        KeyParam::ApplicationData(v) => KeyParameterValue::Blob(v),
+        KeyParam::CreationDatetime(kmr_wire::keymint::DateTime { ms_since_epoch }) => {
+            KeyParameterValue::DateTime(ms_since_epoch)
+        }
+        KeyParam::Origin(v) => KeyParameterValue::Origin(
+            crate::android::hardware::security::keymint::KeyOrigin::KeyOrigin(v as i32),
+        ),
+        KeyParam::RootOfTrust(v) => KeyParameterValue::Blob(v),
+        KeyParam::OsVersion(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::OsPatchlevel(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::AttestationChallenge(v) => KeyParameterValue::Blob(v),
+        KeyParam::AttestationApplicationId(v) => KeyParameterValue::Blob(v),
+        KeyParam::AttestationIdBrand(v) => KeyParameterValue::Blob(v),
+        KeyParam::AttestationIdDevice(v) => KeyParameterValue::Blob(v),
+        KeyParam::AttestationIdProduct(v) => KeyParameterValue::Blob(v),
+        KeyParam::AttestationIdSerial(v) => KeyParameterValue::Blob(v),
+        KeyParam::AttestationIdImei(v) => KeyParameterValue::Blob(v),
+        KeyParam::AttestationIdMeid(v) => KeyParameterValue::Blob(v),
+        KeyParam::AttestationIdManufacturer(v) => KeyParameterValue::Blob(v),
+        KeyParam::AttestationIdModel(v) => KeyParameterValue::Blob(v),
+        KeyParam::VendorPatchlevel(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::BootPatchlevel(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::DeviceUniqueAttestation => KeyParameterValue::BoolValue(true),
+        KeyParam::StorageKey => KeyParameterValue::BoolValue(true),
+        KeyParam::AttestationIdSecondImei(v) => KeyParameterValue::Blob(v),
+        KeyParam::Nonce(v) => KeyParameterValue::Blob(v),
+        KeyParam::MacLength(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::ResetSinceIdRotation => KeyParameterValue::BoolValue(true),
+        KeyParam::CertificateSerial(v) => KeyParameterValue::Blob(v),
+        KeyParam::CertificateSubject(v) => KeyParameterValue::Blob(v),
+        KeyParam::CertificateNotBefore(kmr_wire::keymint::DateTime { ms_since_epoch }) => {
+            KeyParameterValue::DateTime(ms_since_epoch)
+        }
+        KeyParam::CertificateNotAfter(kmr_wire::keymint::DateTime { ms_since_epoch }) => {
+            KeyParameterValue::DateTime(ms_since_epoch)
+        }
+        KeyParam::MaxBootLevel(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::ModuleHash(v) => KeyParameterValue::Blob(v),
+    };
+
+    Ok(crate::android::hardware::security::keymint::KeyParameter::KeyParameter { tag, value })
 }

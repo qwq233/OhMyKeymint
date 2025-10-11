@@ -98,6 +98,9 @@ struct AttestationChainInfo {
     issuer: Vec<u8>,
 }
 
+unsafe impl Send for KeyMintTa {}
+unsafe impl Sync for KeyMintTa {}
+
 /// KeyMint device implementation, running in secure environment.
 pub struct KeyMintTa {
     /**

@@ -194,7 +194,7 @@ macro_rules! impl_metadata {
         }
 
         impl rusqlite::types::ToSql for $entry {
-            fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput> {
+            fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
                 match self {
                     $($entry::$vname(v) => v.to_sql(),)*
                 }

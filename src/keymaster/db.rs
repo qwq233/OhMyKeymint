@@ -956,19 +956,6 @@ impl KeymasterDb {
             // database here and then immediately replaced by the superseding blob.
             // The garbage collector will then subject the blob to deleteKey of the
             // KM back end to permanently invalidate the key.
-            let need_gc = if let Some((blob, blob_metadata)) = superseded_blob {
-                Self::set_blob_internal(
-                    tx,
-                    key_id.id(),
-                    SubComponentType::KEY_BLOB,
-                    Some(blob),
-                    Some(blob_metadata),
-                )
-                .context("Trying to insert superseded key blob.")?;
-                true
-            } else {
-                false
-            };
 
             Self::set_blob_internal(
                 tx,

@@ -1,15 +1,12 @@
 use kmr_wire::keymint::KeyParam;
-use rsbinder::{Interface, Strong};
+use rsbinder::Interface;
 
 use crate::{
     android::hardware::security::keymint::{
         HardwareAuthToken::HardwareAuthToken, IKeyMintOperation::IKeyMintOperation,
         SecurityLevel::SecurityLevel,
     },
-    keymaster::{
-        error::map_ks_error,
-        keymint_device::{get_keymint_wrapper, KeyMintWrapper},
-    },
+    keymaster::{error::map_ks_error, keymint_device::get_keymint_wrapper},
 };
 
 pub struct KeyMintOperation {

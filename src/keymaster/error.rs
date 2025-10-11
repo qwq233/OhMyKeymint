@@ -61,7 +61,7 @@ pub fn map_ks_error(r: KsError) -> Status {
         KsError::Km(ec) => {
             Status::new_service_specific_error(ec.0, format!("KeymintError: {:?}", ec).into())
         }
-        KsError::Binder(ec, se) => Status::from(ec),
+        KsError::Binder(ec, _se) => Status::from(ec),
         KsError::BinderTransaction(sc) => Status::from(sc),
     }
 }
