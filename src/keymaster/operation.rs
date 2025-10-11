@@ -328,7 +328,7 @@ impl Operation {
     // the locked outcome for further updates. In any other case it returns
     // ErrorCode::INVALID_OPERATION_HANDLE indicating that this operation has
     // been finalized and is no longer active.
-    fn check_active(&self) -> Result<MutexGuard<Outcome>> {
+    fn check_active(&self) -> Result<MutexGuard<'_, Outcome>> {
         let guard = self.outcome.lock().expect("In check_active.");
         match *guard {
             Outcome::Unknown => Ok(guard),

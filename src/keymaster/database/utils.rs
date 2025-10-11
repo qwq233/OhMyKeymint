@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{types::FromSql, Row, Rows};
 
-use crate::keymaster::error::KsError;
+use crate::{android::system::keystore2::{Domain::Domain, KeyDescriptor::KeyDescriptor}, err, keymaster::{db::{KeyType, KeymasterDb}, error::KsError}};
 
 // Takes Rows as returned by a query call on prepared statement.
 // Extracts exactly one row with the `row_extractor` and fails if more
@@ -41,6 +41,78 @@ where
             None => break Ok(()),
         }
     }
+}
+
+const RESPONSE_SIZE_LIMIT: usize = 358400; // 350KB
+
+fn estimate_safe_amount_to_return(
+    domain: Domain,
+    namespace: i64,
+    start_past_alias: Option<&str>,
+    key_descriptors: &[KeyDescriptor],
+    response_size_limit: usize,
+) -> usize {
+    let mut count = 0;
+    let mut bytes: usize = 0;
+    // Estimate the transaction size to avoid returning more items than what
+    // could fit in a binder transaction.
+    for kd in key_descriptors.iter() {
+        // 4 bytes for the Domain enum
+        // 8 bytes for the Namespace long.
+        bytes += 4 + 8;
+        // Size of the alias string. Includes 4 bytes for length encoding.
+        if let Some(alias) = &kd.alias {
+            bytes += 4 + alias.len();
+        }
+        // Size of the blob. Includes 4 bytes for length encoding.
+        if let Some(blob) = &kd.blob {
+            bytes += 4 + blob.len();
+        }
+        // The binder transaction size limit is 1M. Empirical measurements show
+        // that the binder overhead is 60% (to be confirmed). So break after
+        // 350KB and return a partial list.
+        if bytes > response_size_limit {
+            log::warn!(
+                "{domain:?}:{namespace}: Key descriptors list ({} items after {start_past_alias:?}) \
+                 may exceed binder size, returning {count} items est. {bytes} bytes",
+                key_descriptors.len(),
+            );
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
+/// List all key aliases for a given domain + namespace. whose alias is greater
+/// than start_past_alias (if provided).
+pub fn list_key_entries(
+    db: &mut KeymasterDb,
+    domain: Domain,
+    namespace: i64,
+    start_past_alias: Option<&str>,
+) -> Result<Vec<KeyDescriptor>> {
+    // The results from the database will be sorted and unique
+    let db_key_descriptors: Vec<KeyDescriptor> = db
+        .list_past_alias(domain, namespace, KeyType::Client, start_past_alias)
+        .context(err!("Trying to list keystore database past alias."))?;
+
+
+    let safe_amount_to_return = estimate_safe_amount_to_return(
+        domain,
+        namespace,
+        start_past_alias,
+        &db_key_descriptors,
+        RESPONSE_SIZE_LIMIT,
+    );
+    Ok(db_key_descriptors[..safe_amount_to_return].to_vec())
+}
+
+/// Count all key aliases for a given domain + namespace.
+pub fn count_key_entries(db: &mut KeymasterDb, domain: Domain, namespace: i64) -> Result<i32> {
+    let num_keys_in_db = db.count_keys(domain, namespace, KeyType::Client)?;
+
+    Ok(num_keys_in_db as i32)
 }
 
 /// This struct is defined to postpone converting rusqlite column value to the

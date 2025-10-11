@@ -41,7 +41,7 @@ use crate::keymaster::key_parameter::KeyParameterValue as KsKeyParamValue;
 use crate::watchdog as wd;
 
 use anyhow::{anyhow, Context, Result};
-use kmr_ta::HardwareInfo;
+use kmr_wire::keymint::KeyMintHardwareInfo;
 use log::debug;
 use rsbinder::{thread_state::CallingContext, Interface, Status};
 
@@ -50,19 +50,26 @@ static ZERO_BLOB_32: &[u8] = &[0; 32];
 
 pub struct KeystoreSecurityLevel {
     security_level: SecurityLevel,
-    hw_info: HardwareInfo,
+    hw_info: KeyMintHardwareInfo,
     km_uuid: Uuid,
     operation_db: OperationDb,
 }
 
 impl KeystoreSecurityLevel {
-    pub fn new(security_level: SecurityLevel, hw_info: HardwareInfo, km_uuid: Uuid) -> Self {
-        KeystoreSecurityLevel {
+    pub fn new(security_level: SecurityLevel) -> Result<(Self, Uuid)> {
+        let km_uuid = Uuid::from(security_level);
+
+        let hw_info = get_keymint_wrapper(security_level)
+            .unwrap()
+            .get_hardware_info()
+            .context(err!("Failed to get hardware info."))?;
+
+        Ok((KeystoreSecurityLevel {
             security_level,
             hw_info,
             km_uuid,
             operation_db: OperationDb::new(),
-        }
+        }, km_uuid))
     }
 
     fn watch_millis(&self, id: &'static str, millis: u64) -> Option<wd::WatchPoint> {
