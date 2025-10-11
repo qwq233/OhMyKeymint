@@ -1,11 +1,13 @@
 pub mod apex;
 pub mod attestation_key_utils;
+pub mod async_task;
 pub mod boot_key;
 pub mod crypto;
 pub mod database;
 pub mod db;
 pub mod enforcements;
 pub mod error;
+pub mod gc;
 pub mod key_parameter;
 pub mod keymint_device;
 pub mod keymint_operation;

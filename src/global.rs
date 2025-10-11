@@ -8,12 +8,47 @@ use rsbinder::Strong;
 use anyhow::{Context, Result};
 
 use crate::{
-    android::hardware::security::secureclock::ISecureClock::ISecureClock,
+    android::hardware::security::{keymint::SecurityLevel::SecurityLevel, secureclock::ISecureClock::ISecureClock},
     err,
-    keymaster::{db::KeymasterDb, enforcements::Enforcements, super_key::SuperKeyManager},
+    keymaster::{async_task::AsyncTask, db::KeymasterDb, enforcements::Enforcements, gc::Gc, keymint_device::get_keymint_wrapper, super_key::SuperKeyManager}, watchdog as wd,
 };
 
 static DB_INIT: Once = Once::new();
+
+/// A single on-demand worker thread that handles deferred tasks with two different
+/// priorities.
+pub static ASYNC_TASK: LazyLock<Arc<AsyncTask>> = LazyLock::new(Default::default);
+
+static GC: LazyLock<Arc<Gc>> = LazyLock::new(|| {
+    Arc::new(Gc::new_init_with(ASYNC_TASK.clone(), || {
+        (
+            Box::new(|uuid, blob| {
+                let security_level = u128::from_be_bytes(uuid.0) as u32;
+                let security_level = match security_level {
+                    100 => SecurityLevel::KEYSTORE,
+                    1 => SecurityLevel::TRUSTED_ENVIRONMENT,
+                    2 => SecurityLevel::STRONGBOX,
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "Invalid security level {security_level} in UUID"
+                        ))
+                    }
+                };
+                
+                let km_dev = get_keymint_wrapper(security_level).unwrap();
+                let _wp = wd::watch("invalidate key closure: calling IKeyMintDevice::deleteKey");
+                km_dev.delete_Key(blob)
+                    .map_err(|e| anyhow::anyhow!("Failed to delete key blob: {e}"))
+                    .context(err!("Trying to invalidate key blob."))
+            }),
+            KeymasterDb::new(
+                None
+            )
+            .expect("Failed to open database"),
+            SUPER_KEY.clone(),
+        )
+    }))
+});
 
 /// Open a connection to the Keystore 2.0 database. This is called during the initialization of
 /// the thread local DB field. It should never be called directly. The first time this is called
@@ -24,7 +59,7 @@ static DB_INIT: Once = Once::new();
 /// is run only once, as long as the ASYNC_TASK instance is the same. So only one additional
 /// database connection is created for the garbage collector worker.
 pub fn create_thread_local_db() -> KeymasterDb {
-    let result = KeymasterDb::new();
+    let result = KeymasterDb::new(Some(GC.clone()));
     let mut db = match result {
         Ok(db) => db,
         Err(e) => {

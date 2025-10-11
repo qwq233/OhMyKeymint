@@ -1126,6 +1126,25 @@ impl KeyMintWrapper {
 
         Result::Ok(())
     }
+
+    #[allow(non_snake_case)]
+    pub fn delete_Key(&self, key_blob: &[u8]) -> Result<(), Error> {
+        let req = PerformOpReq::DeviceDeleteKey(DeleteKeyRequest {
+            key_blob: key_blob.to_vec(),
+        });
+        let result = get_keymint_device(self.security_level)
+            .unwrap()
+            .process_req(req);
+
+        if result.error_code != 0 {
+            return Err(Error::Binder(
+                ExceptionCode::ServiceSpecific,
+                result.error_code,
+            ));
+        }
+
+        Result::Ok(())
+    }
 }
 
 pub fn get_keymint_security_level(
