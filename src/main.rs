@@ -8,8 +8,8 @@ use log::{debug, error};
 use rsbinder::hub;
 
 use crate::{
-    android::system::keystore2::
-        IKeystoreOperation, keymaster::service::KeystoreService}
+    android::system::keystore2::{
+        IKeystoreOperation, IKeystoreService::BnKeystoreService}, keymaster::service::KeystoreService, top::qwq2333::ohmykeymint::IOhMyKsService::BnOhMyKsService}
     
 ;
 
@@ -45,38 +45,17 @@ fn main() {
     rsbinder::ProcessState::start_thread_pool();
 
     debug!("Creating keystore service");
-    let service = KeystoreService::new_native_binder().unwrap();
+    let dev = KeystoreService::new_native_binder().unwrap();
 
-    debug!("Adding service to hub");
+    let service = BnKeystoreService::new_binder(dev.clone());
+
+    debug!("Adding keystore service to hub");
+    hub::add_service("keystore3", service.as_binder()).unwrap();
+
+    debug!("Adding OMK service to hub");
+    let service = BnOhMyKsService::new_binder(dev);
     hub::add_service("omk", service.as_binder()).unwrap();
 
     debug!("Joining thread pool");
     rsbinder::ProcessState::join_thread_pool().unwrap();
-}
-
-#[derive(Clone)]
-pub struct KeystoreOperation;
-
-impl rsbinder::Interface for KeystoreOperation {}
-
-impl IKeystoreOperation::IKeystoreOperation for KeystoreOperation {
-    fn r#updateAad(&self, _arg_aad_input: &[u8]) -> rsbinder::status::Result<()> {
-        Ok(())
-    }
-
-    fn r#update(&self, _arg_input: &[u8]) -> rsbinder::status::Result<Option<Vec<u8>>> {
-        Ok(Some(vec![]))
-    }
-
-    fn r#finish(
-        &self,
-        _arg_input: Option<&[u8]>,
-        _arg_signature: Option<&[u8]>,
-    ) -> rsbinder::status::Result<Option<Vec<u8>>> {
-        Ok(Some(vec![]))
-    }
-
-    fn r#abort(&self) -> rsbinder::status::Result<()> {
-        Ok(())
-    }
 }

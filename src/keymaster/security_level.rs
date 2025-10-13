@@ -32,7 +32,7 @@ use crate::{
         super_key::{KeyBlob, SuperKeyManager},
         utils::{key_characteristics_to_internal, key_parameters_to_authorizations, log_params},
     },
-    plat::utils::multiuser_get_user_id,
+    plat::utils::multiuser_get_user_id, top::qwq2333::ohmykeymint::{CallerInfo::CallerInfo, IOhMySecurityLevel::IOhMySecurityLevel},
 };
 
 use crate::keymaster::key_parameter::KeyParameter as KsKeyParam;
@@ -377,6 +377,7 @@ impl KeystoreSecurityLevel {
     #[allow(unused_variables)]
     pub fn generate_key(
         &self,
+        ctx: Option<&CallerInfo>,
         key: &KeyDescriptor,
         attest_key_descriptor: Option<&KeyDescriptor>,
         params: &[KeyParameter],
@@ -387,8 +388,11 @@ impl KeystoreSecurityLevel {
             return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
                 .context(err!("Alias must be provided for non-BLOB domains"));
         }
-        let calling_context = CallingContext::default();
-        let calling_uid = calling_context.uid;
+        let calling_uid = if let Some(ctx) = ctx {
+            ctx.callingUid
+        } else {
+            CallingContext::default().uid.into()
+        } as u32;
 
         debug!("KeystoreSecurityLevel::generate_key: uid={:?} key={:?}, attest_key_descriptor={:?}, params={:?}, flags={}", calling_uid, key, attest_key_descriptor, log_params(params), flags);
 
@@ -487,6 +491,7 @@ impl KeystoreSecurityLevel {
 
     fn import_key(
         &self,
+        ctx: Option<&CallerInfo>,
         key: &KeyDescriptor,
         _attestation_key: Option<&KeyDescriptor>,
         params: &[KeyParameter],
@@ -498,8 +503,11 @@ impl KeystoreSecurityLevel {
                 .context(err!("Alias must be specified"));
         }
 
-        let calling_context = rsbinder::thread_state::CallingContext::default();
-        let caller_uid = calling_context.uid;
+        let caller_uid = if let Some(ctx) = ctx {
+            ctx.callingUid
+        } else {
+            CallingContext::default().uid.into()
+        } as u32;
 
         let key = match key.domain {
             Domain::APP => KeyDescriptor {
@@ -549,6 +557,7 @@ impl KeystoreSecurityLevel {
 
     fn import_wrapped_key(
         &self,
+        ctx: Option<&CallerInfo>,
         key: &KeyDescriptor,
         wrapping_key: &KeyDescriptor,
         masking_key: Option<&[u8]>,
@@ -582,8 +591,11 @@ impl KeystoreSecurityLevel {
             ));
         }
 
-        let calling_context = rsbinder::thread_state::CallingContext::default();
-        let caller_uid = calling_context.uid;
+        let caller_uid = if let Some(ctx) = ctx {
+            ctx.callingUid
+        } else {
+            CallingContext::default().uid.into()
+        } as u32;
         let user_id = multiuser_get_user_id(caller_uid);
 
         let key = match key.domain {
@@ -740,11 +752,16 @@ impl KeystoreSecurityLevel {
 
     fn create_operation(
         &self,
+        ctx: Option<&CallerInfo>,
         key: &KeyDescriptor,
         operation_parameters: &[KeyParameter],
         forced: bool,
     ) -> Result<CreateOperationResponse> {
-        let caller_uid = CallingContext::default().uid;
+        let caller_uid = if let Some(ctx) = ctx {
+            ctx.callingUid
+        } else {
+            CallingContext::default().uid.into()
+        } as u32;
         // We use `scoping_blob` to extend the life cycle of the blob loaded from the database,
         // so that we can use it by reference like the blob provided by the key descriptor.
         // Otherwise, we would have to clone the blob from the key descriptor.
@@ -977,7 +994,7 @@ impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
     ) -> Result<CreateOperationResponse, Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::createOperation");
         Ok(self
-            .create_operation(key, operation_parameters, forced)
+            .create_operation(None, key, operation_parameters, forced)
             .map_err(into_logged_binder)?)
     }
 
@@ -992,10 +1009,10 @@ impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
         // Duration is set to 5 seconds, because generateKey - especially for RSA keys, takes more
         // time than other operations
         let _wp = self.watch_millis("IKeystoreSecurityLevel::generateKey", 5000);
-        let result = self.generate_key(key, attestation_key, params, flags, entropy);
+        let result = self.generate_key(None, key, attestation_key, params, flags, entropy);
         log_key_creation_event_stats(self.security_level, params, &result);
         debug!(
-            "generateKey: calling uid: {}, result: {:?}",
+            "generateKey: calling uid: {}, result: {:02x?}",
             CallingContext::default().uid,
             result
         );
@@ -1011,7 +1028,7 @@ impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
         key_data: &[u8],
     ) -> Result<KeyMetadata, Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::importKey");
-        let result = self.import_key(key, attestation_key, params, flags, key_data);
+        let result = self.import_key(None, key, attestation_key, params, flags, key_data);
         log_key_creation_event_stats(self.security_level, params, &result);
         debug!(
             "importKey: calling uid: {}, result: {:?}",
@@ -1030,7 +1047,7 @@ impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
     ) -> Result<KeyMetadata, Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::importWrappedKey");
         let result =
-            self.import_wrapped_key(key, wrapping_key, masking_key, params, authenticators);
+            self.import_wrapped_key(None, key, wrapping_key, masking_key, params, authenticators);
         log_key_creation_event_stats(self.security_level, params, &result);
         debug!(
             "importWrappedKey: calling uid: {}, result: {:?}",
@@ -1049,6 +1066,101 @@ impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
     }
     fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::deleteKey");
+        let result = self.delete_key(key);
+        debug!(
+            "deleteKey: calling uid: {}, result: {:?}",
+            CallingContext::default().uid,
+            result
+        );
+        result.map_err(into_logged_binder)
+    }
+}
+
+impl IOhMySecurityLevel for KeystoreSecurityLevel {
+    fn createOperation(
+        &self,
+        ctx: Option<&CallerInfo>,
+        key: &KeyDescriptor,
+        operation_parameters: &[KeyParameter],
+        forced: bool,
+    ) -> Result<CreateOperationResponse, Status> {
+        let _wp = self.watch("IOhMySecurityLevel::createOperation");
+        Ok(self
+            .create_operation(ctx, key, operation_parameters, forced)
+            .map_err(into_logged_binder)?)
+    }
+
+    fn generateKey(
+        &self,
+        ctx: Option<&CallerInfo>,
+        key: &KeyDescriptor,
+        attestation_key: Option<&KeyDescriptor>,
+        params: &[KeyParameter],
+        flags: i32,
+        entropy: &[u8],
+    ) -> Result<KeyMetadata, Status> {
+        // Duration is set to 5 seconds, because generateKey - especially for RSA keys, takes more
+        // time than other operations
+        let _wp = self.watch_millis("IOhMySecurityLevel::generateKey", 5000);
+        let result = self.generate_key(ctx, key, attestation_key, params, flags, entropy);
+        log_key_creation_event_stats(self.security_level, params, &result);
+        debug!(
+            "generateKey: calling uid: {}, result: {:02x?}",
+            ctx.is_some().then(|| ctx.unwrap().callingUid).unwrap_or(CallingContext::default().uid.into()),
+            result
+        );
+        result.map_err(into_logged_binder)
+    }
+
+    fn importKey(
+        &self,
+        ctx: Option<&CallerInfo>,
+        key: &KeyDescriptor,
+        attestation_key: Option<&KeyDescriptor>,
+        params: &[KeyParameter],
+        flags: i32,
+        key_data: &[u8],
+    ) -> Result<KeyMetadata, Status> {
+        let _wp = self.watch("IOhMySecurityLevel::importKey");
+        let result = self.import_key(ctx, key, attestation_key, params, flags, key_data);
+        log_key_creation_event_stats(self.security_level, params, &result);
+        debug!(
+            "importKey: calling uid: {}, result: {:?}",
+            ctx.is_some().then(|| ctx.unwrap().callingUid).unwrap_or(CallingContext::default().uid.into()),
+            result
+        );
+        result.map_err(into_logged_binder)
+    }
+    fn importWrappedKey(
+        &self,
+        ctx: Option<&CallerInfo>,
+        key: &KeyDescriptor,
+        wrapping_key: &KeyDescriptor,
+        masking_key: Option<&[u8]>,
+        params: &[KeyParameter],
+        authenticators: &[AuthenticatorSpec],
+    ) -> Result<KeyMetadata, Status> {
+        let _wp = self.watch("IOhMySecurityLevel::importWrappedKey");
+        let result =
+            self.import_wrapped_key(ctx, key, wrapping_key, masking_key, params, authenticators);
+        log_key_creation_event_stats(self.security_level, params, &result);
+        debug!(
+            "importWrappedKey: calling uid: {}, result: {:?}",
+            ctx.is_some().then(|| ctx.unwrap().callingUid).unwrap_or(CallingContext::default().uid.into()),
+            result
+        );
+        result.map_err(into_logged_binder)
+    }
+    fn convertStorageKeyToEphemeral(
+        &self,
+        storage_key: &KeyDescriptor,
+    ) -> Result<EphemeralStorageKeyResponse, Status> {
+        let _wp = self.watch("IOhMySecurityLevel::convertStorageKeyToEphemeral");
+        self.convert_storage_key_to_ephemeral(storage_key)
+            .map_err(into_logged_binder)
+    }
+    fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
+        let _wp = self.watch("IOhMySecurityLevel::deleteKey");
         let result = self.delete_key(key);
         debug!(
             "deleteKey: calling uid: {}, result: {:?}",

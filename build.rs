@@ -33,6 +33,7 @@ fn main() {
         "aidl/android/hardware/security/keymint",
         "aidl/android/security/metrics",
         "aidl/android/apex",
+        "aidl/top/qwq2333/ohmykeymint",
     ];
     for dir in dirs {
         println!("Processing AIDL files in directory: {}", dir);
