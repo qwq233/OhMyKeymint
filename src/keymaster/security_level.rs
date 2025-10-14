@@ -163,7 +163,7 @@ impl KeystoreSecurityLevel {
                 Ok(aaid_ok) => {
                     result.push(KeyParameter {
                         tag: Tag::ATTESTATION_APPLICATION_ID,
-                        value: KeyParameterValue::Blob(aaid_ok.into_bytes()),
+                        value: KeyParameterValue::Blob(aaid_ok),
                     });
                 }
                 Err(e) => {
