@@ -1,19 +1,23 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Ok;
+use der::Encode;
+use der::asn1::SetOfVec;
+use kmr_common::crypto::Sha256;
+use kmr_crypto_boring::sha256::BoringSha256;
 use log::debug;
-use rsbinder::{hub, DeathRecipient};
-use x509_cert::der::asn1::OctetString;
+use rsbinder::{hub, DeathRecipient, Parcel, Parcelable};
+use serde::de;
 
-use crate::android::content::pm::IPackageManager::IPackageManager;
 use crate::android::apex::IApexService::IApexService;
+use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
+use crate::android::security::keystore::KeyAttestationApplicationId::KeyAttestationApplicationId;
+use crate::android::security::keystore::KeyAttestationPackageInfo::KeyAttestationPackageInfo;
 use crate::err;
 use crate::keymaster::apex::ApexModuleInfo;
 
-use std::cell::RefCell;
-
 thread_local! {
-    static PM: Mutex<Option<rsbinder::Strong<dyn IPackageManager>>> = Mutex::new(None);
+    static PM: Mutex<Option<rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider>>> = Mutex::new(None);
     static APEX: Mutex<Option<rsbinder::Strong<dyn IApexService>>> = Mutex::new(None);
 }
 
@@ -40,13 +44,16 @@ impl rsbinder::DeathRecipient for ApexDeathRecipient {
 }
 
 #[allow(non_snake_case)]
-fn get_pm() -> anyhow::Result<rsbinder::Strong<dyn IPackageManager>> {
+fn get_pm() -> anyhow::Result<rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider>> {
     PM.with(|p| {
         let mut guard = p.lock().unwrap();
         if let Some(iPm) = guard.as_ref() {
             Ok(iPm.clone())
         } else {
-            let pm: rsbinder::Strong<dyn IPackageManager> = hub::get_interface("package")?;
+            let pm: rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider> =
+                hub::get_interface(
+                    "sec_key_att_app_id_provider",
+                )?;
             let recipient = Arc::new(PmDeathRecipient {});
 
             pm.as_binder()
@@ -77,29 +84,86 @@ fn get_apex() -> anyhow::Result<rsbinder::Strong<dyn IApexService>> {
     })
 }
 
-pub fn get_aaid(uid: u32) -> anyhow::Result<String> {
-    if (uid == 0) || (uid == 1000) {
-        return Ok("android".to_string());
-    } // system or root
-    let pm = get_pm()?;
-    let package_names = pm.getPackagesForUid(uid as i32)
-        .map_err(|e| anyhow::anyhow!(err!("getPackagesForUid failed: {:?}", e)))?;
+pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
+    let application_id = if (uid == 0) || (uid == 1000) {
+        let mut info = KeyAttestationPackageInfo::default();
+        info.packageName = "AndroidSystem".to_string();
+        info.versionCode = 1;
+        KeyAttestationApplicationId {
+            packageInfos: vec![info],
+        }
+    } else {
+        let _wd = crate::watchdog::watch("get_aaid: Retrieving AAID by calling service");
+        let pm = get_pm()?;
+        {
+            let current_uid = unsafe { libc::getuid() };
+            let current_euid = unsafe { libc::geteuid() };
 
-    debug!("get_aaid: package_name = {:?}", package_names);
+            debug!("Current UID: {}, EUID: {}", current_uid, current_euid);
 
-    Ok(package_names[0].clone())
+            unsafe {
+                libc::seteuid(1017); // KEYSTORE_UID
+            }
+
+            let result = pm.getKeyAttestationApplicationId(uid as i32)
+                .map_err(|e| anyhow::anyhow!(err!("getPackagesForUid failed: {:?}", e)))?;
+
+            unsafe {
+                libc::seteuid(current_euid);
+            }
+
+            result
+        }
+
+    };
+
+    debug!("Application ID: {:?}", application_id);
+
+    encode_application_id(application_id)
+}
+
+fn encode_application_id(application_id: KeyAttestationApplicationId) -> Result<Vec<u8>, anyhow::Error> {
+    let mut package_info_set = SetOfVec::new();
+    let mut signature_digests = SetOfVec::new();
+    let sha256 = BoringSha256 {};
+
+    for pkg in application_id.packageInfos {
+        for sig in pkg.signatures {
+            let result = sha256.hash(sig.data.as_slice())
+                .map_err(|e| anyhow::anyhow!("Failed to hash signature: {:?}", e))?;
+
+            let octet_string = x509_cert::der::asn1::OctetString::new(&result)?;
+
+            signature_digests.insert_ordered(octet_string).map_err(|e| anyhow::anyhow!("Failed to encode AttestationApplicationId: {:?}", e))?;
+        }
+
+        let package_info = super::aaid::PackageInfoRecord {
+            package_name: der::asn1::OctetString::new(pkg.packageName.as_bytes())?,
+            version: pkg.versionCode,
+        };
+        package_info_set.insert_ordered(package_info).map_err(|e| anyhow::anyhow!("Failed to encode AttestationApplicationId: {:?}", e))?;
+    }
+
+    let result = super::aaid::AttestationApplicationId {
+        package_info_records: package_info_set,
+        signature_digests: signature_digests,
+    };
+
+    result.to_der()
+    .map_err(|e| anyhow::anyhow!("Failed to encode AttestationApplicationId: {:?}", e))
 }
 
 pub fn get_apex_module_info() -> anyhow::Result<Vec<ApexModuleInfo>> {
     let apex = get_apex()?;
-    let result: Vec<crate::android::apex::ApexInfo::ApexInfo> = apex.getAllPackages()
+    let result: Vec<crate::android::apex::ApexInfo::ApexInfo> = apex
+        .getAllPackages()
         .map_err(|e| anyhow::anyhow!(err!("getAllPackages failed: {:?}", e)))?;
 
     let result: Vec<ApexModuleInfo> = result
         .iter()
         .map(|i| {
             Ok(ApexModuleInfo {
-                package_name: OctetString::new(i.moduleName.as_bytes())?,
+                package_name: der::asn1::OctetString::new(i.moduleName.as_bytes())?,
                 version_code: i.versionCode as u64,
             })
         })

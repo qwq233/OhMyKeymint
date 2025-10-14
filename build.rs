@@ -32,6 +32,7 @@ fn main() {
         "aidl/android/system/keystore2",
         "aidl/android/hardware/security/keymint",
         "aidl/android/security/metrics",
+        "aidl/android/security/keystore",
         "aidl/android/apex",
         "aidl/top/qwq2333/ohmykeymint",
     ];
@@ -47,9 +48,7 @@ fn main() {
             }
         }
     }
-    aidl.source(PathBuf::from(
-        "aidl/android/content/pm/IPackageManager.aidl",
-    ))
+    aidl
     .source(PathBuf::from(
         "aidl/android/security/authorization/ResponseCode.aidl",
     ))
