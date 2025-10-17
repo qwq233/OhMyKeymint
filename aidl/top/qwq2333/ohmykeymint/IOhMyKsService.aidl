@@ -1,6 +1,7 @@
 package top.qwq2333.ohmykeymint;
 
 import android.hardware.security.keymint.SecurityLevel;
+import android.hardware.security.keymint.Certificate;
 import android.hardware.security.keymint.Tag;
 import android.system.keystore2.Domain;
 import android.system.keystore2.IKeystoreSecurityLevel;
@@ -41,6 +42,9 @@ interface IOhMyKsService {
     KeyDescriptor[] listEntriesBatched(in @nullable CallerInfo ctx, in Domain domain, in long nspace,
             in @nullable String startingPastAlias);
 
-
     byte[] getSupplementaryAttestationInfo(in Tag tag);
+
+    void updateEcKeybox(in byte[] key, in List<Certificate> chain);
+
+    void updateRsaKeybox(in byte[] key, in List<Certificate> chain);
 }

@@ -136,6 +136,12 @@ impl crate::KeyMintTa {
 
         // Retrieve the signing key information (which will be dropped when signing is done).
         let signing_key = sign_info.signing_key(key_type)?;
+
+        log::info!(
+            "using attestation key with subject {:?}",
+            String::from_utf8_lossy(&chain_info.issuer)
+        );
+
         Ok(SigningInfo {
             attestation_info: None,
             signing_key,

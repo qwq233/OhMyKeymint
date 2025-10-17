@@ -26,13 +26,14 @@ use crate::{
             Uuid,
         },
         error::{KsError, into_logged_binder, map_binder_status},
-        keymint_device::get_keymint_wrapper,
+        keymint_device::{KeyMintWrapper},
         metrics_store::log_key_creation_event_stats,
         operation::{KeystoreOperation, LoggingInfo, OperationDb},
         super_key::{KeyBlob, SuperKeyManager},
         utils::{key_characteristics_to_internal, key_parameters_to_authorizations, log_params},
     },
-    plat::utils::multiuser_get_user_id, top::qwq2333::ohmykeymint::{CallerInfo::CallerInfo, IOhMySecurityLevel::IOhMySecurityLevel},
+    plat::utils::multiuser_get_user_id,
+    top::qwq2333::ohmykeymint::{CallerInfo::CallerInfo, IOhMySecurityLevel::IOhMySecurityLevel},
 };
 
 use crate::keymaster::key_parameter::KeyParameter as KsKeyParam;
@@ -50,26 +51,28 @@ static ZERO_BLOB_32: &[u8] = &[0; 32];
 
 pub struct KeystoreSecurityLevel {
     security_level: SecurityLevel,
+    km_wrapper: KeyMintWrapper,
     hw_info: KeyMintHardwareInfo,
     km_uuid: Uuid,
     operation_db: OperationDb,
 }
 
 impl KeystoreSecurityLevel {
-    pub fn new(security_level: SecurityLevel) -> Result<(Self, Uuid)> {
-        let km_uuid = Uuid::from(security_level);
-
-        let hw_info = get_keymint_wrapper(security_level)
-            .unwrap()
+    pub fn new(security_level: SecurityLevel, km_uuid: Uuid) -> Result<Self> {
+        let km_wrapper = KeyMintWrapper::new(security_level)
+                        .expect(err!("Failed to init strongbox wrapper").as_str());
+    
+        let hw_info = km_wrapper
             .get_hardware_info()
             .context(err!("Failed to get hardware info."))?;
 
-        Ok((KeystoreSecurityLevel {
+        Ok(KeystoreSecurityLevel {
             security_level,
+            km_wrapper,
             hw_info,
             km_uuid,
             operation_db: OperationDb::new(),
-        }, km_uuid))
+        })
     }
 
     fn watch_millis(&self, id: &'static str, millis: u64) -> Option<wd::WatchPoint> {
@@ -80,6 +83,10 @@ impl KeystoreSecurityLevel {
     fn watch(&self, id: &'static str) -> Option<wd::WatchPoint> {
         let sec_level = self.security_level;
         wd::watch_millis_with(id, wd::DEFAULT_TIMEOUT_MS, sec_level)
+    }
+
+    fn get_keymint_wrapper(&self) -> &KeyMintWrapper {
+        &self.km_wrapper
     }
 
     fn store_upgraded_keyblob(
@@ -166,9 +173,7 @@ impl KeystoreSecurityLevel {
                         value: KeyParameterValue::Blob(aaid_ok),
                     });
                 }
-                Err(e) => {
-                    return Err(anyhow!(e)).context(err!("Attestation ID retrieval error."))
-                }
+                Err(e) => return Err(anyhow!(e)).context(err!("Attestation ID retrieval error.")),
             }
         }
 
@@ -203,9 +208,18 @@ impl KeystoreSecurityLevel {
         // If we are generating/importing an asymmetric key, we need to make sure
         // that NOT_BEFORE and NOT_AFTER are present.
         match params.iter().find(|kp| kp.tag == Tag::ALGORITHM) {
-            Some(KeyParameter { tag: _, value: KeyParameterValue::Algorithm(Algorithm::RSA) })
-            | Some(KeyParameter { tag: _, value: KeyParameterValue::Algorithm(Algorithm::EC) }) => {
-                if !params.iter().any(|kp| kp.tag == Tag::CERTIFICATE_NOT_BEFORE) {
+            Some(KeyParameter {
+                tag: _,
+                value: KeyParameterValue::Algorithm(Algorithm::RSA),
+            })
+            | Some(KeyParameter {
+                tag: _,
+                value: KeyParameterValue::Algorithm(Algorithm::EC),
+            }) => {
+                if !params
+                    .iter()
+                    .any(|kp| kp.tag == Tag::CERTIFICATE_NOT_BEFORE)
+                {
                     result.push(KeyParameter {
                         tag: Tag::CERTIFICATE_NOT_BEFORE,
                         value: KeyParameterValue::DateTime(0),
@@ -452,8 +466,7 @@ impl KeystoreSecurityLevel {
                             ),
                             5000, // Generate can take a little longer.
                         );
-                        let result = get_keymint_wrapper(self.security_level)
-                            .unwrap()
+                        let result = self.get_keymint_wrapper()
                             .generateKey(&params, attest_key.as_ref());
                         map_binder_status(result)
                     },
@@ -472,8 +485,7 @@ impl KeystoreSecurityLevel {
                     ),
                     5000, // Generate can take a little longer.
                 );
-                get_keymint_wrapper(self.security_level)
-                    .unwrap()
+                self.get_keymint_wrapper()
                     .generateKey(&params, None)
             }
             .context(err!(
@@ -542,7 +554,7 @@ impl KeystoreSecurityLevel {
             })
             .context(err!())?;
 
-        let km_dev = get_keymint_wrapper(self.security_level).unwrap();
+        let km_dev = self.get_keymint_wrapper();
         let creation_result = map_binder_status({
             let _wp =
                 self.watch("KeystoreSecurityLevel::import_key: calling IKeyMintDevice::importKey.");
@@ -678,7 +690,7 @@ impl KeystoreSecurityLevel {
                     let _wp = self.watch(
                         "KeystoreSecurityLevel::import_wrapped_key: calling IKeyMintDevice::importWrappedKey.",
                     );
-                    let km_dev = get_keymint_wrapper(self.security_level).unwrap();
+                    let km_dev = self.get_keymint_wrapper();
                     let creation_result = map_binder_status(km_dev.importWrappedKey(
                         wrapped_data,
                         wrapping_blob,
@@ -714,7 +726,7 @@ impl KeystoreSecurityLevel {
         // check_key_permission(KeyPerm::ConvertStorageKeyToEphemeral, storage_key, &None)
         //     .context(err!("Check permission"))?;
 
-        let km_dev = get_keymint_wrapper(self.security_level).unwrap();
+        let km_dev = self.get_keymint_wrapper();
         let res = {
             let _wp = self.watch(concat!(
                 "IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: ",
@@ -878,7 +890,7 @@ impl KeystoreSecurityLevel {
                         let _wp = self.watch(
                             "KeystoreSecurityLevel::create_operation: calling IKeyMintDevice::begin",
                         );
-                        let km_dev = get_keymint_wrapper(self.security_level).unwrap();
+                        let km_dev = self.get_keymint_wrapper();
                         km_dev.begin(
                             purpose,
                             blob,
@@ -974,7 +986,7 @@ impl KeystoreSecurityLevel {
         // check_key_permission(KeyPerm::Delete, key, &None)
         //     .context(err!("delete_key: Checking delete permissions"))?;
 
-        let km_dev = get_keymint_wrapper(self.security_level).unwrap();
+        let km_dev = self.get_keymint_wrapper();
         {
             let _wp =
                 self.watch("KeystoreSecuritylevel::delete_key: calling IKeyMintDevice::deleteKey");
@@ -1106,7 +1118,9 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         log_key_creation_event_stats(self.security_level, params, &result);
         debug!(
             "generateKey: calling uid: {}, result: {:02x?}",
-            ctx.is_some().then(|| ctx.unwrap().callingUid).unwrap_or(CallingContext::default().uid.into()),
+            ctx.is_some()
+                .then(|| ctx.unwrap().callingUid)
+                .unwrap_or(CallingContext::default().uid.into()),
             result
         );
         result.map_err(into_logged_binder)
@@ -1126,7 +1140,9 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         log_key_creation_event_stats(self.security_level, params, &result);
         debug!(
             "importKey: calling uid: {}, result: {:?}",
-            ctx.is_some().then(|| ctx.unwrap().callingUid).unwrap_or(CallingContext::default().uid.into()),
+            ctx.is_some()
+                .then(|| ctx.unwrap().callingUid)
+                .unwrap_or(CallingContext::default().uid.into()),
             result
         );
         result.map_err(into_logged_binder)
@@ -1146,7 +1162,9 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         log_key_creation_event_stats(self.security_level, params, &result);
         debug!(
             "importWrappedKey: calling uid: {}, result: {:?}",
-            ctx.is_some().then(|| ctx.unwrap().callingUid).unwrap_or(CallingContext::default().uid.into()),
+            ctx.is_some()
+                .then(|| ctx.unwrap().callingUid)
+                .unwrap_or(CallingContext::default().uid.into()),
             result
         );
         result.map_err(into_logged_binder)

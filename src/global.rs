@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    sync::{Arc, LazyLock, Mutex, Once, RwLock, OnceLock},
+    sync::{Arc, LazyLock, Mutex, Once, OnceLock, RwLock},
 };
 
 use rsbinder::Strong;
@@ -8,9 +8,13 @@ use rsbinder::Strong;
 use anyhow::{Context, Result};
 
 use crate::{
-    android::hardware::security::{keymint::SecurityLevel::SecurityLevel, secureclock::ISecureClock::ISecureClock},
+    android::hardware::security::secureclock::ISecureClock::ISecureClock,
     err,
-    keymaster::{async_task::AsyncTask, db::KeymasterDb, enforcements::Enforcements, gc::Gc, keymint_device::get_keymint_wrapper, super_key::SuperKeyManager}, watchdog as wd,
+    keymaster::{
+        async_task::AsyncTask, db::KeymasterDb, enforcements::Enforcements, gc::Gc,
+        keymint_device::get_keymint_wrapper, super_key::SuperKeyManager,
+    },
+    watchdog as wd,
 };
 
 static DB_INIT: Once = Once::new();
@@ -23,28 +27,16 @@ static GC: LazyLock<Arc<Gc>> = LazyLock::new(|| {
     Arc::new(Gc::new_init_with(ASYNC_TASK.clone(), || {
         (
             Box::new(|uuid, blob| {
-                let security_level = u128::from_be_bytes(uuid.0) as u32;
-                let security_level = match security_level {
-                    100 => SecurityLevel::KEYSTORE,
-                    1 => SecurityLevel::TRUSTED_ENVIRONMENT,
-                    2 => SecurityLevel::STRONGBOX,
-                    _ => {
-                        return Err(anyhow::anyhow!(
-                            "Invalid security level {security_level} in UUID"
-                        ))
-                    }
-                };
-                
+                let security_level = uuid.to_security_level().unwrap();
+
                 let km_dev = get_keymint_wrapper(security_level).unwrap();
                 let _wp = wd::watch("invalidate key closure: calling IKeyMintDevice::deleteKey");
-                km_dev.delete_Key(blob)
+                km_dev
+                    .delete_Key(blob)
                     .map_err(|e| anyhow::anyhow!("Failed to delete key blob: {e}"))
                     .context(err!("Trying to invalidate key blob."))
             }),
-            KeymasterDb::new(
-                None
-            )
-            .expect("Failed to open database"),
+            KeymasterDb::new(None).expect("Failed to open database"),
             SUPER_KEY.clone(),
         )
     }))

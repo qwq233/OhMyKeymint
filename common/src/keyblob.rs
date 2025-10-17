@@ -366,6 +366,11 @@ pub fn encrypt(
 ) -> Result<EncryptedKeyBlob, Error> {
     // Determine if secure deletion is required by examining the key characteristics at our
     // security level.
+    log::debug!(
+        "Encrypting keyblob with characteristics: {:?}, SecLevel={:?}",
+        plaintext_keyblob.characteristics,
+        sec_level
+    );
     let requires_sdd = plaintext_keyblob
         .characteristics_at(sec_level)?
         .iter()

@@ -1,13 +1,12 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Ok;
-use der::Encode;
 use der::asn1::SetOfVec;
+use der::Encode;
 use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::sha256::BoringSha256;
-use log::debug;
-use rsbinder::{hub, DeathRecipient, Parcel, Parcelable};
-use serde::de;
+use log::{debug, error};
+use rsbinder::{hub, DeathRecipient};
 
 use crate::android::apex::IApexService::IApexService;
 use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
@@ -51,9 +50,7 @@ fn get_pm() -> anyhow::Result<rsbinder::Strong<dyn IKeyAttestationApplicationIdP
             Ok(iPm.clone())
         } else {
             let pm: rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider> =
-                hub::get_interface(
-                    "sec_key_att_app_id_provider",
-                )?;
+                hub::get_interface("sec_key_att_app_id_provider")?;
             let recipient = Arc::new(PmDeathRecipient {});
 
             pm.as_binder()
@@ -63,6 +60,13 @@ fn get_pm() -> anyhow::Result<rsbinder::Strong<dyn IKeyAttestationApplicationIdP
             Ok(pm)
         }
     })
+}
+
+fn reset_pm() {
+    PM.with(|p| {
+        *p.lock().unwrap() = None;
+    });
+    debug!("Reset PM instance to None");
 }
 
 #[allow(non_snake_case)]
@@ -85,6 +89,7 @@ fn get_apex() -> anyhow::Result<rsbinder::Strong<dyn IApexService>> {
 }
 
 pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
+    debug!("Getting AAID for UID: {}", uid);
     let application_id = if (uid == 0) || (uid == 1000) {
         let mut info = KeyAttestationPackageInfo::default();
         info.packageName = "AndroidSystem".to_string();
@@ -94,27 +99,40 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
         }
     } else {
         let _wd = crate::watchdog::watch("get_aaid: Retrieving AAID by calling service");
-        let pm = get_pm()?;
-        {
-            let current_uid = unsafe { libc::getuid() };
-            let current_euid = unsafe { libc::geteuid() };
-
-            debug!("Current UID: {}, EUID: {}", current_uid, current_euid);
-
-            unsafe {
-                libc::seteuid(1017); // KEYSTORE_UID
+        let mut tried = 0;
+        loop {
+            let pm = get_pm()?;
+            let result = {
+                let current_uid = unsafe { libc::getuid() };
+                let current_euid = unsafe { libc::geteuid() };
+                debug!("Current UID: {}, EUID: {}", current_uid, current_euid);
+                unsafe {
+                    libc::seteuid(1017); // KEYSTORE_UID
+                }
+                let result = pm.getKeyAttestationApplicationId(uid as i32);
+                unsafe {
+                    libc::seteuid(current_euid);
+                }
+                result
+            };
+            if let Result::Ok(application_id) = result {
+                break application_id;
+            } else {
+                let e = result.unwrap_err();
+                if e.exception_code() == rsbinder::ExceptionCode::TransactionFailed && tried < 2 {
+                    error!("Transaction failed when calling getKeyAttestationApplicationId for UID {}: {:?}", uid, e);
+                    error!("Trying to reset the PM instance to None");
+                    reset_pm();
+                    tried += 1;
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Failed to get KeyAttestationApplicationId for UID {}, Error: {:?}",
+                        uid,
+                        e
+                    ));
+                }
             }
-
-            let result = pm.getKeyAttestationApplicationId(uid as i32)
-                .map_err(|e| anyhow::anyhow!(err!("getPackagesForUid failed: {:?}", e)))?;
-
-            unsafe {
-                libc::seteuid(current_euid);
-            }
-
-            result
         }
-
     };
 
     debug!("Application ID: {:?}", application_id);
@@ -122,26 +140,39 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
     encode_application_id(application_id)
 }
 
-fn encode_application_id(application_id: KeyAttestationApplicationId) -> Result<Vec<u8>, anyhow::Error> {
+fn encode_application_id(
+    application_id: KeyAttestationApplicationId,
+) -> Result<Vec<u8>, anyhow::Error> {
     let mut package_info_set = SetOfVec::new();
     let mut signature_digests = SetOfVec::new();
     let sha256 = BoringSha256 {};
 
     for pkg in application_id.packageInfos {
         for sig in pkg.signatures {
-            let result = sha256.hash(sig.data.as_slice())
+            let result = sha256
+                .hash(sig.data.as_slice())
                 .map_err(|e| anyhow::anyhow!("Failed to hash signature: {:?}", e))?;
 
             let octet_string = x509_cert::der::asn1::OctetString::new(&result)?;
 
-            signature_digests.insert_ordered(octet_string).map_err(|e| anyhow::anyhow!("Failed to encode AttestationApplicationId: {:?}", e))?;
+            let result = signature_digests.insert_ordered(octet_string).map_err(|e| {
+                anyhow::anyhow!(err!("Failed to encode AttestationApplicationId: {:?}", e))
+            });
+            if result.is_err() {
+                error!(
+                    "Failed to insert signature digest: {:?}",
+                    result.unwrap_err()
+                );
+            }
         }
 
         let package_info = super::aaid::PackageInfoRecord {
             package_name: der::asn1::OctetString::new(pkg.packageName.as_bytes())?,
             version: pkg.versionCode,
         };
-        package_info_set.insert_ordered(package_info).map_err(|e| anyhow::anyhow!("Failed to encode AttestationApplicationId: {:?}", e))?;
+        package_info_set.insert_ordered(package_info).map_err(|e| {
+            anyhow::anyhow!(err!("Failed to encode AttestationApplicationId: {:?}", e))
+        })?;
     }
 
     let result = super::aaid::AttestationApplicationId {
@@ -149,8 +180,9 @@ fn encode_application_id(application_id: KeyAttestationApplicationId) -> Result<
         signature_digests: signature_digests,
     };
 
-    result.to_der()
-    .map_err(|e| anyhow::anyhow!("Failed to encode AttestationApplicationId: {:?}", e))
+    result
+        .to_der()
+        .map_err(|e| anyhow::anyhow!("Failed to encode AttestationApplicationId: {:?}", e))
 }
 
 pub fn get_apex_module_info() -> anyhow::Result<Vec<ApexModuleInfo>> {

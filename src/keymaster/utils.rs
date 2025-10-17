@@ -1,15 +1,14 @@
-
 use crate::{
     android::hardware::security::keymint::{
-            ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice,
-            KeyCharacteristics::KeyCharacteristics, KeyParameter::KeyParameter as KmKeyParameter,
-            KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel,
-        },
+        ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice,
+        KeyCharacteristics::KeyCharacteristics, KeyParameter::KeyParameter as KmKeyParameter,
+        KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel,
+    },
     consts, err,
     keymaster::{
-        error::{map_ks_error, KsError as Error},
+        error::{KsError as Error, map_ks_error},
         key_parameter::KeyParameter,
-        keymint_device::{get_keymint_wrapper, KeyMintDevice},
+        keymint_device::{KeyMintDevice, get_keymint_wrapper},
     },
     watchdog,
 };

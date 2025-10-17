@@ -1,6 +1,6 @@
 pub mod apex;
-pub mod attestation_key_utils;
 pub mod async_task;
+pub mod attestation_key_utils;
 pub mod boot_key;
 pub mod crypto;
 pub mod database;
@@ -15,6 +15,6 @@ pub mod metrics_store;
 pub mod operation;
 pub mod permission;
 pub mod security_level;
-pub mod super_key;
 pub mod service;
+pub mod super_key;
 pub mod utils;

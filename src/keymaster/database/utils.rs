@@ -1,7 +1,14 @@
 use anyhow::{Context, Result};
 use rusqlite::{types::FromSql, Row, Rows};
 
-use crate::{android::system::keystore2::{Domain::Domain, KeyDescriptor::KeyDescriptor}, err, keymaster::{db::{KeyType, KeymasterDb}, error::KsError}};
+use crate::{
+    android::system::keystore2::{Domain::Domain, KeyDescriptor::KeyDescriptor},
+    err,
+    keymaster::{
+        db::{KeyType, KeymasterDb},
+        error::KsError,
+    },
+};
 
 // Takes Rows as returned by a query call on prepared statement.
 // Extracts exactly one row with the `row_extractor` and fails if more
@@ -96,7 +103,6 @@ pub fn list_key_entries(
     let db_key_descriptors: Vec<KeyDescriptor> = db
         .list_past_alias(domain, namespace, KeyType::Client, start_past_alias)
         .context(err!("Trying to list keystore database past alias."))?;
-
 
     let safe_amount_to_return = estimate_safe_amount_to_return(
         domain,

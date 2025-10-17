@@ -8,13 +8,17 @@ use log::{debug, error};
 use rsbinder::hub;
 
 use crate::{
-    android::system::keystore2::{
-        IKeystoreOperation, IKeystoreService::BnKeystoreService}, keymaster::service::KeystoreService, top::qwq2333::ohmykeymint::IOhMyKsService::BnOhMyKsService}
-    
-;
+    android::system::keystore2::IKeystoreService::BnKeystoreService,
+    config::{Backend, CONFIG},
+    keymaster::service::KeystoreService,
+    top::qwq2333::ohmykeymint::IOhMyKsService::BnOhMyKsService,
+};
 
+pub mod att_mgr;
+pub mod config;
 pub mod consts;
 pub mod global;
+pub mod keybox;
 pub mod keymaster;
 pub mod keymint;
 pub mod logging;
@@ -33,6 +37,9 @@ const TAG: &str = "OhMyKeymint";
 fn main() {
     logging::init_logger();
     debug!("Hello, OhMyKeymint!");
+    debug!("Reading config");
+    let config = CONFIG.read().unwrap();
+
     debug!("Initial process state");
     rsbinder::ProcessState::init_default();
 
@@ -44,17 +51,26 @@ fn main() {
     debug!("Starting thread pool");
     rsbinder::ProcessState::start_thread_pool();
 
-    debug!("Creating keystore service");
-    let dev = KeystoreService::new_native_binder().unwrap();
+    match config.main.backend {
+        Backend::OMK => {
+            debug!("Using OhMyKeymint backend");
+            debug!("Creating keystore service");
+            let dev = KeystoreService::new_native_binder().unwrap();
 
-    let service = BnKeystoreService::new_binder(dev.clone());
+            let service = BnKeystoreService::new_binder(dev);
+            debug!("Adding keystore service to hub");
+            hub::add_service("keystore3", service.as_binder()).unwrap();
+        }
+        Backend::TrickyStore => {
+            debug!("Using TrickyStore backend");
+            debug!("Creating keystore service");
+            let dev = KeystoreService::new_native_binder().unwrap();
 
-    debug!("Adding keystore service to hub");
-    hub::add_service("keystore3", service.as_binder()).unwrap();
-
-    debug!("Adding OMK service to hub");
-    let service = BnOhMyKsService::new_binder(dev);
-    hub::add_service("omk", service.as_binder()).unwrap();
+            debug!("Adding OMK service to hub");
+            let service = BnOhMyKsService::new_binder(dev);
+            hub::add_service("omk", service.as_binder()).unwrap();
+        }
+    }
 
     debug!("Joining thread pool");
     rsbinder::ProcessState::join_thread_pool().unwrap();

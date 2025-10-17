@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use log::{debug, info};
 use rand::random;
 use rusqlite::{
     params, params_from_iter,
@@ -2022,6 +2023,57 @@ impl KeymasterDb {
         })
         .context(err!())
     }
+
+    pub fn terminate_uuid(&mut self, km_uuid: &Uuid) -> Result<()> {
+        info!("Terminating all keys created by UUID {:0x?}", km_uuid);
+        let _wp = wd::watch("KeystoreDB::terminate_uuid");
+
+        self.with_transaction(Immediate("TX_terminate_uuid"), |tx| {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id FROM persistent.keyentry
+                     WHERE km_uuid = ?;",
+                )
+                .context(
+                    "Failed to prepare the query to find the keys created by the given UUID.",
+                )?;
+
+            let mut rows = stmt
+                .query(params![km_uuid])
+                .context("Failed to query the keys created by the given UUID.")?;
+
+            let mut key_ids: Vec<i64> = Vec::new();
+            utils::with_rows_extract_all(&mut rows, |row| {
+                key_ids.push(row.get(0).context("Failed to read key id.")?);
+                Ok(())
+            })
+            .context("Failed to extract rows.")?;
+            info!("Found {} keys to terminate.", key_ids.len());
+
+            let mut notify_gc = false;
+            for key_id in key_ids {
+                debug!("Terminating key {:0x?}", key_id);
+                let result = tx
+                    .execute(
+                        "UPDATE persistent.keyentry SET state = ? WHERE id = ?;",
+                        params![KeyLifeCycle::Unreferenced, key_id],
+                    )
+                    .context(err!("Failed to set alias."))?;
+                if result != 1 {
+                    return Err(KsError::sys()).context(err!(
+                        "Expected to update a single entry but instead updated {}.",
+                        result
+                    ));
+                }
+
+                debug!("Marked key {:0x?} unreferenced", key_id);
+                notify_gc =
+                    Self::mark_unreferenced(tx, key_id).context("In terminate_uuid.")? || notify_gc;
+            }
+            Ok(()).do_gc(notify_gc)
+        })
+        .context(err!())
+    }
 }
 
 /// Database representation of the monotonic time retrieved from the system call clock_gettime with
@@ -2330,7 +2382,40 @@ pub struct Uuid(pub(crate) [u8; 16]);
 
 impl From<SecurityLevel> for Uuid {
     fn from(sec_level: SecurityLevel) -> Self {
-        Self((sec_level.0 as u128).to_be_bytes())
+        let digest = { crate::keybox::KEYBOX.read().unwrap().get_ec_key_digest() }; // avoid deadlock
+
+        let mut uuid_bytes = [0u8; 16];
+
+        // First 12 bytes: digest (truncate or pad as needed)
+        let digest_len = digest.len().min(12);
+        uuid_bytes[..digest_len].copy_from_slice(&digest[..digest_len]);
+
+        // Last 4 bytes: security level in big-endian
+        let sec_level_bytes = (sec_level.0 as u32).to_be_bytes();
+        uuid_bytes[12..16].copy_from_slice(&sec_level_bytes);
+
+        Self(uuid_bytes)
+    }
+}
+
+impl Uuid {
+    /// Convert UUID back to SecurityLevel by reading the last 4 bytes
+    pub fn to_security_level(&self) -> Option<SecurityLevel> {
+        // Read the last 4 bytes as big-endian u32
+        let mut sec_level_bytes = [0u8; 4];
+        sec_level_bytes.copy_from_slice(&self.0[12..16]);
+        let sec_level_value = u32::from_be_bytes(sec_level_bytes);
+
+        // Validate that it's one of the allowed values: 0, 1, 2, 100
+        match sec_level_value {
+            0 | 1 | 2 | 100 => Some(SecurityLevel(sec_level_value as i32)),
+            _ => None,
+        }
+    }
+
+    /// Get the digest portion (first 12 bytes) of the UUID
+    pub fn get_digest(&self) -> &[u8] {
+        &self.0[..12]
     }
 }
 

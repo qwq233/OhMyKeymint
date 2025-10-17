@@ -9,5 +9,5 @@ pub struct AttestationApplicationId {
 #[derive(der::Sequence, der::ValueOrd, Debug)]
 pub struct PackageInfoRecord {
     pub package_name: OctetString,
-    pub version: i64
+    pub version: i64,
 }

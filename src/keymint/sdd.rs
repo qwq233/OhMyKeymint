@@ -28,10 +28,10 @@ use std::io::Write;
 use std::path;
 
 #[cfg(not(target_os = "android"))]
-const SECURE_DELETION_DATA_FILE: &str = "./omk/data/keymint_secure_deletion_data";
+const SECURE_DELETION_DATA_FILE: &str = "./omk/data/keymint.dat";
 
 #[cfg(target_os = "android")]
-const SECURE_DELETION_DATA_FILE: &str = "/data/adb/omk/data/keymint_secure_deletion_data";
+const SECURE_DELETION_DATA_FILE: &str = "/data/adb/omk/data/keymint.dat";
 
 fn read_sdd_file() -> Result<storage::SecureDeletionData, Error> {
     let f = fs::File::open(SECURE_DELETION_DATA_FILE).map_err(|e| {

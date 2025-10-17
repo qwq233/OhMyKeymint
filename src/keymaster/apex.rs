@@ -1,6 +1,9 @@
 use std::cmp::Ordering;
 
-use der::{DerOrd, Sequence, asn1::OctetString};
+use der::{
+    asn1::{OctetString, SetOfVec},
+    DerOrd, Encode, Sequence,
+};
 
 #[derive(Sequence, Debug)]
 pub struct ApexModuleInfo {
@@ -18,4 +21,8 @@ impl DerOrd for ApexModuleInfo {
     fn der_cmp(&self, other: &Self) -> std::result::Result<Ordering, der::Error> {
         self.package_name.der_cmp(&other.package_name)
     }
+}
+
+pub fn encode_module_info(module_info: Vec<ApexModuleInfo>) -> Result<Vec<u8>, der::Error> {
+    SetOfVec::<ApexModuleInfo>::from_iter(module_info.into_iter())?.to_der()
 }
