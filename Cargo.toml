@@ -55,6 +55,7 @@ rsproperties-service = "*"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15.1"
+multi_log = "0.1.2"
 
 
 [profile.release]
