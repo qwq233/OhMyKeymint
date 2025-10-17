@@ -41,18 +41,24 @@ pub struct Shelf(HashMap<TypeId, Box<dyn Any + Send>>);
 impl Shelf {
     /// Get a reference to the shelved data of type T. Returns Some if the data exists.
     pub fn get_downcast_ref<T: Any + Send>(&self) -> Option<&T> {
-        self.0.get(&TypeId::of::<T>()).and_then(|v| v.downcast_ref::<T>())
+        self.0
+            .get(&TypeId::of::<T>())
+            .and_then(|v| v.downcast_ref::<T>())
     }
 
     /// Get a mutable reference to the shelved data of type T. If a T was inserted using put,
     /// get_mut, or get_or_put_with.
     pub fn get_downcast_mut<T: Any + Send>(&mut self) -> Option<&mut T> {
-        self.0.get_mut(&TypeId::of::<T>()).and_then(|v| v.downcast_mut::<T>())
+        self.0
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|v| v.downcast_mut::<T>())
     }
 
     /// Remove the entry of the given type and returns the stored data if it existed.
     pub fn remove_downcast_ref<T: Any + Send>(&mut self) -> Option<T> {
-        self.0.remove(&TypeId::of::<T>()).and_then(|v| v.downcast::<T>().ok().map(|b| *b))
+        self.0
+            .remove(&TypeId::of::<T>())
+            .and_then(|v| v.downcast::<T>().ok().map(|b| *b))
     }
 
     /// Puts data `v` on the shelf. If there already was an entry of type T it is returned.

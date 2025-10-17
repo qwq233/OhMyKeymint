@@ -25,3 +25,5 @@ hex.txt
 parcel.bin
 
 src/aidl.rs
+cert.crt
+cert.der

@@ -22,6 +22,7 @@ use kmr_common::{
 };
 use kmr_crypto_boring::{hmac::BoringHmac, rng::BoringRng};
 use kmr_ta::device::RetrieveKeyMaterial;
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 /// Root key retrieval using hard-coded fake keys.
 pub struct Keys;
@@ -29,16 +30,26 @@ pub struct Keys;
 impl RetrieveKeyMaterial for Keys {
     fn root_kek(&self, _context: &[u8]) -> Result<crypto::OpaqueOr<crypto::hmac::Key>, Error> {
         // Matches `MASTER_KEY` in system/keymaster/key_blob_utils/software_keyblobs.cpp
-        Ok(crypto::hmac::Key::new([0; 16].to_vec()).into())
+        let mut rng = StdRng::from_seed(b"somedeadbeefcafeherebruhbruhbruh".clone());
+        let mut key = [0; 16];
+        rng.fill_bytes(&mut key);
+
+        Ok(crypto::hmac::Key::new(key.to_vec()).into())
     }
     fn kak(&self) -> Result<crypto::OpaqueOr<crypto::aes::Key>, Error> {
         // Matches `kFakeKeyAgreementKey` in
         // system/keymaster/km_openssl/soft_keymaster_enforcement.cpp.
-        Ok(crypto::aes::Key::Aes256([0; 32]).into())
+        let mut rng = StdRng::from_seed(b"somedeadbeefcafeherebruhbruhbruh".clone());
+        let mut key = [0; 32];
+        rng.fill_bytes(&mut key);
+
+        Ok(crypto::aes::Key::Aes256(key).into())
     }
-    fn unique_id_hbk(&self, _ckdf: &dyn crypto::Ckdf) -> Result<crypto::hmac::Key, Error> {
-        // Matches value used in system/keymaster/contexts/pure_soft_keymaster_context.cpp.
-        crypto::hmac::Key::new_from(b"Very Very Secret HKDF Key")
+    fn unique_id_hbk(&self, ckdf: &dyn crypto::Ckdf) -> Result<crypto::hmac::Key, Error> {
+        // By default, use CKDF on the key agreement secret to derive a key.
+        let unique_id_label = b"UniqueID HBK 32B";
+        ckdf.ckdf(&self.kak()?, unique_id_label, &[], 32)
+            .map(crypto::hmac::Key::new)
     }
 }
 

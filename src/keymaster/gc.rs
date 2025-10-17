@@ -70,15 +70,22 @@ impl Gc {
                 notified,
             });
         });
-        Self { async_task, notified }
+        Self {
+            async_task,
+            notified,
+        }
     }
 
     /// Notifies the key garbage collector to iterate through orphaned and superseded blobs and
     /// attempts their deletion. We only process one key at a time and then schedule another
     /// attempt by queueing it in the async_task (low priority) queue.
     pub fn notify_gc(&self) {
-        if let Ok(0) = self.notified.compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed) {
-            self.async_task.queue_lo(|shelf| shelf.get_downcast_mut::<GcInternal>().unwrap().step())
+        if let Ok(0) = self
+            .notified
+            .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            self.async_task
+                .queue_lo(|shelf| shelf.get_downcast_mut::<GcInternal>().unwrap().step())
         }
     }
 }
@@ -110,7 +117,12 @@ impl GcInternal {
             self.superseded_blobs = blobs;
         }
 
-        if let Some(SupersededBlob { blob_id, blob, metadata }) = self.superseded_blobs.pop() {
+        if let Some(SupersededBlob {
+            blob_id,
+            blob,
+            metadata,
+        }) = self.superseded_blobs.pop()
+        {
             // Add the next blob_id to the deleted blob ids list. So it will be
             // removed from the database regardless of whether the following
             // succeeds or not.
@@ -144,7 +156,8 @@ impl GcInternal {
         if !self.deleted_blob_ids.is_empty() {
             if let Some(at) = self.async_task.upgrade() {
                 if let Ok(0) =
-                    self.notified.compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                    self.notified
+                        .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                 {
                     at.queue_lo(move |shelf| {
                         shelf.get_downcast_mut::<GcInternal>().unwrap().step()

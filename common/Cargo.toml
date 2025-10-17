@@ -20,6 +20,7 @@ kmr-wire = "*"
 log = "^0.4"
 pkcs1 = { version = "^0.7.5", features = ["alloc"] }
 pkcs8 = "^0.10.2"
+rand = "0.9.2"
 sec1 = { version = "0.7.3", features = ["alloc", "der", "pkcs8"] }
 spki = { version = "0.7.3"}
 zeroize = { version = "^1.5.6", features = ["alloc", "zeroize_derive"] }

@@ -48,8 +48,7 @@ fn main() {
             }
         }
     }
-    aidl
-    .source(PathBuf::from(
+    aidl.source(PathBuf::from(
         "aidl/android/security/authorization/ResponseCode.aidl",
     ))
     .source(PathBuf::from(

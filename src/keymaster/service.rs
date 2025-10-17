@@ -16,17 +16,20 @@
 //! AIDL spec.
 
 use std::collections::HashMap;
+use std::sync::RwLock;
 
 use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
 use crate::android::system::keystore2::IKeystoreSecurityLevel::BnKeystoreSecurityLevel;
 use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::err;
 use crate::global::ENCODED_MODULE_INFO;
-use crate::keymaster::apex::ApexModuleInfo;
+use crate::keybox::KEYBOX;
+use crate::keymaster::apex::encode_module_info;
 use crate::keymaster::database::utils::{count_key_entries, list_key_entries};
 use crate::keymaster::db::KEYSTORE_UUID;
 use crate::keymaster::db::{KeyEntryLoadBits, KeyType, SubComponentType};
 use crate::keymaster::error::{into_logged_binder, KsError as Error};
+use crate::keymaster::keymint_device::get_keymint_wrapper;
 use crate::keymaster::permission::KeyPermSet;
 use crate::keymaster::security_level::KeystoreSecurityLevel;
 use crate::keymaster::utils::key_parameters_to_authorizations;
@@ -46,25 +49,31 @@ use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
 use crate::android::hardware::security::keymint::Tag::Tag;
 use crate::android::system::keystore2::{
     Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
-    IKeystoreService::BnKeystoreService, IKeystoreService::IKeystoreService,
-    KeyDescriptor::KeyDescriptor, KeyEntryResponse::KeyEntryResponse, KeyMetadata::KeyMetadata,
+    IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor,
+    KeyEntryResponse::KeyEntryResponse, KeyMetadata::KeyMetadata,
 };
 use anyhow::{Context, Ok, Result};
-use der::asn1::SetOfVec;
-use der::Encode;
 use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::sha256::BoringSha256;
 use log::debug;
 use rsbinder::thread_state::CallingContext;
 use rsbinder::{Status, Strong};
 
-fn encode_module_info(module_info: Vec<ApexModuleInfo>) -> Result<Vec<u8>, der::Error> {
-    SetOfVec::<ApexModuleInfo>::from_iter(module_info.into_iter())?.to_der()
+/// Implementation of the IKeystoreService.
+pub struct KeystoreService {
+    security_levels: RwLock<SecurityLevels>,
 }
 
-/// Implementation of the IKeystoreService.
+impl Default for KeystoreService {
+    fn default() -> Self {
+        Self {
+            security_levels: RwLock::new(Default::default()),
+        }
+    }
+}
+
 #[derive(Default, Clone)]
-pub struct KeystoreService {
+struct SecurityLevels {
     i_sec_level_by_uuid: HashMap<Uuid, Strong<dyn IKeystoreSecurityLevel>>,
     i_osec_level_by_uuid: HashMap<Uuid, Strong<dyn IOhMySecurityLevel>>,
     uuid_by_sec_level: HashMap<SecurityLevel, Uuid>,
@@ -73,9 +82,9 @@ pub struct KeystoreService {
 impl KeystoreService {
     /// Create a new instance of the Keystore 2.0 service.
     pub fn new_native_binder() -> Result<KeystoreService> {
-        let mut result: Self = Default::default();
+        let result: Self = Default::default();
 
-        let (dev, uuid) = match KeystoreSecurityLevel::new(SecurityLevel::TRUSTED_ENVIRONMENT) {
+        match result.register_security_level(SecurityLevel::TRUSTED_ENVIRONMENT) {
             Result::Ok(v) => v,
             Err(e) => {
                 log::error!("Failed to construct mandatory security level TEE: {e:?}");
@@ -84,45 +93,105 @@ impl KeystoreService {
             }
         };
 
-        let dev: Strong<dyn IKeystoreSecurityLevel> = BnKeystoreSecurityLevel::new_binder(dev);
-
-        result.i_sec_level_by_uuid.insert(uuid, dev);
-        result
-            .uuid_by_sec_level
-            .insert(SecurityLevel::TRUSTED_ENVIRONMENT, uuid);
-
-        // Strongbox is optional, so we ignore errors and turn the result into an Option.
-        if let Result::Ok((dev, uuid)) = KeystoreSecurityLevel::new(SecurityLevel::STRONGBOX) {
-            let dev: Strong<dyn IKeystoreSecurityLevel> = BnKeystoreSecurityLevel::new_binder(dev);
-            result.i_sec_level_by_uuid.insert(uuid, dev);
-            result
-                .uuid_by_sec_level
-                .insert(SecurityLevel::STRONGBOX, uuid);
-        }
-
-        // OhMyKeymint extension: register the same security levels also as IOhMySecurityLevel.
-        let (dev, _uuid) = match KeystoreSecurityLevel::new(SecurityLevel::TRUSTED_ENVIRONMENT) {
+        match result.register_security_level(SecurityLevel::STRONGBOX) {
             Result::Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to construct mandatory security level TEE: {e:?}");
-                log::error!("Does the device have a /default Keymaster or KeyMint instance?");
-                return Err(e.context(err!("Trying to construct mandatory security level TEE")));
+                log::error!("Failed to construct mandatory security level StrongBox: {e:?}");
+                log::error!("But we ignore this error because StrongBox is optional.");
             }
         };
-
-        let dev: Strong<dyn IOhMySecurityLevel> = BnOhMySecurityLevel::new_binder(dev);
-        result.i_osec_level_by_uuid.insert(uuid, dev);
-
-        if let Result::Ok((dev, uuid)) = KeystoreSecurityLevel::new(SecurityLevel::STRONGBOX) {
-            let dev: Strong<dyn IOhMySecurityLevel> = BnOhMySecurityLevel::new_binder(dev);
-            result.i_osec_level_by_uuid.insert(uuid, dev);
-        }
 
         Ok(result)
     }
 
+    fn register_security_level(&self, sec_level: SecurityLevel) -> Result<()> {
+        debug!("Registering security level {sec_level:?}");
+        let uuid = Uuid::from(sec_level);
+
+        // Check if we need to terminate old UUID and do it before acquiring write lock
+        let old_uuid_to_terminate = {
+            let security_levels = self.security_levels.read().unwrap();
+            if let Some(&cur_uuid) = security_levels.uuid_by_sec_level.get(&sec_level) {
+                if uuid != cur_uuid {
+                    Some(cur_uuid)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }; // Release read lock
+
+        if let Some(cur_uuid) = old_uuid_to_terminate {
+            log::warn!("Security level {sec_level:?} was registered with a different UUID {cur_uuid:?}, overwriting with {uuid:?}.");
+            log::warn!("Terminating the old UUID from database.");
+
+            DB.with(|db| {
+                log::warn!("Terminating old UUID {cur_uuid:?} from database.");
+                db.borrow_mut().terminate_uuid(&cur_uuid).map_err(|e| {
+                    anyhow::anyhow!(err!("Failed to terminate old UUID {cur_uuid:?}: {e:?}"))
+                })
+            })?;
+        }
+
+        // Create security level instances BEFORE acquiring write lock to avoid holding lock during hardware calls
+        debug!("Creating security level instance (may involve hardware calls)");
+        let i_sec_level_dev = match KeystoreSecurityLevel::new(sec_level, uuid) {
+            Result::Ok(v) => v,
+            Err(e) => {
+                log::error!("Failed to construct security level {sec_level:?}: {e:?}");
+                return Err(e.context(err!("Trying to construct security level {sec_level:?}")));
+            }
+        };
+        let i_sec_level: Strong<dyn IKeystoreSecurityLevel> =
+            BnKeystoreSecurityLevel::new_binder(i_sec_level_dev);
+
+        // OhMyKeymint extension: register the same security levels also as IOhMySecurityLevel.
+        let i_osec_level_dev = match KeystoreSecurityLevel::new(sec_level, uuid) {
+            Result::Ok(v) => v,
+            Err(e) => {
+                log::error!("Failed to construct security level {sec_level:?}: {e:?}");
+                log::error!("Does the device have a /default Keymaster or KeyMint instance?");
+                return Err(e.context(err!("Trying to construct mandatory security level TEE")));
+            }
+        };
+        let i_osec_level: Strong<dyn IOhMySecurityLevel> =
+            BnOhMySecurityLevel::new_binder(i_osec_level_dev);
+
+        // Now acquire write lock only for the minimal time needed to update the maps
+        debug!("Obtaining exclusive lock to register security level");
+        let mut security_levels = self.security_levels.write().unwrap();
+        debug!("Obtained exclusive lock to register security level");
+
+        if security_levels.uuid_by_sec_level.contains_key(&sec_level) {
+            // Unregister if already registered
+            let cur_uuid = security_levels
+                .uuid_by_sec_level
+                .get(&sec_level)
+                .cloned()
+                .unwrap();
+            security_levels.i_sec_level_by_uuid.remove(&cur_uuid);
+            security_levels.i_osec_level_by_uuid.remove(&cur_uuid);
+            security_levels.uuid_by_sec_level.remove(&sec_level);
+            log::warn!("Security level {sec_level:?} was already registered, overwriting.");
+        }
+
+        security_levels
+            .i_sec_level_by_uuid
+            .insert(uuid, i_sec_level);
+        security_levels
+            .i_osec_level_by_uuid
+            .insert(uuid, i_osec_level);
+        security_levels.uuid_by_sec_level.insert(sec_level, uuid);
+
+        Ok(())
+    }
+
     fn uuid_to_sec_level(&self, uuid: &Uuid) -> SecurityLevel {
-        self.uuid_by_sec_level
+        self.security_levels
+            .read()
+            .unwrap()
+            .uuid_by_sec_level
             .iter()
             .find(|(_, v)| **v == *uuid)
             .map(|(s, _)| *s)
@@ -130,7 +199,8 @@ impl KeystoreService {
     }
 
     fn get_i_sec_level_by_uuid(&self, uuid: &Uuid) -> Result<Strong<dyn IKeystoreSecurityLevel>> {
-        if let Some(dev) = self.i_sec_level_by_uuid.get(uuid) {
+        let security_levels = self.security_levels.read().unwrap();
+        if let Some(dev) = security_levels.i_sec_level_by_uuid.get(uuid) {
             Ok(dev.clone())
         } else {
             Err(Error::sys()).context(err!("KeyMint instance for key not found."))
@@ -142,12 +212,14 @@ impl KeystoreService {
         _ctx: Option<&CallerInfo>, // reserved for future use
         sec_level: SecurityLevel,
     ) -> Result<Strong<dyn IKeystoreSecurityLevel>> {
-        if let Some(dev) = self
-            .uuid_by_sec_level
-            .get(&sec_level)
-            .and_then(|uuid| self.i_sec_level_by_uuid.get(uuid))
-        {
-            Ok(dev.clone())
+        let security_levels = self.security_levels.read().unwrap();
+        if let Some(uuid) = security_levels.uuid_by_sec_level.get(&sec_level) {
+            if let Some(dev) = security_levels.i_sec_level_by_uuid.get(uuid) {
+                Ok(dev.clone())
+            } else {
+                Err(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
+                    .context(err!("No such security level."))
+            }
         } else {
             Err(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
                 .context(err!("No such security level."))
@@ -159,10 +231,11 @@ impl KeystoreService {
         _ctx: Option<&CallerInfo>, // reserved for future use
         sec_level: SecurityLevel,
     ) -> Result<Strong<dyn IOhMySecurityLevel>> {
-        if let Some(dev) = self
+        let security_levels = self.security_levels.read().unwrap();
+        if let Some(dev) = security_levels
             .uuid_by_sec_level
             .get(&sec_level)
-            .and_then(|uuid| self.i_osec_level_by_uuid.get(uuid))
+            .and_then(|uuid| security_levels.i_osec_level_by_uuid.get(uuid))
         {
             Ok(dev.clone())
         } else {
@@ -678,5 +751,83 @@ impl IOhMyKsService for KeystoreService {
             // pretend as it's not supported
             Status::from(rsbinder::StatusCode::UnknownTransaction)
         })
+    }
+
+    fn updateEcKeybox(
+        &self,
+        key: &[u8],
+        chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
+    ) -> rsbinder::status::Result<()> {
+        {
+            let mut keybox = KEYBOX.write().unwrap();
+            debug!("Obtained KEYBOX lock to update EC keybox");
+
+            let chain: Vec<kmr_wire::keymint::Certificate> = chain
+                .iter()
+                .map(|c| kmr_wire::keymint::Certificate {
+                    encoded_certificate: c.encodedCertificate.clone(),
+                })
+                .collect();
+
+            keybox.update_ec_keybox(key.to_vec(), chain);
+        } // Release KEYBOX lock before registering security levels
+
+        debug!("Registering security levels after updating EC keybox");
+        self.register_security_level(SecurityLevel::TRUSTED_ENVIRONMENT)
+            .map_err(|e| {
+                panic!("Failed to register TEE security level: {}", e);
+            })
+            .unwrap();
+
+        self.register_security_level(SecurityLevel::STRONGBOX)
+            .map_err(|e| {
+                log::error!("Failed to register StrongBox security level: {}", e);
+                log::error!("But we ignore this error because");
+                // ignore error, StrongBox is optional
+            })
+            .unwrap_or(());
+
+        // reset KeyMintTa
+        get_keymint_wrapper(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap().reset_keymint_ta().unwrap();
+
+        get_keymint_wrapper(SecurityLevel::STRONGBOX).unwrap().reset_keymint_ta().unwrap();
+
+        Result::Ok(())
+    }
+
+    fn updateRsaKeybox(
+        &self,
+        key: &[u8],
+        chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
+    ) -> rsbinder::status::Result<()> {
+        {
+            let mut keybox = KEYBOX.write().unwrap();
+
+            let chain: Vec<kmr_wire::keymint::Certificate> = chain
+                .iter()
+                .map(|c| kmr_wire::keymint::Certificate {
+                    encoded_certificate: c.encodedCertificate.clone(),
+                })
+                .collect();
+
+            keybox.update_rsa_keybox(key.to_vec(), chain);
+        } // Release KEYBOX lock before registering security levels
+
+        debug!("Registering security levels after updating RSA keybox");
+        self.register_security_level(SecurityLevel::TRUSTED_ENVIRONMENT)
+            .map_err(|e| {
+                panic!("Failed to register TEE security level: {}", e);
+            })
+            .unwrap();
+
+        self.register_security_level(SecurityLevel::STRONGBOX)
+            .map_err(|e| {
+                log::error!("Failed to register StrongBox security level: {}", e);
+                log::error!("But we ignore this error because");
+                // ignore error, StrongBox is optional
+            })
+            .unwrap_or(());
+
+        Result::Ok(())
     }
 }

@@ -20,9 +20,19 @@ pub fn init_logger() {
 
 #[cfg(target_os = "android")]
 pub fn init_logger() {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(LevelFilter::Debug)
-            .with_tag("OhMyKeymint"),
-    );
+    // android_logger::init_once(
+    //     android_logger::Config::default()
+    //         .with_max_level(LevelFilter::Debug)
+    //         .with_tag("OhMyKeymint"),
+    // );
+
+    let stdout = ConsoleAppender::builder()
+        .encoder(Box::new(PatternEncoder::new(PATTERN)))
+        .build();
+    let root = Root::builder().appender("stdout").build(LevelFilter::Debug);
+    let config = Config::builder()
+        .appender(Appender::builder().build("stdout", Box::new(stdout)))
+        .build(root)
+        .unwrap();
+    log4rs::init_config(config).unwrap();
 }

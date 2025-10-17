@@ -1,27 +1,16 @@
-//
-// Copyright (C) 2022 The Android Open Source Project
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+use std::sync::RwLock;
 
-//! Attestation keys and certificates.
-//!
-//! Hard-coded keys and certs copied from system/keymaster/context/soft_attestation_cert.cpp
-
+use kmr_common::crypto::Sha256;
 use kmr_common::{
-    crypto::ec, crypto::rsa, crypto::CurveType, crypto::KeyMaterial, wire::keymint,
-    wire::keymint::EcCurve, Error,
+    crypto::{ec, CurveType, KeyMaterial},
+    km_err, Error,
 };
+use kmr_crypto_boring::sha256::BoringSha256;
 use kmr_ta::device::{RetrieveCertSigningInfo, SigningAlgorithm, SigningKeyType};
+use kmr_wire::keymint::{self, EcCurve};
+use log::debug;
+
+use crate::err;
 
 /// RSA attestation private key in PKCS#1 format.
 ///
@@ -362,24 +351,33 @@ const EC_ATTEST_ROOT_CERT: &str = concat!(
     "a585653cad4f24a7e74daf417df1bf",
 );
 
+lazy_static::lazy_static! {
+    /// A `KeyBox` instance holding all the hardcoded keys and certificates.
+    pub static ref KEYBOX: RwLock<KeyBox> = RwLock::new(KeyBox::new());
+}
+
 /// Per-algorithm attestation certificate signing information.
 pub struct CertSignAlgoInfo {
     key: KeyMaterial,
     chain: Vec<keymint::Certificate>,
+    digest: [u8; 32], // SHA-256 of the public key
 }
 
 /// Certificate signing information for all asymmetric key types.
-pub struct CertSignInfo {
+pub struct KeyBox {
     rsa_info: CertSignAlgoInfo,
     ec_info: CertSignAlgoInfo,
 }
 
-impl CertSignInfo {
+impl KeyBox {
     /// Create a new cert signing impl.
     pub fn new() -> Self {
-        CertSignInfo {
+        let hasher = BoringSha256 {};
+        KeyBox {
             rsa_info: CertSignAlgoInfo {
-                key: KeyMaterial::Rsa(rsa::Key(hex::decode(RSA_ATTEST_KEY).unwrap()).into()),
+                key: KeyMaterial::Rsa(
+                    kmr_common::crypto::rsa::Key(hex::decode(RSA_ATTEST_KEY).unwrap()).into(),
+                ),
                 chain: vec![
                     keymint::Certificate {
                         encoded_certificate: hex::decode(RSA_ATTEST_CERT).unwrap(),
@@ -388,6 +386,11 @@ impl CertSignInfo {
                         encoded_certificate: hex::decode(RSA_ATTEST_ROOT_CERT).unwrap(),
                     },
                 ],
+                digest: {
+                    hasher
+                        .hash(hex::decode(RSA_ATTEST_CERT).unwrap().as_slice())
+                        .unwrap()
+                },
             },
             ec_info: CertSignAlgoInfo {
                 key: KeyMaterial::Ec(
@@ -403,23 +406,93 @@ impl CertSignInfo {
                         encoded_certificate: hex::decode(EC_ATTEST_ROOT_CERT).unwrap(),
                     },
                 ],
+                digest: {
+                    hasher
+                        .hash(hex::decode(EC_ATTEST_CERT).unwrap().as_slice())
+                        .unwrap()
+                },
             },
         }
     }
+
+    pub fn update_rsa_keybox(&mut self, key: Vec<u8>, chain: Vec<keymint::Certificate>) {
+        debug!("Updating RSA keybox: {}", err!());
+        self.rsa_info.key = KeyMaterial::Rsa(kmr_common::crypto::rsa::Key(key).into());
+        self.rsa_info.chain = chain;
+        self.rsa_info.digest = BoringSha256 {}
+            .hash(self.rsa_info.chain[0].encoded_certificate.as_slice())
+            .unwrap();
+    }
+
+    pub fn update_ec_keybox(&mut self, key: Vec<u8>, chain: Vec<keymint::Certificate>) {
+        debug!("Updating EC keybox: {}", err!());
+        self.ec_info.key = KeyMaterial::Ec(
+            EcCurve::P256,
+            CurveType::Nist,
+            ec::Key::P256(ec::NistKey(key)).into(),
+        );
+        self.ec_info.chain = chain;
+        self.ec_info.digest = BoringSha256 {}
+            .hash(self.ec_info.chain[0].encoded_certificate.as_slice())
+            .unwrap();
+    }
+
+    pub fn get_ec_key_digest(&self) -> [u8; 32] {
+        self.ec_info.digest
+    }
 }
 
-impl RetrieveCertSigningInfo for CertSignInfo {
+pub struct KeyboxManager;
+
+impl RetrieveCertSigningInfo for KeyboxManager {
     fn signing_key(&self, key_type: SigningKeyType) -> Result<KeyMaterial, Error> {
         Ok(match key_type.algo_hint {
-            SigningAlgorithm::Rsa => self.rsa_info.key.clone(),
-            SigningAlgorithm::Ec => self.ec_info.key.clone(),
+            SigningAlgorithm::Rsa => {
+                let keybox = KEYBOX.read().map_err(|e| {
+                    km_err!(
+                        AttestationKeysNotProvisioned,
+                        "Failed to read KEYBOX: {}",
+                        e
+                    )
+                })?;
+                keybox.rsa_info.key.clone()
+            }
+            SigningAlgorithm::Ec => {
+                debug!("Retrieving EC signing key from KEYBOX");
+                let keybox = KEYBOX.read().map_err(|e| {
+                    km_err!(
+                        AttestationKeysNotProvisioned,
+                        "Failed to read KEYBOX: {}",
+                        e
+                    )
+                })?;
+                keybox.ec_info.key.clone()
+            }
         })
     }
 
     fn cert_chain(&self, key_type: SigningKeyType) -> Result<Vec<keymint::Certificate>, Error> {
         Ok(match key_type.algo_hint {
-            SigningAlgorithm::Rsa => self.rsa_info.chain.clone(),
-            SigningAlgorithm::Ec => self.ec_info.chain.clone(),
+            SigningAlgorithm::Rsa => {
+                let keybox = KEYBOX.read().map_err(|e| {
+                    km_err!(
+                        AttestationKeysNotProvisioned,
+                        "Failed to read KEYBOX: {}",
+                        e
+                    )
+                })?;
+                keybox.rsa_info.chain.clone()
+            }
+            SigningAlgorithm::Ec => {
+                let keybox = KEYBOX.read().map_err(|e| {
+                    km_err!(
+                        AttestationKeysNotProvisioned,
+                        "Failed to read KEYBOX: {}",
+                        e
+                    )
+                })?;
+                keybox.ec_info.chain.clone()
+            }
         })
     }
 }
