@@ -25,12 +25,25 @@ use kmr_ta::device::RetrieveKeyMaterial;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 /// Root key retrieval using hard-coded fake keys.
-pub struct Keys;
+pub struct Keys {
+    root_kek_seed: [u8; 32],
+    kak_seed: [u8; 32],
+}
+
+impl Keys {
+    /// Creates a new `Keys` instance with the given seeds.
+    pub fn new(root_kek_seed: [u8; 32], kak_seed: [u8; 32]) -> Self {
+        Self {
+            root_kek_seed,
+            kak_seed,
+        }
+    }
+}
 
 impl RetrieveKeyMaterial for Keys {
     fn root_kek(&self, _context: &[u8]) -> Result<crypto::OpaqueOr<crypto::hmac::Key>, Error> {
         // Matches `MASTER_KEY` in system/keymaster/key_blob_utils/software_keyblobs.cpp
-        let mut rng = StdRng::from_seed(b"somedeadbeefcafeherebruhbruhbruh".clone());
+        let mut rng = StdRng::from_seed(self.root_kek_seed);
         let mut key = [0; 16];
         rng.fill_bytes(&mut key);
 
@@ -39,17 +52,11 @@ impl RetrieveKeyMaterial for Keys {
     fn kak(&self) -> Result<crypto::OpaqueOr<crypto::aes::Key>, Error> {
         // Matches `kFakeKeyAgreementKey` in
         // system/keymaster/km_openssl/soft_keymaster_enforcement.cpp.
-        let mut rng = StdRng::from_seed(b"somedeadbeefcafeherebruhbruhbruh".clone());
+        let mut rng = StdRng::from_seed(self.kak_seed);
         let mut key = [0; 32];
         rng.fill_bytes(&mut key);
 
         Ok(crypto::aes::Key::Aes256(key).into())
-    }
-    fn unique_id_hbk(&self, ckdf: &dyn crypto::Ckdf) -> Result<crypto::hmac::Key, Error> {
-        // By default, use CKDF on the key agreement secret to derive a key.
-        let unique_id_label = b"UniqueID HBK 32B";
-        ckdf.ckdf(&self.kak()?, unique_id_label, &[], 32)
-            .map(crypto::hmac::Key::new)
     }
 }
 

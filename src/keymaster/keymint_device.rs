@@ -1151,6 +1151,7 @@ pub fn get_keymaster_security_level(
 }
 
 fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
+    let config = CONFIG.read().unwrap();
     let security_level = get_keymint_security_level(security_level)?;
 
     let hw_info = HardwareInfo {
@@ -1198,7 +1199,10 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
         sha256: Box::new(kmr_crypto_boring::sha256::BoringSha256),
     };
 
-    let keys: Box<dyn kmr_ta::device::RetrieveKeyMaterial> = Box::new(soft::Keys);
+    let keys: Box<dyn kmr_ta::device::RetrieveKeyMaterial> = Box::new(soft::Keys::new( 
+        config.crypto.root_kek_seed.clone(),
+        config.crypto.kak_seed.clone(),
+    ));
     let rpc: Box<dyn kmr_ta::device::RetrieveRpcArtifacts> = Box::new(soft::RpcArtifacts::new(
         soft::Derive::default(),
         rpc_sign_algo,
@@ -1229,8 +1233,6 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
     rng.fill_bytes(&mut vb_hash);
     let mut vb_key = vec![0u8; 32];
     rng.fill_bytes(&mut vb_key);
-
-    let config = CONFIG.read().unwrap();
 
     let patch_level = config.trust.security_patch.replace("-", "");
     let patch_level = patch_level.parse::<u32>().unwrap_or(20250605);
