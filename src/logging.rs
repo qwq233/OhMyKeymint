@@ -20,11 +20,11 @@ pub fn init_logger() {
 
 #[cfg(target_os = "android")]
 pub fn init_logger() {
-    // android_logger::init_once(
-    //     android_logger::Config::default()
-    //         .with_max_level(LevelFilter::Debug)
-    //         .with_tag("OhMyKeymint"),
-    // );
+    let config = android_logger::Config::default()
+        .with_max_level(LevelFilter::Debug)
+        .with_tag("OhMyKeymint");
+
+    let android_logger = android_logger::AndroidLogger::new(config);
 
     let stdout = ConsoleAppender::builder()
         .encoder(Box::new(PatternEncoder::new(PATTERN)))
@@ -34,5 +34,8 @@ pub fn init_logger() {
         .appender(Appender::builder().build("stdout", Box::new(stdout)))
         .build(root)
         .unwrap();
-    log4rs::init_config(config).unwrap();
+
+    let log4rs = log4rs::Logger::new(config);
+
+    multi_log::MultiLogger::init(vec![Box::new(android_logger), Box::new(log4rs)], log::Level::Debug).unwrap();
 }
