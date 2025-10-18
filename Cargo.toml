@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 jni = "0.21.1"
-syscalls = "0.6.15"
+syscalls = "0.7.0"
 kmr-derive = { path = "derive" }
 kmr-common = { path = "common" }
 kmr-crypto-boring = { path = "boringssl" }
