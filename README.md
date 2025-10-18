@@ -1,6 +1,6 @@
 # Oh My Keymint
 
-Custom keymint implementation for Android Keystore Spoofer
+Custom keystore implementation for Android Keystore Spoofer
 
 > [!WARNING]
 > This is a toy project. No ANY guarantees are made regarding performance or stability.
@@ -46,7 +46,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 5. 本协议与GNU Affero General Public License（以下简称AGPL）共同发挥效力，
    当本协议内容与AGPL冲突时，应当优先应用本协议内容，本协议仅覆盖本软件作者拥有
    完全著作权的部分，对于使用其他协议的软件代码不发挥效力。
-
 ```
 
 # Credit

@@ -1,0 +1,8 @@
+#!/system/bin/sh
+
+if [ -f "/data/adb/omk/keymint" ]; then
+    chmod 0755 "/data/adb/omk/keymint"
+    exec "/data/adb/omk/keymint" "$@"
+else
+    exec "./keymint" "$@"
+fi
