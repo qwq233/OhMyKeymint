@@ -70,13 +70,13 @@ extract "$ZIPFILE" 'daemon'          "$MODPATH"
 chmod 755 "$MODPATH/daemon"
 
 
-if [ "$ARCH" = "x64" ]; then
-  ui_print "- Extracting x64 libraries"
-  extract "$ZIPFILE" "lib/x86_64/keymint" "$MODPATH" true
-else
+# if [ "$ARCH" = "x64" ]; then
+#   ui_print "- Extracting x64 libraries"
+#   extract "$ZIPFILE" "lib/x86_64/keymint" "$MODPATH" true
+# else
   ui_print "- Extracting arm64 libraries"
   extract "$ZIPFILE" "lib/arm64-v8a/keymint" "$MODPATH" true
-fi
+# fi
 
 chmod 755 "$MODPATH/keymint"
 
