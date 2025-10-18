@@ -1,0 +1,152 @@
+name: Build OhMyKeymint
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  build-boringssl:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Clone BoringSSL
+      run: |
+        git clone https://boringssl.googlesource.com/boringssl
+
+    - name: Cache BoringSSL build
+      uses: actions/cache@v4
+      id: boringssl-cache
+      with:
+        path: boringssl/build
+        key: boringssl-${{ hashFiles('boringssl/.git/HEAD', 'boringssl/.git/refs/heads/main') }}
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: nightly
+        target: aarch64-linux-android
+
+    - name: Install Android SDK
+      if: steps.boringssl-cache.outputs.cache-hit != 'true'
+      uses: android-actions/setup-android@v3
+    - name: Install Android NDK and bindgen
+      if: steps.boringssl-cache.outputs.cache-hit != 'true'
+      run: |
+        cargo install bindgen-cli
+        echo "y" | sdkmanager --install "ndk;28.1.13356709" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        echo "y" | sdkmanager --install "ndk-bundle" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        echo "y" | sdkmanager --install "cmake;4.1.2" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+
+    - name: Install build dependencies
+      if: steps.boringssl-cache.outputs.cache-hit != 'true'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build gcc-multilib
+
+    - name: Build BoringSSL
+      if: steps.boringssl-cache.outputs.cache-hit != 'true'
+      run: |
+        cd boringssl
+        export PATH="~/.cargo/bin:$PATH"
+        $ANDROID_SDK_ROOT/cmake/4.1.2/bin/cmake -GNinja -B build \
+          -DRUST_BINDINGS=aarch64-linux-android \
+          -DCMAKE_SYSROOT=$ANDROID_SDK_ROOT/ndk/28.1.13356709/toolchains/llvm/prebuilt/linux-x86_64/sysroot/ \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_SDK_ROOT/ndk/28.1.13356709/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=android-21 \
+          -DANDROID_STL=c++_shared
+        ninja -j$(nproc) -C build
+    - name: Tar BoringSSL
+      run: |
+        tar czf boringssl.tar.gz boringssl
+    
+    - name: Output BoringSSL
+      uses: actions/upload-artifact@v4
+      with:
+        name: boringssl.tar.gz
+        path: boringssl.tar.gz
+
+  setup-and-build:
+    runs-on: ubuntu-latest
+    needs:
+      - build-boringssl
+    strategy:
+      matrix:
+        build-type: [debug, release]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: nightly
+        target: aarch64-linux-android
+
+    - name: Cache Cargo registry and build artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Install Android SDK and NDK
+      uses: android-actions/setup-android@v3
+    - name: Install Android NDK
+      run: |
+        echo "y" | sdkmanager --install "ndk;28.1.13356709" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        echo "y" | sdkmanager --install "ndk-bundle" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        cargo install cargo-ndk bindgen-cli
+
+    - name: Download BoringSSL
+      uses: actions/download-artifact@v4
+      with:
+        name: boringssl.tar.gz
+        path: .
+
+    - name: Adding BoringSSL to cargo crate
+      run: |
+        tar xf boringssl.tar.gz
+        echo -e "\n[patch.crates-io]\nbssl-sys = { path = \"$(pwd)/boringssl/rust/bssl-sys\" }\n" >> ~/.cargo/config.toml
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install toml
+
+    - name: Build OhMyKeymint
+      id: prepareArtifact
+      run: |
+        python build.py --${{ matrix.build-type }}
+        name=`ls target/OhMyKeymint-*.zip | awk -F '(/|.zip)' '{print $3}'` && echo "${{ matrix.build-type }}Name=$name" >> $GITHUB_OUTPUT
+      env:
+        BORINGSSL_ROOT_DIR: ${{ github.workspace }}/boringssl
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      id: upload
+      with:
+        name: ohmykeymint-${{ matrix.build-type }}
+        path: target/OhMyKeymint-${{ matrix.build-type }}-*.zip
+        retention-days: 30
+
+    - name: Attest release build provenance
+      if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.build-type == 'release' }}
+      uses: actions/attest-build-provenance@v2
+      with:
+        subject-name: ${{ steps.prepareArtifact.outputs.releaseName }}
+        subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}
