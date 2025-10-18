@@ -12,7 +12,7 @@ license = "Apache-2.0"
 cddl-cat = { version = "^0.6.1", optional = true }
 ciborium = { version = "^0.2.0", default-features = false }
 ciborium-io = "^0.2.0"
-coset = "0.3.3"
+coset = "0.4.0"
 der = { version = "^0.7.2", features = ["alloc", "derive"] }
 enumn = "0.1.4"
 kmr-derive = "*"
