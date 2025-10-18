@@ -18,7 +18,6 @@ use crate::{crypto::ec::Key, der_err, explicit, keyblob, vec_try, Error};
 use der::Decode;
 use kmr_wire::{keymint, keymint::Digest, KeySizeInBits, RsaExponent};
 use log::{error, warn};
-use rand::RngCore as _;
 
 /// Combined collection of trait implementations that must be provided.
 pub struct Implementation {
