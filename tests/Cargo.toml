@@ -10,7 +10,7 @@ license = "Apache-2.0"
 
 [dependencies]
 ciborium = { version = "^0.2.0", default-features = false }
-env_logger = "^0.9"
+env_logger = "^0.11"
 hex = "0.4.3"
 kmr-common = "*"
 kmr-crypto-boring = "*"
