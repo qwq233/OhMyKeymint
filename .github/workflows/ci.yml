@@ -30,6 +30,7 @@ jobs:
         key: boringssl-${{ hashFiles('boringssl/.git/HEAD', 'boringssl/.git/refs/heads/main') }}
 
     - name: Install Rust toolchain
+      if: steps.boringssl-cache.outputs.cache-hit != 'true'
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: nightly
@@ -67,7 +68,7 @@ jobs:
         ninja -j$(nproc) -C build
     - name: Tar BoringSSL
       run: |
-        tar czf boringssl.tar.gz boringssl
+        tar czf boringssl.tar.gz boringssl/build boringssl/rust
     
     - name: Output BoringSSL
       uses: actions/upload-artifact@v4
@@ -103,8 +104,7 @@ jobs:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
         restore-keys: |
           ${{ runner.os }}-cargo-
 
@@ -140,14 +140,15 @@ jobs:
       run: |
         unset RUSTFLAGS
         RUSTFLAGS="-C link-arg=-lc++_shared -C link-arg=-lc++abi" python build.py --${{ matrix.build-type }}
-        name=`ls target/OhMyKeymint-* | awk -F '/' '{print $2}'` && echo "releaseName=$name" >> $GITHUB_OUTPUT
+        name=`ls target/OhMyKeymint-* | awk -F '(/|.zip)' '{print $2}'` && echo "releaseName=$name" >> $GITHUB_OUTPUT
+        unzip target/OhMyKeymint-*.zip -d module-${{ matrix.build-type }}
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       id: upload
       with:
         name: ${{ steps.prepareArtifact.outputs.releaseName }}
-        path: target/OhMyKeymint-${{ matrix.build-type }}-*.zip
+        path: "./module-${{ matrix.build-type }}/*"
         retention-days: 90
 
     - name: Attest release build provenance
