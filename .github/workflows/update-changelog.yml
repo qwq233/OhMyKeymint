@@ -1,0 +1,76 @@
+name: Update Changelog and Metadata
+
+on:
+  release:
+    types: ["published", "edited"]
+
+jobs:
+  update-changelog:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository (master)
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Get commit count (versionCode)
+        id: commit_count
+        run: |
+          COUNT=$(git rev-list --count HEAD)
+          echo "versionCode=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Extract release info
+        id: release_info
+        env:
+          ASSETS_JSON: ${{ toJson(github.event.release.assets) }}
+        run: |
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          RELEASE_BODY="${{ github.event.release.body }}"
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "release_body<<EOF" >> $GITHUB_OUTPUT
+          echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          ASSET_URL=$(echo "$ASSETS_JSON" | jq -r '.[] | select(.name | endswith("release.zip")) | .browser_download_url' | head -n1)
+          
+          if [ -z "$ASSET_URL" ]; then
+            echo "::error::No release zip found in assets! Names:"
+            echo "$ASSETS_JSON" | jq -r '.[].name'
+            exit 1
+          fi
+          echo "asset_url=$ASSET_URL" >> $GITHUB_OUTPUT
+
+      - name: Checkout changelog branch
+        uses: actions/checkout@v4
+        with:
+          ref: changelog
+          path: changelog-branch
+
+      - name: Create/update files
+        run: |
+          cd changelog-branch
+          
+          echo "${{ steps.release_info.outputs.release_body }}" > changelog.md
+          
+          cat <<EOF > update.json
+          {
+            "version": "${{ steps.release_info.outputs.tag_name }}",
+            "versionCode": ${{ steps.commit_count.outputs.versionCode }},
+            "zipUrl": "${{ steps.release_info.outputs.asset_url }}",
+            "changelog": "https://raw.githubusercontent.com/qwq233/OhMyKeymint/changelog/changelog.md"
+          }
+          EOF
+
+      - name: Commit and push changes
+        run: |
+          cd changelog-branch
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add changelog.md update.json
+          git commit -m "Update ${{ steps.release_info.outputs.tag_name }}"
+          git push origin changelog -f

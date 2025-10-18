@@ -173,6 +173,8 @@ def main():
     parser = argparse.ArgumentParser(description='Build OhMyKeymint for Android')
     parser.add_argument('--release', action='store_true', 
                        help='Build in release mode')
+    parser.add_argument('--debug', action='store_true', 
+                       help='Build in debug mode (default)')
     args = parser.parse_args()
 
     # Clean up previous temp directory
