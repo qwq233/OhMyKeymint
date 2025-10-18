@@ -4,12 +4,15 @@ on:
   push:
     tags:
       - 'v*'
+    branches: [ "master" ]
+    paths-ignore:
+      - '**.md'
+      - '**.txt'
+      - '.github/**'
+      - '!.github/workflows/**'
   pull_request:
+    branches: [ "master" ]
   workflow_dispatch:
-
-env:
-  CARGO_INCREMENTAL: 0
-  RUST_BACKTRACE: short
 
 jobs:
   build-boringssl:
@@ -39,7 +42,7 @@ jobs:
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
       run: |
         cargo install bindgen-cli
-        echo "y" | sdkmanager --install "ndk;28.1.13356709" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        echo "y" | sdkmanager --install "ndk;28.2.13676358" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
         echo "y" | sdkmanager --install "ndk-bundle" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
         echo "y" | sdkmanager --install "cmake;4.1.2" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
 
@@ -56,8 +59,8 @@ jobs:
         export PATH="~/.cargo/bin:$PATH"
         $ANDROID_SDK_ROOT/cmake/4.1.2/bin/cmake -GNinja -B build \
           -DRUST_BINDINGS=aarch64-linux-android \
-          -DCMAKE_SYSROOT=$ANDROID_SDK_ROOT/ndk/28.1.13356709/toolchains/llvm/prebuilt/linux-x86_64/sysroot/ \
-          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_SDK_ROOT/ndk/28.1.13356709/build/cmake/android.toolchain.cmake \
+          -DCMAKE_SYSROOT=$ANDROID_SDK_ROOT/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/sysroot/ \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_SDK_ROOT/ndk/28.2.13676358/build/cmake/android.toolchain.cmake \
           -DANDROID_ABI=arm64-v8a \
           -DANDROID_PLATFORM=android-21 \
           -DANDROID_STL=c++_shared
@@ -71,6 +74,7 @@ jobs:
       with:
         name: boringssl.tar.gz
         path: boringssl.tar.gz
+        retention-days: 3
 
   setup-and-build:
     runs-on: ubuntu-latest
@@ -104,13 +108,16 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
 
-    - name: Install Android SDK and NDK
+    - name: Install Android SDK
       uses: android-actions/setup-android@v3
     - name: Install Android NDK
       run: |
-        echo "y" | sdkmanager --install "ndk;28.1.13356709" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
-        echo "y" | sdkmanager --install "ndk-bundle" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
-        cargo install cargo-ndk bindgen-cli
+        echo "y" | sdkmanager --install "ndk;28.2.13676358" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        cargo install cargo-ndk
+    - name: Install protoc
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler
 
     - name: Download BoringSSL
       uses: actions/download-artifact@v4
@@ -131,18 +138,17 @@ jobs:
     - name: Build OhMyKeymint
       id: prepareArtifact
       run: |
-        python build.py --${{ matrix.build-type }}
-        name=`ls target/OhMyKeymint-*.zip | awk -F '(/|.zip)' '{print $3}'` && echo "${{ matrix.build-type }}Name=$name" >> $GITHUB_OUTPUT
-      env:
-        BORINGSSL_ROOT_DIR: ${{ github.workspace }}/boringssl
+        unset RUSTFLAGS
+        RUSTFLAGS="-C link-arg=-lc++_shared -C link-arg=-lc++abi" python build.py --${{ matrix.build-type }}
+        name=`ls target/OhMyKeymint-* | awk -F '/' '{print $2}'` && echo "releaseName=$name" >> $GITHUB_OUTPUT
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       id: upload
       with:
-        name: ohmykeymint-${{ matrix.build-type }}
+        name: ${{ steps.prepareArtifact.outputs.releaseName }}
         path: target/OhMyKeymint-${{ matrix.build-type }}-*.zip
-        retention-days: 30
+        retention-days: 90
 
     - name: Attest release build provenance
       if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.build-type == 'release' }}

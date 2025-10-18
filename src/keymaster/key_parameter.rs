@@ -430,7 +430,7 @@ macro_rules! implement_to_sql {
     };
     (@replace_type_spec $enum_name:ident, [$($out:tt)*], []) => {
         /// Converts $enum_name to be stored in a rusqlite database.
-        fn to_sql(&self) -> SqlResult<ToSqlOutput> {
+        fn to_sql(&self) -> SqlResult<ToSqlOutput<'_>> {
             match self {
                 $($out)*
             }
