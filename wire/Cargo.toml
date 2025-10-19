@@ -20,7 +20,7 @@ hal_v2 = []
 [dependencies]
 ciborium = { version = "^0.2.2", default-features = false }
 ciborium-io = "^0.2.0"
-coset = "0.3.3"
+coset = "0.4.0"
 enumn = "0.1.4"
 kmr-derive = "*"
 log = "^0.4"
