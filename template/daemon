@@ -1,5 +1,7 @@
 #!/system/bin/sh
 
+export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/vendor/lib64/:/system/lib64/:/apex/com.android.runtime/lib64/bionic/"
+
 if [ -f "/data/adb/omk/keymint" ]; then
     chmod 0755 "/data/adb/omk/keymint"
     exec "/data/adb/omk/keymint" "$@"

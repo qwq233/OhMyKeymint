@@ -1,10 +1,9 @@
 # shellcheck disable=SC2034
 SKIPUNZIP=1
 
-DEBUG=@DEBUG@
-SONAME=@SONAME@
-SUPPORTED_ABIS="@SUPPORTED_ABIS@"
-MIN_SDK=@MIN_SDK@
+SONAME="Oh My Keymint"
+SUPPORTED_ABIS="arm64"
+MIN_SDK=29
 
 if [ "$BOOTMODE" ] && [ "$KSU" ]; then
   ui_print "- Installing from KernelSU app"
@@ -72,10 +71,10 @@ chmod 755 "$MODPATH/daemon"
 
 # if [ "$ARCH" = "x64" ]; then
 #   ui_print "- Extracting x64 libraries"
-#   extract "$ZIPFILE" "lib/x86_64/keymint" "$MODPATH" true
+#   extract "$ZIPFILE" "libs/x86_64/keymint" "$MODPATH" true
 # else
   ui_print "- Extracting arm64 libraries"
-  extract "$ZIPFILE" "lib/arm64-v8a/keymint" "$MODPATH" true
+  extract "$ZIPFILE" "libs/arm64-v8a/keymint" "$MODPATH" true
 # fi
 
 chmod 755 "$MODPATH/keymint"
