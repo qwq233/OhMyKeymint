@@ -94,7 +94,7 @@ impl KeyMintDevice {
     /// Get a [`KeyMintDevice`] for the given [`SecurityLevel`]
     pub fn get(security_level: SecurityLevel) -> Result<KeyMintDevice> {
         let km_dev = KeyMintWrapper::new(security_level)
-                        .expect(err!("Failed to init strongbox wrapper").as_str());
+            .expect(err!("Failed to init strongbox wrapper").as_str());
         let hw_info = km_dev.get_hardware_info().unwrap();
 
         let km_uuid = RwLock::new(Uuid::from(security_level));
@@ -447,10 +447,8 @@ impl IKeyMintDevice for KeyMintWrapper {
         crate::android::hardware::security::keymint::KeyMintHardwareInfo::KeyMintHardwareInfo,
         Status,
     > {
-        let hardware_info: keymint::KeyMintHardwareInfo = self.keymint
-            .lock().unwrap()
-            .get_hardware_info()
-            .unwrap();
+        let hardware_info: keymint::KeyMintHardwareInfo =
+            self.keymint.lock().unwrap().get_hardware_info().unwrap();
 
         let resp =
             crate::android::hardware::security::keymint::KeyMintHardwareInfo::KeyMintHardwareInfo {
@@ -527,8 +525,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             key_params: key_parameters,
             attestation_key,
         });
-        let result = self.keymint.lock().unwrap()
-            .process_req(req);
+        let result = self.keymint.lock().unwrap().process_req(req);
         if let None = result.rsp {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
@@ -932,7 +929,9 @@ impl KeyMintWrapper {
     }
 
     pub fn get_hardware_info(&self) -> Result<keymint::KeyMintHardwareInfo, Error> {
-        self.keymint.lock().unwrap()
+        self.keymint
+            .lock()
+            .unwrap()
             .get_hardware_info()
             .map_err(|_| Error::Km(ErrorCode::UNKNOWN_ERROR))
     }
@@ -1199,7 +1198,7 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
         sha256: Box::new(kmr_crypto_boring::sha256::BoringSha256),
     };
 
-    let keys: Box<dyn kmr_ta::device::RetrieveKeyMaterial> = Box::new(soft::Keys::new( 
+    let keys: Box<dyn kmr_ta::device::RetrieveKeyMaterial> = Box::new(soft::Keys::new(
         config.crypto.root_kek_seed.clone(),
         config.crypto.kak_seed.clone(),
     ));
@@ -1267,7 +1266,9 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
 
     let module_hash =
         crate::global::ENCODED_MODULE_INFO.get_or_try_init(|| -> Result<Vec<u8>, anyhow::Error> {
-            let apex_info = crate::plat::utils::get_apex_module_info()?;
+            let apex_info = crate::global::APEX_MODULE_HASH
+                .as_ref()
+                .map_err(|_| anyhow::anyhow!("Failed to get APEX module info."))?;
 
             let encoding = encode_module_info(apex_info)
                 .map_err(|_| anyhow::anyhow!("Failed to encode module info."))?;

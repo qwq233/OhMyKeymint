@@ -5,7 +5,7 @@ use der::{
     DerOrd, Encode, Sequence,
 };
 
-#[derive(Sequence, Debug)]
+#[derive(Sequence, Debug, Clone)]
 pub struct ApexModuleInfo {
     pub package_name: OctetString,
     pub version_code: u64,
@@ -23,6 +23,6 @@ impl DerOrd for ApexModuleInfo {
     }
 }
 
-pub fn encode_module_info(module_info: Vec<ApexModuleInfo>) -> Result<Vec<u8>, der::Error> {
-    SetOfVec::<ApexModuleInfo>::from_iter(module_info.into_iter())?.to_der()
+pub fn encode_module_info(module_info: &Vec<ApexModuleInfo>) -> Result<Vec<u8>, der::Error> {
+    SetOfVec::<ApexModuleInfo>::from_iter(module_info.iter().cloned())?.to_der()
 }
