@@ -187,9 +187,8 @@ fn encode_application_id(
 
 pub fn get_apex_module_info() -> anyhow::Result<Vec<ApexModuleInfo>> {
     let apex = get_apex()?;
-    let result: Vec<crate::android::apex::ApexInfo::ApexInfo> = apex
-        .getActivePackages()
-        .map_err(|e| {
+    let result: Vec<crate::android::apex::ApexInfo::ApexInfo> =
+        apex.getActivePackages().map_err(|e| {
             log::error!("Failed to get active packages: {:?}", e);
             anyhow::anyhow!(err!("getActivePackages failed: {:?}", e))
         })?;

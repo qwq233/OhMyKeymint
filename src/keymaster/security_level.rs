@@ -19,14 +19,14 @@ use crate::{
     err,
     global::{DB, ENFORCEMENTS, SUPER_KEY, UNDEFINED_NOT_AFTER},
     keymaster::{
-        attestation_key_utils::{AttestationKeyInfo, get_attest_key_info},
+        attestation_key_utils::{get_attest_key_info, AttestationKeyInfo},
         db::{
             BlobInfo, BlobMetaData, BlobMetaEntry, CertificateInfo, DateTime, KeyEntry,
             KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType, SubComponentType,
             Uuid,
         },
-        error::{KsError, into_logged_binder, map_binder_status},
-        keymint_device::{KeyMintWrapper},
+        error::{into_logged_binder, map_binder_status, KsError},
+        keymint_device::KeyMintWrapper,
         metrics_store::log_key_creation_event_stats,
         operation::{KeystoreOperation, LoggingInfo, OperationDb},
         super_key::{KeyBlob, SuperKeyManager},
@@ -60,8 +60,8 @@ pub struct KeystoreSecurityLevel {
 impl KeystoreSecurityLevel {
     pub fn new(security_level: SecurityLevel, km_uuid: Uuid) -> Result<Self> {
         let km_wrapper = KeyMintWrapper::new(security_level)
-                        .expect(err!("Failed to init strongbox wrapper").as_str());
-    
+            .expect(err!("Failed to init strongbox wrapper").as_str());
+
         let hw_info = km_wrapper
             .get_hardware_info()
             .context(err!("Failed to get hardware info."))?;
@@ -466,7 +466,8 @@ impl KeystoreSecurityLevel {
                             ),
                             5000, // Generate can take a little longer.
                         );
-                        let result = self.get_keymint_wrapper()
+                        let result = self
+                            .get_keymint_wrapper()
                             .generateKey(&params, attest_key.as_ref());
                         map_binder_status(result)
                     },
@@ -485,8 +486,7 @@ impl KeystoreSecurityLevel {
                     ),
                     5000, // Generate can take a little longer.
                 );
-                self.get_keymint_wrapper()
-                    .generateKey(&params, None)
+                self.get_keymint_wrapper().generateKey(&params, None)
             }
             .context(err!(
                 "While generating without a provided \

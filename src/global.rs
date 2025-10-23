@@ -11,13 +11,13 @@ use crate::{
     android::hardware::security::secureclock::ISecureClock::ISecureClock,
     err,
     keymaster::{
-        apex::ApexModuleInfo, async_task::AsyncTask, db::KeymasterDb, enforcements::Enforcements, gc::Gc, keymint_device::get_keymint_wrapper, super_key::SuperKeyManager
+        apex::ApexModuleInfo, async_task::AsyncTask, db::KeymasterDb, enforcements::Enforcements,
+        gc::Gc, keymint_device::get_keymint_wrapper, super_key::SuperKeyManager,
     },
     watchdog as wd,
 };
 
 static DB_INIT: Once = Once::new();
-
 
 lazy_static::lazy_static! {
     pub static ref APEX_MODULE_HASH: anyhow::Result<Vec<ApexModuleInfo>> = crate::plat::utils::get_apex_module_info();
