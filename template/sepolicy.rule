@@ -1,4 +1,9 @@
 allow keystore system_file unix_dgram_socket *
 allow system_file keystore unix_dgram_socket *
 allow keystore system_file file *
+
+allow keystore adb_data_file unix_dgram_socket *
+allow adb_data_file keystore unix_dgram_socket *
+allow keystore adb_data_file file *
+
 allow crash_dump keystore process *
