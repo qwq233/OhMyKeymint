@@ -3,7 +3,61 @@
 Custom keystore implementation for Android Keystore Spoofer
 
 > [!WARNING]
-> This is a toy project. No ANY guarantees are made regarding performance or stability.
+> The program is still in its early stages of development.
+> 
+> No ANY guarantees are made regarding performance or stability.
+
+# What is this?
+
+This is a complete implementation of the Keystore, implementing features not implemented in the Tricky Store.
+You can think of it as DLC for the game. It can work without it, but it's usually better to have it.
+
+In the future, we will gradually move away from the Tricky Store as a backend.
+
+# Install and configure
+
+1. Install the [qwq233's Tricky Store](https://github.com/qwq233/TrickyStore) (My fork).
+
+2. Install this module.
+
+3. Configure (if you need)
+
+Configuration file is located at `/data/adb/omk/config.toml`
+
+```toml
+[main]
+# We can only use Tricky Store as backend at this point.
+backend = "TrickyStore"
+
+# The following values ​​are used to generate the seed for device encryption 
+# and verification. Please be sure to save the following values. If you lose
+# them for some reason, please clear the module database (/data/adb/omk/data/)
+# DO NOT MODIFY ANY VALUE BELOW IF YOU DO NOT UNDERSTAND WHAT ARE YOU DOING
+[crypto]
+root_kek_seed = "4b61c4b3bdf72bb700c351e020270846fb67ba3885e5fb67547e626af5cc1a7f"
+kak_seed = "d6fa5bb024540928a7d554ab5831a0553dd2f688f5d6cb3cb1645be2ff49e357"
+
+[trust]
+os_version = 15
+security_patch = "2025-05-01"
+vb_key = "b114f5162ca0e4b4fc0544a218953caba54f3102f5f3a9346e220c770890b93b"
+vb_hash = "2b38cf298eb4ca0d2dbaab32721dea2bb297b42652f4fff9180c48e7ac4da887"
+verified_boot_state = true
+device_locked = true
+
+[device]
+brand = "Google"
+device = "generic"
+product = "generic"
+manufacturer = "Google"
+model = "generic"
+serial = "ABC12345678ABC"
+meid = "1234567890"
+imei = "1234567890"
+imei2 = "1234567890"
+```
+
+4. Enjoy
 
 # License
 
