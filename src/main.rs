@@ -4,13 +4,14 @@
 
 use std::panic;
 
+use lazy_static::lazy_static;
 use log::{debug, error, info};
 use rsbinder::hub;
 
 use crate::{
     android::system::keystore2::IKeystoreService::BnKeystoreService,
     config::{Backend, CONFIG},
-    keymaster::service::KeystoreService,
+    keymaster::{apex::ApexModuleInfo, service::KeystoreService},
     top::qwq2333::ohmykeymint::IOhMyKsService::BnOhMyKsService,
 };
 
@@ -38,16 +39,21 @@ fn main() {
     logging::init_logger();
     info!("Hello, OhMyKeymint!");
     info!("Reading config");
+    let config = CONFIG.read().unwrap();
+
+    info!("Initial process state");
+    rsbinder::ProcessState::init_default();
+
+    // We can no longer retrieve APEX module info after dropping privileges.
+    debug!("Retrieving APEX module hash with root privileges");
+    if let Err(e) = global::APEX_MODULE_HASH.as_ref() {
+        error!("Failed to retrieve APEX module info: {:?}", e);
+    }
 
     unsafe {
         info!("Setting UID to KEYSTORE_UID (1017)");
         libc::setuid(1017); // KEYSTORE_UID
     }
-
-    let config = CONFIG.read().unwrap();
-
-    info!("Initial process state");
-    rsbinder::ProcessState::init_default();
 
     // Redirect panic messages to logcat.
     panic::set_hook(Box::new(|panic_info| {

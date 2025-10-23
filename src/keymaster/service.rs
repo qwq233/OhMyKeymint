@@ -468,7 +468,9 @@ impl KeystoreService {
             Tag::MODULE_HASH => {
                 let info =
                     ENCODED_MODULE_INFO.get_or_try_init(|| -> Result<Vec<u8>, anyhow::Error> {
-                        let apex_info = crate::plat::utils::get_apex_module_info()?;
+                        let apex_info = crate::global::APEX_MODULE_HASH
+                            .as_ref()
+                            .map_err(|_| anyhow::anyhow!("Failed to get APEX module info."))?;
 
                         let encoding = encode_module_info(apex_info)
                             .map_err(|_| anyhow::anyhow!("Failed to encode module info."))?;
@@ -788,9 +790,15 @@ impl IOhMyKsService for KeystoreService {
             .unwrap_or(());
 
         // reset KeyMintTa
-        get_keymint_wrapper(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap().reset_keymint_ta().unwrap();
+        get_keymint_wrapper(SecurityLevel::TRUSTED_ENVIRONMENT)
+            .unwrap()
+            .reset_keymint_ta()
+            .unwrap();
 
-        get_keymint_wrapper(SecurityLevel::STRONGBOX).unwrap().reset_keymint_ta().unwrap();
+        get_keymint_wrapper(SecurityLevel::STRONGBOX)
+            .unwrap()
+            .reset_keymint_ta()
+            .unwrap();
 
         Result::Ok(())
     }
