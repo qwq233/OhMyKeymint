@@ -11,7 +11,7 @@ lazy_static::lazy_static! {
 }
 
 #[cfg(target_os = "android")]
-const CONFIG_PATH: &str = "/data/adb/omk/config.toml";
+const CONFIG_PATH: &str = "/data/misc/keystore/omk/config.toml";
 
 #[cfg(not(target_os = "android"))]
 const CONFIG_PATH: &str = "./omk/config.toml";

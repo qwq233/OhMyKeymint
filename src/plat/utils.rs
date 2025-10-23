@@ -106,13 +106,13 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
                 let current_uid = unsafe { libc::getuid() };
                 let current_euid = unsafe { libc::geteuid() };
                 debug!("Current UID: {}, EUID: {}", current_uid, current_euid);
-                unsafe {
-                    libc::seteuid(1017); // KEYSTORE_UID
-                }
+                // unsafe {
+                //     libc::seteuid(1017); // KEYSTORE_UID
+                // }
                 let result = pm.getKeyAttestationApplicationId(uid as i32);
-                unsafe {
-                    libc::seteuid(current_euid);
-                }
+                // unsafe {
+                //     libc::seteuid(current_euid);
+                // }
                 result
             };
             if let Result::Ok(application_id) = result {

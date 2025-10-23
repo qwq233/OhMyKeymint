@@ -4,7 +4,7 @@
 
 use std::panic;
 
-use log::{debug, error};
+use log::{debug, error, info};
 use rsbinder::hub;
 
 use crate::{
@@ -36,11 +36,17 @@ const TAG: &str = "OhMyKeymint";
 
 fn main() {
     logging::init_logger();
-    debug!("Hello, OhMyKeymint!");
-    debug!("Reading config");
+    info!("Hello, OhMyKeymint!");
+    info!("Reading config");
+
+    unsafe {
+        info!("Setting UID to KEYSTORE_UID (1017)");
+        libc::setuid(1017); // KEYSTORE_UID
+    }
+
     let config = CONFIG.read().unwrap();
 
-    debug!("Initial process state");
+    info!("Initial process state");
     rsbinder::ProcessState::init_default();
 
     // Redirect panic messages to logcat.
@@ -48,30 +54,30 @@ fn main() {
         error!("{}", panic_info);
     }));
 
-    debug!("Starting thread pool");
+    info!("Starting thread pool");
     rsbinder::ProcessState::start_thread_pool();
 
     match config.main.backend {
         Backend::OMK => {
-            debug!("Using OhMyKeymint backend");
-            debug!("Creating keystore service");
+            info!("Using OhMyKeymint backend");
+            info!("Creating keystore service");
             let dev = KeystoreService::new_native_binder().unwrap();
 
             let service = BnKeystoreService::new_binder(dev);
-            debug!("Adding keystore service to hub");
+            info!("Adding keystore service to hub");
             hub::add_service("keystore3", service.as_binder()).unwrap();
         }
         Backend::TrickyStore => {
-            debug!("Using TrickyStore backend");
-            debug!("Creating keystore service");
+            info!("Using TrickyStore backend");
+            info!("Creating keystore service");
             let dev = KeystoreService::new_native_binder().unwrap();
 
-            debug!("Adding OMK service to hub");
+            info!("Adding OMK service to hub");
             let service = BnOhMyKsService::new_binder(dev);
             hub::add_service("omk", service.as_binder()).unwrap();
         }
     }
 
-    debug!("Joining thread pool");
+    info!("Joining thread pool");
     rsbinder::ProcessState::join_thread_pool().unwrap();
 }

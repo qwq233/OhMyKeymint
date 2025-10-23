@@ -31,7 +31,7 @@ use TransactionBehavior::Immediate;
 const DB_ROOT_PATH: &str = "./omk/data";
 
 #[cfg(target_os = "android")]
-const DB_ROOT_PATH: &str = "/data/adb/omk/data";
+const DB_ROOT_PATH: &str = "/data/misc/keystore/omk/data";
 
 const PERSISTENT_DB_FILENAME: &'static str = "keymaster.db";
 

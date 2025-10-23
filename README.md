@@ -22,7 +22,7 @@ In the future, we will gradually move away from the Tricky Store as a backend.
 
 3. Configure (if you need)
 
-Configuration file is located at `/data/adb/omk/config.toml`
+Configuration file is located at `/data/misc/keystore/omk/config.toml`
 
 ```toml
 [main]
@@ -31,7 +31,7 @@ backend = "TrickyStore"
 
 # The following values ​​are used to generate the seed for device encryption 
 # and verification. Please be sure to save the following values. If you lose
-# them for some reason, please clear the module database (/data/adb/omk/data/)
+# them for some reason, please clear the module database (/data/misc/keystore/omk/data/)
 # DO NOT MODIFY ANY VALUE BELOW IF YOU DO NOT UNDERSTAND WHAT ARE YOU DOING
 [crypto]
 root_kek_seed = "4b61c4b3bdf72bb700c351e020270846fb67ba3885e5fb67547e626af5cc1a7f"
