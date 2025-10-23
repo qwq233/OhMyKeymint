@@ -6,9 +6,9 @@ use crate::{
     },
     consts, err,
     keymaster::{
-        error::{KsError as Error, map_ks_error},
+        error::{map_ks_error, KsError as Error},
         key_parameter::KeyParameter,
-        keymint_device::{KeyMintDevice, get_keymint_wrapper},
+        keymint_device::{get_keymint_wrapper, KeyMintDevice},
     },
     watchdog,
 };

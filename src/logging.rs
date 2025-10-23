@@ -37,5 +37,9 @@ pub fn init_logger() {
 
     let log4rs = log4rs::Logger::new(config);
 
-    multi_log::MultiLogger::init(vec![Box::new(android_logger), Box::new(log4rs)], log::Level::Debug).unwrap();
+    multi_log::MultiLogger::init(
+        vec![Box::new(android_logger), Box::new(log4rs)],
+        log::Level::Debug,
+    )
+    .unwrap();
 }
