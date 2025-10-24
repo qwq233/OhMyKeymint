@@ -9,7 +9,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-foreign-types = "0.3.1"
+foreign-types = "0.5.0"
 kmr-common = "*"
 kmr-wire = "*"
 libc = "^0.2.112"
