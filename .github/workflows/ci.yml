@@ -81,6 +81,9 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - build-boringssl
+    permissions:
+      id-token: write
+      attestations: write
     strategy:
       matrix:
         build-type: [debug, release]
