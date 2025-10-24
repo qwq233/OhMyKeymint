@@ -35,7 +35,7 @@ jobs:
           echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          ASSET_URL=$(echo "$ASSETS_JSON" | jq -r '.[] | select(.name | endswith("release.zip")) | .browser_download_url' | head -n1)
+          ASSET_URL=$(echo "$ASSETS_JSON" | jq -r '.[] | select(.name | contains("release")) | .browser_download_url' | head -n1)
           
           if [ -z "$ASSET_URL" ]; then
             echo "::error::No release zip found in assets! Names:"
