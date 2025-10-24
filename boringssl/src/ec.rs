@@ -33,16 +33,37 @@ use openssl::hash::MessageDigest;
 use Box;
 use Vec;
 
-#[cfg(soong)]
+#[cfg(target_os = "android")]
 fn private_key_from_der_for_group(
     der: &[u8],
     group: &openssl::ec::EcGroupRef,
 ) -> Result<openssl::ec::EcKey<openssl::pkey::Private>, openssl::error::ErrorStack> {
     // This method is an Android modification to the rust-openssl crate.
-    openssl::ec::EcKey::private_key_from_der_for_group(der, group)
+    ossl_private_key_from_der_for_group(der, group)
 }
 
-#[cfg(not(soong))]
+#[cfg(target_os = "android")]
+fn ossl_private_key_from_der_for_group(
+    der: &[u8],
+    group: &openssl::ec::EcGroupRef,
+) -> Result<openssl::ec::EcKey<openssl::pkey::Private>, openssl::error::ErrorStack> {
+    use foreign_types::ForeignTypeRef;
+
+    unsafe {
+        let mut cbs = ffi::CBS {
+            data: der.as_ptr(),
+            len: der.len(),
+        };
+
+        crate::ocvt_p(ffi::EC_KEY_parse_private_key(
+            &mut cbs as *mut ffi::CBS,
+            group.as_ptr(),
+        ))
+        .map(|p| openssl::ec::EcKey::from_ptr(p))
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn private_key_from_der_for_group(
     der: &[u8],
     _group: &openssl::ec::EcGroupRef,

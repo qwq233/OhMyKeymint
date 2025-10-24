@@ -154,6 +154,15 @@ fn cvt_p<T>(r: *mut T) -> Result<*mut T, Error> {
 }
 
 #[inline]
+fn ocvt_p<T>(r: *mut T) -> Result<*mut T, openssl::error::ErrorStack> {
+    if r.is_null() {
+        Err(openssl::error::ErrorStack::get())
+    } else {
+        Ok(r)
+    }
+}
+
+#[inline]
 fn cvt(r: libc::c_int) -> Result<libc::c_int, Error> {
     if r <= 0 {
         Err(openssl_last_err())
