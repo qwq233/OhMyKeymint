@@ -10,7 +10,7 @@ For more information about this module's features, please check the README.md fi
 - The vbmeta key & hash is not from calculation or retrieved from system properties.
 
 ## Attestation 
-- https://github.com/qwq233/OhMyKeymint/attestations/12381348
+- https://github.com/qwq233/OhMyKeymint/attestations/12382544
 
 > [!WARNING]
 > The program is still in its early stages of development.
