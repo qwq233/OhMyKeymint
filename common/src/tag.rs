@@ -108,6 +108,32 @@ macro_rules! get_opt_tag_value {
     }
 }
 
+#[macro_export]
+macro_rules! modify_tag_value {
+    { $params:expr, $variant:ident, $new_value:expr } => {
+        modify_tag_value!($params, $variant, $new_value, InvalidTag)
+    };
+    { $params:expr, $variant:ident, $new_value:expr, $dup_error:ident  } => {
+        {
+            let mut found = false;
+            for param in $params.iter_mut() {
+                if let kmr_wire::keymint::KeyParam::$variant(v) = param {
+                    if (found) {
+                        return Err($crate::km_err!(InvalidTag, "duplicate tag {}", stringify!($variant)));
+                    }
+                    *v = $new_value;
+                    found = true;
+                }
+            }
+            if found {
+                Ok(())
+            } else {
+                Err($crate::km_err!(InvalidTag, "missing tag {}", stringify!($variant)))
+            }
+        }
+    };
+}
+
 /// Macro to retrieve a `bool` tag value, returning `false` if the tag is absent
 #[macro_export]
 macro_rules! get_bool_tag_value {

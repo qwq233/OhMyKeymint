@@ -187,7 +187,7 @@ pub struct SecureDeletionData {
 }
 
 /// Indication of what kind of key operation requires a secure deletion slot.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotPurpose {
     /// Secure deletion slot needed for key generation.
     KeyGeneration,

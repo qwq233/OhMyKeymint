@@ -30,7 +30,7 @@ use kmr_wire::{
     },
     *,
 };
-use log::{error, warn};
+use log::{debug, error, warn};
 use spki::SubjectPublicKeyInfoOwned;
 use std::collections::btree_map::Entry;
 use x509_cert::ext::pkix::KeyUsages;
@@ -399,6 +399,11 @@ impl crate::KeyMintTa {
         key_material: KeyMaterial,
         purpose: keyblob::SlotPurpose,
     ) -> Result<KeyCreationResult, Error> {
+        debug!("finish_keyblob_creation: params {:?} attestKey {:?}", params, attestation_key);
+        debug!("key characteristics: {:?}", chars);
+        debug!("key material: {:?}", key_material);
+        debug!("keyblob purpose: {:?}", purpose);
+
         let keyblob = keyblob::PlaintextKeyBlob {
             // Don't include any `SecurityLevel::Keystore` characteristics in the set that is bound
             // to the key.
