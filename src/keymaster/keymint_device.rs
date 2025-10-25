@@ -93,17 +93,13 @@ impl KeyMintDevice {
 
     /// Get a [`KeyMintDevice`] for the given [`SecurityLevel`]
     pub fn get(security_level: SecurityLevel) -> Result<KeyMintDevice> {
-        let km_dev = KeyMintWrapper::new(security_level)
-            .expect(err!("Failed to init strongbox wrapper").as_str());
-        let hw_info = km_dev.get_hardware_info().unwrap();
-
         let km_uuid = RwLock::new(Uuid::from(security_level));
         let wrapper: KeyMintWrapper = KeyMintWrapper::new(security_level).unwrap();
         Ok(KeyMintDevice {
             km_dev: wrapper,
-            version: hw_info.version_number,
+            version: 400,
             km_uuid,
-            security_level: get_keymaster_security_level(hw_info.security_level)?,
+            security_level,
         })
     }
 
@@ -416,12 +412,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result: InternalBeginResult = match result.rsp.unwrap() {
             PerformOpRsp::DeviceBegin(rsp) => rsp.ret,
-            _ => {
-                return Err(Status::new_service_specific_error(
-                    ErrorCode::UNKNOWN_ERROR.0,
-                    None,
-                ))
-            }
+            _ => unreachable!("Unexpected response type")
         };
 
         let operation = crate::keymaster::keymint_operation::KeyMintOperation::new(
@@ -458,12 +449,7 @@ impl IKeyMintDevice for KeyMintWrapper {
                         SecurityLevel::TRUSTED_ENVIRONMENT
                     }
                     kmr_wire::keymint::SecurityLevel::Strongbox => SecurityLevel::STRONGBOX,
-                    _ => {
-                        return Err(Status::new_service_specific_error(
-                            ErrorCode::UNKNOWN_ERROR.0,
-                            None,
-                        ))
-                    }
+                    kmr_wire::keymint::SecurityLevel::Keystore => SecurityLevel::KEYSTORE,
                 },
                 versionNumber: hardware_info.version_number,
                 keyMintName: hardware_info.key_mint_name,
@@ -531,12 +517,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result = match result.rsp.unwrap() {
             PerformOpRsp::DeviceGenerateKey(rsp) => rsp.ret,
-            _ => {
-                return Err(Status::new_service_specific_error(
-                    ErrorCode::UNKNOWN_ERROR.0,
-                    None,
-                ))
-            }
+            _ => unreachable!("Unexpected response type")
         };
 
         let resp = key_creation_result_to_aidl(result)?;
@@ -595,12 +576,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result = match result.rsp.unwrap() {
             PerformOpRsp::DeviceImportKey(rsp) => rsp.ret,
-            _ => {
-                return Err(Status::new_service_specific_error(
-                    ErrorCode::UNKNOWN_ERROR.0,
-                    None,
-                ))
-            }
+            _ => unreachable!("Unexpected response type")
         };
 
         let resp = key_creation_result_to_aidl(result)?;
@@ -763,12 +739,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result = match result.rsp.unwrap() {
             PerformOpRsp::DeviceConvertStorageKeyToEphemeral(rsp) => rsp.ret,
-            _ => {
-                return Err(Status::new_service_specific_error(
-                    ErrorCode::UNKNOWN_ERROR.0,
-                    None,
-                ))
-            }
+            _ => unreachable!("Unexpected response type")
         };
 
         Result::Ok(result)
@@ -794,12 +765,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result = match result.rsp.unwrap() {
             PerformOpRsp::DeviceGetKeyCharacteristics(rsp) => rsp.ret,
-            _ => {
-                return Err(Status::new_service_specific_error(
-                    ErrorCode::UNKNOWN_ERROR.0,
-                    None,
-                ))
-            }
+            _ => unreachable!("Unexpected response type")
         };
 
         let result: Result<Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>, rsbinder::Status> = result.iter().map(|kc| {
@@ -818,12 +784,7 @@ impl IKeyMintDevice for KeyMintWrapper {
                         SecurityLevel::TRUSTED_ENVIRONMENT
                     }
                     kmr_wire::keymint::SecurityLevel::Strongbox => SecurityLevel::STRONGBOX,
-                    _ => {
-                        return Err(rsbinder::Status::new_service_specific_error(
-                            ErrorCode::UNKNOWN_ERROR.0,
-                            None,
-                        ))
-                    }
+                    kmr_wire::keymint::SecurityLevel::Keystore => SecurityLevel::KEYSTORE,
                 },
             })
 
@@ -865,12 +826,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result = match result.rsp.unwrap() {
             PerformOpRsp::GetRootOfTrust(rsp) => rsp.ret,
-            _ => {
-                return Err(Status::new_service_specific_error(
-                    ErrorCode::UNKNOWN_ERROR.0,
-                    None,
-                ))
-            }
+            _ => unreachable!("Unexpected response type")
         };
 
         Result::Ok(result)

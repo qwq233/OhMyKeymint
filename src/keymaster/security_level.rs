@@ -142,7 +142,7 @@ impl KeystoreSecurityLevel {
         let creation_datetime = SystemTime::now();
 
         // Add CREATION_DATETIME only if the backend version Keymint V1 (100) or newer.
-        if self.hw_info.version_number >= 100 {
+        // if self.hw_info.version_number >= 100 {
             result.push(KeyParameter {
                 tag: Tag::CREATION_DATETIME,
                 value: KeyParameterValue::DateTime(
@@ -160,7 +160,7 @@ impl KeystoreSecurityLevel {
                         ))?,
                 ),
             });
-        }
+        // }
 
         // If there is an attestation challenge we need to get an application id.
         if params.iter().any(|kp| kp.tag == Tag::ATTESTATION_CHALLENGE) {
