@@ -635,12 +635,7 @@ pub fn key_creation_result_to_aidl(
                         SecurityLevel::TRUSTED_ENVIRONMENT
                     }
                     kmr_wire::keymint::SecurityLevel::Strongbox => SecurityLevel::STRONGBOX,
-                    _ => {
-                        return Err(rsbinder::Status::new_service_specific_error(
-                            ErrorCode::UNKNOWN_ERROR.0,
-                            None,
-                        ))
-                    }
+                    kmr_wire::keymint::SecurityLevel::Keystore => SecurityLevel::KEYSTORE,
                 },
             })
 
