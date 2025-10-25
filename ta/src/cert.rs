@@ -28,7 +28,7 @@ use kmr_common::crypto::KeyMaterial;
 use kmr_common::{
     crypto, der_err, get_tag_value, km_err, tag, try_to_vec, vec_try_with_capacity, Error,
 };
-use kmr_common::{get_bool_tag_value, get_opt_tag_value, FallibleAllocExt};
+use kmr_common::{get_bool_tag_value, get_opt_tag_value, modify_tag_value, FallibleAllocExt};
 use kmr_wire::{
     keymint,
     keymint::{
@@ -445,10 +445,12 @@ macro_rules! check_attestation_id {
                 match $mustmatch {
                     None => return Err(km_err!(CannotAttestIds,
                                                "no attestation IDs provisioned")),
-                    Some(want)  => if val != want {
-                        return Err(km_err!(CannotAttestIds,
-                                           "attestation ID mismatch for {}",
-                                           stringify!($variant)))
+                    Some(want)  => if val != want.as_slice() {
+                        let result = modify_tag_value!($params, $variant, want.to_vec());
+                        if result.is_err() {
+                            return Err(result.unwrap_err());
+                        }
+                        log::info!("attestation ID mismatch for {}, reseting to {:?}", stringify!($variant), want);
                     }
                 }
             }
@@ -467,48 +469,50 @@ impl<'a> AuthorizationList<'a> {
         app_id: Option<&'a [u8]>,
         additional_attestation_info: &'a [KeyParam],
     ) -> Result<Self, Error> {
+        let mut keygen_params = keygen_params.to_vec();
+
         check_attestation_id!(
-            keygen_params,
+            &mut keygen_params,
             AttestationIdBrand,
             attestation_ids.map(|v| &v.brand)
         );
         check_attestation_id!(
-            keygen_params,
+            &mut keygen_params,
             AttestationIdDevice,
             attestation_ids.map(|v| &v.device)
         );
         check_attestation_id!(
-            keygen_params,
+            &mut keygen_params,
             AttestationIdProduct,
             attestation_ids.map(|v| &v.product)
         );
         check_attestation_id!(
-            keygen_params,
+            &mut keygen_params,
             AttestationIdSerial,
             attestation_ids.map(|v| &v.serial)
         );
         check_attestation_id!(
-            keygen_params,
+            &mut keygen_params,
             AttestationIdImei,
             attestation_ids.map(|v| &v.imei)
         );
         check_attestation_id!(
-            keygen_params,
+            &mut keygen_params,
             AttestationIdSecondImei,
             attestation_ids.map(|v| &v.imei2)
         );
         check_attestation_id!(
-            keygen_params,
+            &mut keygen_params,
             AttestationIdMeid,
             attestation_ids.map(|v| &v.meid)
         );
         check_attestation_id!(
-            keygen_params,
+            &mut keygen_params,
             AttestationIdManufacturer,
             attestation_ids.map(|v| &v.manufacturer)
         );
         check_attestation_id!(
-            keygen_params,
+            &mut keygen_params,
             AttestationIdModel,
             attestation_ids.map(|v| &v.model)
         );
