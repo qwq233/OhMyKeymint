@@ -1005,9 +1005,9 @@ impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
         forced: bool,
     ) -> Result<CreateOperationResponse, Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::createOperation");
-        Ok(self
+        self
             .create_operation(None, key, operation_parameters, forced)
-            .map_err(into_logged_binder)?)
+            .map_err(into_logged_binder)
     }
 
     fn generateKey(
@@ -1097,9 +1097,9 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         forced: bool,
     ) -> Result<CreateOperationResponse, Status> {
         let _wp = self.watch("IOhMySecurityLevel::createOperation");
-        Ok(self
+        self
             .create_operation(ctx, key, operation_parameters, forced)
-            .map_err(into_logged_binder)?)
+            .map_err(into_logged_binder)
     }
 
     fn generateKey(

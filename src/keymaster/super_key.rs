@@ -364,7 +364,7 @@ impl SuperKeyManager {
     }
 
     pub fn level_accessible(&self, boot_level: i32) -> bool {
-        self.data.boot_level_key_cache.as_ref().map_or(false, |c| {
+        self.data.boot_level_key_cache.as_ref().is_some_and(|c| {
             c.lock().unwrap().level_accessible(boot_level as usize)
         })
     }

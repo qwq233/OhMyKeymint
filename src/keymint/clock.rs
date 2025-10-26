@@ -43,6 +43,6 @@ impl crypto::MonotonicClock for StdClock {
             warn!("failed to get time!");
             return crypto::MillisecondsSinceEpoch(0);
         }
-        crypto::MillisecondsSinceEpoch(((time.tv_sec * 1000) + (time.tv_nsec / 1000 / 1000)).into())
+        crypto::MillisecondsSinceEpoch((time.tv_sec * 1000) + (time.tv_nsec / 1000 / 1000))
     }
 }

@@ -33,7 +33,7 @@ const DB_ROOT_PATH: &str = "./omk/data";
 #[cfg(target_os = "android")]
 const DB_ROOT_PATH: &str = "/data/misc/keystore/omk/data";
 
-const PERSISTENT_DB_FILENAME: &'static str = "keymaster.db";
+const PERSISTENT_DB_FILENAME: &str = "keymaster.db";
 
 const DB_BUSY_RETRY_INTERVAL: Duration = Duration::from_micros(500);
 

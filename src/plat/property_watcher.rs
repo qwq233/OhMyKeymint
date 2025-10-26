@@ -33,7 +33,7 @@ impl PropertyWatcher {
 
     pub fn read(&self) -> Result<String> {
         rsproperties::system_properties()
-            .get_with_result(&self.name.as_str())
+            .get_with_result(self.name.as_str())
             .context(anyhow!("Property '{}' not found", self.name))
     }
 
@@ -42,7 +42,7 @@ impl PropertyWatcher {
         F: FnMut(&str) -> Result<T>,
     {
         rsproperties::system_properties()
-            .get_with_result(&self.name.as_str())
+            .get_with_result(self.name.as_str())
             .context(anyhow!("Property '{}' not found", self.name))
             .and_then(|value| f(value.as_str()))
     }

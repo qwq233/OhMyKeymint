@@ -789,7 +789,7 @@ impl Enforcements {
                 let result = Self::find_auth_token(|auth_token_entry: &AuthTokenEntry| {
                     let token_valid = now_in_millis
                         .checked_sub(&auth_token_entry.time_received())
-                        .map_or(false, |token_age_in_millis| {
+                        .is_some_and(|token_age_in_millis| {
                             auth_token_max_age_millis > token_age_in_millis.milliseconds()
                         });
                     token_valid && auth_token_entry.satisfies(&sids, auth_type)
