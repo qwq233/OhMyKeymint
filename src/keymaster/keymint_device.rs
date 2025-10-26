@@ -171,7 +171,7 @@ impl KeyMintDevice {
             &BlobInfo::new(&creation_result.keyBlob, &blob_metadata),
             &CertificateInfo::new(None, None),
             &key_metadata,
-            &*self.km_uuid.read().unwrap(),
+            &self.km_uuid.read().unwrap(),
         )
         .context(err!("store_new_key failed"))?;
         Ok(())
@@ -303,7 +303,7 @@ impl KeyMintDevice {
         F: Fn(&[u8]) -> Result<T, Error>,
     {
         let (f_result, upgraded_blob) = crate::keymaster::utils::upgrade_keyblob_if_required_with(
-            self.security_level.clone(),
+            self.security_level,
             self.version(),
             &key_blob,
             &[],
@@ -407,7 +407,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         });
 
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
         let result: InternalBeginResult = match result.rsp.unwrap() {
@@ -416,7 +416,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         };
 
         let operation = crate::keymaster::keymint_operation::KeyMintOperation::new(
-            self.security_level.clone(),
+            self.security_level,
             result.challenge,
             km_params,
             result.op_handle,
@@ -512,7 +512,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             attestation_key,
         });
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
         let result = match result.rsp.unwrap() {
@@ -571,7 +571,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             attestation_key,
         });
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
         let result = match result.rsp.unwrap() {
@@ -614,7 +614,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         });
 
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
 
@@ -650,7 +650,7 @@ impl IKeyMintDevice for KeyMintWrapper {
 
         let result = self.keymint.lock().unwrap().process_req(req);
 
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
         let result = match result.rsp.unwrap() {
@@ -734,7 +734,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             });
 
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
         let result = match result.rsp.unwrap() {
@@ -760,7 +760,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         });
 
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
         let result = match result.rsp.unwrap() {
@@ -772,7 +772,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             let params: Result<Vec<crate::android::hardware::security::keymint::KeyParameter::KeyParameter>, rsbinder::Status> = kc.authorizations.iter().map(|p| {
                     key_param_to_aidl(p.clone())
                         .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
-                        .map_err(|e| map_ks_error(e))
+                        .map_err(map_ks_error)
             }).collect();
             let params = params?;
 
@@ -798,7 +798,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         let req = PerformOpReq::GetRootOfTrustChallenge(GetRootOfTrustChallengeRequest {});
 
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
         let result = match result.rsp.unwrap() {
@@ -821,7 +821,7 @@ impl IKeyMintDevice for KeyMintWrapper {
 
         let result = self.keymint.lock().unwrap().process_req(req);
 
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
         let result = match result.rsp.unwrap() {
@@ -873,14 +873,14 @@ impl IKeyMintDevice for KeyMintWrapper {
 impl KeyMintWrapper {
     pub fn new(security_level: SecurityLevel) -> Result<Self> {
         Ok(KeyMintWrapper {
-            security_level: security_level.clone(),
+            security_level,
             keymint: Mutex::new(init_keymint_ta(security_level)?),
         })
     }
 
     pub fn reset_keymint_ta(&self) -> Result<()> {
         let mut keymint = self.keymint.lock().unwrap();
-        *keymint = init_keymint_ta(self.security_level.clone())?;
+        *keymint = init_keymint_ta(self.security_level)?;
         Ok(())
     }
 
@@ -908,26 +908,22 @@ impl KeyMintWrapper {
         } else {
             None
         };
-        let timestamp_token = if let Some(tt) = timestamp_token {
-            Some(kmr_wire::secureclock::TimeStampToken {
+        let timestamp_token = timestamp_token.map(|tt| kmr_wire::secureclock::TimeStampToken {
                 challenge: tt.challenge,
                 timestamp: kmr_wire::secureclock::Timestamp {
                     milliseconds: tt.timestamp.milliSeconds,
                 },
                 mac: tt.mac.clone(),
-            })
-        } else {
-            None
-        };
+            });
 
         let req = PerformOpReq::OperationUpdateAad(UpdateAadRequest {
             op_handle,
             input: input.to_vec(),
             auth_token: hardware_auth_token,
-            timestamp_token: timestamp_token,
+            timestamp_token,
         });
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Error::Binder(
                 ExceptionCode::ServiceSpecific,
                 result.error_code,
@@ -957,26 +953,22 @@ impl KeyMintWrapper {
         } else {
             None
         };
-        let timestamp_token = if let Some(tt) = timestamp_token {
-            Some(kmr_wire::secureclock::TimeStampToken {
+        let timestamp_token = timestamp_token.map(|tt| kmr_wire::secureclock::TimeStampToken {
                 challenge: tt.challenge,
                 timestamp: kmr_wire::secureclock::Timestamp {
                     milliseconds: tt.timestamp.milliSeconds,
                 },
                 mac: tt.mac.clone(),
-            })
-        } else {
-            None
-        };
+            });
 
         let req = PerformOpReq::OperationUpdate(UpdateRequest {
             op_handle,
             input: input.to_vec(),
             auth_token: hardware_auth_token,
-            timestamp_token: timestamp_token,
+            timestamp_token,
         });
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Error::Binder(
                 ExceptionCode::ServiceSpecific,
                 result.error_code,
@@ -1008,31 +1000,27 @@ impl KeyMintWrapper {
         } else {
             None
         };
-        let timestamp_token = if let Some(tt) = timestamp_token {
-            Some(kmr_wire::secureclock::TimeStampToken {
+        let timestamp_token = timestamp_token.map(|tt| kmr_wire::secureclock::TimeStampToken {
                 challenge: tt.challenge,
                 timestamp: kmr_wire::secureclock::Timestamp {
                     milliseconds: tt.timestamp.milliSeconds,
                 },
                 mac: tt.mac.clone(),
-            })
-        } else {
-            None
-        };
+            });
         let input = input.map(|i| i.to_vec());
         let signature = signature.map(|s| s.to_vec());
         let confirmation_token = confirmation_token.map(|c| c.to_vec());
 
         let req = PerformOpReq::OperationFinish(FinishRequest {
             op_handle,
-            input: input,
-            signature: signature,
+            input,
+            signature,
             auth_token: hardware_auth_token,
-            timestamp_token: timestamp_token,
-            confirmation_token: confirmation_token,
+            timestamp_token,
+            confirmation_token,
         });
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Error::Binder(
                 ExceptionCode::ServiceSpecific,
                 result.error_code,
@@ -1049,7 +1037,7 @@ impl KeyMintWrapper {
     pub fn op_abort(&self, op_handle: i64) -> Result<(), Error> {
         let req = PerformOpReq::OperationAbort(AbortRequest { op_handle });
         let result = self.keymint.lock().unwrap().process_req(req);
-        if let None = result.rsp {
+        if result.rsp.is_none() {
             return Err(Error::Binder(
                 ExceptionCode::ServiceSpecific,
                 result.error_code,
@@ -1155,8 +1143,8 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
     };
 
     let keys: Box<dyn kmr_ta::device::RetrieveKeyMaterial> = Box::new(soft::Keys::new(
-        config.crypto.root_kek_seed.clone(),
-        config.crypto.kak_seed.clone(),
+        config.crypto.root_kek_seed,
+        config.crypto.kak_seed,
     ));
     let rpc: Box<dyn kmr_ta::device::RetrieveRpcArtifacts> = Box::new(soft::RpcArtifacts::new(
         soft::Derive::default(),

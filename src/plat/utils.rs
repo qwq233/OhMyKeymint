@@ -109,11 +109,11 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
                 // unsafe {
                 //     libc::seteuid(1017); // KEYSTORE_UID
                 // }
-                let result = pm.getKeyAttestationApplicationId(uid as i32);
+                
                 // unsafe {
                 //     libc::seteuid(current_euid);
                 // }
-                result
+                pm.getKeyAttestationApplicationId(uid as i32)
             };
             if let Result::Ok(application_id) = result {
                 break application_id;
@@ -153,7 +153,7 @@ fn encode_application_id(
                 .hash(sig.data.as_slice())
                 .map_err(|e| anyhow::anyhow!("Failed to hash signature: {:?}", e))?;
 
-            let octet_string = x509_cert::der::asn1::OctetString::new(&result)?;
+            let octet_string = x509_cert::der::asn1::OctetString::new(result)?;
 
             let result = signature_digests.insert_ordered(octet_string).map_err(|e| {
                 anyhow::anyhow!(err!("Failed to encode AttestationApplicationId: {:?}", e))
@@ -177,7 +177,7 @@ fn encode_application_id(
 
     let result = super::aaid::AttestationApplicationId {
         package_info_records: package_info_set,
-        signature_digests: signature_digests,
+        signature_digests,
     };
 
     result

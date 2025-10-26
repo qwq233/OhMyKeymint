@@ -20,7 +20,7 @@ use kmr_wire::{
 };
 
 pub fn log_params(params: &[KmKeyParameter]) -> Vec<KmKeyParameter> {
-    params.iter().cloned().collect::<Vec<KmKeyParameter>>()
+    params.to_vec()
 }
 
 /// Converts a set of key characteristics as returned from KeyMint into the internal
@@ -623,7 +623,7 @@ pub fn key_creation_result_to_aidl(
             let params: Result<Vec<crate::android::hardware::security::keymint::KeyParameter::KeyParameter>, rsbinder::Status> = kc.authorizations.iter().map(|p| {
                     key_param_to_aidl(p.clone())
                         .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
-                        .map_err(|e| map_ks_error(e))
+                        .map_err(map_ks_error)
             }).collect();
             let params = params?;
 

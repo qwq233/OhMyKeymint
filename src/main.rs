@@ -4,14 +4,13 @@
 
 use std::panic;
 
-use lazy_static::lazy_static;
 use log::{debug, error, info};
 use rsbinder::hub;
 
 use crate::{
     android::system::keystore2::IKeystoreService::BnKeystoreService,
     config::{Backend, CONFIG},
-    keymaster::{apex::ApexModuleInfo, service::KeystoreService},
+    keymaster::service::KeystoreService,
     top::qwq2333::ohmykeymint::IOhMyKsService::BnOhMyKsService,
 };
 
