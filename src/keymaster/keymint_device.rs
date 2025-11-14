@@ -1201,7 +1201,7 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
     let req = PerformOpReq::SetHalInfo(kmr_wire::SetHalInfoRequest {
         os_version: config.trust.os_version as u32,
         os_patchlevel,
-        vendor_patchlevel: os_patchlevel,
+        vendor_patchlevel: boot_patchlevel,
     });
     let resp = ta.process_req(req);
     if resp.error_code != 0 {
