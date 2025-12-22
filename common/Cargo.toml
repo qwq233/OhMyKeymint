@@ -9,7 +9,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-cddl-cat = { version = "^0.6.1", optional = true }
+cddl-cat = { version = "^0.7.0", optional = true }
 ciborium = { version = "^0.2.0", default-features = false }
 ciborium-io = "^0.2.0"
 coset = "0.4.0"
