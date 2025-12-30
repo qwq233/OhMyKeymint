@@ -81,4 +81,4 @@ rsproperties-service = { path = "rsproperties-service" }
 
 [build-dependencies]
 prost-build = "0.14.1"
-rsbinder-aidl = "0.4.3"
+rsbinder-aidl = "0.5.0"
