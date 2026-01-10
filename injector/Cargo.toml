@@ -1,0 +1,21 @@
+[package]
+name = "injector"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[[bin]]
+name = "inject"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2.177"
+log = "0.4.28"
+log4rs = "1.4.0"
+nix = { version = "0.30.1", features = ["dir", "fs", "ptrace", "signal"] }
+lsplt-rs = "2.1.5"
+anyhow = "1.0.100"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.15.1"
+multi_log = "0.1.2"

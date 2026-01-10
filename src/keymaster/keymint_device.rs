@@ -412,7 +412,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result: InternalBeginResult = match result.rsp.unwrap() {
             PerformOpRsp::DeviceBegin(rsp) => rsp.ret,
-            _ => unreachable!("Unexpected response type")
+            _ => unreachable!("Unexpected response type"),
         };
 
         let operation = crate::keymaster::keymint_operation::KeyMintOperation::new(
@@ -517,7 +517,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result = match result.rsp.unwrap() {
             PerformOpRsp::DeviceGenerateKey(rsp) => rsp.ret,
-            _ => unreachable!("Unexpected response type")
+            _ => unreachable!("Unexpected response type"),
         };
 
         let resp = key_creation_result_to_aidl(result)?;
@@ -576,7 +576,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result = match result.rsp.unwrap() {
             PerformOpRsp::DeviceImportKey(rsp) => rsp.ret,
-            _ => unreachable!("Unexpected response type")
+            _ => unreachable!("Unexpected response type"),
         };
 
         let resp = key_creation_result_to_aidl(result)?;
@@ -739,7 +739,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result = match result.rsp.unwrap() {
             PerformOpRsp::DeviceConvertStorageKeyToEphemeral(rsp) => rsp.ret,
-            _ => unreachable!("Unexpected response type")
+            _ => unreachable!("Unexpected response type"),
         };
 
         Result::Ok(result)
@@ -765,7 +765,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result = match result.rsp.unwrap() {
             PerformOpRsp::DeviceGetKeyCharacteristics(rsp) => rsp.ret,
-            _ => unreachable!("Unexpected response type")
+            _ => unreachable!("Unexpected response type"),
         };
 
         let result: Result<Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>, rsbinder::Status> = result.iter().map(|kc| {
@@ -826,7 +826,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }
         let result = match result.rsp.unwrap() {
             PerformOpRsp::GetRootOfTrust(rsp) => rsp.ret,
-            _ => unreachable!("Unexpected response type")
+            _ => unreachable!("Unexpected response type"),
         };
 
         Result::Ok(result)
@@ -909,12 +909,12 @@ impl KeyMintWrapper {
             None
         };
         let timestamp_token = timestamp_token.map(|tt| kmr_wire::secureclock::TimeStampToken {
-                challenge: tt.challenge,
-                timestamp: kmr_wire::secureclock::Timestamp {
-                    milliseconds: tt.timestamp.milliSeconds,
-                },
-                mac: tt.mac.clone(),
-            });
+            challenge: tt.challenge,
+            timestamp: kmr_wire::secureclock::Timestamp {
+                milliseconds: tt.timestamp.milliSeconds,
+            },
+            mac: tt.mac.clone(),
+        });
 
         let req = PerformOpReq::OperationUpdateAad(UpdateAadRequest {
             op_handle,
@@ -954,12 +954,12 @@ impl KeyMintWrapper {
             None
         };
         let timestamp_token = timestamp_token.map(|tt| kmr_wire::secureclock::TimeStampToken {
-                challenge: tt.challenge,
-                timestamp: kmr_wire::secureclock::Timestamp {
-                    milliseconds: tt.timestamp.milliSeconds,
-                },
-                mac: tt.mac.clone(),
-            });
+            challenge: tt.challenge,
+            timestamp: kmr_wire::secureclock::Timestamp {
+                milliseconds: tt.timestamp.milliSeconds,
+            },
+            mac: tt.mac.clone(),
+        });
 
         let req = PerformOpReq::OperationUpdate(UpdateRequest {
             op_handle,
@@ -1001,12 +1001,12 @@ impl KeyMintWrapper {
             None
         };
         let timestamp_token = timestamp_token.map(|tt| kmr_wire::secureclock::TimeStampToken {
-                challenge: tt.challenge,
-                timestamp: kmr_wire::secureclock::Timestamp {
-                    milliseconds: tt.timestamp.milliSeconds,
-                },
-                mac: tt.mac.clone(),
-            });
+            challenge: tt.challenge,
+            timestamp: kmr_wire::secureclock::Timestamp {
+                milliseconds: tt.timestamp.milliSeconds,
+            },
+            mac: tt.mac.clone(),
+        });
         let input = input.map(|i| i.to_vec());
         let signature = signature.map(|s| s.to_vec());
         let confirmation_token = confirmation_token.map(|c| c.to_vec());

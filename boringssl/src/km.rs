@@ -62,7 +62,7 @@ pub fn generate_random_data(size: usize) -> Result<Vec<u8>, Error> {
 
 #[allow(non_snake_case)]
 fn randomBytes(buf: *mut u8, len: usize) -> bool {
-    let mut rng = crate::rng::BoringRng::default();
+    let mut rng = crate::rng::BoringRng;
     rng.fill_bytes(unsafe { std::slice::from_raw_parts_mut(buf, len) });
     true
 }
@@ -370,10 +370,7 @@ pub fn hkdf_expand(out_len: usize, prk: &[u8], info: &[u8]) -> Result<ZVec, Erro
 fn hkdf_expand_rs(out_key: &mut [u8], prk: &[u8], info: &[u8]) -> bool {
     let digest = MessageDigest::sha256();
 
-    match openssl::pkcs5::pbkdf2_hmac(prk, info, 1, digest, out_key) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    openssl::pkcs5::pbkdf2_hmac(prk, info, 1, digest, out_key).is_ok()
 }
 
 /// A wrapper around the boringssl EC_KEY type that frees it on drop.
