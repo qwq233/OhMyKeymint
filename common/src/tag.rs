@@ -200,7 +200,7 @@ pub fn transcribe_tags(
     for param in src {
         let tag = param.tag();
         dup_checker.add(tag)?;
-        if tags.iter().any(|t| *t == tag) {
+        if tags.contains(&tag) {
             dest.try_push(param.clone())?;
         }
     }
@@ -807,9 +807,7 @@ fn check_aes_import_params(
 
 /// Check the parameter validity for an AES key that is about to be generated or imported.
 fn check_aes_params(params: &[KeyParam]) -> Result<(), Error> {
-    let gcm_support = params
-        .iter()
-        .any(|p| *p == KeyParam::BlockMode(BlockMode::Gcm));
+    let gcm_support = params.contains(&KeyParam::BlockMode(BlockMode::Gcm));
     if gcm_support {
         let min_mac_len = get_tag_value!(params, MinMacLength, ErrorCode::MissingMinMacLength)?;
         if (min_mac_len % 8 != 0) || !(96..=128).contains(&min_mac_len) {

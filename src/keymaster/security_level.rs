@@ -143,23 +143,23 @@ impl KeystoreSecurityLevel {
 
         // Add CREATION_DATETIME only if the backend version Keymint V1 (100) or newer.
         // if self.hw_info.version_number >= 100 {
-            result.push(KeyParameter {
-                tag: Tag::CREATION_DATETIME,
-                value: KeyParameterValue::DateTime(
-                    creation_datetime
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .context(err!(
-                            "KeystoreSecurityLevel::add_required_parameters: \
+        result.push(KeyParameter {
+            tag: Tag::CREATION_DATETIME,
+            value: KeyParameterValue::DateTime(
+                creation_datetime
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .context(err!(
+                        "KeystoreSecurityLevel::add_required_parameters: \
                                 Failed to get epoch time."
-                        ))?
-                        .as_millis()
-                        .try_into()
-                        .context(err!(
-                            "KeystoreSecurityLevel::add_required_parameters: \
+                    ))?
+                    .as_millis()
+                    .try_into()
+                    .context(err!(
+                        "KeystoreSecurityLevel::add_required_parameters: \
                                 Failed to convert epoch time."
-                        ))?,
-                ),
-            });
+                    ))?,
+            ),
+        });
         // }
 
         // If there is an attestation challenge we need to get an application id.
@@ -1005,8 +1005,7 @@ impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
         forced: bool,
     ) -> Result<CreateOperationResponse, Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::createOperation");
-        self
-            .create_operation(None, key, operation_parameters, forced)
+        self.create_operation(None, key, operation_parameters, forced)
             .map_err(into_logged_binder)
     }
 
@@ -1097,8 +1096,7 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         forced: bool,
     ) -> Result<CreateOperationResponse, Status> {
         let _wp = self.watch("IOhMySecurityLevel::createOperation");
-        self
-            .create_operation(ctx, key, operation_parameters, forced)
+        self.create_operation(ctx, key, operation_parameters, forced)
             .map_err(into_logged_binder)
     }
 

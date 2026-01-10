@@ -109,7 +109,7 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
                 // unsafe {
                 //     libc::seteuid(1017); // KEYSTORE_UID
                 // }
-                
+
                 // unsafe {
                 //     libc::seteuid(current_euid);
                 // }

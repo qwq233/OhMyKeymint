@@ -1735,11 +1735,13 @@ impl KeymasterDb {
                      AND state = ?
                      AND key_type = ?;",
                 params![domain.0 as u32, namespace, KeyLifeCycle::Live, key_type],
-                |row| row.get(0),
+                |row| row.get::<_, i32>(0),
             )
             .context(err!("Failed to count number of keys."))
             .no_gc()
         })?;
+        let num_keys =
+            usize::try_from(num_keys).context(err!("Failed to convert key count to usize."))?;
         Ok(num_keys)
     }
 

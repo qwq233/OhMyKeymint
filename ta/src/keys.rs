@@ -399,7 +399,10 @@ impl crate::KeyMintTa {
         key_material: KeyMaterial,
         purpose: keyblob::SlotPurpose,
     ) -> Result<KeyCreationResult, Error> {
-        debug!("finish_keyblob_creation: params {:?} attestKey {:?}", params, attestation_key);
+        debug!(
+            "finish_keyblob_creation: params {:?} attestKey {:?}",
+            params, attestation_key
+        );
         debug!("key characteristics: {:?}", chars);
         debug!("key material: {:?}", key_material);
         debug!("keyblob purpose: {:?}", purpose);

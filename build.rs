@@ -1,6 +1,8 @@
 use std::{fs, path::PathBuf, vec};
 
 fn main() {
+    println!("cargo:rustc-link-lib=c++");
+
     println!("cargo:rerun-if-changed=aidl");
     println!("cargo:rerun-if-changed=src/proto");
     println!("cargo:rerun-if-changed=build.rs");

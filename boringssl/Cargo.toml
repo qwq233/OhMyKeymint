@@ -16,7 +16,7 @@ libc = "^0.2.112"
 log = "^0.4"
 anyhow = "*"
 thiserror = "*"
-nix = "*"
+nix = { version = "*", features = ["mman"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = "^0.10.36"

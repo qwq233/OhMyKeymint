@@ -1,6 +1,3 @@
-use log::info;
-use rsproperties::PropertyConfig;
-
 #[cfg(not(target_os = "android"))]
 use rsproperties_service;
 

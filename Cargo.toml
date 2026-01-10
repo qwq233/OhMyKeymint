@@ -16,7 +16,7 @@ kmr-common = { path = "common" }
 kmr-crypto-boring = { path = "boringssl" }
 kmr-ta = { path = "ta" }
 kmr-wire = { path = "wire" }
-libc = "0.2.179"
+libc = "0.2.180"
 prost = "0.14.1"
 prost-types = "0.14.1"
 hex = "0.4.3"
@@ -48,6 +48,8 @@ rsproperties-service = "*"
 android_logger = "0.15.1"
 multi_log = "0.1.2"
 
+[profile.dev]
+incremental = true
 
 [profile.release]
 opt-level = 'z'     # Optimize for size
@@ -56,6 +58,7 @@ codegen-units = 1   # Reduce number of codegen units to increase optimizations
 panic = 'abort'     # Abort on panic
 strip = true        # Strip symbols from binary*
 debuginfo = 0       # Disable debug info
+incremental = true
 
 [workspace]
 members = [
@@ -67,6 +70,7 @@ members = [
   "wire",
   "watchdog",
   "rsproperties-service",
+  "injector",
 ]
 
 [patch.crates-io]
@@ -77,6 +81,7 @@ kmr-ta = { path = "ta" }
 kmr-tests = { path = "tests" }
 kmr-wire = { path = "wire" }
 watchdog_rs = { path = "watchdog" }
+injector = { path = "injector" }
 rsproperties-service = { path = "rsproperties-service" }
 
 [build-dependencies]

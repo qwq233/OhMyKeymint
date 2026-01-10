@@ -64,7 +64,8 @@ impl IKeyMintOperation for KeyMintOperation {
         get_keymint_wrapper(self.security_level)
             .unwrap()
             .op_update(self.op_handle, input, authToken, timeStampToken)
-            .map_err(map_ks_error).map(|rsp: Vec<u8>| rsp.to_vec())
+            .map_err(map_ks_error)
+            .map(|rsp: Vec<u8>| rsp.to_vec())
     }
 
     fn r#finish(
@@ -87,7 +88,8 @@ impl IKeyMintOperation for KeyMintOperation {
                 timestampToken,
                 confirmationToken,
             )
-            .map_err(map_ks_error).map(|rsp: Vec<u8>| rsp.to_vec())
+            .map_err(map_ks_error)
+            .map(|rsp: Vec<u8>| rsp.to_vec())
     }
 
     fn r#abort(&self) -> rsbinder::status::Result<()> {

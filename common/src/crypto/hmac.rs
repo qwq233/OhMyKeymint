@@ -32,7 +32,7 @@ pub const MAX_KEY_SIZE_BITS: usize = 1024;
 pub struct Key(pub Vec<u8>);
 
 fn valid_size(key_size: KeySizeInBits, max_size_bits: usize) -> Result<(), Error> {
-    if key_size.0 % 8 != 0 {
+    if !key_size.0.is_multiple_of(8) {
         Err(km_err!(
             UnsupportedKeySize,
             "key size {} bits not a multiple of 8",

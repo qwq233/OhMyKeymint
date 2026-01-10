@@ -1375,7 +1375,7 @@ struct RootOfTrust<'a> {
 }
 
 impl<'a> From<&'a keymint::BootInfo> for RootOfTrust<'a> {
-    fn from(info: &keymint::BootInfo) -> RootOfTrust {
+    fn from(info: &keymint::BootInfo) -> RootOfTrust<'_> {
         let verified_boot_key: &[u8] = if info.verified_boot_key.is_empty() {
             // If an empty verified boot key was passed by the boot loader, set the verified boot
             // key in the attestation to all zeroes.

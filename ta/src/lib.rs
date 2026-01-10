@@ -196,7 +196,7 @@ pub fn split_rsp(mut rsp_data: &[u8], max_size: usize) -> Result<Vec<Vec<u8>>, E
     // Need to allocate one byte for the more_msg_signal.
     let allowed_msg_length = max_size - 1;
     let mut num_of_splits = rsp_data.len() / allowed_msg_length;
-    if rsp_data.len() % allowed_msg_length > 0 {
+    if !rsp_data.len().is_multiple_of(allowed_msg_length) {
         num_of_splits += 1;
     }
     let mut split_rsp = vec_try_with_capacity!(num_of_splits)?;
