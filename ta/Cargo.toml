@@ -15,17 +15,17 @@ default = []
 downgrade = []
 
 [dependencies]
-ciborium = { version = "^0.2.0", default-features = false }
+ciborium = { version = "0.2.2", default-features = false }
 ciborium-io = "^0.2.0"
-coset = "0.4.0"
+coset = "0.4.2"
 der = { version = "^0.7.8", features = ["alloc", "derive"] }
 flagset = "0.4.3"
-kmr-common = "*"
-kmr-derive = "*"
-kmr-wire = "*"
+kmr-common = { path = "../common", version = "0.1.0" }
+kmr-derive = { path = "../derive", version = "0.1.0" }
+kmr-wire = { path = "../wire", version = "0.1.0" }
 log = "^0.4"
 spki = { version = "0.7.3"}
-x509-cert = { version = "0.2.4", default-features = false }
+x509-cert = { version = "0.2.5", default-features = false }
 
 [dev-dependencies]
 hex = "0.4.3"

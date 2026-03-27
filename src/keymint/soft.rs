@@ -22,7 +22,7 @@ use kmr_common::{
 };
 use kmr_crypto_boring::{hmac::BoringHmac, rng::BoringRng};
 use kmr_ta::device::RetrieveKeyMaterial;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng as RandRng, SeedableRng};
 
 /// Root key retrieval using hard-coded fake keys.
 pub struct Keys {
@@ -45,7 +45,7 @@ impl RetrieveKeyMaterial for Keys {
         // Matches `MASTER_KEY` in system/keymaster/key_blob_utils/software_keyblobs.cpp
         let mut rng = StdRng::from_seed(self.root_kek_seed);
         let mut key = [0; 16];
-        rng.fill_bytes(&mut key);
+        RandRng::fill_bytes(&mut rng, &mut key);
 
         Ok(crypto::hmac::Key::new(key.to_vec()).into())
     }
@@ -54,7 +54,7 @@ impl RetrieveKeyMaterial for Keys {
         // system/keymaster/km_openssl/soft_keymaster_enforcement.cpp.
         let mut rng = StdRng::from_seed(self.kak_seed);
         let mut key = [0; 32];
-        rng.fill_bytes(&mut key);
+        RandRng::fill_bytes(&mut rng, &mut key);
 
         Ok(crypto::aes::Key::Aes256(key).into())
     }

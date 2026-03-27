@@ -9,40 +9,40 @@ name = "keymint"
 path = "src/main.rs"
 
 [dependencies]
-jni = "0.21.1"
-syscalls = "0.7.0"
+jni = "0.22.4"
+syscalls = "0.8.1"
 kmr-derive = { path = "derive" }
 kmr-common = { path = "common" }
 kmr-crypto-boring = { path = "boringssl" }
 kmr-ta = { path = "ta" }
 kmr-wire = { path = "wire" }
 libc = "0.2.180"
-prost = "0.14.1"
-prost-types = "0.14.1"
+prost = "0.14.3"
+prost-types = "0.14.3"
 hex = "0.4.3"
 log4rs = "1.4.0"
 log = "0.4.29"
-rsbinder = { version = "0.5.0", features = ["android_12_plus"] }
-rusqlite = { version = "0.38.0", features = ["bundled"] }
-anyhow = "1.0.100"
+rsbinder = { version = "0.6.0", features = ["android_12_plus"] }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+anyhow = "1.0.102"
 async-trait = "0.1.89"
-tokio = { version = "1.49.0", features = ["macros", "libc"] }
+tokio = { version = "1.50.0", features = ["macros", "libc"] }
 lazy_static = "1.5.0"
-thiserror = "2.0.17"
-serde = "1.0.228"
+thiserror = "2.0.18"
+serde = { version = "1.0.228", features = ["derive"] }
 x509-cert = "0.2.5"
-watchdog_rs = "*"
-nix = { version = "0.30.1", features = ["mman"] }
-rsproperties = { version = "0.2.2", features = ["builder"] }
-libsqlite3-sys = "0.36.0"
-rand = "0.9.2"
+watchdog_rs = { path = "watchdog", version = "0.1.0" }
+nix = { version = "0.31.2", features = ["mman"] }
+rsproperties = { version = "0.3.0", features = ["builder"] }
+libsqlite3-sys = "0.37.0"
+rand = "0.10.0"
 der = "0.7.10"
-toml = "0.9.8"
-regex = "1.12.2"
+toml = "1.1.0"
+regex = "1.12.3"
 hotwatch = "0.5.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rsproperties-service = "*"
+rsproperties-service = { path = "rsproperties-service", version = "0.1.0" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15.1"
@@ -57,7 +57,7 @@ lto = true          # Enable link-time optimization
 codegen-units = 1   # Reduce number of codegen units to increase optimizations
 panic = 'abort'     # Abort on panic
 strip = true        # Strip symbols from binary*
-debuginfo = 0       # Disable debug info
+debug = 0           # Disable debug info
 incremental = true
 
 [workspace]
@@ -85,5 +85,5 @@ injector = { path = "injector" }
 rsproperties-service = { path = "rsproperties-service" }
 
 [build-dependencies]
-prost-build = "0.14.1"
-rsbinder-aidl = "0.5.0"
+prost-build = "0.14.3"
+rsbinder-aidl = "0.6.0"

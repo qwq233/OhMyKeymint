@@ -9,15 +9,15 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-ciborium = { version = "^0.2.0", default-features = false }
-env_logger = "^0.9"
+ciborium = { version = "0.2.2", default-features = false }
+env_logger = "0.11.10"
 hex = "0.4.3"
-kmr-common = "*"
-kmr-crypto-boring = "*"
-kmr-ta = "*"
-kmr-wire = "*"
+kmr-common = { path = "../common", version = "0.1.0" }
+kmr-crypto-boring = { path = "../boringssl", version = "0.1.0" }
+kmr-ta = { path = "../ta", version = "0.1.0" }
+kmr-wire = { path = "../wire", version = "0.1.0" }
 log = "^0.4"
-x509-cert = "0.2.4"
+x509-cert = "0.2.5"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(soong)'] }

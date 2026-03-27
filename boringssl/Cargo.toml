@@ -9,25 +9,25 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-foreign-types = "0.3.1"
-kmr-common = "*"
-kmr-wire = "*"
+foreign-types = "0.3.2"
+kmr-common = { path = "../common", version = "0.1.0" }
+kmr-wire = { path = "../wire", version = "0.1.0" }
 libc = "^0.2.112"
 log = "^0.4"
-anyhow = "*"
-thiserror = "*"
-nix = { version = "*", features = ["mman"] }
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+nix = { version = "0.31.2", features = ["mman"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-openssl = "^0.10.36"
-ffi = { package = "openssl-sys", version = "^0.9.75", features = ["bindgen"]  }
+openssl = "0.10.76"
+ffi = { package = "openssl-sys", version = "0.9.112", features = ["bindgen"]  }
 
 [target.'cfg(target_os = "android")'.dependencies]
-openssl = { package = "openssl", version = "*", features = ["unstable_boringssl", "bindgen"] }
-ffi = { package = "openssl-sys", version = "^0.9.75", features = ["bindgen"]  }
+openssl = { package = "openssl", version = "0.10.76", features = ["unstable_boringssl", "bindgen"] }
+ffi = { package = "openssl-sys", version = "0.9.112", features = ["bindgen"]  }
 
 [dev-dependencies]
-kmr-tests = "*"
+kmr-tests = { path = "../tests", version = "0.1.0" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(soong)'] }

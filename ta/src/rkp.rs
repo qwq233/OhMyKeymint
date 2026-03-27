@@ -288,7 +288,10 @@ impl KeyMintTa {
                 return Err(rpc_err!(Failed, "no payload found in a MacedPublicKey"));
             }
 
-            cose_mac0.verify_tag(&[], |expected_tag, data| -> Result<(), Error> {
+            cose_mac0.verify_payload_tag(
+                &[],
+                || rpc_err!(Failed, "no payload found in a MacedPublicKey"),
+                |expected_tag, data| -> Result<(), Error> {
                 let computed_tag =
                     self.dev
                         .rpc
