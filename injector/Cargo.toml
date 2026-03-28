@@ -13,7 +13,7 @@ libc = "0.2.180"
 log = "0.4.29"
 log4rs = "1.4.0"
 nix = { version = "0.31.2", features = ["dir", "fs", "ptrace", "signal"] }
-lsplt-rs = "2.1.5"
+lsplt-rs = "2.1.6"
 anyhow = "1.0.102"
 
 [target.'cfg(target_os = "android")'.dependencies]

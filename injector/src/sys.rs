@@ -5,7 +5,7 @@ use std::ffi::c_void;
 
 use anyhow::{anyhow, bail, Context, Result};
 use libc::iovec;
-use log::{debug, error, trace};
+use log::{debug, error, trace, warn};
 use nix::sys::signal::Signal;
 use nix::{
     sys::wait::{WaitPidFlag, WaitStatus},
@@ -43,15 +43,18 @@ pub fn align_stack(regs: &mut Regs, preserve: usize) {
 
 pub fn wait_pid(pid: Pid, target: Signal) -> Result<()> {
     loop {
-        match nix::sys::wait::waitpid(pid, Some(WaitPidFlag::empty()))? {
+        match nix::sys::wait::waitpid(pid, Some(WaitPidFlag::__WALL))? {
             WaitStatus::Stopped(_, sig) => {
                 if sig == target {
                     return Ok(());
                 }
-                if sig == Signal::SIGTRAP {
-                    continue;
+                // Got an unexpected signal — re-deliver it via PTRACE_CONT and keep waiting
+                warn!("Process {} stopped with unexpected signal {}, re-delivering", pid, sig.as_str());
+                let deliver_sig = if sig == Signal::SIGTRAP || sig == Signal::SIGSTOP { 0 } else { sig as i32 };
+                unsafe {
+                    libc::ptrace(libc::PTRACE_CONT, pid.as_raw(), 0, deliver_sig);
                 }
-                bail!("Process {} stopped with signal {}", pid, sig.as_str());
+                continue;
             }
             WaitStatus::Signaled(_, sig, _) => {
                 bail!("Process {} terminated with signal {}", pid, sig.as_str());

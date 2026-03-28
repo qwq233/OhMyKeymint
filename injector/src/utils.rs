@@ -75,12 +75,14 @@ pub fn resolve_return_addr(info: &[MapInfo], lib_name: &str) -> Result<usize> {
     for map in info {
         if let Some(path) = &map.pathname {
             if (map.perms & libc::PROT_EXEC as u8) == 0 && path.as_str().ends_with(lib_name) {
-                let data_addr = map.start + map.offset;
+                // Use map.start directly (not + offset). This is a non-executable
+                // region that will cause SIGSEGV when the remote function "returns"
+                // here, allowing us to catch the return value.
                 debug!(
-                    "Found data seg in library '{}' at address: 0x{:x}",
-                    lib_name, data_addr
+                    "Found return addr in library '{}' at address: 0x{:x}",
+                    lib_name, map.start
                 );
-                return Ok(data_addr);
+                return Ok(map.start);
             }
         }
     }

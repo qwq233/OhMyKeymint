@@ -27,3 +27,6 @@ parcel.bin
 src/aidl.rs
 cert.crt
 cert.der
+
+# Some refs files.
+/refs

@@ -1,11 +1,13 @@
 use std::ffi::c_void;
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use log::{debug, error};
+use log::{debug, error, info, warn};
 use nix::{sys::signal::Signal, unistd::Pid};
 
 use crate::sys::wait_pid;
 
+pub mod hook;
 pub mod logging;
 pub mod sys;
 pub mod utils;
@@ -14,7 +16,18 @@ fn main() {
     logging::init_logger();
     let (pid, _) = utils::find_process_by_name("keystore2").unwrap();
     let pid = Pid::from_raw(pid);
-    inject_library(pid, entry).unwrap();
+    match inject_library(pid, entry) {
+        Ok(()) => info!("Injection successful"),
+        Err(e) => {
+            error!("Injection failed: {:#}", e);
+            std::process::exit(1);
+        }
+    }
+
+    info!("Staying alive to prevent early unload. Press Ctrl+C to terminate...");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
 }
 
 fn inject_library(pid: Pid, entry: extern "C" fn(*const c_void) -> bool) -> Result<()> {
@@ -25,11 +38,34 @@ fn inject_library(pid: Pid, entry: extern "C" fn(*const c_void) -> bool) -> Resu
     debug!("Attached to process {}", pid);
 
     if let Err(e) = wait_pid(pid, Signal::SIGSTOP) {
+        warn!("Wait failed, detaching: {}", e);
+        let _ = nix::sys::ptrace::detach(pid, None);
         bail!("Failed to wait for process {} to stop: {}", pid, e);
     }
 
+    let backup_regs = sys::get_regs(pid)?;
+
+    // Run actual injection; regardless of success/failure we MUST restore regs and detach
+    let result = do_inject(pid, &self_path, entry);
+
+    // === CLEANUP: Always restore registers and detach ===
+    debug!("Restoring registers and detaching");
+    if let Err(e) = sys::set_regs(pid, &backup_regs) {
+        error!("Failed to restore registers: {}", e);
+    }
+    if let Err(e) = nix::sys::ptrace::detach(pid, None) {
+        error!("Failed to detach from process {}: {}", pid, e);
+    }
+
+    result
+}
+
+fn do_inject(
+    pid: Pid,
+    self_path: &Path,
+    entry: extern "C" fn(*const c_void) -> bool,
+) -> Result<()> {
     let mut regs = sys::get_regs(pid)?;
-    let backup_regs = regs;
 
     let local_maps = lsplt_rs::MapInfo::scan("self");
     let remote_maps = lsplt_rs::MapInfo::scan(pid.as_raw().to_string().as_str());
@@ -97,7 +133,7 @@ fn inject_library(pid: Pid, entry: extern "C" fn(*const c_void) -> bool) -> Resu
     let errno_addr = resolve("libc.so", "__errno").ok();
     let strlen_addr = resolve("libc.so", "strlen").ok();
 
-    let dlopen_addr = resolve("libdl.so", "dlopen")?;
+    let dlopen_addr = resolve("libdl.so", "android_dlopen_ext").or_else(|_| resolve("libdl.so", "dlopen"))?;
     let dlerror_addr = resolve("libdl.so", "dlerror").ok();
 
     let get_remote_errno = || -> Result<i32> {
@@ -145,7 +181,7 @@ fn inject_library(pid: Pid, entry: extern "C" fn(*const c_void) -> bool) -> Resu
         FdGuard(local_socket)
     };
     // Set SELinux context for the file
-    utils::set_file_con(&self_path, "u:object_r:system_file:s0")?;
+    utils::set_file_con(&self_path.to_path_buf(), "u:object_r:system_file:s0")?;
 
     let local_lib_file = std::fs::OpenOptions::new()
         .read(true)
@@ -256,8 +292,8 @@ fn inject_library(pid: Pid, entry: extern "C" fn(*const c_void) -> bool) -> Resu
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
         (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as usize;
         *(libc::CMSG_DATA(cmsg) as *mut libc::c_int) = local_lib_fd;
-        // Update controllen to actual length used
-        local_hdr.msg_controllen = (*cmsg).cmsg_len;
+        // NOTE: Keep msg_controllen as cmsg_space (CMSG_SPACE), not cmsg_len.
+        // The kernel expects the full CMSG_SPACE which includes alignment padding.
     }
 
     let send_res = unsafe { libc::sendmsg(local_socket, &local_hdr, 0) };
@@ -373,16 +409,18 @@ fn inject_library(pid: Pid, entry: extern "C" fn(*const c_void) -> bool) -> Resu
     let args = vec![handle];
     sys::remote_call(pid, injector_entry, libc_return_addr, &args)?;
 
-    // Cleanup
-    debug!("Restore context and detach");
-    sys::set_regs(pid, &backup_regs)?;
-    nix::sys::ptrace::detach(pid, None)?;
-
+    info!("Remote entry called successfully");
     Ok(())
 }
 
 #[no_mangle]
 #[allow(unused)]
 pub extern "C" fn entry(handle: *const c_void) -> bool {
+    // This runs inside the target process, so we must initialize logging again
+    // for that process. On Android this enables both logcat and stdout logging.
+    logging::init_logger();
+    println!("[inject::entry] injected library entry called, handle={:?}", handle);
+    log::info!("Injected library entry called! Handle: {:?}", handle);
+    hook::init_hook();
     true
 }
