@@ -1,7 +1,11 @@
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::{ffi::CString, path::PathBuf};
-
-use std::ffi::{c_void, CStr};
+use std::{
+    ffi::CString,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{anyhow, Context, Result};
 use log::{debug, error};
@@ -11,6 +15,98 @@ use nix::{
     fcntl::OFlag,
     sys::stat::Mode,
 };
+use sha2::{Digest, Sha256};
+
+const ELF_CLASS_32: u8 = 1;
+const ELF_CLASS_64: u8 = 2;
+const EM_386: u16 = 3;
+const EM_ARM: u16 = 40;
+const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
+
+#[derive(Debug, Clone)]
+pub struct ExecutableIdentity {
+    pub path: PathBuf,
+    pub sha256: String,
+    pub elf: String,
+}
+
+pub fn build_id() -> &'static str {
+    env!("INJECTOR_BUILD_ID")
+}
+
+pub fn build_target() -> &'static str {
+    env!("INJECTOR_BUILD_TARGET")
+}
+
+pub fn build_git_sha() -> &'static str {
+    env!("INJECTOR_BUILD_GIT_SHA")
+}
+
+pub fn current_exe_path() -> Result<PathBuf> {
+    std::fs::read_link("/proc/self/exe").context("Failed to read link /proc/self/exe")
+}
+
+pub fn current_exe_identity() -> Result<ExecutableIdentity> {
+    let path = current_exe_path()?;
+    executable_identity(&path)
+}
+
+pub fn executable_identity(path: &Path) -> Result<ExecutableIdentity> {
+    Ok(ExecutableIdentity {
+        path: path.to_path_buf(),
+        sha256: sha256_file(path)?,
+        elf: describe_elf(path)?,
+    })
+}
+
+pub fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path)
+        .with_context(|| format!("Failed to open {} for hashing", path.display()))?;
+    let mut sha256 = Sha256::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Failed to read {} for hashing", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        sha256.update(&buffer[..read]);
+    }
+
+    Ok(format!("{:x}", sha256.finalize()))
+}
+
+pub fn describe_elf(path: &Path) -> Result<String> {
+    let mut file =
+        File::open(path).with_context(|| format!("Failed to open ELF {}", path.display()))?;
+    let mut header = [0u8; 20];
+    file.read_exact(&mut header)
+        .with_context(|| format!("Failed to read ELF header from {}", path.display()))?;
+
+    if header[0..4] != [0x7f, b'E', b'L', b'F'] {
+        return Err(anyhow!("{} is not an ELF file", path.display()));
+    }
+
+    let class = match header[4] {
+        ELF_CLASS_32 => "ELF32",
+        ELF_CLASS_64 => "ELF64",
+        other => return Err(anyhow!("unsupported ELF class {}", other)),
+    };
+
+    let machine = u16::from_le_bytes([header[18], header[19]]);
+    let arch = match machine {
+        EM_386 => "x86",
+        EM_ARM => "arm",
+        EM_X86_64 => "x86_64",
+        EM_AARCH64 => "aarch64",
+        _ => "unknown",
+    };
+
+    Ok(format!("{class} {arch} (e_machine={machine})"))
+}
 
 // SELinux stuff
 pub fn set_sockcreate_con(context: &str) -> Result<()> {
@@ -27,32 +123,32 @@ pub fn set_sockcreate_con(context: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn set_file_con(path: &PathBuf, context: &str) -> Result<()> {
-    const XATTR_NAME_SELINUX: &CStr = c"security.selinux";
-
-    let path =
-        CString::new(path.as_os_str().as_bytes()).context("Invalid file path for setxattr")?;
-    let context = CString::new(context).context("Invalid context string")?;
-    let size = context.as_bytes_with_nul().len();
-
-    let result = unsafe {
-        libc::setxattr(
-            path.as_ptr(),
-            XATTR_NAME_SELINUX.as_ptr(),
-            context.as_ptr() as *const c_void,
-            size,
-            0,
+pub fn create_memfd_from_path(path: &Path, name: &str) -> Result<File> {
+    let memfd_name = CString::new(name).context("Invalid memfd name")?;
+    let raw_fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create as libc::c_long,
+            memfd_name.as_ptr(),
+            libc::MFD_CLOEXEC as libc::c_uint,
         )
-    };
-
-    if result != 0 {
-        Err(anyhow!(
-            "Failed to set file context: {}",
+    } as libc::c_int;
+    if raw_fd < 0 {
+        return Err(anyhow!(
+            "memfd_create failed: {}",
             std::io::Error::last_os_error()
-        ))
-    } else {
-        Ok(())
+        ));
     }
+
+    let mut input = File::open(path)
+        .with_context(|| format!("Failed to open payload image {}", path.display()))?;
+    let mut memfd = unsafe { File::from_raw_fd(raw_fd) };
+    std::io::copy(&mut input, &mut memfd)
+        .with_context(|| format!("Failed to copy payload image {}", path.display()))?;
+    memfd.flush().context("Failed to flush memfd payload")?;
+    memfd
+        .seek(SeekFrom::Start(0))
+        .context("Failed to rewind memfd payload")?;
+    Ok(memfd)
 }
 
 // Hook stuff
@@ -167,20 +263,32 @@ pub fn find_process_by_name(target_name: &str) -> Result<(i32, PathBuf)> {
 
         let path = PathBuf::from("/proc").join(pid_str);
 
-        let comm_path = path.join("exe");
-        let target = match std::fs::read_link(comm_path) {
-            Ok(name) => name,
-            Err(_) => continue,
-        };
-        let file_name = match target.file_name().and_then(std::ffi::OsStr::to_str) {
-            Some(name) => name,
-            None => continue,
-        };
-        if file_name.trim() != target_name {
+        let process_name = match std::fs::read(path.join("cmdline")) {
+            Ok(cmdline) => {
+                let first = cmdline
+                    .split(|byte| *byte == 0)
+                    .find(|part| !part.is_empty())
+                    .unwrap_or(&[]);
+                Path::new(std::ffi::OsStr::from_bytes(first))
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .map(str::to_owned)
+            }
+            Err(_) => None,
+        }
+        .or_else(|| {
+            std::fs::read_to_string(path.join("comm"))
+                .ok()
+                .map(|name| name.trim().to_owned())
+        });
+
+        if process_name.as_deref() != Some(target_name) {
             continue;
         }
 
         let pid = pid_str.parse::<i32>().unwrap();
+        let target = std::fs::read_link(path.join("exe"))
+            .unwrap_or_else(|_| PathBuf::from(format!("/proc/{pid}/exe")));
         debug!("Found target executable: {:?} (PID {})", target, pid);
 
         return Ok((pid, target));

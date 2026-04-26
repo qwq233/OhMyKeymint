@@ -7,3 +7,8 @@ allow adb_data_file keystore unix_dgram_socket *
 allow keystore adb_data_file file *
 
 allow crash_dump keystore process *
+
+allow magisk default_android_service service_manager add
+allow magisk default_android_service service_manager find
+allow keystore default_android_service service_manager find
+allow shell default_android_service service_manager find

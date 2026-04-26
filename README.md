@@ -4,17 +4,16 @@ Custom keystore implementation for Android Keystore Spoofer
 
 > [!WARNING]
 > The program is still in its early stages of development.
-> 
 > No ANY guarantees are made regarding performance or stability.
 
-# What is this?
+## What is this?
 
 This is a complete implementation of the Keystore, implementing features not implemented in the Tricky Store.
 You can think of it as DLC for the game. It can work without it, but it's usually better to have it.
 
 In the future, we will gradually move away from the Tricky Store as a backend.
 
-# Install and configure
+## Install and configure
 
 1. Install the [qwq233's Tricky Store](https://github.com/qwq233/TrickyStore) (My fork).
 
@@ -59,13 +58,44 @@ imei2 = "1234567890"
 
 4. Enjoy
 
-# License
+## Restarting keymint and injector
+
+The module ships two background daemons: one for `keymint`, one for `injector`.
+The recommended way to request a restart is through the restart system properties.
+
+Restart only `keymint`:
+
+```sh
+resetprop persist.sys.omk.restart.keymint 1
+```
+
+Restart only `injector`:
+
+```sh
+resetprop persist.sys.omk.restart.injector 1
+```
+
+Restart both together:
+
+```sh
+resetprop persist.sys.omk.restart.all 1
+```
+
+The daemons also watch these marker files if you prefer the file-based path:
+
+```sh
+/data/adb/oh_my_keymint/restart.keymint
+/data/adb/oh_my_keymint/restart.injector
+/data/adb/oh_my_keymint/restart.all
+```
+
+## License
 
 **YOU MUST AGREE TO BOTH OF THE LICENSE BEFORE USING THIS SOFTWARE.**
 
 `AGPL-3.0-or-later`
 
-```
+```plaintext
 OhMyKeymint - Custom keymint implementation for Android Keystore Spoofer
 Copyright (C) 2025 James Clef <qwq233@qwq2333.top>
 
@@ -85,7 +115,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 `Oh My Keymint License`
 
-```
+```plaintext
 1. 您不得将本软件、本软件的任意部分或将本软件作为依赖的软件用于任何商业用途。该
    商业用途包括但不限于以盈利为目的，将本软件、本软件的任意部分或将本软件作为依
    赖的软件与其他资源、物品或服务捆绑销售。
@@ -102,12 +132,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
    完全著作权的部分，对于使用其他协议的软件代码不发挥效力。
 ```
 
-# Credit
+## Credit
 
 Some code from [AOSP](https://source.android.com/)
 
 License: `Apache-2.0`
-```
+
+```plaintext
 Copyright 2022, The Android Open Source Project
 
 Licensed under the Apache License, Version 2.0 (the "License");

@@ -2384,7 +2384,7 @@ pub struct Uuid(pub(crate) [u8; 16]);
 
 impl From<SecurityLevel> for Uuid {
     fn from(sec_level: SecurityLevel) -> Self {
-        let digest = { crate::keybox::KEYBOX.read().unwrap().get_ec_key_digest() }; // avoid deadlock
+        let digest = crate::keybox::current_identity_digest();
 
         let mut uuid_bytes = [0u8; 16];
 

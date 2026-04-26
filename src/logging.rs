@@ -5,20 +5,6 @@ use log4rs::encode::pattern::PatternEncoder;
 
 const PATTERN: &str = "{d(%Y-%m-%d %H:%M:%S %Z)(utc)} [{h({l})}] {M} - {m}{n}";
 
-#[cfg(not(target_os = "android"))]
-pub fn init_logger() {
-    let stdout = ConsoleAppender::builder()
-        .encoder(Box::new(PatternEncoder::new(PATTERN)))
-        .build();
-    let root = Root::builder().appender("stdout").build(LevelFilter::Debug);
-    let config = Config::builder()
-        .appender(Appender::builder().build("stdout", Box::new(stdout)))
-        .build(root)
-        .unwrap();
-    log4rs::init_config(config).unwrap();
-}
-
-#[cfg(target_os = "android")]
 pub fn init_logger() {
     let config = android_logger::Config::default()
         .with_max_level(LevelFilter::Debug)

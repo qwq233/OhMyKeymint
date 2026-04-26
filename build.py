@@ -1,233 +1,377 @@
 #!/usr/bin/env python3
 """
-Build script for OhMyKeymint Android targets
+Build script for OhMyKeymint Android targets.
 """
 
+from __future__ import annotations
+
 import argparse
+import glob
+import hashlib
 import os
+from pathlib import Path
 import shutil
 import subprocess
-import hashlib
 import zipfile
-import toml
-import subprocess
-import glob
 
-def get_version_from_cargo_toml():
-    """Read version from Cargo.toml"""
-    with open('./Cargo.toml', 'r') as f:
-        cargo_toml = toml.load(f)
-        return cargo_toml['package']['version']
+try:
+    import tomllib as toml
+except ModuleNotFoundError:
+    import toml
 
-def get_git_commit_count():
-    """Get git commit count - must be numeric only"""
-    result = subprocess.run(['git', 'rev-list', '--count', 'HEAD'], 
-                          capture_output=True, text=True)
-    if result.returncode == 0:
-        git_count = result.stdout.strip()
-        # Validate that git_count contains only digits
-        if not git_count.isdigit():
-            raise ValueError(f"Git commit count must be numeric only, got: {git_count}")
-        return git_count
-    raise Exception("Failed to get git commit count")
 
-def get_git_commit_hash():
-    """Get git commit hash (first 7 characters)"""
-    result = subprocess.run(['git', 'rev-parse', 'HEAD'], 
-                          capture_output=True, text=True)
-    if result.returncode == 0:
-        full_hash = result.stdout.strip()
-        return full_hash[:7]  # Return first 7 characters
-    raise Exception("Failed to get git commit hash")
+REPO_ROOT = Path(__file__).resolve().parent
+TARGET_ROOT = REPO_ROOT / "target"
+DEFAULT_PLATFORM = 24
 
-def build_target(target, release=False):
-    """Build for specific target"""
-    build_type = "release" if release else "debug"
-    print(f"Building for {target} ({build_type})...")
-    
-    cmd = ['cargo', 'ndk', '-t', target, '-o', 'build', 'build']
-    if release:
-        cmd.append('--release')
-    
-    result = subprocess.run(cmd)
+ABI_TO_TARGET = {
+    "arm64-v8a": "aarch64-linux-android",
+    "x86_64": "x86_64-linux-android",
+}
+
+ABI_TO_MODULE_ARCHES = {
+    "arm64-v8a": "arm64 arm64-v8a",
+    "x86_64": "x64 x86_64",
+}
+
+BORINGSSL_BUILD_DIRS = {
+    "aarch64-linux-android": Path.home() / ".cargo" / "boringssl" / "build",
+    "x86_64-linux-android": Path.home() / ".cargo" / "boringssl" / "build-x86_64",
+}
+
+BINARY_SPECS = (
+    {"package": None, "bin": "keymint", "output_name": "keymint"},
+    {"package": "injector", "bin": "inject", "output_name": "inject"},
+)
+
+REQUIRED_TEMPLATE_FILES = (
+    "customize.sh",
+    "daemon",
+    "daemon-injector",
+    "injector.toml",
+    "module.prop",
+    "post-fs-data.sh",
+    "service.sh",
+    "verify.sh",
+)
+
+MODULE_TEXT_FILES = (
+    "AOSP.Apache-license-2.0.txt",
+    "README.md",
+    "customize.sh",
+    "daemon",
+    "daemon-injector",
+    "injector.toml",
+    "keybox.xml",
+    "module.prop",
+    "post-fs-data.sh",
+    "sepolicy.rule",
+    "service.sh",
+    "verify.sh",
+    "META-INF/com/google/android/update-binary",
+    "META-INF/com/google/android/updater-script",
+)
+
+
+def run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
+    print("+", " ".join(cmd))
+    result = subprocess.run(cmd, cwd=REPO_ROOT, env=env)
     if result.returncode != 0:
-        raise Exception(f"Build failed for {target}")
+        raise RuntimeError(f"command failed: {' '.join(cmd)}")
 
-def copy_binary(target, arch_name, release=False):
-    """Copy built binary from correct target directory"""
+
+def get_version_from_cargo_toml() -> str:
+    with (REPO_ROOT / "Cargo.toml").open("r", encoding="utf-8") as fh:
+        cargo_toml = toml.loads(fh.read())
+    return cargo_toml["package"]["version"]
+
+
+def get_git_commit_count() -> str:
+    result = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Failed to get git commit count")
+    git_count = result.stdout.strip()
+    if not git_count.isdigit():
+        raise ValueError(f"Git commit count must be numeric only, got: {git_count}")
+    return git_count
+
+
+def get_git_commit_hash() -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Failed to get git commit hash")
+    return result.stdout.strip()[:7]
+
+
+def cargo_env_for_target(target: str) -> dict[str, str]:
+    env = os.environ.copy()
+    if "BORINGSSL_BUILD_DIR" not in env:
+        boring_dir = BORINGSSL_BUILD_DIRS.get(target)
+        if boring_dir and boring_dir.exists():
+            env["BORINGSSL_BUILD_DIR"] = os.fspath(boring_dir)
+    return env
+
+
+def build_binary(
+    *,
+    abi: str,
+    target: str,
+    release: bool,
+    platform: int,
+    package: str | None,
+    bin_name: str,
+) -> Path:
     build_type = "release" if release else "debug"
-    source_path = f"target/{target}/{build_type}/keymint"
-    
-    if not os.path.exists(source_path):
-        raise FileNotFoundError(f"Binary not found at {source_path}")
-    
-    dest_dir = f"target/temp/libs/{arch_name}"
-    os.makedirs(dest_dir, exist_ok=True)
-    shutil.copy2(source_path, f"{dest_dir}/keymint")
-    print(f"Copied binary from {source_path} to {dest_dir}/keymint")
+    print(f"Building {bin_name} for {abi} ({target}, {build_type})...")
 
-def copy_template_files():
-    """Copy template directory contents to temp folder"""
-    temp_dir = "target/temp"
-    template_dir = "template"
-    
-    if not os.path.exists(template_dir):
+    cmd = ["cargo", "ndk", "-t", abi, "--platform", str(platform), "build"]
+    if package:
+        cmd.extend(["-p", package, "--bin", bin_name])
+    else:
+        cmd.extend(["--bin", bin_name])
+    if release:
+        cmd.append("--release")
+
+    run(cmd, env=cargo_env_for_target(target))
+
+    binary_path = TARGET_ROOT / target / build_type / bin_name
+    if not binary_path.exists():
+        raise FileNotFoundError(f"Built binary not found at {binary_path}")
+    return binary_path
+
+
+def copy_binary(binary: Path, output_name: str, abi: str, stage_dir: Path) -> None:
+    dest_dir = stage_dir / "libs" / abi
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / output_name
+    shutil.copy2(binary, dest_path)
+    print(f"Copied {binary} to {dest_path}")
+
+
+def copy_template_files(stage_dir: Path) -> None:
+    template_dir = REPO_ROOT / "template"
+    if not template_dir.exists():
         raise FileNotFoundError("Template directory not found")
-    
-    print("Copying template files...")
-    for item in os.listdir(template_dir):
-        src = os.path.join(template_dir, item)
-        dst = os.path.join(temp_dir, item)
-        if os.path.isdir(src):
-            shutil.copytree(src, dst, dirs_exist_ok=True)
-        else:
-            shutil.copy2(src, dst)
 
-def modify_module_prop(version, git_count, git_hash):
-    """Modify module.prop file with version, git count and git hash"""
-    module_prop_path = "target/temp/module.prop"
-    
-    if not os.path.exists(module_prop_path):
+    missing = [name for name in REQUIRED_TEMPLATE_FILES if not (template_dir / name).exists()]
+    if missing:
+        raise FileNotFoundError(f"Template is missing required file(s): {', '.join(missing)}")
+
+    print(f"Copying template files into {stage_dir}...")
+    for item in template_dir.iterdir():
+        dst = stage_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, dst, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dst)
+
+
+def write_text_lf(path: Path, content: str) -> None:
+    with path.open("w", encoding="utf-8", newline="\n") as fh:
+        fh.write(content)
+
+
+def normalize_module_text_files(stage_dir: Path) -> None:
+    for relative_path in MODULE_TEXT_FILES:
+        path = stage_dir / relative_path
+        if not path.exists():
+            continue
+        content = path.read_text(encoding="utf-8")
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        write_text_lf(path, content)
+
+
+def configure_template_for_abi(stage_dir: Path, abi: str) -> None:
+    customize_path = stage_dir / "customize.sh"
+    if not customize_path.exists():
+        raise FileNotFoundError(f"customize.sh not found at {customize_path}")
+
+    supported_arch = ABI_TO_MODULE_ARCHES[abi]
+    content = customize_path.read_text(encoding="utf-8")
+    content = content.replace('SUPPORTED_ABIS="arm64 x64"', f'SUPPORTED_ABIS="{supported_arch}"')
+    write_text_lf(customize_path, content)
+    print(f"Updated customize.sh supported ABI to {supported_arch}")
+
+
+def modify_module_prop(stage_dir: Path, version: str, git_count: str, git_hash: str) -> None:
+    module_prop_path = stage_dir / "module.prop"
+    if not module_prop_path.exists():
         raise FileNotFoundError(f"module.prop not found at {module_prop_path}")
-    
-    print("Modifying module.prop file...")
-    
-    with open(module_prop_path, 'r') as f:
-        content = f.read()
-    
-    # Create version name with git hash
+
     version_name = f"{version}-{git_hash}"
-    
-    # Replace placeholders
+    content = module_prop_path.read_text(encoding="utf-8")
     content = content.replace("${versionName}", version_name)
     content = content.replace("${versionCode}", git_count)
-    
-    with open(module_prop_path, 'w') as f:
-        f.write(content)
-    
+    write_text_lf(module_prop_path, content)
     print(f"Updated module.prop: versionName={version_name}, versionCode={git_count}")
 
-def generate_hash_for_file(file_path):
-    """Generate SHA256 hash for a single file"""
-    with open(file_path, 'rb') as f:
-        file_hash = hashlib.sha256(f.read()).hexdigest()
-    
-    hash_file = f"{file_path}.sha256"
-    with open(hash_file, 'w') as f:
-        f.write(file_hash)
-    print(f"Created hash file: {hash_file}")
 
-def generate_hash_files():
-    """Generate SHA256 hash files for root directory files and binaries"""
-    temp_dir = "target/temp"
-    
-    print("Generating SHA256 hash files...")
-    
-    # Generate hash files for root directory files
-    for item in os.listdir(temp_dir):
-        item_path = os.path.join(temp_dir, item)
-        if os.path.isfile(item_path):
-            generate_hash_for_file(item_path)
-    
-    # Generate hash files for binaries in libs directory
-    libs_dir = os.path.join(temp_dir, "libs")
-    if os.path.exists(libs_dir):
-        for arch_dir in os.listdir(libs_dir):
-            arch_path = os.path.join(libs_dir, arch_dir)
-            if os.path.isdir(arch_path):
-                for binary in os.listdir(arch_path):
-                    binary_path = os.path.join(arch_path, binary)
-                    if os.path.isfile(binary_path):
-                        generate_hash_for_file(binary_path)
+def generate_hash_for_file(file_path: Path) -> None:
+    digest = hashlib.sha256()
+    with file_path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
 
-def delete_old_zips(release=False):
-    """Delete all old zip files with the same build type"""
+    hash_path = file_path.with_name(f"{file_path.name}.sha256")
+    hash_path.write_text(digest.hexdigest(), encoding="utf-8")
+    print(f"Created hash file: {hash_path}")
+
+
+def generate_hash_files(stage_dir: Path) -> None:
+    print(f"Generating SHA256 hash files under {stage_dir}...")
+    for item in stage_dir.rglob("*"):
+        if item.is_file() and not item.name.endswith(".sha256"):
+            generate_hash_for_file(item)
+
+
+def delete_old_zips(release: bool, selected_abis: list[str]) -> None:
     build_type = "release" if release else "debug"
-    pattern = f"target/OhMyKeymint-{build_type}-*.zip"
-    
-    old_zips = glob.glob(pattern)
-    if old_zips:
-        print(f"Found {len(old_zips)} old zip file(s) to delete:")
-        for old_zip in old_zips:
-            print(f"  Deleting: {old_zip}")
-            os.remove(old_zip)
-    else:
-        print(f"No old zip files found matching pattern: {pattern}")
+    old_zips: list[str] = []
+    for abi in selected_abis:
+        pattern = TARGET_ROOT / f"OhMyKeymint-{build_type}-{abi}-*.zip"
+        old_zips.extend(glob.glob(os.fspath(pattern)))
+    if not old_zips:
+        print(f"No old zip files found for build type {build_type} and ABIs {selected_abis}")
+        return
 
-def create_zip_package(version, git_hash, release=False):
-    """Create final zip package"""
+    print(f"Found {len(old_zips)} old zip file(s) to delete:")
+    for old_zip in old_zips:
+        print(f"  Deleting: {old_zip}")
+        os.remove(old_zip)
+
+
+def create_zip_package(
+    *,
+    stage_dir: Path,
+    version: str,
+    git_hash: str,
+    abi: str,
+    release: bool,
+) -> Path:
     build_type = "release" if release else "debug"
-    zip_name = f"target/OhMyKeymint-{build_type}-{version}-{git_hash}.zip"
-    
-    print(f"Creating zip package: {zip_name}")
-    with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, dirs, files in os.walk("target/temp"):
-            for file in files:
-                file_path = os.path.join(root, file)
-                arcname = os.path.relpath(file_path, "target/temp")
+    zip_path = TARGET_ROOT / f"OhMyKeymint-{build_type}-{abi}-{version}-{git_hash}.zip"
+    print(f"Creating zip package: {zip_path}")
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(stage_dir):
+            for file_name in files:
+                file_path = Path(root) / file_name
+                arcname = file_path.relative_to(stage_dir)
                 zipf.write(file_path, arcname)
-    
-    return zip_name
 
-def main():
-    parser = argparse.ArgumentParser(description='Build OhMyKeymint for Android')
-    parser.add_argument('--release', action='store_true', 
-                       help='Build in release mode')
-    parser.add_argument('--debug', action='store_true', 
-                       help='Build in debug mode (default)')
-    args = parser.parse_args()
+    return zip_path
 
-    # Clean up previous temp directory
-    if os.path.exists("target/temp"):
-        shutil.rmtree("target/temp")
 
-    # Create target directory structure
-    os.makedirs("target/temp", exist_ok=True)
+def build_package_for_abi(
+    *,
+    abi: str,
+    release: bool,
+    platform: int,
+    version: str,
+    git_count: str,
+    git_hash: str,
+) -> Path:
+    target = ABI_TO_TARGET[abi]
+    stage_dir = TARGET_ROOT / "temp" / abi
+    if stage_dir.exists():
+        shutil.rmtree(stage_dir)
+    stage_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Get version and git info
-        version = get_version_from_cargo_toml()
-        git_count = get_git_commit_count()
-        git_hash = get_git_commit_hash()
-        
-        print(f"Building OhMyKeymint version {version} (commit {git_count}, hash {git_hash})")
-        print(f"Build mode: {'Release' if args.release else 'Debug'}")
+        built_binaries: dict[str, Path] = {}
+        for spec in BINARY_SPECS:
+            built_binaries[spec["output_name"]] = build_binary(
+                abi=abi,
+                target=target,
+                release=release,
+                platform=platform,
+                package=spec["package"],
+                bin_name=spec["bin"],
+            )
 
-        # Delete all old zip files with the same build type
-        delete_old_zips(args.release)
+        copy_template_files(stage_dir)
+        normalize_module_text_files(stage_dir)
+        configure_template_for_abi(stage_dir, abi)
+        for spec in BINARY_SPECS:
+            copy_binary(
+                built_binaries[spec["output_name"]],
+                spec["output_name"],
+                abi,
+                stage_dir,
+            )
 
-        # Build targets
-        targets = [
-            ("aarch64-linux-android", "arm64-v8a"),
-            # ("x86_64-linux-android", "x86_64")
-        ]
+        modify_module_prop(stage_dir, version, git_count, git_hash)
+        normalize_module_text_files(stage_dir)
+        generate_hash_files(stage_dir)
+        return create_zip_package(
+            stage_dir=stage_dir,
+            version=version,
+            git_hash=git_hash,
+            abi=abi,
+            release=release,
+        )
+    finally:
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir)
 
-        for target, arch_name in targets:
-            build_target(target, args.release)
-            copy_binary(target, arch_name, args.release)
 
-        # Copy template files
-        copy_template_files()
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build OhMyKeymint Magisk packages for Android")
+    parser.add_argument("--release", action="store_true", help="Build in release mode")
+    parser.add_argument("--debug", action="store_true", help="Build in debug mode (default)")
+    parser.add_argument(
+        "--abi",
+        dest="abis",
+        action="append",
+        choices=sorted(ABI_TO_TARGET),
+        help="Build only the selected Android ABI(s). Defaults to arm64-v8a.",
+    )
+    parser.add_argument(
+        "--platform",
+        type=int,
+        default=DEFAULT_PLATFORM,
+        help=f"Android API level to pass to cargo-ndk (default: {DEFAULT_PLATFORM})",
+    )
+    args = parser.parse_args()
 
-        # Modify module.prop file
-        modify_module_prop(version, git_count, git_hash)
+    version = get_version_from_cargo_toml()
+    git_count = get_git_commit_count()
+    git_hash = get_git_commit_hash()
+    selected_abis = args.abis or ["arm64-v8a"]
 
-        # Generate hash files for all files including binaries
-        generate_hash_files()
+    print(f"Building OhMyKeymint version {version} (commit {git_count}, hash {git_hash})")
+    print(f"Build mode: {'Release' if args.release else 'Debug'}")
+    print(f"Target ABIs: {', '.join(selected_abis)}")
+    print(f"Android platform: {args.platform}")
 
-        # Create final zip
-        zip_path = create_zip_package(version, git_hash, args.release)
-        
-        print(f"Build completed successfully!")
+    delete_old_zips(args.release, selected_abis)
+    built_packages = []
+    for abi in selected_abis:
+        built_packages.append(
+            build_package_for_abi(
+                abi=abi,
+                release=args.release,
+                platform=args.platform,
+                version=version,
+                git_count=git_count,
+                git_hash=git_hash,
+            )
+        )
+
+    print("Build completed successfully!")
+    for zip_path in built_packages:
         print(f"Output: {zip_path}")
 
-    except Exception as e:
-        print(f"Build failed: {e}")
-        # Clean up on failure
-        if os.path.exists("target/temp"):
-            shutil.rmtree("target/temp")
-        exit(1)
 
 if __name__ == "__main__":
     main()
-

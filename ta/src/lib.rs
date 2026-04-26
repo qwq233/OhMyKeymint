@@ -1136,16 +1136,15 @@ impl KeyMintTa {
         mac0.verify_payload_tag(
             &self.rot_challenge,
             || km_err!(InvalidArgument, "RootOfTrust payload missing"),
-            |tag, data| {
-            match self.verify_device_hmac(data, tag) {
+            |tag, data| match self.verify_device_hmac(data, tag) {
                 Ok(true) => Ok(()),
                 Ok(false) => Err(km_err!(
                     VerificationFailed,
                     "HMAC verification of RootOfTrust failed"
                 )),
                 Err(e) => Err(e),
-            }
-        })?;
+            },
+        )?;
         let payload = mac0
             .payload
             .ok_or_else(|| km_err!(InvalidArgument, "Missing payload in CoseMac0"))?;

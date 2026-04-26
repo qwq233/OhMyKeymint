@@ -1,0 +1,154 @@
+#!/system/bin/sh
+
+MODDIR=${0%/*}
+STATE_DIR=/data/adb/oh_my_keymint
+TARGET_INJECTOR=/data/adb/inject
+RESTART_PROP=persist.sys.omk.restart.injector
+RESTART_ALL_PROP=persist.sys.omk.restart.all
+RESTART_FILE=$STATE_DIR/restart.injector
+RESTART_ALL_FILE=$STATE_DIR/restart.all
+SELF_ACK_FILE=$STATE_DIR/restart.all.injector
+PEER_ACK_FILE=$STATE_DIR/restart.all.keymint
+
+clear_restart_props() {
+  if command -v resetprop >/dev/null 2>&1; then
+    resetprop "$RESTART_PROP" ""
+    return
+  fi
+  if command -v ksud >/dev/null 2>&1; then
+    ksud resetprop "$RESTART_PROP" ""
+  fi
+}
+
+clear_restart_all_prop() {
+  if command -v resetprop >/dev/null 2>&1; then
+    resetprop "$RESTART_ALL_PROP" ""
+    return
+  fi
+  if command -v ksud >/dev/null 2>&1; then
+    ksud resetprop "$RESTART_ALL_PROP" ""
+  fi
+}
+
+shared_restart_requested() {
+  if [ -f "$RESTART_ALL_FILE" ]; then
+    return 0
+  fi
+
+  value=$(getprop "$RESTART_ALL_PROP" 2>/dev/null)
+  [ -n "$value" ]
+}
+
+cleanup_shared_restart_state() {
+  if shared_restart_requested; then
+    if [ -f "$SELF_ACK_FILE" ] && [ -f "$PEER_ACK_FILE" ]; then
+      rm -f "$RESTART_ALL_FILE" "$SELF_ACK_FILE" "$PEER_ACK_FILE"
+      clear_restart_all_prop
+    fi
+    return
+  fi
+
+  rm -f "$SELF_ACK_FILE" "$PEER_ACK_FILE"
+}
+
+consume_restart_request() {
+  cleanup_shared_restart_state
+
+  if [ -f "$RESTART_FILE" ]; then
+    rm -f "$RESTART_FILE"
+    clear_restart_props
+    return 0
+  fi
+
+  value=$(getprop "$RESTART_PROP" 2>/dev/null)
+  if [ -n "$value" ]; then
+    clear_restart_props
+    return 0
+  fi
+
+  if shared_restart_requested && [ ! -f "$SELF_ACK_FILE" ]; then
+    : > "$SELF_ACK_FILE"
+    return 0
+  fi
+
+  return 1
+}
+
+get_keystore_pid() {
+  pidof keystore2 2>/dev/null | awk '{print $1}'
+}
+
+is_injected() {
+  pid=$1
+  maps=/proc/$pid/maps
+  [ -r "$maps" ] || return 1
+
+  grep -F "/data/adb/inject" "$maps" >/dev/null 2>&1 && return 0
+  grep -F "libinjector_payload.so" "$maps" >/dev/null 2>&1 && return 0
+  grep -F "memfd:libinjector_payload.so" "$maps" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+restart_keystore() {
+  pid=$1
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "[injector-daemon] restart requested; stopping keystore2 pid=$pid"
+    kill -TERM "$pid" 2>/dev/null
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null
+    fi
+  fi
+}
+
+mkdir -p "$STATE_DIR"
+pending_restart=0
+last_attempt_pid=
+last_attempt_at=0
+retry_cooldown=15
+
+while true; do
+  if [ ! -x "$TARGET_INJECTOR" ]; then
+    echo "[injector-daemon] injector binary missing or not executable: $TARGET_INJECTOR"
+    sleep 5
+    continue
+  fi
+
+  if consume_restart_request; then
+    pending_restart=1
+    restart_keystore "$(get_keystore_pid)"
+    cleanup_shared_restart_state
+  fi
+
+  pid=$(get_keystore_pid)
+  if [ -z "$pid" ]; then
+    last_attempt_pid=
+    sleep 2
+    continue
+  fi
+
+  if is_injected "$pid"; then
+    pending_restart=0
+    last_attempt_pid=
+    sleep 5
+    continue
+  fi
+
+  if [ "$last_attempt_pid" = "$pid" ] && [ "$pending_restart" -eq 0 ]; then
+    now=$(date +%s 2>/dev/null)
+    if [ -n "$now" ] && [ "$now" -lt $((last_attempt_at + retry_cooldown)) ]; then
+      sleep 5
+      continue
+    fi
+  fi
+
+  echo "[injector-daemon] injecting into keystore2 pid=$pid via $TARGET_INJECTOR"
+  "$TARGET_INJECTOR"
+  rc=$?
+  last_attempt_pid=$pid
+  last_attempt_at=$(date +%s 2>/dev/null)
+  pending_restart=0
+  cleanup_shared_restart_state
+  echo "[injector-daemon] injector exited with code $rc"
+  sleep 3
+done

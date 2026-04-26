@@ -49,8 +49,16 @@ pub fn wait_pid(pid: Pid, target: Signal) -> Result<()> {
                     return Ok(());
                 }
                 // Got an unexpected signal — re-deliver it via PTRACE_CONT and keep waiting
-                warn!("Process {} stopped with unexpected signal {}, re-delivering", pid, sig.as_str());
-                let deliver_sig = if sig == Signal::SIGTRAP || sig == Signal::SIGSTOP { 0 } else { sig as i32 };
+                warn!(
+                    "Process {} stopped with unexpected signal {}, re-delivering",
+                    pid,
+                    sig.as_str()
+                );
+                let deliver_sig = if sig == Signal::SIGTRAP || sig == Signal::SIGSTOP {
+                    0
+                } else {
+                    sig as i32
+                };
                 unsafe {
                     libc::ptrace(libc::PTRACE_CONT, pid.as_raw(), 0, deliver_sig);
                 }
@@ -488,24 +496,51 @@ fn wait_remote_call(pid: Pid, return_addr: usize) -> Result<usize> {
     }
 }
 
+#[derive(Debug)]
+pub struct RemoteCallSession {
+    original_regs: Regs,
+    return_addr: usize,
+}
+
+pub fn remote_pre_call(
+    pid: Pid,
+    func_addr: usize,
+    return_addr: usize,
+    args: &[usize],
+) -> Result<RemoteCallSession> {
+    debug!(
+        "Preparing remote call to 0x{:x} with return address 0x{:x} and args {:?}",
+        func_addr, return_addr, args
+    );
+    let original_regs = get_regs(pid).context("Failed to backup registers.")?;
+    let mut regs = original_regs;
+    setup_remote_call(pid, &mut regs, func_addr, return_addr, args)?;
+
+    Ok(RemoteCallSession {
+        original_regs,
+        return_addr,
+    })
+}
+
+pub fn remote_post_call(pid: Pid, session: RemoteCallSession) -> Result<usize> {
+    let wait_result = wait_remote_call(pid, session.return_addr);
+    let restore_result =
+        set_regs(pid, &session.original_regs).context("Failed to restore registers.");
+
+    match (wait_result, restore_result) {
+        (Ok(ret), Ok(())) => Ok(ret),
+        (Err(wait_error), Ok(())) => Err(wait_error),
+        (Ok(_), Err(restore_error)) => Err(restore_error),
+        (Err(wait_error), Err(restore_error)) => Err(wait_error.context(restore_error)),
+    }
+}
+
 pub fn remote_call(
     pid: Pid,
     func_addr: usize,
     return_addr: usize,
     args: &[usize],
 ) -> Result<usize> {
-    debug!(
-        "Performing remote call to 0x{:x} with return address 0x{:x} and args {:?}",
-        func_addr, return_addr, args
-    );
-    let original_regs = get_regs(pid).context("Failed to backup registers.")?;
-    let mut regs = original_regs;
-
-    setup_remote_call(pid, &mut regs, func_addr, return_addr, args)?;
-    let ret = wait_remote_call(pid, return_addr)?;
-
-    // restore original registers
-    set_regs(pid, &original_regs).context("Failed to restore registers.")?;
-
-    Ok(ret)
+    let session = remote_pre_call(pid, func_addr, return_addr, args)?;
+    remote_post_call(pid, session)
 }

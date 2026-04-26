@@ -367,18 +367,23 @@ impl KeyMintDevice {
     }
 }
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 static KM_WRAPPER_STRONGBOX: OnceLock<Mutex<KeyMintWrapper>> = OnceLock::new();
 
 static KM_WRAPPER_TEE: OnceLock<Mutex<KeyMintWrapper>> = OnceLock::new();
 
+#[derive(Clone)]
 pub struct KeyMintWrapper {
     security_level: SecurityLevel,
-    keymint: Mutex<KeyMintTa>,
+    inner: Arc<KeyMintWrapperInner>,
 }
 
 unsafe impl Sync for KeyMintWrapper {}
+
+struct KeyMintWrapperInner {
+    keymint: Mutex<KeyMintTa>,
+}
 
 impl Interface for KeyMintWrapper {}
 
@@ -406,7 +411,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             })?,
         });
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
@@ -416,7 +421,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         };
 
         let operation = crate::keymaster::keymint_operation::KeyMintOperation::new(
-            self.security_level,
+            self.clone(),
             result.challenge,
             km_params,
             result.op_handle,
@@ -438,8 +443,13 @@ impl IKeyMintDevice for KeyMintWrapper {
         crate::android::hardware::security::keymint::KeyMintHardwareInfo::KeyMintHardwareInfo,
         Status,
     > {
-        let hardware_info: keymint::KeyMintHardwareInfo =
-            self.keymint.lock().unwrap().get_hardware_info().unwrap();
+        let hardware_info: keymint::KeyMintHardwareInfo = self
+            .inner
+            .keymint
+            .lock()
+            .unwrap()
+            .get_hardware_info()
+            .unwrap();
 
         let resp =
             crate::android::hardware::security::keymint::KeyMintHardwareInfo::KeyMintHardwareInfo {
@@ -465,7 +475,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             data: data.to_vec(),
         });
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.error_code != 0 {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
@@ -511,7 +521,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             key_params: key_parameters,
             attestation_key,
         });
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
@@ -570,7 +580,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             key_data: key_data.to_vec(),
             attestation_key,
         });
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
@@ -613,7 +623,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             biometric_sid,
         });
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
@@ -648,7 +658,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             upgrade_params,
         });
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
 
         if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
@@ -669,7 +679,7 @@ impl IKeyMintDevice for KeyMintWrapper {
     fn deleteKey(&self, key_blob: &[u8]) -> rsbinder::status::Result<()> {
         let key_blob = key_blob.to_vec();
         let req = PerformOpReq::DeviceDeleteKey(DeleteKeyRequest { key_blob });
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
 
         if result.error_code != 0 {
             return Err(Status::new_service_specific_error(result.error_code, None));
@@ -681,7 +691,7 @@ impl IKeyMintDevice for KeyMintWrapper {
     fn deleteAllKeys(&self) -> rsbinder::status::Result<()> {
         let req = PerformOpReq::DeviceDeleteAllKeys(DeleteAllKeysRequest {});
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
 
         if result.error_code != 0 {
             return Err(Status::new_service_specific_error(result.error_code, None));
@@ -693,7 +703,7 @@ impl IKeyMintDevice for KeyMintWrapper {
     fn destroyAttestationIds(&self) -> rsbinder::status::Result<()> {
         let req = PerformOpReq::DeviceDestroyAttestationIds(DestroyAttestationIdsRequest {});
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
 
         if result.error_code != 0 {
             return Err(Status::new_service_specific_error(result.error_code, None));
@@ -715,7 +725,7 @@ impl IKeyMintDevice for KeyMintWrapper {
     fn earlyBootEnded(&self) -> rsbinder::status::Result<()> {
         let req = PerformOpReq::DeviceEarlyBootEnded(EarlyBootEndedRequest {});
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
 
         if result.error_code != 0 {
             return Err(Status::new_service_specific_error(result.error_code, None));
@@ -733,7 +743,7 @@ impl IKeyMintDevice for KeyMintWrapper {
                 storage_key_blob: storage_key_blob.to_vec(),
             });
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
@@ -759,7 +769,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             app_data: app_data.to_vec(),
         });
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
@@ -797,7 +807,7 @@ impl IKeyMintDevice for KeyMintWrapper {
     fn getRootOfTrustChallenge(&self) -> rsbinder::status::Result<[u8; 16]> {
         let req = PerformOpReq::GetRootOfTrustChallenge(GetRootOfTrustChallengeRequest {});
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
         }
@@ -819,7 +829,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             challenge: *challenge,
         });
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
 
         if result.rsp.is_none() {
             return Err(Status::new_service_specific_error(result.error_code, None));
@@ -837,7 +847,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             root_of_trust: root_of_trust.to_vec(),
         });
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
 
         if result.error_code != 0 {
             return Err(Status::new_service_specific_error(result.error_code, None));
@@ -860,7 +870,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             info: additional_info,
         });
 
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
 
         if result.error_code != 0 {
             return Err(Status::new_service_specific_error(result.error_code, None));
@@ -874,18 +884,25 @@ impl KeyMintWrapper {
     pub fn new(security_level: SecurityLevel) -> Result<Self> {
         Ok(KeyMintWrapper {
             security_level,
-            keymint: Mutex::new(init_keymint_ta(security_level)?),
+            inner: Arc::new(KeyMintWrapperInner {
+                keymint: Mutex::new(init_keymint_ta(security_level)?),
+            }),
         })
     }
 
     pub fn reset_keymint_ta(&self) -> Result<()> {
-        let mut keymint = self.keymint.lock().unwrap();
+        let mut keymint = self.inner.keymint.lock().unwrap();
         *keymint = init_keymint_ta(self.security_level)?;
         Ok(())
     }
 
+    pub fn clear_attestation_cache(&self) {
+        self.inner.keymint.lock().unwrap().clear_attestation_cache();
+    }
+
     pub fn get_hardware_info(&self) -> Result<keymint::KeyMintHardwareInfo, Error> {
-        self.keymint
+        self.inner
+            .keymint
             .lock()
             .unwrap()
             .get_hardware_info()
@@ -922,7 +939,7 @@ impl KeyMintWrapper {
             auth_token: hardware_auth_token,
             timestamp_token,
         });
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Error::Binder(
                 ExceptionCode::ServiceSpecific,
@@ -967,7 +984,7 @@ impl KeyMintWrapper {
             auth_token: hardware_auth_token,
             timestamp_token,
         });
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Error::Binder(
                 ExceptionCode::ServiceSpecific,
@@ -1019,7 +1036,7 @@ impl KeyMintWrapper {
             timestamp_token,
             confirmation_token,
         });
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Error::Binder(
                 ExceptionCode::ServiceSpecific,
@@ -1036,7 +1053,7 @@ impl KeyMintWrapper {
 
     pub fn op_abort(&self, op_handle: i64) -> Result<(), Error> {
         let req = PerformOpReq::OperationAbort(AbortRequest { op_handle });
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
         if result.rsp.is_none() {
             return Err(Error::Binder(
                 ExceptionCode::ServiceSpecific,
@@ -1056,7 +1073,7 @@ impl KeyMintWrapper {
         let req = PerformOpReq::DeviceDeleteKey(DeleteKeyRequest {
             key_blob: key_blob.to_vec(),
         });
-        let result = self.keymint.lock().unwrap().process_req(req);
+        let result = self.inner.keymint.lock().unwrap().process_req(req);
 
         if result.error_code != 0 {
             return Err(Error::Binder(

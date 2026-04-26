@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::{sync::RwLock, time::SystemTime};
 
 use crate::{
     android::{
@@ -53,7 +53,7 @@ pub struct KeystoreSecurityLevel {
     security_level: SecurityLevel,
     km_wrapper: KeyMintWrapper,
     hw_info: KeyMintHardwareInfo,
-    km_uuid: Uuid,
+    km_uuid: RwLock<Uuid>,
     operation_db: OperationDb,
 }
 
@@ -70,7 +70,7 @@ impl KeystoreSecurityLevel {
             security_level,
             km_wrapper,
             hw_info,
-            km_uuid,
+            km_uuid: RwLock::new(km_uuid),
             operation_db: OperationDb::new(),
         })
     }
@@ -87,6 +87,31 @@ impl KeystoreSecurityLevel {
 
     fn get_keymint_wrapper(&self) -> &KeyMintWrapper {
         &self.km_wrapper
+    }
+
+    fn current_km_uuid(&self) -> Uuid {
+        Uuid::from(self.security_level)
+    }
+
+    fn effective_km_uuid(&self) -> Uuid {
+        *self.km_uuid.read().unwrap()
+    }
+
+    fn ensure_current_uuid(&self) -> Result<()> {
+        let current_uuid = self.current_km_uuid();
+        let stale_uuid = {
+            let km_uuid = self.km_uuid.read().unwrap();
+            (*km_uuid != current_uuid).then_some(*km_uuid)
+        };
+
+        if let Some(old_uuid) = stale_uuid {
+            self.km_wrapper.clear_attestation_cache();
+            DB.with(|db| db.borrow_mut().terminate_uuid(&old_uuid))
+                .context(err!("Failed to invalidate keys for rotated keybox"))?;
+            *self.km_uuid.write().unwrap() = current_uuid;
+        }
+
+        Ok(())
     }
 
     fn store_upgraded_keyblob(
@@ -356,7 +381,8 @@ impl KeystoreSecurityLevel {
 
                     let mut key_metadata = KeyMetaData::new();
                     key_metadata.add(KeyMetaEntry::CreationDate(creation_date));
-                    blob_metadata.add(BlobMetaEntry::KmUuid(self.km_uuid));
+                    let km_uuid = self.effective_km_uuid();
+                    blob_metadata.add(BlobMetaEntry::KmUuid(km_uuid));
 
                     let key_id = db
                         .store_new_key(
@@ -366,7 +392,7 @@ impl KeystoreSecurityLevel {
                             &BlobInfo::new(&key_blob, &blob_metadata),
                             &cert_info,
                             &key_metadata,
-                            &self.km_uuid,
+                            &km_uuid,
                         )
                         .context(err!())?;
                     Ok(KeyDescriptor {
@@ -398,6 +424,7 @@ impl KeystoreSecurityLevel {
         flags: i32,
         _entropy: &[u8],
     ) -> Result<KeyMetadata> {
+        self.ensure_current_uuid()?;
         if key.domain != Domain::BLOB && key.alias.is_none() {
             return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
                 .context(err!("Alias must be provided for non-BLOB domains"));
@@ -510,6 +537,7 @@ impl KeystoreSecurityLevel {
         flags: i32,
         key_data: &[u8],
     ) -> Result<KeyMetadata> {
+        self.ensure_current_uuid()?;
         if key.domain != Domain::BLOB && key.alias.is_none() {
             return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
                 .context(err!("Alias must be specified"));
@@ -576,6 +604,7 @@ impl KeystoreSecurityLevel {
         params: &[KeyParameter],
         authenticators: &[AuthenticatorSpec],
     ) -> Result<KeyMetadata> {
+        self.ensure_current_uuid()?;
         let wrapped_data: &[u8] = match key {
             KeyDescriptor {
                 domain: Domain::APP,
@@ -712,6 +741,7 @@ impl KeystoreSecurityLevel {
         &self,
         storage_key: &KeyDescriptor,
     ) -> Result<EphemeralStorageKeyResponse> {
+        self.ensure_current_uuid()?;
         if storage_key.domain != Domain::BLOB {
             return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
                 .context(err!("Key must be of Domain::BLOB"));
@@ -769,6 +799,7 @@ impl KeystoreSecurityLevel {
         operation_parameters: &[KeyParameter],
         forced: bool,
     ) -> Result<CreateOperationResponse> {
+        self.ensure_current_uuid()?;
         let caller_uid = if let Some(ctx) = ctx {
             ctx.callingUid
         } else {
@@ -972,6 +1003,7 @@ impl KeystoreSecurityLevel {
     }
 
     fn delete_key(&self, key: &KeyDescriptor) -> Result<()> {
+        self.ensure_current_uuid()?;
         if key.domain != Domain::BLOB {
             return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
                 .context(err!("delete_key: Key must be of Domain::BLOB"));

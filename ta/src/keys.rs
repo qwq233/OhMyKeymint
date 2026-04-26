@@ -108,6 +108,10 @@ pub(crate) struct SigningInfo<'a> {
 }
 
 impl crate::KeyMintTa {
+    pub fn clear_attestation_cache(&self) {
+        self.attestation_chain_info.borrow_mut().clear();
+    }
+
     /// Retrieve the signing information.
     pub(crate) fn get_signing_info(
         &self,
@@ -119,18 +123,17 @@ impl crate::KeyMintTa {
                 "batch attestation keys not available"
             )
         })?;
-        // Retrieve the chain and issuer information, which is cached after first retrieval.
+        // The certificate chain is cached, but keybox rotation explicitly clears the cache.
         let mut attestation_chain_info = self.attestation_chain_info.borrow_mut();
         let chain_info = match attestation_chain_info.entry(key_type) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => {
-                // Retrieve and store the cert chain information (as this is public).
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
                 let chain = sign_info.cert_chain(key_type)?;
                 let issuer =
                     cert::extract_subject(chain.first().ok_or_else(|| {
                         km_err!(KeymintNotConfigured, "empty attestation chain")
                     })?)?;
-                e.insert(AttestationChainInfo { chain, issuer })
+                entry.insert(AttestationChainInfo { chain, issuer })
             }
         };
 
@@ -183,7 +186,9 @@ impl crate::KeyMintTa {
         };
 
         // Build and encode attestation extension if present
-        let id_info = self.get_attestation_ids();
+        let id_info = needs_attestation_ids(params)
+            .then(|| self.get_attestation_ids())
+            .flatten();
         let attest_ext_val = if let Some(SigningInfo {
             attestation_info: Some((challenge, app_id)),
             ..
@@ -877,4 +882,21 @@ impl crate::KeyMintTa {
         )?;
         Ok(encrypted_keyblob.into_vec()?)
     }
+}
+
+fn needs_attestation_ids(params: &[KeyParam]) -> bool {
+    params.iter().any(|param| {
+        matches!(
+            param,
+            KeyParam::AttestationIdBrand(_)
+                | KeyParam::AttestationIdDevice(_)
+                | KeyParam::AttestationIdProduct(_)
+                | KeyParam::AttestationIdSerial(_)
+                | KeyParam::AttestationIdImei(_)
+                | KeyParam::AttestationIdSecondImei(_)
+                | KeyParam::AttestationIdMeid(_)
+                | KeyParam::AttestationIdManufacturer(_)
+                | KeyParam::AttestationIdModel(_)
+        )
+    })
 }

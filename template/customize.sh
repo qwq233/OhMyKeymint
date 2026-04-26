@@ -2,7 +2,7 @@
 SKIPUNZIP=1
 
 SONAME="Oh My Keymint"
-SUPPORTED_ABIS="arm64"
+SUPPORTED_ABIS="arm64 x64"
 MIN_SDK=29
 
 if [ "$BOOTMODE" ] && [ "$KSU" ]; then
@@ -66,18 +66,41 @@ extract "$ZIPFILE" 'post-fs-data.sh' "$MODPATH"
 extract "$ZIPFILE" 'service.sh'      "$MODPATH"
 extract "$ZIPFILE" 'sepolicy.rule'   "$MODPATH"
 extract "$ZIPFILE" 'daemon'          "$MODPATH"
-chmod 755 "$MODPATH/daemon"
+extract "$ZIPFILE" 'daemon-injector' "$MODPATH"
+extract "$ZIPFILE" 'injector.toml'   "$MODPATH"
+extract "$ZIPFILE" 'keybox.xml'      "$MODPATH"
+chmod 755 "$MODPATH/daemon" "$MODPATH/daemon-injector" \
+  "$MODPATH/post-fs-data.sh" "$MODPATH/service.sh"
 
 
-# if [ "$ARCH" = "x64" ]; then
-#   ui_print "- Extracting x64 libraries"
-#   extract "$ZIPFILE" "libs/x86_64/keymint" "$MODPATH" true
-# else
-  ui_print "- Extracting arm64 libraries"
-  extract "$ZIPFILE" "libs/arm64-v8a/keymint" "$MODPATH" true
-# fi
+if [ "$ARCH" = "x64" ] || [ "$ARCH" = "x86_64" ]; then
+  ui_print "- Using packaged x64 binaries"
+  BINDIR="$MODPATH/libs/x86_64"
+  extract "$ZIPFILE" 'libs/x86_64/keymint' "$MODPATH"
+  extract "$ZIPFILE" 'libs/x86_64/inject'  "$MODPATH"
+elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "arm64-v8a" ]; then
+  ui_print "- Using packaged arm64 binaries"
+  BINDIR="$MODPATH/libs/arm64-v8a"
+  extract "$ZIPFILE" 'libs/arm64-v8a/keymint' "$MODPATH"
+  extract "$ZIPFILE" 'libs/arm64-v8a/inject'  "$MODPATH"
+else
+  abort "! Unsupported platform: $ARCH"
+fi
 
-chmod 755 "$MODPATH/keymint"
+[ -f "$BINDIR/keymint" ] || abort "! Missing $BINDIR/keymint"
+[ -f "$BINDIR/inject" ] || abort "! Missing $BINDIR/inject"
+chmod 755 "$BINDIR/keymint" "$BINDIR/inject"
 
 CONFIG_DIR=/data/adb/oh_my_keymint
-
+mkdir -p "$CONFIG_DIR"
+rm -f "$CONFIG_DIR/restart.keymint" "$CONFIG_DIR/restart.injector" "$CONFIG_DIR/restart.all" \
+  "$CONFIG_DIR/restart.all.keymint" "$CONFIG_DIR/restart.all.injector"
+if command -v resetprop >/dev/null 2>&1; then
+  resetprop persist.sys.omk.restart.keymint ""
+  resetprop persist.sys.omk.restart.injector ""
+  resetprop persist.sys.omk.restart.all ""
+elif command -v ksud >/dev/null 2>&1; then
+  ksud resetprop persist.sys.omk.restart.keymint ""
+  ksud resetprop persist.sys.omk.restart.injector ""
+  ksud resetprop persist.sys.omk.restart.all ""
+fi

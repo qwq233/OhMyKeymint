@@ -292,19 +292,20 @@ impl KeyMintTa {
                 &[],
                 || rpc_err!(Failed, "no payload found in a MacedPublicKey"),
                 |expected_tag, data| -> Result<(), Error> {
-                let computed_tag =
-                    self.dev
-                        .rpc
-                        .compute_hmac_sha256(&*self.imp.hmac, &*self.imp.hkdf, data)?;
-                if self.imp.compare.eq(expected_tag, &computed_tag) {
-                    Ok(())
-                } else {
-                    Err(rpc_err!(
-                        InvalidMac,
-                        "invalid tag found in a MacedPublicKey"
-                    ))
-                }
-            })?;
+                    let computed_tag =
+                        self.dev
+                            .rpc
+                            .compute_hmac_sha256(&*self.imp.hmac, &*self.imp.hkdf, data)?;
+                    if self.imp.compare.eq(expected_tag, &computed_tag) {
+                        Ok(())
+                    } else {
+                        Err(rpc_err!(
+                            InvalidMac,
+                            "invalid tag found in a MacedPublicKey"
+                        ))
+                    }
+                },
+            )?;
         }
         // Construct the `CsrPayload`
         let rpc_device_info = self.rpc_device_info_cbor()?;
