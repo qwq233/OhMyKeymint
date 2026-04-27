@@ -1,14 +1,18 @@
-use core::panic;
-use std::sync::RwLock;
+use std::{
+    fs,
+    io::Write,
+    path::Path,
+    sync::{OnceLock, RwLock},
+};
 
+use anyhow::{anyhow, Context, Result};
 use hotwatch::Hotwatch;
 use kmr_common::crypto::Rng;
 use kmr_crypto_boring::rng::BoringRng;
 use serde::{ser::SerializeStruct, Deserialize, Serialize};
 
-lazy_static::lazy_static! {
-    pub static ref CONFIG: RwLock<Config> = init_config();
-}
+pub static CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
+static CONFIG_WATCHER_STARTED: OnceLock<()> = OnceLock::new();
 
 #[cfg(target_os = "android")]
 const CONFIG_PATH: &str = "/data/misc/keystore/omk/config.toml";
@@ -16,83 +20,234 @@ const CONFIG_PATH: &str = "/data/misc/keystore/omk/config.toml";
 #[cfg(not(target_os = "android"))]
 const CONFIG_PATH: &str = "./omk/config.toml";
 
-fn init_config() -> RwLock<Config> {
-    let config = std::fs::read_to_string(CONFIG_PATH);
-    let config: Config = match config {
-        Ok(s) => match toml::from_str(&s) {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("Failed to parse config file, using default: {:?}", e);
-                Config::default()
+pub fn config() -> &'static RwLock<Config> {
+    CONFIG.get().expect("CONFIG must be bootstrapped before use")
+}
+
+pub fn config_path() -> &'static str {
+    CONFIG_PATH
+}
+
+pub fn bootstrap_config_file() -> Result<ConfigFile> {
+    match fs::read_to_string(CONFIG_PATH) {
+        Ok(contents) => match parse_config_file(&contents) {
+            Ok(config_file) => Ok(config_file),
+            Err(error) => {
+                log::error!("Failed to parse config file, repairing: {error:#}");
+                let config_file = ConfigFile::default();
+                rewrite_invalid_config(&config_file, &format!("{error:#}"))?;
+                Ok(config_file)
             }
         },
-        Err(e) => {
-            log::error!("Failed to read config file, using default: {:?}", e);
-            Config::default()
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let config_file = ConfigFile::default();
+            persist_config_file(&config_file)?;
+            Ok(config_file)
         }
-    };
+        Err(error) => {
+            log::error!("Failed to read config file, repairing: {error:#}");
+            let config_file = ConfigFile::default();
+            rewrite_invalid_config(&config_file, &format!("{error:#}"))?;
+            Ok(config_file)
+        }
+    }
+}
 
-    // write back the config file to ensure it's always present
-    let s = toml::to_string_pretty(&config).unwrap();
-    if let Err(e) = std::fs::create_dir_all(std::path::Path::new(CONFIG_PATH).parent().unwrap()) {
-        log::error!("Failed to create config directory: {:?}", e);
-    } else if let Err(e) = {
-        // backup old config
-        if std::path::Path::new(CONFIG_PATH).exists() {
-            let backup_path = format!("{}.bak", CONFIG_PATH);
-            if let Err(e) = std::fs::copy(CONFIG_PATH, &backup_path) {
-                log::error!("Failed to backup config file: {:?}", e);
-            } else {
-                log::info!("Backed up old config file to {}", backup_path);
-            }
-        }
-        std::fs::write(CONFIG_PATH, s)
-    } {
-        log::error!("Failed to write config file: {:?}", e);
-        panic!("Failed to write config file: {:?}", e);
+pub fn persist_config_file(config_file: &ConfigFile) -> Result<()> {
+    let path = Path::new(CONFIG_PATH);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("config path has no parent: {}", CONFIG_PATH))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+    let serialized =
+        toml::to_string_pretty(config_file).context("failed to serialize config.toml")?;
+    fs::write(path, serialized)
+        .with_context(|| format!("failed to write config file {}", path.display()))?;
+    Ok(())
+}
+
+pub fn install_runtime_config(config_file: ConfigFile, resolved_trust: ResolvedTrust) -> Result<()> {
+    let runtime = Config::from_file(&config_file, resolved_trust);
+    if CONFIG.set(RwLock::new(runtime.clone())).is_err() {
+        let mut guard = config()
+            .write()
+            .map_err(|_| anyhow!("config lock poisoned while installing runtime config"))?;
+        *guard = runtime;
+    }
+    start_config_watcher()?;
+    Ok(())
+}
+
+fn parse_config_file(contents: &str) -> Result<ConfigFile> {
+    let config_file: ConfigFile =
+        toml::from_str(contents).context("failed to deserialize config.toml")?;
+    validate_security_patch(&config_file.trust.security_patch)
+        .context("invalid trust.security_patch")?;
+    Ok(config_file)
+}
+
+fn rewrite_invalid_config(replacement: &ConfigFile, reason: &str) -> Result<()> {
+    backup_existing_config(reason)?;
+    persist_config_file(replacement)?;
+    Ok(())
+}
+
+fn backup_existing_config(reason: &str) -> Result<()> {
+    let path = Path::new(CONFIG_PATH);
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let backup_path = format!("{CONFIG_PATH}.bak");
+    let backup = Path::new(&backup_path);
+    if backup.exists() {
+        fs::remove_file(backup)
+            .with_context(|| format!("failed to remove stale backup {}", backup.display()))?;
+    }
+
+    fs::rename(path, backup)
+        .or_else(|rename_error| {
+            fs::copy(path, backup)
+                .with_context(|| {
+                    format!(
+                        "failed to copy invalid config to backup {} after rename error {rename_error}",
+                        backup.display()
+                    )
+                })
+                .and_then(|_| {
+                    fs::remove_file(path).with_context(|| {
+                        format!("failed to remove original config {}", path.display())
+                    })
+                })
+        })
+        .with_context(|| format!("failed to move invalid config to {}", backup.display()))?;
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(backup)
+        .with_context(|| format!("failed to open backup {}", backup.display()))?;
+    writeln!(file)?;
+    writeln!(file, "# OMK config recovery reason:")?;
+    for line in reason.lines() {
+        writeln!(file, "# {line}")?;
+    }
+    Ok(())
+}
+
+fn start_config_watcher() -> Result<()> {
+    if CONFIG_WATCHER_STARTED.set(()).is_err() {
+        return Ok(());
     }
 
     std::thread::spawn(|| {
-        let mut watcher = Hotwatch::new().unwrap();
-        watcher
-            .watch(CONFIG_PATH, |event| {
-                log::info!("Config file changed: {:?}", event);
-                let config = std::fs::read_to_string(CONFIG_PATH);
-                let config: Config = match config {
-                    Ok(s) => match toml::from_str(&s) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            log::error!("Failed to parse config file, ignoring change: {:?}", e);
-                            return;
-                        }
-                    },
-                    Err(e) => {
-                        log::error!("Failed to read config file, ignoring change: {:?}", e);
-                        return;
-                    }
-                };
-                let mut cfg = CONFIG.write().unwrap();
-                *cfg = config;
-                log::info!("Config updated");
-            })
-            .unwrap();
+        let mut watcher = match Hotwatch::new() {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                log::error!("Failed to start config watcher: {error:?}");
+                return;
+            }
+        };
+
+        if let Err(error) = watcher.watch(CONFIG_PATH, |event| {
+            log::info!("Config file changed: {:?}", event);
+            let contents = match fs::read_to_string(CONFIG_PATH) {
+                Ok(contents) => contents,
+                Err(error) => {
+                    log::error!("Failed to read config file after change, ignoring: {error:?}");
+                    return;
+                }
+            };
+
+            let new_config_file = match parse_config_file(&contents) {
+                Ok(config_file) => config_file,
+                Err(error) => {
+                    log::error!("Failed to parse changed config file, ignoring: {error:#}");
+                    return;
+                }
+            };
+
+            let mut runtime = match config().write() {
+                Ok(runtime) => runtime,
+                Err(_) => {
+                    log::error!("Config lock poisoned while handling config change");
+                    return;
+                }
+            };
+
+            if runtime.trust_intent != new_config_file.trust {
+                log::warn!(
+                    "Trust config changed on disk; restart keymint to apply vbmeta changes."
+                );
+            }
+
+            if runtime.crypto != new_config_file.crypto {
+                log::warn!(
+                    "Crypto config changed on disk; restart keymint to apply seed changes."
+                );
+            }
+
+            let resolved_trust = runtime.trust.clone();
+            *runtime = Config::from_file(&new_config_file, resolved_trust);
+            log::info!("Config updated");
+        }) {
+            log::error!("Failed to watch config file: {error:?}");
+            return;
+        }
+
         loop {
             std::thread::park();
         }
     });
 
-    RwLock::new(config)
+    Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+fn validate_security_patch(value: &str) -> Result<()> {
+    let is_valid = regex::Regex::new(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$")
+        .expect("security patch regex must compile")
+        .is_match(value);
+    if is_valid {
+        Ok(())
+    } else {
+        Err(anyhow!("security_patch must be in YYYY-MM-DD format"))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Config {
     pub main: MainConfig,
     pub crypto: CryptoConfig,
-    pub trust: TrustConfig,
+    pub trust: ResolvedTrust,
+    pub trust_record: TrustRecord,
+    pub device: DeviceProperty,
+    trust_intent: RawTrustConfig,
+}
+
+impl Config {
+    fn from_file(config_file: &ConfigFile, resolved_trust: ResolvedTrust) -> Self {
+        Self {
+            main: config_file.main.clone(),
+            crypto: config_file.crypto.clone(),
+            trust: resolved_trust,
+            trust_record: config_file.trust_record.clone(),
+            device: config_file.device.clone(),
+            trust_intent: config_file.trust.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConfigFile {
+    pub main: MainConfig,
+    pub crypto: CryptoConfig,
+    pub trust: RawTrustConfig,
+    #[serde(default, skip_serializing_if = "TrustRecord::is_empty")]
+    pub trust_record: TrustRecord,
     pub device: DeviceProperty,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Backend {
     TrickyStore,
     OMK,
@@ -119,7 +274,7 @@ impl std::str::FromStr for Backend {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MainConfig {
     /// default to tricky store for compatibility, we will
     /// switch to omk later when we are sure everything works
@@ -134,7 +289,7 @@ impl Default for MainConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CryptoConfig {
     pub root_kek_seed: [u8; 32],
     pub kak_seed: [u8; 32],
@@ -164,7 +319,8 @@ impl<'de> Deserialize<'de> for CryptoConfig {
         }
 
         let helper = CryptoConfigHelper::deserialize(deserializer)?;
-        let root_kek_seed = hex::decode(&helper.root_kek_seed).map_err(serde::de::Error::custom)?;
+        let root_kek_seed =
+            hex::decode(&helper.root_kek_seed).map_err(serde::de::Error::custom)?;
         let kak_seed = hex::decode(&helper.kak_seed).map_err(serde::de::Error::custom)?;
 
         if root_kek_seed.len() != 32 {
@@ -205,110 +361,148 @@ impl Default for CryptoConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct TrustConfig {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTrust {
     pub os_version: i32,
     pub security_patch: String,
-    pub vb_key: [u8; 32],  // hex encoded
-    pub vb_hash: [u8; 32], // hex encoded
-
-    pub verified_boot_state: bool, // you sure?
+    pub vb_key: [u8; 32],
+    pub vb_hash: [u8; 32],
+    pub vb_key_source: TrustValueSource,
+    pub vb_hash_source: TrustValueSource,
+    pub verified_boot_state: bool,
     pub device_locked: bool,
 }
 
-impl Serialize for TrustConfig {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut state = serializer.serialize_struct("TrustConfig", 6)?;
-        state.serialize_field("os_version", &self.os_version)?;
-        state.serialize_field("security_patch", &self.security_patch)?;
-        state.serialize_field("vb_key", &hex::encode(self.vb_key))?;
-        state.serialize_field("vb_hash", &hex::encode(self.vb_hash))?;
-        state.serialize_field("verified_boot_state", &self.verified_boot_state)?;
-        state.serialize_field("device_locked", &self.device_locked)?;
-        state.end()
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RawTrustConfig {
+    pub os_version: i32,
+    pub security_patch: String,
+    #[serde(default)]
+    pub vb_key: TrustValueSpec,
+    #[serde(default)]
+    pub vb_hash: TrustValueSpec,
+    pub verified_boot_state: bool,
+    pub device_locked: bool,
 }
 
-impl<'de> Deserialize<'de> for TrustConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct TrustConfigHelper {
-            os_version: i32,
-            security_patch: String,
-            vb_key: String,
-            vb_hash: String,
-            verified_boot_state: bool,
-            device_locked: bool,
-        }
-
-        let helper = TrustConfigHelper::deserialize(deserializer)?;
-        let vb_key = hex::decode(&helper.vb_key).map_err(serde::de::Error::custom)?;
-        let vb_hash = hex::decode(&helper.vb_hash).map_err(serde::de::Error::custom)?;
-
-        if vb_key.len() != 32 {
-            return Err(serde::de::Error::custom("vb_key must be 32 bytes"));
-        }
-        if vb_hash.len() != 32 {
-            return Err(serde::de::Error::custom("vb_hash must be 32 bytes"));
-        }
-
-        let mut vb_key_array = [0u8; 32];
-        vb_key_array.copy_from_slice(&vb_key);
-
-        let mut vb_hash_array = [0u8; 32];
-        vb_hash_array.copy_from_slice(&vb_hash);
-
-        // check security patch format
-        if !regex::Regex::new(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$")
-            .unwrap()
-            .is_match(&helper.security_patch)
-        {
-            return Err(serde::de::Error::custom(
-                "security_patch must be in YYYY-MM-DD format",
-            ));
-        }
-
-        Ok(TrustConfig {
-            os_version: helper.os_version,
-            security_patch: helper.security_patch,
-            vb_key: vb_key_array,
-            vb_hash: vb_hash_array,
-            verified_boot_state: helper.verified_boot_state,
-            device_locked: helper.device_locked,
-        })
-    }
-}
-
-impl Default for TrustConfig {
+impl Default for RawTrustConfig {
     fn default() -> Self {
-        let mut rng = BoringRng {};
-
-        let mut vb_key = [0u8; 32];
-        rng.fill_bytes(&mut vb_key);
-        let mut vb_hash = [0u8; 32];
-        rng.fill_bytes(&mut vb_hash);
-
         Self {
             os_version: rsproperties::get_or("ro.build.version.release", 35 /* Android 15 */),
             security_patch: rsproperties::get_or(
                 "ro.build.version.security_patch",
                 "2024-01-05".to_string(),
             ),
-            vb_key,
-            vb_hash,
-            verified_boot_state: true, // rsproperties::get_or("ro.boot.verifiedbootstate", "green".to_string()) != "orange",
-            device_locked: true, // rsproperties::get_or("ro.boot.verifiedbootstate", "green".to_string()) != "orange",
+            vb_key: TrustValueSpec::Auto,
+            vb_hash: TrustValueSpec::Auto,
+            verified_boot_state: true,
+            device_locked: true,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustValueSpec {
+    Auto,
+    Random,
+    Hex([u8; 32]),
+}
+
+impl Default for TrustValueSpec {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl Serialize for TrustValueSpec {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            TrustValueSpec::Auto => serializer.serialize_str("auto"),
+            TrustValueSpec::Random => serializer.serialize_str("random"),
+            TrustValueSpec::Hex(bytes) => serializer.serialize_str(&hex::encode(bytes)),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TrustValueSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.trim() {
+            "auto" => Ok(TrustValueSpec::Auto),
+            "random" => Ok(TrustValueSpec::Random),
+            candidate => {
+                let decoded = hex::decode(candidate).map_err(serde::de::Error::custom)?;
+                if decoded.len() != 32 {
+                    return Err(serde::de::Error::custom(
+                        "vb_key/vb_hash hex values must be exactly 32 bytes",
+                    ));
+                }
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&decoded);
+                Ok(TrustValueSpec::Hex(bytes))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustValueSource {
+    ExplicitHex,
+    Property,
+    Computed,
+    Original,
+    RandomExplicit,
+    RandomFallback,
+}
+
+impl std::fmt::Display for TrustValueSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrustValueSource::ExplicitHex => write!(f, "explicit_hex"),
+            TrustValueSource::Property => write!(f, "property"),
+            TrustValueSource::Computed => write!(f, "computed"),
+            TrustValueSource::Original => write!(f, "original"),
+            TrustValueSource::RandomExplicit => write!(f, "random_explicit"),
+            TrustValueSource::RandomFallback => write!(f, "random_fallback"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrustRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vb_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vb_key_source: Option<TrustValueSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vb_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vb_hash_source: Option<TrustValueSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_suffix: Option<String>,
+}
+
+impl TrustRecord {
+    pub fn is_empty(&self) -> bool {
+        self.vb_key.is_none()
+            && self.vb_key_source.is_none()
+            && self.vb_hash.is_none()
+            && self.vb_hash_source.is_none()
+            && self.build_fingerprint.is_none()
+            && self.slot_suffix.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceProperty {
     pub brand: String,
     pub device: String,
@@ -316,7 +510,6 @@ pub struct DeviceProperty {
     pub manufacturer: String,
     pub model: String,
     pub serial: String,
-
     pub meid: String,
     pub imei: String,
     pub imei2: String,
@@ -335,5 +528,101 @@ impl Default for DeviceProperty {
             imei: rsproperties::get_or("ro.ril.oem.imei", "".to_string()),
             imei2: rsproperties::get_or("ro.ril.oem.imei2", "".to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trust_value_spec_parses_tokens_and_hex() {
+        let parsed: TrustValueSpec = toml::from_str::<TrustValueToml>("value = \"auto\"")
+            .unwrap_or_else(|_| panic!("toml helper should parse"))
+            .value;
+        assert_eq!(parsed, TrustValueSpec::Auto);
+
+        let parsed: TrustValueSpec = toml::from_str::<TrustValueToml>("value = \"random\"")
+            .unwrap_or_else(|_| panic!("toml helper should parse"))
+            .value;
+        assert_eq!(parsed, TrustValueSpec::Random);
+
+        let parsed: TrustValueSpec = toml::from_str::<TrustValueToml>(
+            "value = \"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"",
+        )
+        .unwrap_or_else(|_| panic!("toml helper should parse"))
+        .value;
+        assert!(matches!(parsed, TrustValueSpec::Hex(_)));
+    }
+
+    #[test]
+    fn trust_value_spec_serializes_tokens() {
+        #[derive(Serialize)]
+        struct Wrapper {
+            value: TrustValueSpec,
+        }
+
+        let serialized = toml::to_string(&Wrapper {
+            value: TrustValueSpec::Random,
+        })
+        .unwrap();
+        assert!(serialized.contains("value = \"random\""));
+    }
+
+    #[test]
+    fn trust_record_emptiness_tracks_fields() {
+        let mut record = TrustRecord::default();
+        assert!(record.is_empty());
+        record.vb_key = Some("aa".to_string());
+        assert!(!record.is_empty());
+    }
+
+    #[test]
+    fn raw_trust_default_uses_auto_modes() {
+        let trust = RawTrustConfig::default();
+        assert_eq!(trust.vb_key, TrustValueSpec::Auto);
+        assert_eq!(trust.vb_hash, TrustValueSpec::Auto);
+    }
+
+    #[test]
+    fn config_file_parses_legacy_hex_values() {
+        let config = parse_config_file(
+            r#"
+[main]
+backend = "TrickyStore"
+
+[crypto]
+root_kek_seed = "0000000000000000000000000000000000000000000000000000000000000000"
+kak_seed = "1111111111111111111111111111111111111111111111111111111111111111"
+
+[trust]
+os_version = 16
+security_patch = "2026-04-05"
+vb_key = "2222222222222222222222222222222222222222222222222222222222222222"
+vb_hash = "3333333333333333333333333333333333333333333333333333333333333333"
+verified_boot_state = true
+device_locked = true
+
+[device]
+brand = "Google"
+device = "caiman"
+product = "caiman"
+manufacturer = "Google"
+model = "Pixel 9"
+serial = "serial"
+meid = ""
+imei = ""
+imei2 = ""
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(config.trust.vb_key, TrustValueSpec::Hex(_)));
+        assert!(matches!(config.trust.vb_hash, TrustValueSpec::Hex(_)));
+    }
+
+    #[derive(Deserialize)]
+    struct TrustValueToml {
+        value: TrustValueSpec,
     }
 }

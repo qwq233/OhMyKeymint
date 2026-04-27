@@ -2,14 +2,14 @@ use kmr_common::km_err;
 use kmr_ta::device::RetrieveAttestationIds;
 use kmr_wire::AttestationIdInfo;
 
-use crate::config::CONFIG;
+use crate::config::config;
 
 pub struct AttestationIdMgr;
 
 impl RetrieveAttestationIds for AttestationIdMgr {
     fn get(&self) -> Result<AttestationIdInfo, kmr_common::Error> {
         let info = {
-            let config = CONFIG
+            let config = config()
                 .read()
                 .map_err(|_| km_err!(UnknownError, "config lock poisoned"))?;
             AttestationIdInfo {

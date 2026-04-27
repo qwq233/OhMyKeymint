@@ -26,7 +26,7 @@ use crate::android::hardware::security::keymint::{
 use crate::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
 };
-use crate::config::CONFIG;
+use crate::config::config;
 use crate::global::{AID_KEYSTORE, DB};
 use crate::keymaster::apex::encode_module_info;
 use crate::keymaster::db::Uuid;
@@ -48,7 +48,6 @@ use crate::{
     watchdog as wd,
 };
 use anyhow::{Context, Ok, Result};
-use kmr_common::crypto::Rng;
 use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::ec::BoringEc;
 use kmr_crypto_boring::hmac::BoringHmac;
@@ -1111,7 +1110,7 @@ pub fn get_keymaster_security_level(
 }
 
 fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
-    let config = CONFIG.read().unwrap();
+    let config = config().read().unwrap();
     let security_level = get_keymint_security_level(security_level)?;
 
     let hw_info = HardwareInfo {
@@ -1186,13 +1185,6 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
     };
 
     let mut ta = KeyMintTa::new(hw_info, RpcInfo::V3(rpc_info_v3), imp, dev);
-
-    let mut rng = BoringRng {};
-
-    let mut vb_hash = vec![0u8; 32];
-    rng.fill_bytes(&mut vb_hash);
-    let mut vb_key = vec![0u8; 32];
-    rng.fill_bytes(&mut vb_key);
 
     let patch_level = config.trust.security_patch.replace("-", "");
     let patch_level = patch_level.parse::<u32>().unwrap_or(20250605);

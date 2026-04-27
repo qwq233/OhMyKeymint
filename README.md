@@ -15,13 +15,13 @@ In the future, we will gradually move away from the Tricky Store as a backend.
 
 ## Install and configure
 
-1. Install the [qwq233's Tricky Store](https://github.com/qwq233/TrickyStore) (My fork).
+1. Install this module.
 
-2. Install this module.
+2. Configure (if you need)
 
-3. Configure (if you need)
+Configuration file is located at `/data/misc/keystore/omk/config.toml` and `/data/misc/keystore/omk/injector.toml`
 
-Configuration file is located at `/data/misc/keystore/omk/config.toml`
+### /data/misc/keystore/omk/config.toml
 
 ```toml
 [main]
@@ -39,8 +39,18 @@ kak_seed = "d6fa5bb024540928a7d554ab5831a0553dd2f688f5d6cb3cb1645be2ff49e357"
 [trust]
 os_version = 15
 security_patch = "2025-05-01"
-vb_key = "b114f5162ca0e4b4fc0544a218953caba54f3102f5f3a9346e220c770890b93b"
-vb_hash = "2b38cf298eb4ca0d2dbaab32721dea2bb297b42652f4fff9180c48e7ac4da887"
+# `vb_key` accepts:
+# - "auto": ro.boot.vbmeta.public_key_digest -> computed top-level vbmeta key digest -> random fallback
+# - "random": generate a fresh 32-byte value for this boot and push it into ro.boot.vbmeta.public_key_digest
+# - "<64 hex chars>": pin an exact 32-byte value
+vb_key = "auto"
+
+# `vb_hash` accepts:
+# - "auto": ro.boot.vbmeta.digest -> original system attestation verifiedBootHash -> random fallback
+# - "random": generate a fresh 32-byte value for this boot and push it into ro.boot.vbmeta.digest
+# - "<64 hex chars>": pin an exact 32-byte value
+vb_hash = "auto"
+
 verified_boot_state = true
 device_locked = true
 
@@ -56,7 +66,53 @@ imei = "1234567890"
 imei2 = "1234567890"
 ```
 
-4. Enjoy
+`[trust_record]` is managed by OMK and may be added automatically after startup.
+It records stable derived values such as computed `vb_key` or original-system `vb_hash`.
+Random values are not written back into `config.toml`.
+
+If `config.toml` becomes invalid, OMK rewrites a canonical default config, renames the broken
+file to `config.toml.bak`, and appends the parse error to the backup.
+
+### /data/misc/keystore/omk/injector.toml
+
+```toml
+# Only packages listed in `scoop` are intercepted.
+# Optional per-package settings can be added under [scoop.<package>].
+# Example:
+# [scoop.io.github.vvb2060.keyattestation]
+# mode = "strict"
+
+scoop = [
+  "io.github.vvb2060.keyattestation",
+  "com.google.android.gsf",
+  "com.google.android.gms",
+  "com.android.vending",
+  "com.eltavine.duckdetector",
+]
+
+[main]
+enabled = true
+log_level = "debug"
+
+[filter]
+enabled = true
+deny_packages = []
+block_android_package = true
+allow_unknown_package = false
+
+[intercept]
+get_security_level = true
+get_key_entry = true
+update_subcomponent = true
+list_entries = true
+delete_key = true
+grant = true
+ungrant = true
+get_number_of_entries = true
+list_entries_batched = true
+get_supplementary_attestation_info = true
+
+```
 
 ## Restarting keymint and injector
 
@@ -80,6 +136,11 @@ Restart both together:
 ```sh
 resetprop persist.sys.omk.restart.all 1
 ```
+
+If you switch `[trust].vb_key` or `[trust].vb_hash` from `"random"` back to `"auto"`,
+restart alone is not enough. `auto` resolves `ro.boot.vbmeta.*` first, so the current
+boot keeps using the randomized sysprops until the device reboots and restores the
+original boot properties.
 
 The daemons also watch these marker files if you prefer the file-based path:
 
