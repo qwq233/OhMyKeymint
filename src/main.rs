@@ -27,7 +27,6 @@ pub mod macros;
 pub mod plat;
 pub mod proto;
 pub mod utils;
-pub mod vbmeta;
 pub mod watchdog;
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
@@ -125,12 +124,14 @@ fn run() -> Result<()> {
     rsbinder::ProcessState::init_default();
 
     prepare_android_storage();
+    plat::resetprop::bootstrap_privileged_helper()
+        .context("failed to bootstrap resetprop helper")?;
 
     info!("Bootstrapping config");
     let mut config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
     plat::device_ids::bootstrap_device_ids(&mut config_file);
     let resolved_trust =
-        vbmeta::bootstrap_vbmeta(&mut config_file).context("failed to bootstrap vbmeta")?;
+        plat::vbmeta::bootstrap_vbmeta(&mut config_file).context("failed to bootstrap vbmeta")?;
     config::persist_config_file(&config_file).context("failed to persist config")?;
     prepare_android_storage();
     config::install_runtime_config(config_file, resolved_trust)

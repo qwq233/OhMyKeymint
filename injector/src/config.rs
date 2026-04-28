@@ -1,6 +1,7 @@
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -459,6 +460,24 @@ fn start_watcher(path: PathBuf) {
 }
 
 fn watch_loop(path: PathBuf) {
+    #[cfg(target_os = "android")]
+    {
+        if let Err(error) = watch_loop_inotify(&path) {
+            log::error!(
+                "[Injector][Config] inotify watcher failed for {}: {}; falling back to polling",
+                path.display(),
+                error
+            );
+            watch_loop_polling(path);
+        }
+        return;
+    }
+
+    #[cfg(not(target_os = "android"))]
+    watch_loop_polling(path);
+}
+
+fn watch_loop_polling(path: PathBuf) {
     let mut last_seen = inspect_path(&path);
     loop {
         thread::sleep(WATCH_INTERVAL);
@@ -469,21 +488,110 @@ fn watch_loop(path: PathBuf) {
         }
         last_seen = current;
 
-        let config = load_or_seed(&path);
-        if let Some(lock) = CONFIG.get() {
-            match lock.write() {
-                Ok(mut guard) => {
-                    *guard = config.clone();
-                    crate::logging::update_runtime_level(config.main.log_level_filter());
-                    log::info!("[Injector][Config] reloaded config from {}", path.display());
-                }
-                Err(error) => {
-                    log::error!(
-                        "[Injector][Config] failed to apply reloaded config {}: {}",
-                        path.display(),
-                        error
-                    );
-                }
+        reload_runtime_config(&path);
+    }
+}
+
+#[cfg(target_os = "android")]
+fn watch_loop_inotify(path: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("config path has no parent: {}", path.display()),
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("config path has no filename: {}", path.display()),
+        )
+    })?;
+    let parent_cstr = CString::new(parent.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("config path contains NUL byte: {}", parent.display()),
+        )
+    })?;
+    let watch_mask = libc::IN_ATTRIB
+        | libc::IN_CLOSE_WRITE
+        | libc::IN_CREATE
+        | libc::IN_DELETE
+        | libc::IN_MOVED_FROM
+        | libc::IN_MOVED_TO
+        | libc::IN_Q_OVERFLOW;
+
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let watch = unsafe { libc::inotify_add_watch(fd, parent_cstr.as_ptr(), watch_mask) };
+    if watch < 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::close(fd);
+        }
+        return Err(error);
+    }
+
+    let watched_name = file_name.as_bytes().to_vec();
+    let mut buffer = vec![0u8; 4096];
+    loop {
+        let read =
+            unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
+        if read < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(error);
+        }
+
+        let mut reload = false;
+        let mut offset = 0usize;
+        while offset < read as usize {
+            let event = unsafe { &*(buffer[offset..].as_ptr() as *const libc::inotify_event) };
+            let name_start = offset + std::mem::size_of::<libc::inotify_event>();
+            let name_end = name_start + event.len as usize;
+            let name_bytes = &buffer[name_start..name_end.min(read as usize)];
+            let name = name_bytes
+                .split(|byte| *byte == 0)
+                .next()
+                .unwrap_or_default();
+
+            if (event.mask & libc::IN_Q_OVERFLOW) != 0 || name == watched_name.as_slice() {
+                reload = true;
+            }
+
+            offset += std::mem::size_of::<libc::inotify_event>() + event.len as usize;
+        }
+
+        if reload {
+            reload_runtime_config(path);
+        }
+    }
+}
+
+fn reload_runtime_config(path: &Path) {
+    let config = load_or_seed(path);
+    if let Some(lock) = CONFIG.get() {
+        match lock.write() {
+            Ok(mut guard) => {
+                *guard = config.clone();
+                crate::logging::update_runtime_level(config.main.log_level_filter());
+                log::info!("[Injector][Config] reloaded config from {}", path.display());
+            }
+            Err(error) => {
+                log::error!(
+                    "[Injector][Config] failed to apply reloaded config {}: {}",
+                    path.display(),
+                    error
+                );
             }
         }
     }

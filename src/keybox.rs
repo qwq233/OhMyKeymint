@@ -8,7 +8,6 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use der::{Decode, Encode};
-use hotwatch::Hotwatch;
 use kmr_common::{
     crypto::{ec, rsa, KeyMaterial, Sha256},
     Error,
@@ -518,26 +517,17 @@ pub fn initialize() -> Result<()> {
     ensure_keybox_file(KEYBOX_PATH)?;
     reload_from_disk()?;
     KEYBOX_WATCHER.get_or_init(|| {
-        std::thread::spawn(|| {
-            let mut watcher = match Hotwatch::new() {
-                Ok(watcher) => watcher,
-                Err(error) => {
-                    error!("failed to create keybox watcher: {error:?}");
-                    return;
-                }
-            };
-            if let Err(error) = watcher.watch(KEYBOX_PATH, |_| {
+        if let Err(error) = crate::plat::file_watch::spawn_path_watcher(
+            "omk-keybox-watch",
+            PathBuf::from(KEYBOX_PATH),
+            || {
                 if let Err(reload_error) = reload_from_disk() {
                     error!("failed to reload keybox.xml after change: {reload_error:#}");
                 }
-            }) {
-                error!("failed to watch keybox.xml: {error:?}");
-                return;
-            }
-            loop {
-                std::thread::park();
-            }
-        });
+            },
+        ) {
+            error!("failed to watch keybox.xml: {error:#}");
+        }
     });
     Ok(())
 }

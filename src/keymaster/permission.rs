@@ -639,8 +639,9 @@ fn lookup_process_selinux_context(process_name: &str) -> Result<Option<CString>>
                 continue;
             }
             Err(error) => {
-                return Err(error)
-                    .context(format!("failed to read /proc/{pid}/cmdline while locating {process_name}"));
+                return Err(error).context(format!(
+                    "failed to read /proc/{pid}/cmdline while locating {process_name}"
+                ));
             }
         };
 

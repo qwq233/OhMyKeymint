@@ -99,19 +99,65 @@ pub struct HostSddManager {
 }
 
 impl HostSddManager {
+    fn randomize_factory_secret(data: &mut storage::SecureDeletionData, rng: &mut dyn crypto::Rng) {
+        data.factory_secret.resize(32, 0);
+        rng.fill_bytes(&mut data.factory_secret[..]);
+    }
+
+    fn validate_loaded_data(data: &mut storage::SecureDeletionData) -> Result<(), String> {
+        if data.factory_secret.len() != 32 {
+            return Err(format!(
+                "factory_secret must be 32 bytes, got {}",
+                data.factory_secret.len()
+            ));
+        }
+        if data.factory_secret.iter().all(|byte| *byte == 0) {
+            return Err("factory_secret must not be all zero".to_string());
+        }
+
+        let mut max_slot = 0u32;
+        for (slot, secret) in &data.secure_deletion_secrets {
+            if secret.len() != 16 {
+                return Err(format!(
+                    "secure deletion secret for slot {} must be 16 bytes, got {}",
+                    slot,
+                    secret.len()
+                ));
+            }
+            max_slot = max_slot.max(*slot);
+        }
+        if data.last_free_slot < max_slot {
+            data.last_free_slot = max_slot;
+        }
+        Ok(())
+    }
+
+    fn reinitialize_persisted_state(
+        &mut self,
+        rng: &mut dyn crypto::Rng,
+        reason: &str,
+    ) -> Result<(), Error> {
+        error!("Secure deletion data invalid, reinitializing: {reason}");
+        self.data = storage::SecureDeletionData::default();
+        Self::randomize_factory_secret(&mut self.data, rng);
+        write_sdd_file(&self.data)
+    }
+
     fn init(&mut self, rng: &mut dyn crypto::Rng) -> Result<(), Error> {
         // Restore data from disk if it was previously saved.
         if path::Path::new(SECURE_DELETION_DATA_FILE).exists() {
             info!("Secure deletion data file found. Parsing.");
             self.data = read_sdd_file()?;
+            if let Err(reason) = Self::validate_loaded_data(&mut self.data) {
+                return self.reinitialize_persisted_state(rng, &reason);
+            }
             return Ok(());
         }
 
         info!("No secure deletion data file found. Creating one.");
 
         // Initialize factory reset secret.
-        self.data.factory_secret.resize(32, 0);
-        rng.fill_bytes(&mut self.data.factory_secret[..]);
+        Self::randomize_factory_secret(&mut self.data, rng);
 
         // Create secure deletion data file.
         write_sdd_file(&self.data)
@@ -137,7 +183,7 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
     }
 
     fn get_factory_reset_secret(&self) -> Result<keyblob::SecureDeletionData, Error> {
-        if self.data.factory_secret.is_empty() {
+        if self.data.factory_secret.len() != 32 {
             return Err(km_err!(UnknownError, "no factory secret available"));
         }
         Ok(keyblob::SecureDeletionData {

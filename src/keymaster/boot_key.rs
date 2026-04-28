@@ -27,6 +27,7 @@ use kmr_common::crypto::AES_256_KEY_LENGTH;
 use kmr_crypto_boring::km::hkdf_expand;
 use kmr_crypto_boring::zvec::ZVec;
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 
 /// Strategies used to prevent later boot stages from using the KM key that protects the level 0
 /// key
@@ -46,6 +47,7 @@ enum DenyLaterStrategy {
 /// `PRODUCT_VENDOR_PROPERTIES` means that the strategy can be fixed no matter what versions
 /// of KM are present.
 const PROPERTY_NAME: &str = "ro.keystore.boot_level_key.strategy";
+static LEVEL_ZERO_SELECTION: OnceLock<(SecurityLevel, DenyLaterStrategy)> = OnceLock::new();
 
 fn lookup_level_zero_km_and_strategy() -> Result<Option<(SecurityLevel, DenyLaterStrategy)>> {
     let property_val: Result<String, rsproperties::Error> = rsproperties::get(PROPERTY_NAME);
@@ -91,26 +93,36 @@ fn lookup_level_zero_km_and_strategy() -> Result<Option<(SecurityLevel, DenyLate
 }
 
 fn get_level_zero_key_km_and_strategy() -> Result<(KeyMintDevice, DenyLaterStrategy)> {
-    if let Some((level, strategy)) = lookup_level_zero_km_and_strategy()? {
-        return Ok((
-            KeyMintDevice::get(level).context(err!("Get KM instance failed."))?,
-            strategy,
-        ));
-    }
-    let tee = KeyMintDevice::get(SecurityLevel::TRUSTED_ENVIRONMENT)
-        .context(err!("Get TEE instance failed."))?;
-    if tee.version() >= KeyMintDevice::KEY_MASTER_V4_1 {
-        Ok((tee, DenyLaterStrategy::EarlyBootOnly))
-    } else {
-        match KeyMintDevice::get_or_none(SecurityLevel::STRONGBOX)
-            .context(err!("Get Strongbox instance failed."))?
-        {
-            Some(strongbox) if strongbox.version() >= KeyMintDevice::KEY_MASTER_V4_1 => {
-                Ok((strongbox, DenyLaterStrategy::EarlyBootOnly))
-            }
-            _ => Ok((tee, DenyLaterStrategy::MaxUsesPerBoot)),
+    let &(level, strategy) = LEVEL_ZERO_SELECTION.get_or_try_init(|| -> Result<_> {
+        if let Some((level, strategy)) = lookup_level_zero_km_and_strategy()? {
+            return Ok((level, strategy));
         }
-    }
+        let tee = KeyMintDevice::get(SecurityLevel::TRUSTED_ENVIRONMENT)
+            .context(err!("Get TEE instance failed."))?;
+        if tee.version() >= KeyMintDevice::KEY_MASTER_V4_1 {
+            Ok((
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+                DenyLaterStrategy::EarlyBootOnly,
+            ))
+        } else {
+            match KeyMintDevice::get_or_none(SecurityLevel::STRONGBOX)
+                .context(err!("Get Strongbox instance failed."))?
+            {
+                Some(strongbox) if strongbox.version() >= KeyMintDevice::KEY_MASTER_V4_1 => {
+                    Ok((SecurityLevel::STRONGBOX, DenyLaterStrategy::EarlyBootOnly))
+                }
+                _ => Ok((
+                    SecurityLevel::TRUSTED_ENVIRONMENT,
+                    DenyLaterStrategy::MaxUsesPerBoot,
+                )),
+            }
+        }
+    })?;
+
+    Ok((
+        KeyMintDevice::get(level).context(err!("Get KM instance failed."))?,
+        strategy,
+    ))
 }
 
 /// This is not thread safe; caller must hold a lock before calling.

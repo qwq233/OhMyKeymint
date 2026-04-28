@@ -37,7 +37,11 @@ kak_seed = "d6fa5bb024540928a7d554ab5831a0553dd2f688f5d6cb3cb1645be2ff49e357"
 
 [trust]
 os_version = 15
-security_patch = "2025-05-01"
+# Accepted values:
+# - "auto": read and preserve the original build.prop patch level
+# - "latest": use the 5th day of the current month
+# - "YYYY-MM-DD": force an exact patch level
+security_patch = "auto"
 # `vb_key` accepts:
 # - "auto": ro.boot.vbmeta.public_key_digest -> computed top-level vbmeta key digest -> random fallback
 # - "random": generate a fresh 32-byte value for this boot and push it into ro.boot.vbmeta.public_key_digest
@@ -67,8 +71,25 @@ imei2 = ""
 ```
 
 `[trust_record]` is managed by OMK and may be added automatically after startup.
-It records stable derived values such as computed `vb_key` or original-system `vb_hash`.
+It records stable derived values such as computed `vb_key`, original-system `vb_hash`,
+and `original_security_patch`.
 Random values are not written back into `config.toml`.
+
+`security_patch` semantics:
+
+1. `auto` resolves from the original `build.prop` value captured at startup.
+
+2. `latest` resolves to the 5th day of the current month.
+
+3. An explicit `YYYY-MM-DD` value forces that exact patch level.
+
+4. Any non-`auto` value overrides `ro.build.version.security_patch` at runtime.
+
+5. Switching back to `auto` restores the saved original patch level.
+
+6. On every start, OMK refreshes the original patch level from `build.prop` again before applying overrides.
+
+Only `security_patch` hot-applies. Other `[trust]` changes still require restarting `keymint`.
 
 If `overrideTelephonyProperties = false` (the default), OMK ignores user-configured
 `[device].imei` and `[device].meid` and resolves them from the device at startup instead.
@@ -133,6 +154,13 @@ get_supplementary_attestation_info = true
 
 ```
 
+`allow_unknown_package = true` allows callers whose package name cannot be resolved to pass
+the filter instead of being rejected.
+
+On Android, `injector.toml` reload also uses `inotify`, with polling kept only as fallback.
+If the system TEE backend is unavailable but OMK is still reachable, injector preserves the
+original OMK binder error instead of replacing it with a synthetic fallback failure.
+
 ## Restarting keymint and injector
 
 The module ships two background daemons: one for `keymint`, one for `injector`.
@@ -160,6 +188,9 @@ If you switch `[trust].vb_key` or `[trust].vb_hash` from `"random"` back to `"au
 restart alone is not enough. `auto` resolves `ro.boot.vbmeta.*` first, so the current
 boot keeps using the randomized sysprops until the device reboots and restores the
 original boot properties.
+
+Changing `[trust].security_patch` does not require a restart by itself. OMK hot-applies
+the new value and rebuilds the active KeyMint wrappers in place.
 
 The daemons also watch these marker files if you prefer the file-based path:
 

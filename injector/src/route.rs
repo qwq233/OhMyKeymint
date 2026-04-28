@@ -219,6 +219,21 @@ impl KeystoreServiceBinder {
         system_call()
     }
 
+    fn preserve_omk_error<T>(
+        &self,
+        method: ServiceMethod,
+        error: rsbinder::Status,
+    ) -> rsbinder::status::Result<T> {
+        warn!(
+            "[Injector][Route] OMK service backend for {:?} failed for uid={} pid={}: {}; system fallback unavailable, preserving OMK error",
+            method,
+            self.caller.uid,
+            self.caller.pid,
+            error
+        );
+        Err(error)
+    }
+
     fn wrap_system_key_entry(&self, response: KeyEntryResponse) -> KeyEntryResponse {
         let KeyEntryResponse {
             r#iSecurityLevel,
@@ -279,21 +294,17 @@ impl AospKeystoreService for KeystoreServiceBinder {
                     let Some(system_backend) = self.optional_system_security_level(security_level)
                     else {
                         warn!(
-                            "[Injector][Route] OMK getSecurityLevel({:?}) succeeded for uid={} pid={} but system fallback backend was unavailable; returning system wrapper instead",
+                            "[Injector][Route] OMK getSecurityLevel({:?}) succeeded for uid={} pid={} but system fallback backend was unavailable; returning OMK-only wrapper",
                             security_level,
                             self.caller.uid,
                             self.caller.pid,
                         );
-                        return self
-                            .call_system(|backend| backend.r#getSecurityLevel(security_level))
-                            .map(|system_backend| {
-                                new_security_level_binder(
-                                    security_level,
-                                    RouteTarget::System,
-                                    Some(system_backend),
-                                    None,
-                                )
-                            });
+                        return Ok(new_security_level_binder(
+                            security_level,
+                            RouteTarget::Omk,
+                            None,
+                            Some(omk_backend),
+                        ));
                     };
 
                     return Ok(new_security_level_binder(
@@ -304,17 +315,15 @@ impl AospKeystoreService for KeystoreServiceBinder {
                     ));
                 }
                 Err(error) => {
-                    return self.fallback_to_system(ServiceMethod::GetSecurityLevel, error, || {
-                        self.call_system(|backend| backend.r#getSecurityLevel(security_level))
-                            .map(|system_backend| {
-                                new_security_level_binder(
-                                    security_level,
-                                    RouteTarget::System,
-                                    Some(system_backend),
-                                    None,
-                                )
-                            })
-                    });
+                    return match self.optional_system_security_level(security_level) {
+                        Some(system_backend) => Ok(new_security_level_binder(
+                            security_level,
+                            RouteTarget::System,
+                            Some(system_backend),
+                            None,
+                        )),
+                        None => self.preserve_omk_error(ServiceMethod::GetSecurityLevel, error),
+                    };
                 }
             }
         }
@@ -588,6 +597,16 @@ impl KeystoreSecurityLevelBinder {
         system_call: impl FnOnce() -> rsbinder::status::Result<T>,
     ) -> rsbinder::status::Result<T> {
         let caller = current_calling_identity();
+        if self.system_backend.is_none() && self.omk_backend.is_some() {
+            warn!(
+                "[Injector][Route] OMK backend for {:?} failed for uid={} pid={}: {}; system fallback unavailable, preserving OMK error",
+                self.security_level,
+                caller.uid,
+                caller.pid,
+                error
+            );
+            return Err(error);
+        }
         warn!(
             "[Injector][Route] OMK backend for {:?} failed for uid={} pid={}: {}; falling back to system",
             self.security_level,
@@ -1153,6 +1172,210 @@ mod tests {
         }
     }
 
+    struct NoSecurityLevelSystemService;
+
+    impl Interface for NoSecurityLevelSystemService {}
+
+    impl AospKeystoreService for NoSecurityLevelSystemService {
+        fn r#getSecurityLevel(
+            &self,
+            _security_level: SecurityLevel,
+        ) -> rsbinder::status::Result<AospSecurityLevelBinder> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getKeyEntry(
+            &self,
+            _key: &KeyDescriptor,
+        ) -> rsbinder::status::Result<KeyEntryResponse> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#updateSubcomponent(
+            &self,
+            _key: &KeyDescriptor,
+            _public_cert: Option<&[u8]>,
+            _certificate_chain: Option<&[u8]>,
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#listEntries(
+            &self,
+            _domain: Domain,
+            _nspace: i64,
+        ) -> rsbinder::status::Result<Vec<KeyDescriptor>> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#deleteKey(&self, _key: &KeyDescriptor) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#grant(
+            &self,
+            _key: &KeyDescriptor,
+            _grantee_uid: i32,
+            _access_vector: i32,
+        ) -> rsbinder::status::Result<KeyDescriptor> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#ungrant(
+            &self,
+            _key: &KeyDescriptor,
+            _grantee_uid: i32,
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getNumberOfEntries(
+            &self,
+            _domain: Domain,
+            _nspace: i64,
+        ) -> rsbinder::status::Result<i32> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#listEntriesBatched(
+            &self,
+            _domain: Domain,
+            _nspace: i64,
+            _starting_past_alias: Option<&str>,
+        ) -> rsbinder::status::Result<Vec<KeyDescriptor>> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getSupplementaryAttestationInfo(
+            &self,
+            _tag: Tag,
+        ) -> rsbinder::status::Result<Vec<u8>> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+    }
+
+    struct OmkOnlySecurityLevelService {
+        omk_backend: OmkSecurityLevelBinder,
+        fail_get_ohmy_security_level: bool,
+    }
+
+    impl Interface for OmkOnlySecurityLevelService {}
+
+    impl IOhMyKsService for OmkOnlySecurityLevelService {
+        fn r#getSecurityLevel(
+            &self,
+            _security_level: SecurityLevel,
+        ) -> rsbinder::status::Result<AospSecurityLevelBinder> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getOhMySecurityLevel(
+            &self,
+            _security_level: SecurityLevel,
+        ) -> rsbinder::status::Result<OmkSecurityLevelBinder> {
+            if self.fail_get_ohmy_security_level {
+                return Err(StatusCode::UnknownTransaction.into());
+            }
+            Ok(self.omk_backend.clone())
+        }
+
+        fn r#getKeyEntry(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+        ) -> rsbinder::status::Result<KeyEntryResponse> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#updateSubcomponent(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+            _public_cert: Option<&[u8]>,
+            _certificate_chain: Option<&[u8]>,
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#listEntries(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _domain: Domain,
+            _nspace: i64,
+        ) -> rsbinder::status::Result<Vec<KeyDescriptor>> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#deleteKey(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#grant(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+            _grantee_uid: i32,
+            _access_vector: i32,
+        ) -> rsbinder::status::Result<KeyDescriptor> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#ungrant(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+            _grantee_uid: i32,
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getNumberOfEntries(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _domain: Domain,
+            _nspace: i64,
+        ) -> rsbinder::status::Result<i32> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#listEntriesBatched(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _domain: Domain,
+            _nspace: i64,
+            _starting_past_alias: Option<&str>,
+        ) -> rsbinder::status::Result<Vec<KeyDescriptor>> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getSupplementaryAttestationInfo(
+            &self,
+            _tag: Tag,
+        ) -> rsbinder::status::Result<Vec<u8>> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#updateEcKeybox(
+            &self,
+            _key: &[u8],
+            _chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#updateRsaKeybox(
+            &self,
+            _key: &[u8],
+            _chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+    }
+
     fn sample_key_descriptor() -> KeyDescriptor {
         KeyDescriptor {
             domain: Domain::APP,
@@ -1445,6 +1668,34 @@ mod tests {
     }
 
     #[test]
+    fn get_security_level_omk_route_survives_missing_system_backend() {
+        tracker::clear_state_for_tests();
+        let omk_backend = rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
+            operation_aborts: Arc::new(AtomicUsize::new(0)),
+            should_fail_create: false,
+        }) as Box<dyn IOhMySecurityLevel>);
+        let wrapper = new_service_binder(
+            CallerIdentity::new(1000, 2000),
+            InterceptConfig::default(),
+            true,
+            BnKeystoreService::new_binder(NoSecurityLevelSystemService),
+            Some(rsbinder::Strong::new(
+                Box::new(OmkOnlySecurityLevelService {
+                    omk_backend,
+                    fail_get_ohmy_security_level: false,
+                }) as Box<dyn IOhMyKsService>,
+            )),
+        );
+
+        let returned = wrapper
+            .r#getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT)
+            .expect("OMK-only wrapper should still be returned");
+        returned
+            .r#deleteKey(&sample_key_descriptor())
+            .expect("OMK-only security-level wrapper should remain usable");
+    }
+
+    #[test]
     fn create_operation_sticks_to_the_backend_that_created_it() {
         tracker::clear_state_for_tests();
         let counters = OperationCounters {
@@ -1548,6 +1799,54 @@ mod tests {
 
         assert_eq!(counters.system_abort.load(Ordering::SeqCst), 1);
         assert_eq!(counters.omk_abort.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn get_security_level_preserves_omk_error_when_system_backend_is_unavailable() {
+        tracker::clear_state_for_tests();
+        let wrapper = new_service_binder(
+            CallerIdentity::new(1000, 2000),
+            InterceptConfig::default(),
+            true,
+            BnKeystoreService::new_binder(NoSecurityLevelSystemService),
+            Some(rsbinder::Strong::new(
+                Box::new(OmkOnlySecurityLevelService {
+                    omk_backend: rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
+                        operation_aborts: Arc::new(AtomicUsize::new(0)),
+                        should_fail_create: false,
+                    })
+                        as Box<dyn IOhMySecurityLevel>),
+                    fail_get_ohmy_security_level: true,
+                }) as Box<dyn IOhMyKsService>,
+            )),
+        );
+
+        let status = wrapper
+            .r#getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT)
+            .expect_err("missing system backend should preserve the OMK error");
+
+        assert_eq!(status.transaction_error(), StatusCode::UnknownTransaction);
+    }
+
+    #[test]
+    fn omk_only_wrapper_preserves_omk_error_when_create_operation_fails() {
+        tracker::clear_state_for_tests();
+        let wrapper = new_security_level_binder(
+            SecurityLevel::TRUSTED_ENVIRONMENT,
+            RouteTarget::Omk,
+            None,
+            Some(rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
+                operation_aborts: Arc::new(AtomicUsize::new(0)),
+                should_fail_create: true,
+            })
+                as Box<dyn IOhMySecurityLevel>)),
+        );
+
+        let status = wrapper
+            .r#createOperation(&sample_key_descriptor(), &[], false)
+            .expect_err("OMK-only wrapper should preserve the original OMK failure");
+
+        assert_eq!(status.transaction_error(), StatusCode::UnknownTransaction);
     }
 
     #[test]

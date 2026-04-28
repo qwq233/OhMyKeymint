@@ -503,9 +503,10 @@ impl KeystoreService {
 
     fn get_supplementary_attestation_info(&self, tag: Tag) -> Result<Vec<u8>> {
         match tag {
-            Tag::MODULE_HASH => Err(Error::Rc(ResponseCode::INFO_NOT_AVAILABLE)).context(err!(
-                "MODULE_HASH supplementary info is not exposed on the AOSP surface"
-            )),
+            Tag::MODULE_HASH => crate::global::module_info_bundle()
+                .map(|bundle| bundle.encoded_der.clone())
+                .ok_or_else(|| Error::Rc(ResponseCode::INFO_NOT_AVAILABLE))
+                .context(err!("MODULE_HASH supplementary info is unavailable")),
             _ => Err(Error::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!(
                 "Tag {tag:?} not supported for getSupplementaryAttestationInfo."
             )),

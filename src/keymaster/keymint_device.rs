@@ -14,7 +14,8 @@
 
 //! Provide the [`KeyMintDevice`] wrapper for operating directly on a KeyMint device.
 
-use std::sync::{OnceLock, RwLock};
+use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::android::hardware::security::keymint::IKeyMintOperation::BnKeyMintOperation;
 use crate::android::hardware::security::keymint::{
@@ -32,6 +33,7 @@ use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_binder_status, map_ks_error, map_ks_result};
 use crate::keymaster::utils::{key_creation_result_to_aidl, key_param_to_aidl};
 use crate::keymint::{clock, sdd, soft};
+use crate::plat::resetprop;
 use crate::{
     android::hardware::security::keymint::ErrorCode::ErrorCode,
     err,
@@ -46,7 +48,7 @@ use crate::{
     },
     watchdog as wd,
 };
-use anyhow::{Context, Ok, Result};
+use anyhow::{Context, Result};
 use kmr_crypto_boring::ec::BoringEc;
 use kmr_crypto_boring::hmac::BoringHmac;
 use kmr_crypto_boring::rng::BoringRng;
@@ -86,14 +88,20 @@ impl KeyMintDevice {
     pub const KEY_MINT_V2: i32 = 200;
     /// Version number of KeyMintDevice@V3
     pub const KEY_MINT_V3: i32 = 300;
+    /// Version number of KeyMintDevice@V4
+    pub const KEY_MINT_V4: i32 = 400;
 
     /// Get a [`KeyMintDevice`] for the given [`SecurityLevel`]
     pub fn get(security_level: SecurityLevel) -> Result<KeyMintDevice> {
         let km_uuid = RwLock::new(Uuid::from(security_level));
-        let wrapper: KeyMintWrapper = KeyMintWrapper::new(security_level).unwrap();
+        let wrapper: KeyMintWrapper = KeyMintWrapper::new(security_level)?;
+        let version = wrapper
+            .get_hardware_info()
+            .context(err!("Failed to get hardware info"))?
+            .version_number;
         Ok(KeyMintDevice {
             km_dev: wrapper,
-            version: 400,
+            version,
             km_uuid,
             security_level,
         })
@@ -362,12 +370,9 @@ impl KeyMintDevice {
             .context(err!("Failed to finish operation."))
     }
 }
+static KM_WRAPPER_STRONGBOX: OnceLock<Arc<KeyMintWrapperInner>> = OnceLock::new();
 
-use std::sync::{Arc, Mutex};
-
-static KM_WRAPPER_STRONGBOX: OnceLock<Mutex<KeyMintWrapper>> = OnceLock::new();
-
-static KM_WRAPPER_TEE: OnceLock<Mutex<KeyMintWrapper>> = OnceLock::new();
+static KM_WRAPPER_TEE: OnceLock<Arc<KeyMintWrapperInner>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct KeyMintWrapper {
@@ -887,9 +892,7 @@ impl KeyMintWrapper {
     pub fn new(security_level: SecurityLevel) -> Result<Self> {
         Ok(KeyMintWrapper {
             security_level,
-            inner: Arc::new(KeyMintWrapperInner {
-                keymint: Mutex::new(init_keymint_ta(security_level)?),
-            }),
+            inner: shared_keymint_wrapper_inner(security_level)?,
         })
     }
 
@@ -1113,22 +1116,134 @@ pub fn get_keymaster_security_level(
     }
 }
 
+struct ResolvedHardwareProfile {
+    version_number: i32,
+    impl_name: &'static str,
+    author_name: &'static str,
+    unique_id: &'static str,
+}
+
+fn resolve_hardware_profile(security_level: SecurityLevel) -> ResolvedHardwareProfile {
+    let version_number = probe_keymint_version_from_vintf(security_level)
+        .unwrap_or_else(|| fallback_keymint_version_from_android());
+    let line = version_number / 100;
+    let sec_label = match security_level {
+        SecurityLevel::TRUSTED_ENVIRONMENT => "TEE",
+        SecurityLevel::STRONGBOX => "StrongBox",
+        SecurityLevel::SOFTWARE => "Software",
+        _ => "Unknown",
+    };
+    let impl_name = leak_string(format!("Android {sec_label} KeyMint {line}"));
+    let author_name = leak_string("The Android Open Source Project".to_string());
+    let unique_id = leak_string(format!("android-{sec_label}-keymint-{line}"));
+
+    ResolvedHardwareProfile {
+        version_number,
+        impl_name,
+        author_name,
+        unique_id,
+    }
+}
+
+fn probe_keymint_version_from_vintf(security_level: SecurityLevel) -> Option<i32> {
+    let instance = match security_level {
+        SecurityLevel::TRUSTED_ENVIRONMENT => "default",
+        SecurityLevel::STRONGBOX => "strongbox",
+        _ => return None,
+    };
+    let pattern = regex::Regex::new(&format!(
+        r#"(?s)<hal\s+format="aidl">.*?<name>\s*android\.hardware\.security\.keymint\s*</name>.*?<version>\s*(\d+)\s*</version>.*?<fqname>\s*IKeyMintDevice/{}\s*</fqname>.*?</hal>"#,
+        regex::escape(instance)
+    ))
+    .expect("VINTF regex must compile");
+
+    let manifest_dir = Path::new("/vendor/etc/vintf/manifest");
+    let entries = std::fs::read_dir(manifest_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("android.hardware.security.keymint-service") || !name.ends_with(".xml")
+        {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(captures) = pattern.captures(&contents) else {
+            continue;
+        };
+        let version = captures.get(1)?.as_str().parse::<i32>().ok()?;
+        return Some(normalize_keymint_version(version));
+    }
+    None
+}
+
+fn fallback_keymint_version_from_android() -> i32 {
+    match detect_android_major_version() {
+        Some(version) if version >= 16 => KeyMintDevice::KEY_MINT_V4,
+        Some(14 | 15) => KeyMintDevice::KEY_MINT_V3,
+        Some(13) => KeyMintDevice::KEY_MINT_V2,
+        Some(12) => KeyMintDevice::KEY_MINT_V1,
+        _ => KeyMintDevice::KEY_MINT_V4,
+    }
+}
+
+fn detect_android_major_version() -> Option<i32> {
+    resetprop::read_string_property("ro.build.version.release_or_codename")
+        .or_else(|| resetprop::read_string_property("ro.build.version.release"))
+        .and_then(|value| value.parse::<i32>().ok())
+        .or_else(|| {
+            resetprop::read_string_property("ro.build.version.sdk")
+                .and_then(|sdk| sdk.parse::<i32>().ok())
+                .map(|sdk| match sdk {
+                    31 | 32 => 12,
+                    33 => 13,
+                    34 => 14,
+                    35 => 15,
+                    value if value >= 36 => 16,
+                    _ => 16,
+                })
+        })
+}
+
+fn normalize_keymint_version(version: i32) -> i32 {
+    if (1..10).contains(&version) {
+        version * 100
+    } else {
+        version
+    }
+}
+
+fn leak_string(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
+}
+
+fn parse_security_patch_level(value: &str) -> Result<u32> {
+    value
+        .replace('-', "")
+        .parse::<u32>()
+        .with_context(|| format!("invalid resolved security_patch value: {value}"))
+}
+
 fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
     let config = config().read().unwrap();
     let security_level = get_keymint_security_level(security_level)?;
+    let profile = resolve_hardware_profile(get_keymaster_security_level(security_level)?);
 
     let hw_info = HardwareInfo {
-        version_number: 2,
+        version_number: profile.version_number,
         security_level,
-        impl_name: "Qualcomm QTEE KeyMint 2",
-        author_name: "Qualcomm Technologies",
-        unique_id: "Qualcomm QTEE KeyMint 2",
+        impl_name: profile.impl_name,
+        author_name: profile.author_name,
+        unique_id: profile.unique_id,
     };
 
     let rpc_sign_algo = CsrSigningAlgorithm::EdDSA;
     let rpc_info_v3 = RpcInfoV3 {
-        author_name: "Qualcomm Technologies",
-        unique_id: "Qualcomm QTEE KeyMint 2",
+        author_name: profile.author_name,
+        unique_id: profile.unique_id,
         fused: false,
         supported_num_of_keys_in_csr: MINIMUM_SUPPORTED_KEYS_IN_CSR,
     };
@@ -1190,8 +1305,7 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
 
     let mut ta = KeyMintTa::new(hw_info, RpcInfo::V3(rpc_info_v3), imp, dev);
 
-    let patch_level = config.trust.security_patch.replace("-", "");
-    let patch_level = patch_level.parse::<u32>().unwrap_or(20250605);
+    let patch_level = parse_security_patch_level(&config.trust.security_patch).unwrap_or(20250605);
     let boot_patchlevel = patch_level;
     let os_patchlevel = patch_level / 100;
 
@@ -1240,30 +1354,50 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
     Ok(ta)
 }
 
-pub fn get_keymint_wrapper<'a>(
-    security_level: SecurityLevel,
-) -> Result<std::sync::MutexGuard<'a, KeyMintWrapper>> {
+pub fn get_keymint_wrapper(security_level: SecurityLevel) -> Result<KeyMintWrapper> {
+    KeyMintWrapper::new(security_level)
+}
+
+pub fn reset_initialized_keymint_wrappers() -> Result<()> {
+    if let Some(wrapper) = KM_WRAPPER_TEE.get() {
+        let keymint = KeyMintWrapper {
+            security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
+            inner: wrapper.clone(),
+        };
+        keymint
+            .reset_keymint_ta()
+            .context(err!("Failed to reset TEE keymint wrapper"))?;
+    }
+
+    if let Some(wrapper) = KM_WRAPPER_STRONGBOX.get() {
+        let keymint = KeyMintWrapper {
+            security_level: SecurityLevel::STRONGBOX,
+            inner: wrapper.clone(),
+        };
+        if let Err(error) = keymint.reset_keymint_ta() {
+            log::warn!("Failed to reset optional StrongBox keymint wrapper: {error:#}");
+        }
+    }
+
+    Ok(())
+}
+
+fn shared_keymint_wrapper_inner(security_level: SecurityLevel) -> Result<Arc<KeyMintWrapperInner>> {
     match security_level {
-        SecurityLevel::STRONGBOX => {
-            let wrapper = KM_WRAPPER_STRONGBOX.get_or_init(|| {
-                Mutex::new(
-                    KeyMintWrapper::new(security_level)
-                        .expect(err!("Failed to init strongbox wrapper").as_str()),
-                )
-            });
-
-            Ok(wrapper.lock().expect("Failed to lock KM_WRAPPER_STRONGBOX"))
-        }
-        SecurityLevel::TRUSTED_ENVIRONMENT => {
-            let wrapper = KM_WRAPPER_TEE.get_or_init(|| {
-                Mutex::new(
-                    KeyMintWrapper::new(security_level)
-                        .expect(err!("Failed to init tee wrapper").as_str()),
-                )
-            });
-
-            Ok(wrapper.lock().expect("Failed to lock KM_WRAPPER_TEE"))
-        }
+        SecurityLevel::STRONGBOX => KM_WRAPPER_STRONGBOX
+            .get_or_try_init(|| {
+                Ok(Arc::new(KeyMintWrapperInner {
+                    keymint: Mutex::new(init_keymint_ta(security_level)?),
+                }))
+            })
+            .map(Arc::clone),
+        SecurityLevel::TRUSTED_ENVIRONMENT => KM_WRAPPER_TEE
+            .get_or_try_init(|| {
+                Ok(Arc::new(KeyMintWrapperInner {
+                    keymint: Mutex::new(init_keymint_ta(security_level)?),
+                }))
+            })
+            .map(Arc::clone),
         SecurityLevel::SOFTWARE => Err(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
             .context(err!("Software KeyMint not supported")),
         _ => Err(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))

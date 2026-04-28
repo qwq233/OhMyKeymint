@@ -1,12 +1,11 @@
 use std::{
     fs,
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{OnceLock, RwLock},
 };
 
 use anyhow::{anyhow, Context, Result};
-use hotwatch::Hotwatch;
 use kmr_common::crypto::Rng;
 use kmr_crypto_boring::rng::BoringRng;
 use serde::{ser::SerializeStruct, Deserialize, Serialize};
@@ -151,76 +150,126 @@ fn start_config_watcher() -> Result<()> {
         return Ok(());
     }
 
-    std::thread::spawn(|| {
-        let mut watcher = match Hotwatch::new() {
-            Ok(watcher) => watcher,
-            Err(error) => {
-                log::error!("Failed to start config watcher: {error:?}");
-                return;
-            }
-        };
+    crate::plat::file_watch::spawn_path_watcher(
+        "omk-config-watch",
+        PathBuf::from(CONFIG_PATH),
+        reload_runtime_config,
+    )
+}
 
-        if let Err(error) = watcher.watch(CONFIG_PATH, |event| {
-            log::info!("Config file changed: {:?}", event);
-            let contents = match fs::read_to_string(CONFIG_PATH) {
-                Ok(contents) => contents,
-                Err(error) => {
-                    log::error!("Failed to read config file after change, ignoring: {error:?}");
-                    return;
-                }
-            };
-
-            let new_config_file = match parse_config_file(&contents) {
-                Ok(config_file) => config_file,
-                Err(error) => {
-                    log::error!("Failed to parse changed config file, ignoring: {error:#}");
-                    return;
-                }
-            };
-
-            let mut runtime = match config().write() {
-                Ok(runtime) => runtime,
-                Err(_) => {
-                    log::error!("Config lock poisoned while handling config change");
-                    return;
-                }
-            };
-
-            if runtime.trust_intent != new_config_file.trust {
-                log::warn!(
-                    "Trust config changed on disk; restart keymint to apply vbmeta changes."
-                );
-            }
-
-            if runtime.crypto != new_config_file.crypto {
-                log::warn!("Crypto config changed on disk; restart keymint to apply seed changes.");
-            }
-
-            let resolved_trust = runtime.trust.clone();
-            *runtime = Config::from_file(&new_config_file, resolved_trust);
-            log::info!("Config updated");
-        }) {
-            log::error!("Failed to watch config file: {error:?}");
+fn reload_runtime_config() {
+    let contents = match fs::read_to_string(CONFIG_PATH) {
+        Ok(contents) => contents,
+        Err(error) => {
+            log::error!("Failed to read config file after change, ignoring: {error:?}");
             return;
         }
+    };
 
-        loop {
-            std::thread::park();
+    let new_config_file = match parse_config_file(&contents) {
+        Ok(config_file) => config_file,
+        Err(error) => {
+            log::error!("Failed to parse changed config file, ignoring: {error:#}");
+            return;
         }
-    });
+    };
 
-    Ok(())
+    let runtime_snapshot = match config().read() {
+        Ok(runtime) => runtime.clone(),
+        Err(_) => {
+            log::error!("Config lock poisoned while snapshotting config change");
+            return;
+        }
+    };
+
+    let previous_trust = runtime_snapshot.trust.clone();
+    let previous_trust_intent = runtime_snapshot.trust_intent.clone();
+    let mut applied_trust = previous_trust.clone();
+    let mut applied_trust_intent = previous_trust_intent.clone();
+
+    if trust_changed_beyond_security_patch(&runtime_snapshot.trust_intent, &new_config_file.trust) {
+        log::warn!(
+            "Trust config changed on disk beyond security_patch; restart keymint to apply vbmeta changes."
+        );
+    } else if runtime_snapshot.trust_intent.security_patch != new_config_file.trust.security_patch {
+        match crate::plat::vbmeta::apply_runtime_security_patch(
+            &runtime_snapshot.trust_record,
+            &new_config_file.trust.security_patch,
+        ) {
+            Ok(resolved_patch) => {
+                applied_trust.security_patch = resolved_patch;
+                match crate::keymaster::keymint_device::reset_initialized_keymint_wrappers() {
+                    Ok(()) => {
+                        applied_trust_intent = new_config_file.trust.clone();
+                        log::info!("Applied runtime security_patch change");
+                    }
+                    Err(error) => {
+                        if let Err(revert_error) = crate::plat::vbmeta::apply_runtime_security_patch(
+                            &runtime_snapshot.trust_record,
+                            &previous_trust_intent.security_patch,
+                        ) {
+                            log::error!(
+                                "Failed to revert security_patch after wrapper reset failure: {revert_error:#}"
+                            );
+                        }
+                        applied_trust = previous_trust;
+                        log::error!(
+                            "Failed to rebuild keymint wrappers after security_patch change; restart keymint to apply it safely: {error:#}"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "Failed to hot-apply security_patch change; restart keymint to apply it: {error:#}"
+                );
+            }
+        }
+    }
+
+    let mut applied_crypto = new_config_file.crypto.clone();
+    if runtime_snapshot.crypto != new_config_file.crypto {
+        log::warn!("Crypto config changed on disk; restart keymint to apply seed changes.");
+        applied_crypto = runtime_snapshot.crypto.clone();
+    }
+
+    let mut updated = Config::from_file(&new_config_file, applied_trust);
+    updated.trust_intent = applied_trust_intent;
+    updated.crypto = applied_crypto;
+    let mut runtime = match config().write() {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            log::error!("Config lock poisoned while applying config change");
+            return;
+        }
+    };
+    *runtime = updated;
+    log::info!("Config updated");
 }
 
 fn validate_security_patch(value: &str) -> Result<()> {
-    let is_valid = regex::Regex::new(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$")
-        .expect("security patch regex must compile")
-        .is_match(value);
-    if is_valid {
+    let normalized = value.trim();
+    if matches!(normalized, "auto" | "latest") || is_security_patch_date(normalized) {
         Ok(())
     } else {
-        Err(anyhow!("security_patch must be in YYYY-MM-DD format"))
+        Err(anyhow!(
+            "security_patch must be auto, latest, or in YYYY-MM-DD format"
+        ))
     }
+}
+
+pub fn is_security_patch_date(value: &str) -> bool {
+    regex::Regex::new(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$")
+        .expect("security patch regex must compile")
+        .is_match(value)
+}
+
+fn trust_changed_beyond_security_patch(old: &RawTrustConfig, new: &RawTrustConfig) -> bool {
+    old.os_version != new.os_version
+        || old.vb_key != new.vb_key
+        || old.vb_hash != new.vb_hash
+        || old.verified_boot_state != new.verified_boot_state
+        || old.device_locked != new.device_locked
 }
 
 #[derive(Debug, Clone)]
@@ -397,10 +446,7 @@ impl Default for RawTrustConfig {
     fn default() -> Self {
         Self {
             os_version: rsproperties::get_or("ro.build.version.release", 35 /* Android 15 */),
-            security_patch: rsproperties::get_or(
-                "ro.build.version.security_patch",
-                "2024-01-05".to_string(),
-            ),
+            security_patch: "auto".to_string(),
             vb_key: TrustValueSpec::Auto,
             vb_hash: TrustValueSpec::Auto,
             verified_boot_state: true,
@@ -497,6 +543,8 @@ pub struct TrustRecord {
     pub build_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_suffix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_security_patch: Option<String>,
 }
 
 impl TrustRecord {
@@ -507,6 +555,7 @@ impl TrustRecord {
             && self.vb_hash_source.is_none()
             && self.build_fingerprint.is_none()
             && self.slot_suffix.is_none()
+            && self.original_security_patch.is_none()
     }
 }
 
@@ -589,10 +638,32 @@ mod tests {
     }
 
     #[test]
+    fn trust_record_original_security_patch_is_not_empty() {
+        let mut record = TrustRecord::default();
+        record.original_security_patch = Some("2025-12-01".to_string());
+        assert!(!record.is_empty());
+    }
+
+    #[test]
     fn raw_trust_default_uses_auto_modes() {
         let trust = RawTrustConfig::default();
+        assert_eq!(trust.security_patch, "auto");
         assert_eq!(trust.vb_key, TrustValueSpec::Auto);
         assert_eq!(trust.vb_hash, TrustValueSpec::Auto);
+    }
+
+    #[test]
+    fn validate_security_patch_accepts_auto_latest_and_dates() {
+        validate_security_patch("auto").expect("auto should validate");
+        validate_security_patch("latest").expect("latest should validate");
+        validate_security_patch("2026-04-05").expect("explicit patch level should validate");
+    }
+
+    #[test]
+    fn validate_security_patch_rejects_invalid_values() {
+        assert!(validate_security_patch("2026-4-5").is_err());
+        assert!(validate_security_patch("yesterday").is_err());
+        assert!(validate_security_patch("").is_err());
     }
 
     #[test]

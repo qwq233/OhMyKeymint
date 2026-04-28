@@ -2,7 +2,6 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
-    process::Command,
     sync::mpsc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -28,44 +27,27 @@ use crate::{
         },
     },
     config::{ConfigFile, ResolvedTrust, TrustRecord, TrustValueSource, TrustValueSpec},
+    plat::resetprop,
 };
 
 const KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/default";
+const SECURITY_PATCH_PROP: &str = "ro.build.version.security_patch";
 const VBMETA_KEY_PROP: &str = "ro.boot.vbmeta.public_key_digest";
 const VBMETA_HASH_PROP: &str = "ro.boot.vbmeta.digest";
 const ANDROID_ATTESTATION_OID: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.1.17");
 const ORIGINAL_HASH_TIMEOUT: Duration = Duration::from_secs(5);
 const AVB_HEADER_SIZE: usize = 256;
-
-const RESETPROP_FALLBACKS: &[ResetpropSpec] = &[
-    ResetpropSpec::direct("/system_ext/bin/resetprop"),
-    ResetpropSpec::direct("/system/bin/resetprop"),
-    ResetpropSpec::direct("/data/adb/ksu/bin/resetprop"),
-    ResetpropSpec::subcommand("/data/adb/ksud", "resetprop"),
+const BUILD_PROP_PATHS: &[&str] = &[
+    "/system/build.prop",
+    "/system/system/build.prop",
+    "/product/build.prop",
+    "/system_ext/build.prop",
+    "/vendor/build.prop",
+    "/odm/build.prop",
+    "/vendor/default.prop",
+    "/default.prop",
 ];
-
-#[derive(Clone, Copy)]
-struct ResetpropSpec {
-    program: &'static str,
-    prepend_arg: Option<&'static str>,
-}
-
-impl ResetpropSpec {
-    const fn direct(program: &'static str) -> Self {
-        Self {
-            program,
-            prepend_arg: None,
-        }
-    }
-
-    const fn subcommand(program: &'static str, prepend_arg: &'static str) -> Self {
-        Self {
-            program,
-            prepend_arg: Some(prepend_arg),
-        }
-    }
-}
 
 #[derive(Clone)]
 struct ResolvedField {
@@ -90,8 +72,13 @@ struct Tlv<'a> {
 }
 
 pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
-    let slot_suffix = read_string_property("ro.boot.slot_suffix").unwrap_or_default();
-    let build_fingerprint = read_string_property("ro.build.fingerprint").unwrap_or_default();
+    let slot_suffix = resetprop::read_string_property("ro.boot.slot_suffix").unwrap_or_default();
+    let build_fingerprint =
+        resetprop::read_string_property("ro.build.fingerprint").unwrap_or_default();
+    let security_patch = resolve_and_sync_security_patch(
+        &config_file.trust.security_patch,
+        &mut config_file.trust_record,
+    )?;
 
     let vb_key = resolve_vb_key(
         &config_file.trust.vb_key,
@@ -136,7 +123,7 @@ pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
 
     Ok(ResolvedTrust {
         os_version: config_file.trust.os_version,
-        security_patch: config_file.trust.security_patch.clone(),
+        security_patch,
         vb_key: vb_key.value,
         vb_hash: vb_hash.value,
         vb_key_source: vb_key.source,
@@ -144,6 +131,21 @@ pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
         verified_boot_state: config_file.trust.verified_boot_state,
         device_locked: config_file.trust.device_locked,
     })
+}
+
+pub fn apply_runtime_security_patch(
+    record: &TrustRecord,
+    security_patch_spec: &str,
+) -> Result<String> {
+    let original = record
+        .original_security_patch
+        .as_deref()
+        .ok_or_else(|| anyhow!("original security patch is unavailable in trust_record"))?;
+    let resolved = resolve_security_patch_value(security_patch_spec, original)?;
+    if resetprop::read_string_property(SECURITY_PATCH_PROP).as_deref() != Some(resolved.as_str()) {
+        resetprop::runtime_write_and_verify_property(SECURITY_PATCH_PROP, &resolved)?;
+    }
+    Ok(resolved)
 }
 
 fn resolve_vb_key(
@@ -215,6 +217,80 @@ fn random_field(source: TrustValueSource) -> ResolvedField {
     ResolvedField { value, source }
 }
 
+fn resolve_and_sync_security_patch(
+    security_patch_spec: &str,
+    record: &mut TrustRecord,
+) -> Result<String> {
+    let original = read_build_prop_security_patch()
+        .or_else(|| resetprop::read_string_property(SECURITY_PATCH_PROP))
+        .ok_or_else(|| anyhow!("failed to resolve original security patch from build props"))?;
+    let resolved = resolve_security_patch_value(security_patch_spec, &original)?;
+
+    record.original_security_patch = Some(original.clone());
+    if resetprop::read_string_property(SECURITY_PATCH_PROP).as_deref() != Some(resolved.as_str()) {
+        resetprop::direct_write_and_verify_property(SECURITY_PATCH_PROP, &resolved)?;
+    }
+    Ok(resolved)
+}
+
+fn resolve_security_patch_value(security_patch_spec: &str, original: &str) -> Result<String> {
+    match security_patch_spec.trim() {
+        "auto" => Ok(original.to_string()),
+        "latest" => {
+            let (year, month) = current_year_month()?;
+            Ok(format!("{year:04}-{month:02}-05"))
+        }
+        value if crate::config::is_security_patch_date(value) => Ok(value.to_string()),
+        value => Err(anyhow!("invalid security_patch value: {value}")),
+    }
+}
+
+fn read_build_prop_security_patch() -> Option<String> {
+    for path in BUILD_PROP_PATHS {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(value) = parse_build_prop_value(&contents, SECURITY_PATCH_PROP) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn parse_build_prop_value(contents: &str, key: &str) -> Option<String> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .find_map(|line| {
+            let (candidate_key, candidate_value) = line.split_once('=')?;
+            (candidate_key.trim() == key).then(|| candidate_value.trim().to_string())
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn current_year_month() -> Result<(i32, u32)> {
+    #[cfg(unix)]
+    unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        if now < 0 {
+            bail!("libc::time returned a negative timestamp");
+        }
+        let mut local = std::mem::zeroed::<libc::tm>();
+        if libc::localtime_r(&now, &mut local).is_null() {
+            bail!("libc::localtime_r failed");
+        }
+        return Ok((local.tm_year + 1900, (local.tm_mon + 1) as u32));
+    }
+
+    #[cfg(not(unix))]
+    {
+        Err(anyhow!(
+            "current_year_month is unsupported on this platform"
+        ))
+    }
+}
+
 fn update_trust_record(
     record: &mut TrustRecord,
     build_fingerprint: &str,
@@ -222,7 +298,9 @@ fn update_trust_record(
     vb_key: &ResolvedField,
     vb_hash: &ResolvedField,
 ) {
+    let original_security_patch = record.original_security_patch.clone();
     *record = TrustRecord::default();
+    record.original_security_patch = original_security_patch;
 
     if vb_key.source.should_record_in_config() {
         record.vb_key = Some(hex::encode(vb_key.value));
@@ -245,69 +323,21 @@ fn update_trust_record(
 }
 
 fn sync_sysprops_if_needed(vb_key: &ResolvedField, vb_hash: &ResolvedField) -> Result<()> {
-    let command = match find_resetprop_command() {
-        Ok(command) => command,
-        Err(error)
-            if !vb_key.source.needs_sysprop_write() && !vb_hash.source.needs_sysprop_write() =>
-        {
-            log::debug!("No sysprop write needed, skipping resetprop lookup failure: {error:#}");
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-
     if vb_key.source.needs_sysprop_write() {
         let value = hex::encode(vb_key.value);
-        write_and_verify_property(&command, VBMETA_KEY_PROP, &value)?;
+        resetprop::direct_write_and_verify_property(VBMETA_KEY_PROP, &value)?;
     }
 
     if vb_hash.source.needs_sysprop_write() {
         let value = hex::encode(vb_hash.value);
-        write_and_verify_property(&command, VBMETA_HASH_PROP, &value)?;
+        resetprop::direct_write_and_verify_property(VBMETA_HASH_PROP, &value)?;
     }
 
     Ok(())
 }
 
-fn write_and_verify_property(
-    command: &ResetpropCommand,
-    property: &str,
-    value: &str,
-) -> Result<()> {
-    let mut process = Command::new(&command.program);
-    if let Some(prepend_arg) = &command.prepend_arg {
-        process.arg(prepend_arg);
-    }
-    let status = process
-        .arg(property)
-        .arg(value)
-        .status()
-        .with_context(|| format!("failed to execute resetprop for {property}"))?;
-    if !status.success() {
-        bail!("resetprop failed for {property} with status {status}");
-    }
-
-    let actual = read_string_property(property)
-        .ok_or_else(|| anyhow!("property {property} missing after resetprop write"))?;
-    if actual.trim().eq_ignore_ascii_case(value) {
-        Ok(())
-    } else {
-        bail!(
-            "property verification failed for {property}: expected {value}, got {}",
-            actual.trim()
-        )
-    }
-}
-
-fn read_string_property(name: &str) -> Option<String> {
-    rsproperties::get::<String>(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 fn read_hex_property(name: &str) -> Option<[u8; 32]> {
-    let value = read_string_property(name)?;
+    let value = resetprop::read_string_property(name)?;
     match parse_hex_32(&value) {
         Ok(bytes) => Some(bytes),
         Err(error) => {
@@ -325,42 +355,6 @@ fn parse_hex_32(value: &str) -> Result<[u8; 32]> {
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&decoded);
     Ok(bytes)
-}
-
-fn find_resetprop_command() -> Result<ResetpropCommand> {
-    if let Some(program) = find_program_in_path("resetprop") {
-        return Ok(ResetpropCommand {
-            program,
-            prepend_arg: None,
-        });
-    }
-
-    for fallback in RESETPROP_FALLBACKS {
-        if Path::new(fallback.program).exists() {
-            return Ok(ResetpropCommand {
-                program: fallback.program.to_string(),
-                prepend_arg: fallback.prepend_arg.map(str::to_string),
-            });
-        }
-    }
-
-    Err(anyhow!("no usable resetprop binary found"))
-}
-
-fn find_program_in_path(name: &str) -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    for directory in std::env::split_paths(&path) {
-        let candidate = directory.join(name);
-        if candidate.exists() {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-    None
-}
-
-struct ResetpropCommand {
-    program: String,
-    prepend_arg: Option<String>,
 }
 
 impl TrustValueSource {
@@ -825,6 +819,61 @@ mod tests {
         update_trust_record(&mut record, "fingerprint", "_a", &vb_key, &vb_hash);
 
         assert!(record.is_empty());
+    }
+
+    #[test]
+    fn parse_build_prop_value_ignores_comments_and_requires_exact_key() {
+        let parsed = parse_build_prop_value(
+            r#"
+# comment
+ro.build.version.security_patch = 2025-12-01
+ro.build.version.security_patch.extra = ignored
+"#,
+            SECURITY_PATCH_PROP,
+        );
+        assert_eq!(parsed.as_deref(), Some("2025-12-01"));
+    }
+
+    #[test]
+    fn resolve_security_patch_value_supports_auto_and_explicit_modes() {
+        assert_eq!(
+            resolve_security_patch_value("auto", "2025-12-01").unwrap(),
+            "2025-12-01"
+        );
+        assert_eq!(
+            resolve_security_patch_value("2026-04-05", "2025-12-01").unwrap(),
+            "2026-04-05"
+        );
+    }
+
+    #[test]
+    fn resolve_security_patch_value_latest_uses_monthly_fifth() {
+        let latest = resolve_security_patch_value("latest", "2025-12-01").unwrap();
+        assert!(crate::config::is_security_patch_date(&latest));
+        assert!(latest.ends_with("-05"));
+    }
+
+    #[test]
+    fn update_trust_record_preserves_original_security_patch() {
+        let mut record = TrustRecord {
+            original_security_patch: Some("2025-12-01".to_string()),
+            ..TrustRecord::default()
+        };
+        let vb_key = ResolvedField {
+            value: [0x11; 32],
+            source: TrustValueSource::Computed,
+        };
+        let vb_hash = ResolvedField {
+            value: [0x22; 32],
+            source: TrustValueSource::Original,
+        };
+
+        update_trust_record(&mut record, "fingerprint", "_a", &vb_key, &vb_hash);
+
+        assert_eq!(
+            record.original_security_patch.as_deref(),
+            Some("2025-12-01")
+        );
     }
 
     #[test]

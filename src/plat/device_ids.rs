@@ -447,8 +447,8 @@ fn probe_phone_identifier_via_binder(
     transaction: u32,
     calling_package: &str,
 ) -> Result<Option<String>> {
-    let binder =
-        hub::get_service(PHONE_SERVICE).ok_or_else(|| anyhow!("service {PHONE_SERVICE} unavailable"))?;
+    let binder = hub::get_service(PHONE_SERVICE)
+        .ok_or_else(|| anyhow!("service {PHONE_SERVICE} unavailable"))?;
     let proxy = binder
         .as_proxy()
         .context("phone binder was unexpectedly local")?;
@@ -528,10 +528,7 @@ fn prepare_shell_accessible_helper() -> Result<std::path::PathBuf> {
 
         let permissions = fs::Permissions::from_mode(0o755);
         fs::set_permissions(&helper_path, permissions).with_context(|| {
-            format!(
-                "failed to chmod telephony helper {}",
-                helper_path.display()
-            )
+            format!("failed to chmod telephony helper {}", helper_path.display())
         })?;
     }
 
@@ -840,5 +837,4 @@ mod tests {
         assert_eq!(mask_identifier("355231937352445"), "35***********45");
         assert_eq!(mask_identifier("A100"), "****");
     }
-
 }

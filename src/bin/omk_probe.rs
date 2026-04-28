@@ -1,4 +1,6 @@
 use anyhow::{anyhow, Context, Result};
+use kmr_common::crypto::Sha256;
+use kmr_crypto_boring::sha256::BoringSha256;
 use rsbinder::{hub, Strong};
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
@@ -33,14 +35,25 @@ fn run() -> Result<()> {
         hub::get_interface(OMK_SERVICE).context("failed to connect to omk service")?;
 
     match service.getSupplementaryAttestationInfo(Tag::MODULE_HASH) {
-        Ok(_) => {
-            return Err(anyhow!(
-                "IOhMyKsService exposed MODULE_HASH on an AOSP-overlapping method"
-            ));
+        Ok(module_info_der) => {
+            if module_info_der.len() <= 32 {
+                return Err(anyhow!(
+                    "MODULE_HASH supplementary info is too short to be DER module info: {} bytes",
+                    module_info_der.len()
+                ));
+            }
+            let module_info_hash = BoringSha256 {}.hash(&module_info_der).map_err(|error| {
+                anyhow!("failed to hash MODULE_HASH supplementary info: {error:?}")
+            })?;
+            println!(
+                "module info exposed on OMK wrapper surface: der_len={} sha256={}",
+                module_info_der.len(),
+                hex::encode(module_info_hash)
+            );
         }
         Err(status) if is_expected_module_hash_status(&status) => {
             println!(
-                "module info not exposed on OMK wrapper surface as expected: exception={:?} service_specific={} transaction={:?}",
+                "module info unavailable on OMK wrapper surface: exception={:?} service_specific={} transaction={:?}",
                 status.exception_code(),
                 status.service_specific_error(),
                 status.transaction_error()

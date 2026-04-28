@@ -28,10 +28,10 @@ pub fn evaluate(
     config: &FilterConfig,
     resolution: PackageResolution,
 ) -> FilterDecision {
-    if scoop.is_empty() {
+    if !config.enabled {
         return FilterDecision {
-            allowed: false,
-            reason: FilterReason::RejectedNotInScope,
+            allowed: true,
+            reason: FilterReason::Disabled,
             packages: match resolution {
                 PackageResolution::Known(packages) => packages,
                 PackageResolution::Unknown => Vec::new(),
@@ -42,6 +42,13 @@ pub fn evaluate(
     let packages = match resolution {
         PackageResolution::Known(packages) => packages,
         PackageResolution::Unknown => {
+            if config.allow_unknown_package {
+                return FilterDecision {
+                    allowed: true,
+                    reason: FilterReason::Allowed,
+                    packages: Vec::new(),
+                };
+            }
             return FilterDecision {
                 allowed: false,
                 reason: FilterReason::RejectedUnknownPackage,
@@ -50,21 +57,14 @@ pub fn evaluate(
         }
     };
 
-    if !packages
-        .iter()
-        .any(|pkg| scoop.iter().any(|entry| entry == pkg))
+    if scoop.is_empty()
+        || !packages
+            .iter()
+            .any(|pkg| scoop.iter().any(|entry| entry == pkg))
     {
         return FilterDecision {
             allowed: false,
             reason: FilterReason::RejectedNotInScope,
-            packages,
-        };
-    }
-
-    if !config.enabled {
-        return FilterDecision {
-            allowed: true,
-            reason: FilterReason::Disabled,
             packages,
         };
     }
@@ -117,8 +117,8 @@ mod tests {
         config.enabled = false;
 
         let decision = evaluate(&base_scope(), &config, PackageResolution::Unknown);
-        assert!(!decision.allowed);
-        assert_eq!(decision.reason, FilterReason::RejectedUnknownPackage);
+        assert!(decision.allowed);
+        assert_eq!(decision.reason, FilterReason::Disabled);
     }
 
     #[test]
@@ -171,8 +171,8 @@ mod tests {
         config.allow_unknown_package = true;
 
         let decision = evaluate(&base_scope(), &config, PackageResolution::Unknown);
-        assert!(!decision.allowed);
-        assert_eq!(decision.reason, FilterReason::RejectedUnknownPackage);
+        assert!(decision.allowed);
+        assert_eq!(decision.reason, FilterReason::Allowed);
     }
 
     #[test]
