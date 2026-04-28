@@ -8,6 +8,7 @@ pub mod db;
 pub mod enforcements;
 pub mod error;
 pub mod gc;
+pub mod id_rotation;
 pub mod key_parameter;
 pub mod keymint_device;
 pub mod keymint_operation;

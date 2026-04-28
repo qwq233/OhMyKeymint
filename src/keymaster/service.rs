@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
-use crate::android::system::keystore2::IKeystoreSecurityLevel::BnKeystoreSecurityLevel;
 use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::err;
 use crate::keybox;
@@ -27,15 +26,17 @@ use crate::keymaster::database::utils::{count_key_entries, list_key_entries};
 use crate::keymaster::db::KEYSTORE_UUID;
 use crate::keymaster::db::{KeyEntryLoadBits, KeyType, SubComponentType};
 use crate::keymaster::error::{into_logged_binder, KsError as Error};
-use crate::keymaster::permission::KeyPermSet;
+use crate::keymaster::id_rotation::IdRotationState;
+use crate::keymaster::permission::{
+    check_grant_permission, check_key_permission, check_keystore_permission, KeyPerm, KeyPermSet,
+    KeystorePerm,
+};
 use crate::keymaster::security_level::KeystoreSecurityLevel;
 use crate::keymaster::utils::key_parameters_to_authorizations;
 use crate::plat::utils::multiuser_get_user_id;
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 use crate::top::qwq2333::ohmykeymint::IOhMyKsService::IOhMyKsService;
-use crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::{
-    BnOhMySecurityLevel, IOhMySecurityLevel,
-};
+use crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::IOhMySecurityLevel;
 use crate::watchdog as wd;
 use crate::{
     global::{DB, SUPER_KEY},
@@ -57,12 +58,14 @@ use rsbinder::{Status, Strong};
 /// Implementation of the IKeystoreService.
 pub struct KeystoreService {
     security_levels: RwLock<SecurityLevels>,
+    id_rotation_state: IdRotationState,
 }
 
 impl Default for KeystoreService {
     fn default() -> Self {
         Self {
             security_levels: RwLock::new(Default::default()),
+            id_rotation_state: IdRotationState::new_default(),
         }
     }
 }
@@ -168,27 +171,17 @@ impl KeystoreService {
 
         // Create security level instances BEFORE acquiring write lock to avoid holding lock during hardware calls
         debug!("Creating security level instance (may involve hardware calls)");
-        let i_sec_level_dev = match KeystoreSecurityLevel::new(sec_level, uuid) {
+        let (i_sec_level, i_osec_level) = match KeystoreSecurityLevel::new_binders(
+            sec_level,
+            uuid,
+            self.id_rotation_state.clone(),
+        ) {
             Result::Ok(v) => v,
             Err(e) => {
                 log::error!("Failed to construct security level {sec_level:?}: {e:?}");
                 return Err(e.context(err!("Trying to construct security level {sec_level:?}")));
             }
         };
-        let i_sec_level: Strong<dyn IKeystoreSecurityLevel> =
-            BnKeystoreSecurityLevel::new_binder(i_sec_level_dev);
-
-        // OhMyKeymint extension: register the same security levels also as IOhMySecurityLevel.
-        let i_osec_level_dev = match KeystoreSecurityLevel::new(sec_level, uuid) {
-            Result::Ok(v) => v,
-            Err(e) => {
-                log::error!("Failed to construct security level {sec_level:?}: {e:?}");
-                log::error!("Does the device have a /default Keymaster or KeyMint instance?");
-                return Err(e.context(err!("Trying to construct mandatory security level TEE")));
-            }
-        };
-        let i_osec_level: Strong<dyn IOhMySecurityLevel> =
-            BnOhMySecurityLevel::new_binder(i_osec_level_dev);
 
         // Now acquire write lock only for the minimal time needed to update the maps
         debug!("Obtaining exclusive lock to register security level");
@@ -284,18 +277,28 @@ impl KeystoreService {
         key: &KeyDescriptor,
     ) -> Result<KeyEntryResponse> {
         self.ensure_security_levels_current()?;
-        let caller_uid = if let Some(ctx) = ctx {
-            ctx.callingUid
-        } else {
-            CallingContext::default().uid.into()
-        } as u32;
+        let caller_uid = calling_uid(ctx);
 
         debug!("get_key_entry: key={:?}, uid={}", key, caller_uid);
 
-        let super_key = SUPER_KEY
+        let _super_key = SUPER_KEY
             .read()
             .unwrap()
             .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
+
+        let resolved = DB
+            .with(|db| {
+                db.borrow_mut()
+                    .resolve_key_permission(key, KeyType::Client, caller_uid)
+            })
+            .context(err!("while trying to resolve key permissions."))?;
+        check_key_permission(
+            KeyPerm::GetInfo,
+            &resolved.descriptor,
+            resolved.access_vector.as_ref(),
+            ctx,
+        )
+        .context(err!("Caller does not have permission to inspect this key."))?;
 
         let (key_id_guard, mut key_entry) = DB
             .with(|db| {
@@ -347,83 +350,87 @@ impl KeystoreService {
         certificate_chain: Option<&[u8]>,
     ) -> Result<()> {
         self.ensure_security_levels_current()?;
-        let caller_uid = if let Some(ctx) = ctx {
-            ctx.callingUid
-        } else {
-            CallingContext::default().uid.into()
-        } as u32;
+        let caller_uid = calling_uid(ctx);
         let _super_key = SUPER_KEY
             .read()
             .unwrap()
             .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
+        let existing_key = match DB.with(|db| {
+            db.borrow_mut()
+                .resolve_key_permission(key, KeyType::Client, caller_uid)
+        }) {
+            Ok(resolved) => Some(resolved),
+            Err(e) => match e.root_cause().downcast_ref::<Error>() {
+                Some(Error::Rc(ResponseCode::KEY_NOT_FOUND)) => None,
+                _ => return Err(e).context(err!("Failed to resolve key permissions.")),
+            },
+        };
+
+        if let Some(resolved) = existing_key {
+            check_key_permission(
+                KeyPerm::Update,
+                &resolved.descriptor,
+                resolved.access_vector.as_ref(),
+                ctx,
+            )
+            .context(err!("Caller does not have permission to update this key."))?;
+
+            return DB
+                .with::<_, Result<()>>(|db| {
+                    let (key_id_guard, _) = db.borrow_mut().load_key_entry(
+                        key,
+                        KeyType::Client,
+                        KeyEntryLoadBits::NONE,
+                        caller_uid,
+                    )?;
+                    let mut db = db.borrow_mut();
+                    db.set_blob(&key_id_guard, SubComponentType::CERT, public_cert, None)
+                        .context(err!("Failed to update cert subcomponent."))?;
+                    db.set_blob(
+                        &key_id_guard,
+                        SubComponentType::CERT_CHAIN,
+                        certificate_chain,
+                        None,
+                    )
+                    .context(err!("Failed to update cert chain subcomponent."))?;
+                    Ok(())
+                })
+                .context(err!());
+        }
+
+        if !(public_cert.is_none() && certificate_chain.is_some()) {
+            return Err(Error::Rc(ResponseCode::KEY_NOT_FOUND)).context(err!("No key to update."));
+        }
+
+        let key = match (key.domain, &key.alias) {
+            (Domain::APP, Some(ref alias)) => KeyDescriptor {
+                domain: Domain::APP,
+                nspace: caller_uid as i64,
+                alias: Some(alias.clone()),
+                blob: None,
+            },
+            (Domain::SELINUX, Some(_)) => key.clone(),
+            _ => {
+                return Err(Error::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!(
+                    "Domain must be APP or SELINUX to insert a certificate."
+                ));
+            }
+        };
+
+        check_key_permission(KeyPerm::Rebind, &key, None, ctx).context(err!(
+            "Caller does not have permission to insert this certificate."
+        ))?;
 
         DB.with::<_, Result<()>>(|db| {
-            let entry = match db.borrow_mut().load_key_entry(
-                key,
-                KeyType::Client,
-                KeyEntryLoadBits::NONE,
-                caller_uid,
-            ) {
-                Err(e) => match e.root_cause().downcast_ref::<Error>() {
-                    Some(Error::Rc(ResponseCode::KEY_NOT_FOUND)) => Ok(None),
-                    _ => Err(e),
-                },
-                Result::Ok(v) => Ok(Some(v)),
-            }?;
-
-            let mut db = db.borrow_mut();
-            if let Some((key_id_guard, _key_entry)) = entry {
-                db.set_blob(&key_id_guard, SubComponentType::CERT, public_cert, None)
-                    .context(err!("Failed to update cert subcomponent."))?;
-
-                db.set_blob(
-                    &key_id_guard,
-                    SubComponentType::CERT_CHAIN,
-                    certificate_chain,
-                    None,
-                )
-                .context(err!("Failed to update cert chain subcomponent."))?;
-                return Ok(());
-            }
-
-            // If we reach this point we have to check the special condition where a certificate
-            // entry may be made.
-            if !(public_cert.is_none() && certificate_chain.is_some()) {
-                return Err(Error::Rc(ResponseCode::KEY_NOT_FOUND))
-                    .context(err!("No key to update."));
-            }
-
-            // So we know that we have a certificate chain and no public cert.
-            // Now check that we have everything we need to make a new certificate entry.
-            let key = match (key.domain, &key.alias) {
-                (Domain::APP, Some(ref alias)) => KeyDescriptor {
-                    domain: Domain::APP,
-                    nspace: caller_uid as i64,
-                    alias: Some(alias.clone()),
-                    blob: None,
-                },
-                (Domain::SELINUX, Some(_)) => key.clone(),
-                _ => {
-                    return Err(Error::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!(
-                        "Domain must be APP or SELINUX to insert a certificate."
-                    ))
-                }
-            };
-
-            // Security critical: This must return on failure. Do not remove the `?`;
-            // check_key_permission(KeyPerm::Rebind, &key, &None)
-            //     .context(err!("Caller does not have permission to insert this certificate."))?;
-
-            db.store_new_certificate(
+            db.borrow_mut().store_new_certificate(
                 &key,
                 KeyType::Client,
                 certificate_chain.unwrap(),
                 &KEYSTORE_UUID,
-            )
-            .context(err!("Failed to insert new certificate."))?;
+            )?;
             Ok(())
         })
-        .context(err!())
+        .context(err!("Failed to insert new certificate."))
     }
 
     fn get_key_descriptor_for_lookup(
@@ -433,13 +440,9 @@ impl KeystoreService {
         namespace: i64,
     ) -> Result<KeyDescriptor> {
         self.ensure_security_levels_current()?;
-        let caller_uid = if let Some(ctx) = ctx {
-            ctx.callingUid
-        } else {
-            CallingContext::default().uid.into()
-        };
+        let caller_uid = calling_uid(ctx) as i64;
 
-        let k = match domain {
+        let mut k = match domain {
             Domain::APP => KeyDescriptor {
                 domain,
                 nspace: caller_uid,
@@ -462,19 +465,17 @@ impl KeystoreService {
         // If the first check fails we check if the caller has the list permission allowing to list
         // any namespace. In that case we also adjust the queried namespace if a specific uid was
         // selected.
-        // if let Err(e) = check_key_permission(KeyPerm::GetInfo, &k, &None) {
-        //     if let Some(selinux::Error::PermissionDenied) =
-        //         e.root_cause().downcast_ref::<selinux::Error>()
-        //     {
-        //         check_keystore_permission(KeystorePerm::List)
-        //             .context(err!("While checking keystore permission."))?;
-        //         if namespace != -1 {
-        //             k.nspace = namespace;
-        //         }
-        //     } else {
-        //         return Err(e).context(err!("While checking key permission."))?;
-        //     }
-        // }
+        if let Err(e) = check_key_permission(KeyPerm::GetInfo, &k, None, ctx) {
+            if is_permission_denied(&e) {
+                check_keystore_permission(KeystorePerm::List, ctx)
+                    .context(err!("While checking keystore permission."))?;
+                if namespace != -1 {
+                    k.nspace = namespace;
+                }
+            } else {
+                return Err(e).context(err!("While checking key permission."));
+            }
+        }
         Ok(k)
     }
 
@@ -502,10 +503,9 @@ impl KeystoreService {
 
     fn get_supplementary_attestation_info(&self, tag: Tag) -> Result<Vec<u8>> {
         match tag {
-            Tag::MODULE_HASH => crate::global::module_info_bundle()
-                .map(|bundle| bundle.encoded_der.clone())
-                .ok_or(Error::Rc(ResponseCode::INFO_NOT_AVAILABLE))
-                .context(err!("APEX module info bundle not initialized")),
+            Tag::MODULE_HASH => Err(Error::Rc(ResponseCode::INFO_NOT_AVAILABLE)).context(err!(
+                "MODULE_HASH supplementary info is not exposed on the AOSP surface"
+            )),
             _ => Err(Error::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!(
                 "Tag {tag:?} not supported for getSupplementaryAttestationInfo."
             )),
@@ -525,15 +525,25 @@ impl KeystoreService {
 
     fn delete_key(&self, ctx: Option<&CallerInfo>, key: &KeyDescriptor) -> Result<()> {
         self.ensure_security_levels_current()?;
-        let caller_uid = if let Some(ctx) = ctx {
-            ctx.callingUid
-        } else {
-            CallingContext::default().uid.into()
-        } as u32;
-        let super_key = SUPER_KEY
+        let caller_uid = calling_uid(ctx);
+        let _super_key = SUPER_KEY
             .read()
             .unwrap()
             .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
+
+        let resolved = DB
+            .with(|db| {
+                db.borrow_mut()
+                    .resolve_key_permission(key, KeyType::Client, caller_uid)
+            })
+            .context(err!("Trying to resolve key permissions."))?;
+        check_key_permission(
+            KeyPerm::Delete,
+            &resolved.descriptor,
+            resolved.access_vector.as_ref(),
+            ctx,
+        )
+        .context(err!("Caller does not have permission to delete this key."))?;
 
         DB.with(|db| db.borrow_mut().unbind_key(key, KeyType::Client, caller_uid))
             .context(err!("Trying to unbind the key."))?;
@@ -548,15 +558,20 @@ impl KeystoreService {
         access_vector: KeyPermSet,
     ) -> Result<KeyDescriptor> {
         self.ensure_security_levels_current()?;
-        let caller_uid = if let Some(ctx) = ctx {
-            ctx.callingUid
-        } else {
-            CallingContext::default().uid.into()
-        } as u32;
-        let super_key = SUPER_KEY
+        let caller_uid = calling_uid(ctx);
+        let _super_key = SUPER_KEY
             .read()
             .unwrap()
             .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
+
+        let resolved = DB
+            .with(|db| {
+                db.borrow_mut()
+                    .resolve_key_permission(key, KeyType::Client, caller_uid)
+            })
+            .context(err!("KeystoreService::grant: resolving permissions"))?;
+        check_grant_permission(access_vector, &resolved.descriptor, ctx)
+            .context(err!("KeystoreService::grant: permission denied"))?;
 
         DB.with(|db| {
             db.borrow_mut()
@@ -572,11 +587,20 @@ impl KeystoreService {
         grantee_uid: i32,
     ) -> Result<()> {
         self.ensure_security_levels_current()?;
-        let caller_uid = if let Some(ctx) = ctx {
-            ctx.callingUid
-        } else {
-            CallingContext::default().uid.into()
-        } as u32;
+        let caller_uid = calling_uid(ctx);
+        let resolved = DB
+            .with(|db| {
+                db.borrow_mut()
+                    .resolve_key_permission(key, KeyType::Client, caller_uid)
+            })
+            .context(err!("KeystoreService::ungrant: resolving permissions"))?;
+        check_key_permission(
+            KeyPerm::Grant,
+            &resolved.descriptor,
+            resolved.access_vector.as_ref(),
+            ctx,
+        )
+        .context(err!("KeystoreService::ungrant: permission denied"))?;
         DB.with(|db| db.borrow_mut().ungrant(key, caller_uid, grantee_uid as u32))
             .context(err!("KeystoreService::ungrant."))
     }
@@ -590,6 +614,18 @@ impl KeystoreService {
             )),
         }
     }
+}
+
+fn calling_uid(ctx: Option<&CallerInfo>) -> u32 {
+    ctx.map(|ctx| ctx.callingUid)
+        .unwrap_or(CallingContext::default().uid.into()) as u32
+}
+
+fn is_permission_denied(error: &anyhow::Error) -> bool {
+    matches!(
+        error.root_cause().downcast_ref::<Error>(),
+        Some(Error::Rc(ResponseCode::PERMISSION_DENIED))
+    )
 }
 
 impl rsbinder::Interface for KeystoreService {}

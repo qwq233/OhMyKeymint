@@ -80,6 +80,8 @@ kmr-tests = { path = "tests" }
 kmr-wire = { path = "wire" }
 watchdog_rs = { path = "watchdog" }
 injector = { path = "injector" }
+rsbinder = { path = "libs/rsbinder/rsbinder" }
+rsbinder-aidl = { path = "libs/rsbinder/rsbinder-aidl" }
 
 [build-dependencies]
 prost-build = "0.14.3"

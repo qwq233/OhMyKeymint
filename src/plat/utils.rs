@@ -12,8 +12,10 @@ use crate::android::apex::IApexService::IApexService;
 use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
 use crate::android::security::keystore::KeyAttestationApplicationId::KeyAttestationApplicationId;
 use crate::android::security::keystore::KeyAttestationPackageInfo::KeyAttestationPackageInfo;
+use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::err;
 use crate::keymaster::apex::ApexModuleInfo;
+use crate::keymaster::error::KsError;
 
 thread_local! {
     static PM: Mutex<Option<rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider>>> = Mutex::new(None);
@@ -61,6 +63,8 @@ fn get_pm() -> anyhow::Result<rsbinder::Strong<dyn IKeyAttestationApplicationIdP
         }
     })
 }
+
+const ERROR_GET_ATTESTATION_APPLICATION_ID_FAILED: i32 = 1;
 
 fn reset_pm() {
     PM.with(|p| {
@@ -124,6 +128,12 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
                     error!("Trying to reset the PM instance to None");
                     reset_pm();
                     tried += 1;
+                } else if e.exception_code() == rsbinder::ExceptionCode::ServiceSpecific
+                    && e.service_specific_error() == ERROR_GET_ATTESTATION_APPLICATION_ID_FAILED
+                {
+                    return Err(anyhow::anyhow!(KsError::Rc(
+                        ResponseCode::GET_ATTESTATION_APPLICATION_ID_FAILED
+                    )));
                 } else {
                     return Err(anyhow::anyhow!(
                         "Failed to get KeyAttestationApplicationId for UID {}, Error: {:?}",

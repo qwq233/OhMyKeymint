@@ -1,5 +1,5 @@
 use log::{debug, info, warn};
-use rsbinder::{thread_state::CallingContext, Interface, Strong};
+use rsbinder::{thread_state::CallingContext, BinderFeatures, Interface, Strong};
 
 use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
 use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
@@ -86,6 +86,12 @@ pub type AospOperationBinder = Strong<dyn AospKeystoreOperation>;
 pub type OmkServiceBinder = Strong<dyn IOhMyKsService>;
 pub type OmkSecurityLevelBinder = Strong<dyn IOhMySecurityLevel>;
 
+fn sid_features() -> BinderFeatures {
+    BinderFeatures {
+        set_requesting_sid: true,
+    }
+}
+
 pub fn new_service_binder(
     caller: CallerIdentity,
     intercept: InterceptConfig,
@@ -93,13 +99,16 @@ pub fn new_service_binder(
     system_backend: AospServiceBinder,
     omk_backend: Option<OmkServiceBinder>,
 ) -> AospServiceBinder {
-    BnKeystoreService::new_binder(KeystoreServiceBinder {
-        caller,
-        intercept,
-        allow_omk,
-        system_backend,
-        omk_backend,
-    })
+    BnKeystoreService::new_binder_with_features(
+        KeystoreServiceBinder {
+            caller,
+            intercept,
+            allow_omk,
+            system_backend,
+            omk_backend,
+        },
+        sid_features(),
+    )
 }
 
 pub fn new_security_level_binder(
@@ -108,19 +117,25 @@ pub fn new_security_level_binder(
     system_backend: Option<AospSecurityLevelBinder>,
     omk_backend: Option<OmkSecurityLevelBinder>,
 ) -> AospSecurityLevelBinder {
-    BnKeystoreSecurityLevel::new_binder(KeystoreSecurityLevelBinder {
-        security_level,
-        preferred_route,
-        system_backend,
-        omk_backend,
-    })
+    BnKeystoreSecurityLevel::new_binder_with_features(
+        KeystoreSecurityLevelBinder {
+            security_level,
+            preferred_route,
+            system_backend,
+            omk_backend,
+        },
+        sid_features(),
+    )
 }
 
 pub fn new_operation_binder(
     backend: AospOperationBinder,
     route: RouteTarget,
 ) -> AospOperationBinder {
-    BnKeystoreOperation::new_binder(KeystoreOperationBinder { backend, route })
+    BnKeystoreOperation::new_binder_with_features(
+        KeystoreOperationBinder { backend, route },
+        sid_features(),
+    )
 }
 
 pub struct KeystoreServiceBinder {
@@ -503,23 +518,6 @@ impl AospKeystoreService for KeystoreServiceBinder {
     }
 
     fn r#getSupplementaryAttestationInfo(&self, tag: Tag) -> rsbinder::status::Result<Vec<u8>> {
-        if self.prefer_omk(ServiceMethod::GetSupplementaryAttestationInfo) {
-            match self.call_omk(|backend, _caller| backend.r#getSupplementaryAttestationInfo(tag)) {
-                Ok(info) => return Ok(info),
-                Err(error) => {
-                    return self.fallback_to_system(
-                        ServiceMethod::GetSupplementaryAttestationInfo,
-                        error,
-                        || {
-                            self.call_system(|backend| {
-                                backend.r#getSupplementaryAttestationInfo(tag)
-                            })
-                        },
-                    );
-                }
-            }
-        }
-
         self.call_system(|backend| backend.r#getSupplementaryAttestationInfo(tag))
     }
 }
@@ -1191,6 +1189,204 @@ mod tests {
         })
     }
 
+    struct SupplementarySystemService;
+
+    impl Interface for SupplementarySystemService {}
+
+    impl AospKeystoreService for SupplementarySystemService {
+        fn r#getSecurityLevel(
+            &self,
+            _security_level: SecurityLevel,
+        ) -> rsbinder::status::Result<AospSecurityLevelBinder> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getKeyEntry(
+            &self,
+            _key: &KeyDescriptor,
+        ) -> rsbinder::status::Result<KeyEntryResponse> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#updateSubcomponent(
+            &self,
+            _key: &KeyDescriptor,
+            _public_cert: Option<&[u8]>,
+            _certificate_chain: Option<&[u8]>,
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#listEntries(
+            &self,
+            _domain: Domain,
+            _nspace: i64,
+        ) -> rsbinder::status::Result<Vec<KeyDescriptor>> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#deleteKey(&self, _key: &KeyDescriptor) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#grant(
+            &self,
+            _key: &KeyDescriptor,
+            _grantee_uid: i32,
+            _access_vector: i32,
+        ) -> rsbinder::status::Result<KeyDescriptor> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#ungrant(
+            &self,
+            _key: &KeyDescriptor,
+            _grantee_uid: i32,
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getNumberOfEntries(
+            &self,
+            _domain: Domain,
+            _nspace: i64,
+        ) -> rsbinder::status::Result<i32> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#listEntriesBatched(
+            &self,
+            _domain: Domain,
+            _nspace: i64,
+            _starting_past_alias: Option<&str>,
+        ) -> rsbinder::status::Result<Vec<KeyDescriptor>> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getSupplementaryAttestationInfo(
+            &self,
+            _tag: Tag,
+        ) -> rsbinder::status::Result<Vec<u8>> {
+            Ok(vec![1, 2, 3])
+        }
+    }
+
+    struct SupplementaryOmkService;
+
+    impl Interface for SupplementaryOmkService {}
+
+    impl IOhMyKsService for SupplementaryOmkService {
+        fn r#getSecurityLevel(
+            &self,
+            _security_level: SecurityLevel,
+        ) -> rsbinder::status::Result<AospSecurityLevelBinder> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getOhMySecurityLevel(
+            &self,
+            _security_level: SecurityLevel,
+        ) -> rsbinder::status::Result<OmkSecurityLevelBinder> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getKeyEntry(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+        ) -> rsbinder::status::Result<KeyEntryResponse> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#updateSubcomponent(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+            _public_cert: Option<&[u8]>,
+            _certificate_chain: Option<&[u8]>,
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#listEntries(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _domain: Domain,
+            _nspace: i64,
+        ) -> rsbinder::status::Result<Vec<KeyDescriptor>> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#deleteKey(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#grant(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+            _grantee_uid: i32,
+            _access_vector: i32,
+        ) -> rsbinder::status::Result<KeyDescriptor> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#ungrant(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+            _grantee_uid: i32,
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getNumberOfEntries(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _domain: Domain,
+            _nspace: i64,
+        ) -> rsbinder::status::Result<i32> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#listEntriesBatched(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _domain: Domain,
+            _nspace: i64,
+            _starting_past_alias: Option<&str>,
+        ) -> rsbinder::status::Result<Vec<KeyDescriptor>> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#getSupplementaryAttestationInfo(
+            &self,
+            _tag: Tag,
+        ) -> rsbinder::status::Result<Vec<u8>> {
+            Ok(vec![9, 9, 9])
+        }
+
+        fn r#updateEcKeybox(
+            &self,
+            _key: &[u8],
+            _chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#updateRsaKeybox(
+            &self,
+            _key: &[u8],
+            _chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
+        ) -> rsbinder::status::Result<()> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+    }
+
     #[test]
     fn get_security_level_system_route_returns_functional_wrapper() {
         tracker::clear_state_for_tests();
@@ -1296,6 +1492,26 @@ mod tests {
 
         assert_eq!(counters.system_abort.load(Ordering::SeqCst), 1);
         assert_eq!(counters.omk_abort.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn supplementary_attestation_info_stays_on_system_backend() {
+        tracker::clear_state_for_tests();
+        let wrapper = new_service_binder(
+            CallerIdentity::new(1000, 2000),
+            InterceptConfig::default(),
+            true,
+            BnKeystoreService::new_binder(SupplementarySystemService),
+            Some(rsbinder::Strong::new(
+                Box::new(SupplementaryOmkService) as Box<dyn IOhMyKsService>
+            )),
+        );
+
+        let result = wrapper
+            .r#getSupplementaryAttestationInfo(Tag::MODULE_HASH)
+            .expect("AOSP wrapper should use the system backend for MODULE_HASH");
+
+        assert_eq!(result, vec![1, 2, 3]);
     }
 
     #[test]

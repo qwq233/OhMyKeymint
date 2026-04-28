@@ -36,23 +36,37 @@ fn run() -> Result<()> {
 
     let service: Strong<dyn IKeystoreService> = hub::get_interface(KEYSTORE_SERVICE)
         .context("failed to connect to android.system.keystore2.IKeystoreService/default")?;
-    let module_info_der = service
-        .getSupplementaryAttestationInfo(Tag::MODULE_HASH)
-        .context("getSupplementaryAttestationInfo(MODULE_HASH) failed")?;
-    if module_info_der.len() <= 32 {
-        return Err(anyhow!(
-            "MODULE_HASH supplementary info is too short to be DER module info: {} bytes",
-            module_info_der.len()
-        ));
+    match service.getSupplementaryAttestationInfo(Tag::MODULE_HASH) {
+        Ok(module_info_der) => {
+            if module_info_der.len() <= 32 {
+                return Err(anyhow!(
+                    "MODULE_HASH supplementary info is too short to be DER module info: {} bytes",
+                    module_info_der.len()
+                ));
+            }
+            let module_info_hash = BoringSha256 {}.hash(&module_info_der).map_err(|error| {
+                anyhow!("failed to hash MODULE_HASH supplementary info: {error:?}")
+            })?;
+            println!(
+                "module info exposed on AOSP surface: der_len={} sha256={}",
+                module_info_der.len(),
+                hex_encode(module_info_hash)
+            );
+        }
+        Err(status) if is_expected_module_hash_status(&status) => {
+            println!(
+                "module info not exposed on AOSP surface as expected: exception={:?} service_specific={} transaction={:?}",
+                status.exception_code(),
+                status.service_specific_error(),
+                status.transaction_error()
+            );
+        }
+        Err(status) => {
+            return Err(anyhow!(
+                "getSupplementaryAttestationInfo(MODULE_HASH) returned unexpected status: {status:?}"
+            ));
+        }
     }
-    let module_info_hash = BoringSha256 {}
-        .hash(&module_info_der)
-        .map_err(|error| anyhow!("failed to hash MODULE_HASH supplementary info: {error:?}"))?;
-    println!(
-        "module info: der_len={} sha256={}",
-        module_info_der.len(),
-        hex_encode(module_info_hash)
-    );
 
     let tee = get_security_level_with_diagnostics(&service)?;
 
@@ -316,4 +330,12 @@ fn leaf_issuer_cn(metadata: &KeyMetadata) -> Result<String> {
 fn expect_invalid_argument(status: &rsbinder::Status) -> bool {
     status.exception_code() == rsbinder::ExceptionCode::ServiceSpecific
         && status.service_specific_error() == ErrorCode::INVALID_ARGUMENT.0
+}
+
+fn is_expected_module_hash_status(status: &rsbinder::Status) -> bool {
+    (status.exception_code() == rsbinder::ExceptionCode::ServiceSpecific
+        && status.service_specific_error()
+            == android::system::keystore2::ResponseCode::ResponseCode::INFO_NOT_AVAILABLE.0)
+        || status.exception_code() == rsbinder::ExceptionCode::TransactionFailed
+            && status.transaction_error() == StatusCode::UnknownTransaction
 }

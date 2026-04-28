@@ -79,7 +79,7 @@ use crate::{
         database::utils::{self, SqlField},
         error::KsError,
         key_parameter::KeyParameter,
-        permission::KeyPermSet,
+        permission::{KeyPermSet, ResolvedKeyPermission},
     },
     utils::get_current_time_in_milliseconds,
 };
@@ -940,6 +940,37 @@ impl KeymasterDb {
                         return Err(e).context(err!());
                     }
                 }
+            }
+        }
+    }
+
+    pub fn resolve_key_permission(
+        &mut self,
+        key: &KeyDescriptor,
+        key_type: KeyType,
+        caller_uid: u32,
+    ) -> Result<ResolvedKeyPermission> {
+        loop {
+            let result = (|| {
+                let tx = self
+                    .conn
+                    .unchecked_transaction()
+                    .context(err!("Failed to initialize transaction."))?;
+                let access =
+                    Self::load_access_tuple(&tx, key, key_type, caller_uid).context(err!())?;
+                tx.commit().context(err!("Failed to commit transaction."))?;
+                Ok(ResolvedKeyPermission {
+                    descriptor: access.descriptor,
+                    access_vector: access.vector,
+                })
+            })();
+
+            match result {
+                Ok(resolved) => break Ok(resolved),
+                Err(error) if Self::is_locked_error(&error) => {
+                    std::thread::sleep(DB_BUSY_RETRY_INTERVAL);
+                }
+                Err(error) => return Err(error).context(err!()),
             }
         }
     }

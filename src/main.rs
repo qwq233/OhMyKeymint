@@ -6,7 +6,7 @@ use std::panic;
 use std::{ffi::CString, os::unix::fs::PermissionsExt, path::Path};
 
 use log::{debug, error, info, warn};
-use rsbinder::hub;
+use rsbinder::{hub, BinderFeatures};
 
 use crate::{
     android::system::keystore2::IKeystoreService::BnKeystoreService,
@@ -32,6 +32,12 @@ pub mod watchdog;
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
 // include!( "./aidl.rs"); // for development only
+
+fn sid_features() -> BinderFeatures {
+    BinderFeatures {
+        set_requesting_sid: true,
+    }
+}
 
 const KEYSTORE_UID: libc::uid_t = 1017;
 const KEYSTORE_GID: libc::gid_t = 1017;
@@ -174,7 +180,7 @@ fn run() -> Result<()> {
             let dev = KeystoreService::new_native_binder()
                 .context("failed to create keystore3 service")?;
 
-            let service = BnKeystoreService::new_binder(dev);
+            let service = BnKeystoreService::new_binder_with_features(dev, sid_features());
             info!("Adding keystore service to hub");
             hub::add_service("keystore3", service.as_binder())
                 .context("failed to add keystore3 service")?;
@@ -186,7 +192,7 @@ fn run() -> Result<()> {
                 KeystoreService::new_native_binder().context("failed to create omk service")?;
 
             info!("Adding OMK service to hub");
-            let service = BnOhMyKsService::new_binder(dev);
+            let service = BnOhMyKsService::new_binder_with_features(dev, sid_features());
             hub::add_service("omk", service.as_binder()).context("failed to add omk service")?;
         }
     }

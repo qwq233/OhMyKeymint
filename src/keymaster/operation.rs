@@ -146,7 +146,7 @@ use crate::err;
 use crate::keymaster::metrics_store::log_key_operation_event_stats;
 use crate::watchdog as wd;
 use anyhow::{anyhow, Context, Result};
-use rsbinder::{Status, Strong};
+use rsbinder::{BinderFeatures, Status, Strong};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard, Weak},
@@ -839,9 +839,14 @@ impl KeystoreOperation {
     pub fn new_native_binder(
         operation: Arc<Operation>,
     ) -> rsbinder::Strong<dyn IKeystoreOperation> {
-        BnKeystoreOperation::new_binder(Self {
-            operation: Mutex::new(Some(operation)),
-        })
+        BnKeystoreOperation::new_binder_with_features(
+            Self {
+                operation: Mutex::new(Some(operation)),
+            },
+            BinderFeatures {
+                set_requesting_sid: true,
+            },
+        )
     }
 
     /// Grabs the outer operation mutex and calls `f` on the locked operation.

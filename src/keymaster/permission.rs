@@ -1,4 +1,16 @@
+use std::ffi::{CStr, CString};
+use std::sync::OnceLock;
+
+use anyhow::{anyhow, Context, Result};
+use rsbinder::{hub, thread_state::CallingContext, Status};
+
+use crate::android::hardware::security::keymint::{ErrorCode::ErrorCode, Tag::Tag};
+use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use crate::android::system::keystore2::KeyPermission::KeyPermission;
+use crate::android::system::keystore2::ResponseCode::ResponseCode;
+use crate::keymaster::error::KsError;
+use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 
 /// This macro implements an enum with values mapped to SELinux permission names.
 /// The example below implements `enum MyPermission with public visibility:
@@ -433,5 +445,687 @@ impl IntoIterator for KeyPermSet {
 
     fn into_iter(self) -> Self::IntoIter {
         Self::IntoIter::new(self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeystorePerm {
+    List,
+}
+
+impl KeystorePerm {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+        }
+    }
+
+    pub const fn class_name(self) -> &'static str {
+        "keystore2"
+    }
+}
+
+impl KeyPerm {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ConvertStorageKeyToEphemeral => "convert_storage_key_to_ephemeral",
+            Self::Delete => "delete",
+            Self::GenUniqueId => "gen_unique_id",
+            Self::GetInfo => "get_info",
+            Self::Grant => "grant",
+            Self::ManageBlob => "manage_blob",
+            Self::Rebind => "rebind",
+            Self::ReqForcedOp => "req_forced_op",
+            Self::Update => "update",
+            Self::Use => "use",
+            Self::UseDevId => "use_dev_id",
+        }
+    }
+
+    pub const fn class_name(self) -> &'static str {
+        "keystore2_key"
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallerCtx {
+    pub uid: u32,
+    pub pid: i32,
+    pub sid: Option<CString>,
+}
+
+impl CallerCtx {
+    pub fn from_caller_info(ctx: Option<&CallerInfo>) -> Self {
+        if let Some(ctx) = ctx {
+            let sid = (!ctx.callingSid.is_empty())
+                .then(|| CString::new(ctx.callingSid.clone()).ok())
+                .flatten();
+            return Self {
+                uid: ctx.callingUid as u32,
+                pid: ctx.callingPid as i32,
+                sid,
+            };
+        }
+
+        let calling = CallingContext::default();
+        Self {
+            uid: calling.uid as u32,
+            pid: calling.pid as i32,
+            sid: calling.sid,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedKeyPermission {
+    pub descriptor: KeyDescriptor,
+    pub access_vector: Option<KeyPermSet>,
+}
+
+const PERMISSION_MANAGER_SERVICE: &str = "permissionmgr";
+const CHECK_UID_PERMISSION_TRANSACTION: u32 = rsbinder::FIRST_CALL_TRANSACTION + 30;
+const DEFAULT_DEVICE_ID: i32 = 0;
+const PERMISSION_GRANTED: i32 = 0;
+const READ_PRIVILEGED_PHONE_STATE: &str = "android.permission.READ_PRIVILEGED_PHONE_STATE";
+const REQUEST_UNIQUE_ID_ATTESTATION: &str = "android.permission.REQUEST_UNIQUE_ID_ATTESTATION";
+const AOSP_KEYSTORE_CONTEXT: &str = "u:r:keystore:s0";
+
+const KEYSTORE2_KEY_CONTEXT_FILES: &[&str] = &[
+    "/system/etc/selinux/plat_keystore2_key_contexts",
+    "/system_ext/etc/selinux/system_ext_keystore2_key_contexts",
+    "/product/etc/selinux/product_keystore2_key_contexts",
+    "/vendor/etc/selinux/vendor_keystore2_key_contexts",
+    "/odm/etc/selinux/odm_keystore2_key_contexts",
+];
+
+fn parse_keystore2_key_contexts(contents: &str) -> Vec<(i64, CString)> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+
+            let mut parts = line.split_whitespace();
+            let namespace = parts.next()?.parse::<i64>().ok()?;
+            let context = parts.next()?;
+            if !context.starts_with("u:object_r:") {
+                return None;
+            }
+            CString::new(context)
+                .ok()
+                .map(|context| (namespace, context))
+        })
+        .collect()
+}
+
+fn keystore2_key_contexts() -> Result<&'static Vec<(i64, CString)>> {
+    static CONTEXTS: OnceLock<Result<Vec<(i64, CString)>, String>> = OnceLock::new();
+
+    CONTEXTS
+        .get_or_init(|| {
+            let mut contexts = Vec::new();
+            for path in KEYSTORE2_KEY_CONTEXT_FILES {
+                match std::fs::read_to_string(path) {
+                    Ok(contents) => contexts.extend(parse_keystore2_key_contexts(&contents)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("failed to read {path}: {error}"));
+                    }
+                }
+            }
+
+            if contexts.is_empty() {
+                return Err("no keystore2 key context files were readable".to_string());
+            }
+
+            Ok(contexts)
+        })
+        .as_ref()
+        .map_err(|error| anyhow!(error.clone()))
+}
+
+fn lookup_keystore2_key_context(namespace: i64) -> Result<CString> {
+    keystore2_key_contexts()?
+        .iter()
+        .find(|(candidate, _)| *candidate == namespace)
+        .map(|(_, context)| context.clone())
+        .ok_or_else(|| anyhow!(KsError::perm()))
+        .context(format!(
+            "no keystore2 key context for namespace {namespace}"
+        ))
+}
+
+#[cfg(target_os = "android")]
+fn parse_selinux_context_bytes(bytes: Vec<u8>, label: &str) -> Result<CString> {
+    let trimmed: Vec<u8> = bytes
+        .into_iter()
+        .take_while(|byte| *byte != 0 && *byte != b'\n' && *byte != b'\r')
+        .collect();
+    CString::new(trimmed).context(format!(
+        "{label} SELinux context contained an interior NUL byte"
+    ))
+}
+
+#[cfg(target_os = "android")]
+fn current_selinux_context() -> Result<CString> {
+    let bytes = std::fs::read("/proc/self/attr/current")
+        .context("failed to read /proc/self/attr/current for SELinux context")?;
+    parse_selinux_context_bytes(bytes, "current")
+}
+
+#[cfg(target_os = "android")]
+fn lookup_process_selinux_context(process_name: &str) -> Result<Option<CString>> {
+    for entry in std::fs::read_dir("/proc").context("failed to scan /proc for keystore2")? {
+        let entry = entry.context("failed to inspect /proc entry")?;
+        let file_name = entry.file_name();
+        let Some(pid) = file_name
+            .to_str()
+            .filter(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+        else {
+            continue;
+        };
+
+        let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .context(format!("failed to read /proc/{pid}/cmdline while locating {process_name}"));
+            }
+        };
+
+        let Some(command) = cmdline
+            .split(|byte| *byte == 0)
+            .next()
+            .filter(|command| !command.is_empty())
+        else {
+            continue;
+        };
+
+        let Ok(command) = std::str::from_utf8(command) else {
+            continue;
+        };
+        let Some(basename) = std::path::Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        if basename != process_name {
+            continue;
+        }
+
+        let bytes = std::fs::read(format!("/proc/{pid}/attr/current")).with_context(|| {
+            format!("failed to read /proc/{pid}/attr/current for {process_name}")
+        })?;
+        return parse_selinux_context_bytes(bytes, process_name).map(Some);
+    }
+
+    Ok(None)
+}
+
+#[cfg(target_os = "android")]
+fn keystore_selinux_context() -> Result<CString> {
+    static CONTEXT: OnceLock<Result<CString, String>> = OnceLock::new();
+
+    CONTEXT
+        .get_or_init(|| {
+            (|| -> Result<CString> {
+                let current = current_selinux_context()?;
+                if current.to_bytes().starts_with(b"u:r:keystore:") {
+                    return Ok(current);
+                }
+
+                if let Some(context) = lookup_process_selinux_context("keystore2")? {
+                    return Ok(context);
+                }
+
+                Ok(CString::new(AOSP_KEYSTORE_CONTEXT).expect("static SELinux context is valid"))
+            })()
+            .map_err(|error| format!("{error:#}"))
+        })
+        .as_ref()
+        .cloned()
+        .map_err(|error| anyhow!(error.clone()))
+}
+
+#[cfg(not(target_os = "android"))]
+fn current_selinux_context() -> Result<CString> {
+    Ok(CString::new("u:r:keystore:s0").expect("static SELinux context is valid"))
+}
+
+#[cfg(not(target_os = "android"))]
+fn keystore_selinux_context() -> Result<CString> {
+    Ok(CString::new(AOSP_KEYSTORE_CONTEXT).expect("static SELinux context is valid"))
+}
+
+#[cfg(target_os = "android")]
+fn check_selinux_permission_raw(
+    source: &CStr,
+    target: &CStr,
+    class_name: &CStr,
+    permission_name: &CStr,
+) -> Result<()> {
+    type SelinuxCheckAccessFn = unsafe extern "C" fn(
+        *const libc::c_char,
+        *const libc::c_char,
+        *const libc::c_char,
+        *const libc::c_char,
+        *mut libc::c_void,
+    ) -> libc::c_int;
+
+    static CHECK_ACCESS: OnceLock<Result<SelinuxCheckAccessFn, String>> = OnceLock::new();
+    let check_access = CHECK_ACCESS
+        .get_or_init(|| unsafe {
+            let library = CString::new("libselinux.so").expect("libselinux name is static");
+            let symbol =
+                CString::new("selinux_check_access").expect("selinux_check_access is static");
+            let handle = libc::dlopen(library.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+            if handle.is_null() {
+                return Err("dlopen(libselinux.so) failed".to_string());
+            }
+            let function = libc::dlsym(handle, symbol.as_ptr());
+            if function.is_null() {
+                return Err("dlsym(selinux_check_access) failed".to_string());
+            }
+            Ok(std::mem::transmute::<*mut libc::c_void, SelinuxCheckAccessFn>(function))
+        })
+        .as_ref()
+        .map_err(|error| anyhow!(error.clone()))?;
+
+    let rc = unsafe {
+        check_access(
+            source.as_ptr(),
+            target.as_ptr(),
+            class_name.as_ptr(),
+            permission_name.as_ptr(),
+            std::ptr::null_mut(),
+        )
+    };
+
+    if rc == 0 {
+        return Ok(());
+    }
+
+    let errno = std::io::Error::last_os_error();
+    if matches!(errno.raw_os_error(), Some(libc::EACCES)) {
+        return Err(KsError::perm()).context(format!(
+            "SELinux denied {} {} {} -> {}",
+            source.to_string_lossy(),
+            class_name.to_string_lossy(),
+            permission_name.to_string_lossy(),
+            target.to_string_lossy()
+        ));
+    }
+
+    Err(KsError::sys()).context(format!(
+        "selinux_check_access failed for {} {} {} -> {}: {}",
+        source.to_string_lossy(),
+        class_name.to_string_lossy(),
+        permission_name.to_string_lossy(),
+        target.to_string_lossy(),
+        errno
+    ))
+}
+
+#[cfg(not(target_os = "android"))]
+fn check_selinux_permission_raw(
+    _source: &CStr,
+    _target: &CStr,
+    _class_name: &CStr,
+    _permission_name: &CStr,
+) -> Result<()> {
+    Ok(())
+}
+
+fn check_selinux_permission(
+    source: &CStr,
+    target: &CStr,
+    class_name: &str,
+    permission_name: &str,
+) -> Result<()> {
+    let class_name = CString::new(class_name).expect("SELinux class names are static");
+    let permission_name =
+        CString::new(permission_name).expect("SELinux permission names are static");
+    check_selinux_permission_raw(
+        source,
+        target,
+        class_name.as_c_str(),
+        permission_name.as_c_str(),
+    )
+}
+
+#[cfg(target_os = "android")]
+fn check_android_permission_for_uid(
+    uid: u32,
+    permission: &str,
+    permission_denied: KsError,
+) -> Result<()> {
+    let binder = hub::get_service(PERMISSION_MANAGER_SERVICE)
+        .ok_or_else(|| anyhow!(KsError::sys()))
+        .context(format!("service {PERMISSION_MANAGER_SERVICE} unavailable"))?;
+    let proxy = binder
+        .as_proxy()
+        .ok_or_else(|| anyhow!(KsError::sys()))
+        .context("permissionmgr binder was unexpectedly local")?;
+    let mut data = proxy
+        .prepare_transact(true)
+        .context("failed to prepare permissionmgr transaction")?;
+    data.write(&(uid as i32))
+        .context("failed to write permissionmgr uid argument")?;
+    data.write(&permission.to_string())
+        .context("failed to write permissionmgr permission argument")?;
+    data.write(&DEFAULT_DEVICE_ID)
+        .context("failed to write permissionmgr deviceId argument")?;
+
+    let mut reply = proxy
+        .submit_transact(CHECK_UID_PERMISSION_TRANSACTION, &data, 0)
+        .context("permissionmgr transact failed")?
+        .context("permissionmgr returned no reply")?;
+    reply.set_data_position(0);
+
+    let status: Status = reply
+        .read()
+        .context("failed to decode permissionmgr reply status")?;
+    if !status.is_ok() {
+        return Err(KsError::sys()).context(format!(
+            "permissionmgr checkUidPermission returned non-ok status: {status}"
+        ));
+    }
+
+    let result: i32 = reply
+        .read()
+        .context("failed to decode permissionmgr checkUidPermission result")?;
+    if result == PERMISSION_GRANTED {
+        Ok(())
+    } else {
+        Err(permission_denied).context(format!(
+            "uid {uid} does not hold Android permission {permission}"
+        ))
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn check_android_permission_for_uid(
+    _uid: u32,
+    _permission: &str,
+    _permission_denied: KsError,
+) -> Result<()> {
+    Ok(())
+}
+
+pub fn check_key_permission(
+    permission: KeyPerm,
+    key: &KeyDescriptor,
+    access_vector: Option<&KeyPermSet>,
+    caller: Option<&CallerInfo>,
+) -> Result<()> {
+    let caller = CallerCtx::from_caller_info(caller);
+
+    if access_vector.is_some_and(|vector| vector.includes(permission)) {
+        return Ok(());
+    }
+
+    let sid = caller
+        .sid
+        .as_ref()
+        .ok_or_else(|| anyhow!(KsError::sys()))
+        .context("caller SID unavailable for key permission check")?;
+
+    let target = match key.domain {
+        Domain::APP => {
+            if caller.uid as i64 != key.nspace {
+                return Err(KsError::perm()).context(format!(
+                    "uid {} does not own app namespace {}",
+                    caller.uid, key.nspace
+                ));
+            }
+            keystore_selinux_context().context("failed to resolve keystore SELinux context")?
+        }
+        Domain::SELINUX => lookup_keystore2_key_context(key.nspace)?,
+        Domain::GRANT => match access_vector {
+            Some(_) => {
+                return Err(KsError::perm())
+                    .context(format!("{} was not granted", permission.name()));
+            }
+            None => {
+                return Err(KsError::sys())
+                    .context("cannot check Domain::GRANT without an access vector");
+            }
+        },
+        Domain::KEY_ID => {
+            return Err(KsError::sys()).context("cannot check permission for Domain::KEY_ID");
+        }
+        Domain::BLOB => {
+            let target = lookup_keystore2_key_context(key.nspace)?;
+            check_selinux_permission(
+                sid.as_c_str(),
+                target.as_c_str(),
+                KeyPerm::ManageBlob.class_name(),
+                KeyPerm::ManageBlob.name(),
+            )?;
+            target
+        }
+        _ => {
+            return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT)).context(format!(
+                "unsupported key domain {:?} for permission check",
+                key.domain
+            ));
+        }
+    };
+
+    check_selinux_permission(
+        sid.as_c_str(),
+        target.as_c_str(),
+        permission.class_name(),
+        permission.name(),
+    )
+}
+
+pub fn check_grant_permission(
+    access_vector: KeyPermSet,
+    key: &KeyDescriptor,
+    caller: Option<&CallerInfo>,
+) -> Result<()> {
+    let caller = CallerCtx::from_caller_info(caller);
+    let sid = caller
+        .sid
+        .as_ref()
+        .ok_or_else(|| anyhow!(KsError::sys()))
+        .context("caller SID unavailable for grant permission check")?;
+
+    let target = match key.domain {
+        Domain::APP => {
+            if caller.uid as i64 != key.nspace {
+                return Err(KsError::perm()).context(format!(
+                    "uid {} does not own app namespace {}",
+                    caller.uid, key.nspace
+                ));
+            }
+            keystore_selinux_context().context("failed to resolve keystore SELinux context")?
+        }
+        Domain::SELINUX => lookup_keystore2_key_context(key.nspace)?,
+        _ => {
+            return Err(KsError::sys()).context(format!(
+                "cannot grant permissions for domain {:?}",
+                key.domain
+            ));
+        }
+    };
+
+    check_selinux_permission(
+        sid.as_c_str(),
+        target.as_c_str(),
+        KeyPerm::Grant.class_name(),
+        KeyPerm::Grant.name(),
+    )?;
+
+    if access_vector.includes(KeyPerm::Grant) {
+        return Err(KsError::perm()).context("grant permission cannot itself be granted");
+    }
+
+    for permission in access_vector {
+        check_selinux_permission(
+            sid.as_c_str(),
+            target.as_c_str(),
+            permission.class_name(),
+            permission.name(),
+        )?;
+    }
+    Ok(())
+}
+
+pub fn check_keystore_permission(
+    permission: KeystorePerm,
+    caller: Option<&CallerInfo>,
+) -> Result<()> {
+    let caller = CallerCtx::from_caller_info(caller);
+    let sid = caller
+        .sid
+        .as_ref()
+        .ok_or_else(|| anyhow!(KsError::sys()))
+        .context("caller SID unavailable for keystore permission check")?;
+    let target = keystore_selinux_context()?;
+    check_selinux_permission(
+        sid.as_c_str(),
+        target.as_c_str(),
+        permission.class_name(),
+        permission.name(),
+    )
+}
+
+pub fn check_device_attestation_permissions(caller: Option<&CallerInfo>) -> Result<()> {
+    let caller = CallerCtx::from_caller_info(caller);
+    check_android_permission_for_uid(
+        caller.uid,
+        READ_PRIVILEGED_PHONE_STATE,
+        KsError::Km(ErrorCode::CANNOT_ATTEST_IDS),
+    )
+}
+
+pub fn check_unique_id_attestation_permissions(caller: Option<&CallerInfo>) -> Result<()> {
+    let caller = CallerCtx::from_caller_info(caller);
+    check_android_permission_for_uid(
+        caller.uid,
+        REQUEST_UNIQUE_ID_ATTESTATION,
+        KsError::Km(ErrorCode::CANNOT_ATTEST_IDS),
+    )
+}
+
+pub fn is_device_id_attestation_tag(tag: Tag) -> bool {
+    matches!(
+        tag,
+        Tag::ATTESTATION_ID_IMEI
+            | Tag::ATTESTATION_ID_MEID
+            | Tag::ATTESTATION_ID_SERIAL
+            | Tag::DEVICE_UNIQUE_ATTESTATION
+            | Tag::ATTESTATION_ID_SECOND_IMEI
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_key(namespace: i64) -> KeyDescriptor {
+        KeyDescriptor {
+            domain: Domain::APP,
+            nspace: namespace,
+            alias: Some("alias".to_string()),
+            blob: None,
+        }
+    }
+
+    #[test]
+    fn parse_keystore2_key_contexts_skips_comments_and_extracts_pairs() {
+        let parsed = parse_keystore2_key_contexts(
+            "# comment\n25 ignored\n100 u:object_r:vold_key:s0\n\n120 u:object_r:resume_on_reboot_key:s0\n",
+        );
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, 100);
+        assert_eq!(parsed[0].1.to_string_lossy(), "u:object_r:vold_key:s0");
+        assert_eq!(parsed[1].0, 120);
+    }
+
+    #[test]
+    fn app_owner_has_permission_without_sid() {
+        let caller = CallerInfo {
+            callingUid: 10001,
+            callingPid: 1234,
+            callingSid: "u:r:untrusted_app:s0".to_string(),
+        };
+        check_key_permission(KeyPerm::Use, &app_key(10001), None, Some(&caller))
+            .expect("owner should satisfy APP-domain ownership and SELinux permission checks");
+    }
+
+    #[test]
+    fn grant_vector_allows_non_owner_app_access() {
+        let caller = CallerInfo {
+            callingUid: 20002,
+            callingPid: 1234,
+            callingSid: "u:r:untrusted_app:s0".to_string(),
+        };
+        check_key_permission(
+            KeyPerm::Use,
+            &app_key(10001),
+            Some(&KeyPermSet::from(KeyPerm::Use)),
+            Some(&caller),
+        )
+        .expect("grant vector should allow the requested permission");
+    }
+
+    #[test]
+    fn missing_grant_denies_non_owner_app_access() {
+        let caller = CallerInfo {
+            callingUid: 20002,
+            callingPid: 1234,
+            callingSid: "u:r:untrusted_app:s0".to_string(),
+        };
+        let error = check_key_permission(KeyPerm::Use, &app_key(10001), None, Some(&caller))
+            .expect_err("non-owner app key access should be denied without a grant");
+        assert!(matches!(
+            error.root_cause().downcast_ref::<KsError>(),
+            Some(KsError::Rc(ResponseCode::PERMISSION_DENIED))
+        ));
+    }
+
+    #[test]
+    fn grant_permission_cannot_be_granted() {
+        let caller = CallerInfo {
+            callingUid: 10001,
+            callingPid: 1234,
+            callingSid: "u:r:untrusted_app:s0".to_string(),
+        };
+        let error = check_grant_permission(
+            KeyPermSet::from(KeyPerm::Grant),
+            &app_key(10001),
+            Some(&caller),
+        )
+        .expect_err("grant permission itself must never be grantable");
+        assert!(matches!(
+            error.root_cause().downcast_ref::<KsError>(),
+            Some(KsError::Rc(ResponseCode::PERMISSION_DENIED))
+        ));
+    }
+
+    #[test]
+    fn device_id_attestation_tags_match_aosp_surface() {
+        assert!(is_device_id_attestation_tag(Tag::ATTESTATION_ID_SERIAL));
+        assert!(is_device_id_attestation_tag(Tag::DEVICE_UNIQUE_ATTESTATION));
+        assert!(is_device_id_attestation_tag(
+            Tag::ATTESTATION_ID_SECOND_IMEI
+        ));
+        assert!(!is_device_id_attestation_tag(Tag::ATTESTATION_ID_BRAND));
+        assert!(!is_device_id_attestation_tag(Tag::PURPOSE));
     }
 }
