@@ -1,8 +1,9 @@
 MODDIR=${0%/*}
 TARGET_DIR=/data/misc/keystore/omk
+TARGET_KEYMINT=$TARGET_DIR/keymint
 TARGET_KEYBOX=$TARGET_DIR/keybox.xml
 TARGET_INJECTOR_CONFIG=$TARGET_DIR/injector.toml
-STATE_DIR=/data/adb/oh_my_keymint
+STATE_DIR=/data/adb/omk
 TARGET_INJECTOR=/data/adb/inject
 
 find_module_binary() {
@@ -62,6 +63,15 @@ fi
 if [ -f "$TARGET_INJECTOR_CONFIG" ]; then
   chmod 0600 "$TARGET_INJECTOR_CONFIG"
   chown 1017:1017 "$TARGET_INJECTOR_CONFIG"
+fi
+
+MODULE_KEYMINT=$(find_module_binary keymint)
+if [ -n "$MODULE_KEYMINT" ]; then
+  if [ ! -f "$TARGET_KEYMINT" ] || ! cmp -s "$MODULE_KEYMINT" "$TARGET_KEYMINT"; then
+    cp "$MODULE_KEYMINT" "$TARGET_KEYMINT"
+  fi
+  chmod 0755 "$TARGET_KEYMINT"
+  chown 1017:1017 "$TARGET_KEYMINT"
 fi
 
 MODULE_INJECTOR=$(find_module_binary inject)

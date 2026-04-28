@@ -1,5 +1,5 @@
 MODDIR=${0%/*}
-STATE_DIR=/data/adb/oh_my_keymint
+STATE_DIR=/data/adb/omk
 
 mkdir -p "$STATE_DIR"
 

@@ -28,7 +28,6 @@ use crate::android::system::keystore2::{
 };
 use crate::config::config;
 use crate::global::{AID_KEYSTORE, DB};
-use crate::keymaster::apex::encode_module_info;
 use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_binder_status, map_ks_error, map_ks_result};
 use crate::keymaster::utils::{key_creation_result_to_aidl, key_param_to_aidl};
@@ -48,12 +47,10 @@ use crate::{
     watchdog as wd,
 };
 use anyhow::{Context, Ok, Result};
-use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::ec::BoringEc;
 use kmr_crypto_boring::hmac::BoringHmac;
 use kmr_crypto_boring::rng::BoringRng;
 use kmr_crypto_boring::rsa::BoringRsa;
-use kmr_crypto_boring::sha256::BoringSha256;
 use kmr_ta::device::CsrSigningAlgorithm;
 use kmr_ta::{HardwareInfo, KeyMintTa, RpcInfo, RpcInfoV3};
 use kmr_wire::keymint::{AttestationKey, KeyParam};
@@ -1224,26 +1221,8 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
         return Err(Error::Km(ErrorCode::UNKNOWN_ERROR)).context(err!("Failed to set HAL info"));
     }
 
-    let module_hash =
-        crate::global::ENCODED_MODULE_INFO.get_or_try_init(|| -> Result<Vec<u8>, anyhow::Error> {
-            let apex_info = crate::global::APEX_MODULE_HASH
-                .as_ref()
-                .map_err(|_| anyhow::anyhow!("Failed to get APEX module info."))?;
-
-            let encoding = encode_module_info(apex_info)
-                .map_err(|_| anyhow::anyhow!("Failed to encode module info."))?;
-
-            let sha256 = BoringSha256 {};
-
-            let hash = sha256
-                .hash(&encoding)
-                .map_err(|_| anyhow::anyhow!("Failed to hash module info."))?;
-
-            Ok(hash.to_vec())
-        });
-
-    if let Result::Ok(hash) = module_hash {
-        let module_hash = KeyParam::ModuleHash(hash.to_vec());
+    if let Some(bundle) = crate::global::module_info_bundle() {
+        let module_hash = KeyParam::ModuleHash(bundle.sha256.clone());
         let req = PerformOpReq::SetAdditionalAttestationInfo(
             kmr_wire::SetAdditionalAttestationInfoRequest {
                 info: vec![module_hash],
@@ -1255,7 +1234,7 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
                 .context(err!("Failed to set additional attestation info"));
         }
     } else {
-        warn!("Failed to get module hash: {:?}", module_hash.err());
+        warn!("APEX module info bundle unavailable; skipping moduleHash attestation bootstrap");
     }
 
     Ok(ta)

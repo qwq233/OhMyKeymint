@@ -446,12 +446,11 @@ pub unsafe fn parse_key_entry_reply_metadata(
     let mut metadata = None;
     let mut read_error = None;
     parcel.sized_read(|sub_parcel| {
-        match read_reply_binder_carrier(sub_parcel, data)
-            .and_then(|_| {
-                sub_parcel
-                    .read()
-                    .context("failed to decode key-entry metadata payload")
-            }) {
+        match read_reply_binder_carrier(sub_parcel, data).and_then(|_| {
+            sub_parcel
+                .read()
+                .context("failed to decode key-entry metadata payload")
+        }) {
             Ok(value) => metadata = Some(value),
             Err(error) => read_error = Some(error),
         }

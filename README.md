@@ -8,10 +8,9 @@ Custom keystore implementation for Android Keystore Spoofer
 
 ## What is this?
 
-This is a complete implementation of the Keystore, implementing features not implemented in the Tricky Store.
-You can think of it as DLC for the game. It can work without it, but it's usually better to have it.
+This is a complete implementation of the keystore, which fully implements the AOSP AIDL interface, referencing the official AOSP implementation.
 
-In the future, we will gradually move away from the Tricky Store as a backend.
+In theory, this would make it harder for detectors to identify behavior inconsistent with AOSP, thus achieving greater stealth than the FOSS branch of TrickyStore.
 
 ## Install and configure
 
@@ -25,8 +24,8 @@ Configuration file is located at `/data/misc/keystore/omk/config.toml` and `/dat
 
 ```toml
 [main]
-# We can only use Tricky Store as backend at this point.
-backend = "TrickyStore"
+# We can only use Injector as backend at this point.
+backend = "Injector"
 
 # The following values ​​are used to generate the seed for device encryption 
 # and verification. Please be sure to save the following values. If you lose
@@ -61,14 +60,34 @@ product = "generic"
 manufacturer = "Google"
 model = "generic"
 serial = "ABC12345678ABC"
-meid = "1234567890"
-imei = "1234567890"
-imei2 = "1234567890"
+overrideTelephonyProperties = false
+meid = ""
+imei = ""
+imei2 = ""
 ```
 
 `[trust_record]` is managed by OMK and may be added automatically after startup.
 It records stable derived values such as computed `vb_key` or original-system `vb_hash`.
 Random values are not written back into `config.toml`.
+
+If `overrideTelephonyProperties = false` (the default), OMK ignores user-configured
+`[device].imei` and `[device].meid` and resolves them from the device at startup instead.
+
+`[device].imei2` keeps the old behavior: OMK only auto-fills it when it is empty.
+If it still resolves to empty, OMK leaves `imei2 = ""` in `config.toml` and omits
+the second-IMEI attestation field from generated certificates instead of encoding an
+empty value.
+
+For startup auto-fill, OMK resolves telephony identifiers in this order:
+
+1. dedicated telephony APIs from `phone`
+
+2. common radio properties
+
+3. generic device-id fallback from `iphonesubinfo`
+
+OMK writes any successful result back into `config.toml` and leaves still-unavailable
+fields empty.
 
 If `config.toml` becomes invalid, OMK rewrites a canonical default config, renames the broken
 file to `config.toml.bak`, and appends the parse error to the backup.
@@ -145,9 +164,9 @@ original boot properties.
 The daemons also watch these marker files if you prefer the file-based path:
 
 ```sh
-/data/adb/oh_my_keymint/restart.keymint
-/data/adb/oh_my_keymint/restart.injector
-/data/adb/oh_my_keymint/restart.all
+touch /data/adb/omk/restart.keymint
+touch /data/adb/omk/restart.injector
+touch /data/adb/omk/restart.all
 ```
 
 ## License

@@ -64,6 +64,12 @@ pub fn persist_config_file(config_file: &ConfigFile) -> Result<()> {
         .with_context(|| format!("failed to create config directory {}", parent.display()))?;
     let serialized =
         toml::to_string_pretty(config_file).context("failed to serialize config.toml")?;
+    if let Ok(existing) = fs::read_to_string(path) {
+        if existing == serialized {
+            log::debug!("Config file unchanged, skipping rewrite");
+            return Ok(());
+        }
+    }
     fs::write(path, serialized)
         .with_context(|| format!("failed to write config file {}", path.display()))?;
     Ok(())
@@ -252,14 +258,14 @@ pub struct ConfigFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Backend {
-    TrickyStore,
+    Injector,
     OMK,
 }
 
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Backend::TrickyStore => write!(f, "ts"),
+            Backend::Injector => write!(f, "injector"),
             Backend::OMK => write!(f, "omk"),
         }
     }
@@ -270,7 +276,7 @@ impl std::str::FromStr for Backend {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "ts" => Ok(Backend::TrickyStore),
+            "ts" => Ok(Backend::Injector),
             "omk" => Ok(Backend::OMK),
             _ => Err(()),
         }
@@ -287,7 +293,7 @@ pub struct MainConfig {
 impl Default for MainConfig {
     fn default() -> Self {
         Self {
-            backend: Backend::TrickyStore,
+            backend: Backend::Injector,
         }
     }
 }
@@ -512,6 +518,8 @@ pub struct DeviceProperty {
     pub manufacturer: String,
     pub model: String,
     pub serial: String,
+    #[serde(rename = "overrideTelephonyProperties", default)]
+    pub override_telephony_properties: bool,
     pub meid: String,
     pub imei: String,
     pub imei2: String,
@@ -526,9 +534,10 @@ impl Default for DeviceProperty {
             manufacturer: rsproperties::get_or("ro.product.manufacturer", "google".to_string()),
             model: rsproperties::get_or("ro.product.model", "mainline".to_string()),
             serial: rsproperties::get_or("ro.serialno", "f7bade12".to_string()),
-            meid: rsproperties::get_or("ro.ril.oem.meid", "".to_string()),
-            imei: rsproperties::get_or("ro.ril.oem.imei", "".to_string()),
-            imei2: rsproperties::get_or("ro.ril.oem.imei2", "".to_string()),
+            override_telephony_properties: false,
+            meid: String::new(),
+            imei: String::new(),
+            imei2: String::new(),
         }
     }
 }
@@ -591,7 +600,7 @@ mod tests {
         let config = parse_config_file(
             r#"
 [main]
-backend = "TrickyStore"
+backend = "injector"
 
 [crypto]
 root_kek_seed = "0000000000000000000000000000000000000000000000000000000000000000"
@@ -612,6 +621,7 @@ product = "caiman"
 manufacturer = "Google"
 model = "Pixel 9"
 serial = "serial"
+overrideTelephonyProperties = false
 meid = ""
 imei = ""
 imei2 = ""
@@ -621,6 +631,15 @@ imei2 = ""
 
         assert!(matches!(config.trust.vb_key, TrustValueSpec::Hex(_)));
         assert!(matches!(config.trust.vb_hash, TrustValueSpec::Hex(_)));
+    }
+
+    #[test]
+    fn device_property_default_leaves_telephony_ids_empty() {
+        let device = DeviceProperty::default();
+        assert!(!device.override_telephony_properties);
+        assert!(device.imei.is_empty());
+        assert!(device.imei2.is_empty());
+        assert!(device.meid.is_empty());
     }
 
     #[derive(Deserialize)]

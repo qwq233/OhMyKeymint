@@ -496,11 +496,15 @@ impl<'a> AuthorizationList<'a> {
             AttestationIdImei,
             attestation_ids.map(|v| &v.imei)
         );
-        check_attestation_id!(
-            &mut keygen_params,
-            AttestationIdSecondImei,
-            attestation_ids.map(|v| &v.imei2)
-        );
+        if attestation_ids.is_some_and(|v| v.imei2.is_empty()) {
+            keygen_params.retain(|param| !matches!(param, KeyParam::AttestationIdSecondImei(_)));
+        } else {
+            check_attestation_id!(
+                &mut keygen_params,
+                AttestationIdSecondImei,
+                attestation_ids.map(|v| &v.imei2)
+            );
+        }
         check_attestation_id!(
             &mut keygen_params,
             AttestationIdMeid,
@@ -1652,6 +1656,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_authz_list_omits_empty_second_imei() {
+        let attestation_ids = AttestationIdInfo {
+            brand: vec![],
+            device: vec![],
+            product: vec![],
+            serial: vec![],
+            imei: vec![],
+            imei2: vec![],
+            meid: vec![],
+            manufacturer: vec![],
+            model: vec![],
+        };
+        let authz_list = AuthorizationList::new(
+            &[],
+            &[KeyParam::AttestationIdSecondImei(vec![])],
+            Some(&attestation_ids),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        assert!(!authz_list
+            .keygen_params
+            .iter()
+            .any(|param| matches!(param, KeyParam::AttestationIdSecondImei(_))));
+        assert_eq!(hex::encode(authz_list.to_der().unwrap()), "3000");
     }
 
     #[test]

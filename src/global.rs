@@ -11,17 +11,13 @@ use crate::{
     android::hardware::security::secureclock::ISecureClock::ISecureClock,
     err,
     keymaster::{
-        apex::ApexModuleInfo, async_task::AsyncTask, db::KeymasterDb, enforcements::Enforcements,
+        apex::ModuleInfoBundle, async_task::AsyncTask, db::KeymasterDb, enforcements::Enforcements,
         gc::Gc, keymint_device::get_keymint_wrapper, super_key::SuperKeyManager,
     },
     watchdog as wd,
 };
 
 static DB_INIT: Once = Once::new();
-
-lazy_static::lazy_static! {
-    pub static ref APEX_MODULE_HASH: anyhow::Result<Vec<ApexModuleInfo>> = crate::plat::utils::get_apex_module_info();
-}
 
 /// A single on-demand worker thread that handles deferred tasks with two different
 /// priorities.
@@ -92,8 +88,19 @@ pub static ENFORCEMENTS: LazyLock<Enforcements> = LazyLock::new(Default::default
 
 pub static SUPER_KEY: LazyLock<Arc<RwLock<SuperKeyManager>>> = LazyLock::new(Default::default);
 
-/// DER-encoded module information returned by `getSupplementaryAttestationInfo(Tag.MODULE_HASH)`.
-pub static ENCODED_MODULE_INFO: OnceLock<Vec<u8>> = OnceLock::new();
+/// Boot-scoped APEX module information used by both KeyMint attestation injection and
+/// `getSupplementaryAttestationInfo(Tag::MODULE_HASH)`.
+pub static MODULE_INFO_BUNDLE: OnceLock<ModuleInfoBundle> = OnceLock::new();
+
+pub fn install_module_info_bundle(bundle: ModuleInfoBundle) -> Result<()> {
+    MODULE_INFO_BUNDLE
+        .set(bundle)
+        .map_err(|_| anyhow::anyhow!("APEX module info bundle was already initialized"))
+}
+
+pub fn module_info_bundle() -> Option<&'static ModuleInfoBundle> {
+    MODULE_INFO_BUNDLE.get()
+}
 
 /// Timestamp service.
 static TIME_STAMP_DEVICE: Mutex<Option<Strong<dyn ISecureClock>>> = Mutex::new(None);

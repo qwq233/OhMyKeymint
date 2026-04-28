@@ -1,4 +1,7 @@
 use anyhow::{anyhow, Context, Result};
+use hex::encode as hex_encode;
+use kmr_common::crypto::Sha256;
+use kmr_crypto_boring::sha256::BoringSha256;
 use rsbinder::{hub, Strong};
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
@@ -30,6 +33,24 @@ fn run() -> Result<()> {
 
     let service: Strong<dyn IOhMyKsService> =
         hub::get_interface(OMK_SERVICE).context("failed to connect to omk service")?;
+
+    let module_info_der = service
+        .getSupplementaryAttestationInfo(Tag::MODULE_HASH)
+        .context("getSupplementaryAttestationInfo(MODULE_HASH) failed")?;
+    if module_info_der.len() <= 32 {
+        return Err(anyhow!(
+            "MODULE_HASH supplementary info is too short to be DER module info: {} bytes",
+            module_info_der.len()
+        ));
+    }
+    let module_info_hash = BoringSha256 {}
+        .hash(&module_info_der)
+        .map_err(|error| anyhow!("failed to hash MODULE_HASH supplementary info: {error:?}"))?;
+    println!(
+        "module info: der_len={} sha256={}",
+        module_info_der.len(),
+        hex_encode(module_info_hash)
+    );
 
     let _ = service
         .getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT)

@@ -1,7 +1,7 @@
 #!/system/bin/sh
 
 MODDIR=${0%/*}
-STATE_DIR=/data/adb/oh_my_keymint
+STATE_DIR=/data/adb/omk
 TARGET_INJECTOR=/data/adb/inject
 RESTART_PROP=persist.sys.omk.restart.injector
 RESTART_ALL_PROP=persist.sys.omk.restart.all

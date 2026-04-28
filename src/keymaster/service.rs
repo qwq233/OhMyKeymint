@@ -22,9 +22,7 @@ use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
 use crate::android::system::keystore2::IKeystoreSecurityLevel::BnKeystoreSecurityLevel;
 use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::err;
-use crate::global::ENCODED_MODULE_INFO;
 use crate::keybox;
-use crate::keymaster::apex::encode_module_info;
 use crate::keymaster::database::utils::{count_key_entries, list_key_entries};
 use crate::keymaster::db::KEYSTORE_UUID;
 use crate::keymaster::db::{KeyEntryLoadBits, KeyType, SubComponentType};
@@ -52,8 +50,6 @@ use crate::android::system::keystore2::{
     KeyEntryResponse::KeyEntryResponse, KeyMetadata::KeyMetadata,
 };
 use anyhow::{Context, Result};
-use kmr_common::crypto::Sha256;
-use kmr_crypto_boring::sha256::BoringSha256;
 use log::debug;
 use rsbinder::thread_state::CallingContext;
 use rsbinder::{Status, Strong};
@@ -506,27 +502,10 @@ impl KeystoreService {
 
     fn get_supplementary_attestation_info(&self, tag: Tag) -> Result<Vec<u8>> {
         match tag {
-            Tag::MODULE_HASH => {
-                let info =
-                    ENCODED_MODULE_INFO.get_or_try_init(|| -> Result<Vec<u8>, anyhow::Error> {
-                        let apex_info = crate::global::APEX_MODULE_HASH
-                            .as_ref()
-                            .map_err(|_| anyhow::anyhow!("Failed to get APEX module info."))?;
-
-                        let encoding = encode_module_info(apex_info)
-                            .map_err(|_| anyhow::anyhow!("Failed to encode module info."))?;
-
-                        let sha256 = BoringSha256 {};
-
-                        let hash = sha256
-                            .hash(&encoding)
-                            .map_err(|_| anyhow::anyhow!("Failed to hash module info."))?;
-
-                        Ok(hash.to_vec())
-                    })?;
-
-                Ok(info.clone())
-            }
+            Tag::MODULE_HASH => crate::global::module_info_bundle()
+                .map(|bundle| bundle.encoded_der.clone())
+                .ok_or(Error::Rc(ResponseCode::INFO_NOT_AVAILABLE))
+                .context(err!("APEX module info bundle not initialized")),
             _ => Err(Error::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!(
                 "Tag {tag:?} not supported for getSupplementaryAttestationInfo."
             )),
@@ -690,11 +669,8 @@ impl IKeystoreService for KeystoreService {
 
     fn getSupplementaryAttestationInfo(&self, tag: Tag) -> Result<Vec<u8>, Status> {
         let _wp = wd::watch("IKeystoreService::getSupplementaryAttestationInfo");
-        self.get_supplementary_attestation_info(tag).map_err(|e| {
-            log::error!("Failed to get supplementary attestation info: {}", e);
-            // pretend as it's not supported
-            Status::from(rsbinder::StatusCode::UnknownTransaction)
-        })
+        self.get_supplementary_attestation_info(tag)
+            .map_err(into_logged_binder)
     }
 }
 
@@ -802,11 +778,8 @@ impl IOhMyKsService for KeystoreService {
 
     fn getSupplementaryAttestationInfo(&self, tag: Tag) -> Result<Vec<u8>, Status> {
         let _wp = wd::watch("IOhMyKsService::getSupplementaryAttestationInfo");
-        self.get_supplementary_attestation_info(tag).map_err(|e| {
-            log::error!("Failed to get supplementary attestation info: {}", e);
-            // pretend as it's not supported
-            Status::from(rsbinder::StatusCode::UnknownTransaction)
-        })
+        self.get_supplementary_attestation_info(tag)
+            .map_err(into_logged_binder)
     }
 
     fn updateEcKeybox(

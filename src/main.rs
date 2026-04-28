@@ -92,6 +92,15 @@ fn prepare_android_storage() {
 }
 
 fn main() {
+    match plat::device_ids::maybe_run_telephony_probe_command() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Telephony probe helper failed: {error:#}");
+            std::process::exit(1);
+        }
+    }
+
     logging::init_logger();
     panic::set_hook(Box::new(|panic_info| {
         error!("{}", panic_info);
@@ -113,6 +122,7 @@ fn run() -> Result<()> {
 
     info!("Bootstrapping config");
     let mut config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
+    plat::device_ids::bootstrap_device_ids(&mut config_file);
     let resolved_trust =
         vbmeta::bootstrap_vbmeta(&mut config_file).context("failed to bootstrap vbmeta")?;
     config::persist_config_file(&config_file).context("failed to persist config")?;
@@ -129,10 +139,22 @@ fn run() -> Result<()> {
             .clone()
     };
 
-    // We can no longer retrieve APEX module info after dropping privileges.
-    debug!("Retrieving APEX module hash with root privileges");
-    if let Err(e) = global::APEX_MODULE_HASH.as_ref() {
-        error!("Failed to retrieve APEX module info: {:?}", e);
+    // We can no longer resolve module info after dropping privileges.
+    debug!("Resolving APEX module info with root privileges");
+    match crate::keymaster::apex::resolve_module_info_bundle() {
+        Ok(bundle) => {
+            let source = bundle.source.as_str();
+            let module_count = bundle.modules.len();
+            let sha256 = hex::encode(&bundle.sha256);
+            global::install_module_info_bundle(bundle)
+                .context("failed to install APEX module info bundle")?;
+            info!(
+                "Initialized moduleHash input from {source} with {module_count} active modules (sha256={sha256})"
+            );
+        }
+        Err(e) => {
+            warn!("Failed to resolve APEX module info before dropping privileges: {e:#}");
+        }
     }
 
     keybox::initialize().context("failed to initialize keybox runtime")?;
@@ -157,8 +179,8 @@ fn run() -> Result<()> {
             hub::add_service("keystore3", service.as_binder())
                 .context("failed to add keystore3 service")?;
         }
-        Backend::TrickyStore => {
-            info!("Using TrickyStore backend");
+        Backend::Injector => {
+            info!("Using Injector backend");
             info!("Creating keystore service");
             let dev =
                 KeystoreService::new_native_binder().context("failed to create omk service")?;

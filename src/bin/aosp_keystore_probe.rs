@@ -36,6 +36,24 @@ fn run() -> Result<()> {
 
     let service: Strong<dyn IKeystoreService> = hub::get_interface(KEYSTORE_SERVICE)
         .context("failed to connect to android.system.keystore2.IKeystoreService/default")?;
+    let module_info_der = service
+        .getSupplementaryAttestationInfo(Tag::MODULE_HASH)
+        .context("getSupplementaryAttestationInfo(MODULE_HASH) failed")?;
+    if module_info_der.len() <= 32 {
+        return Err(anyhow!(
+            "MODULE_HASH supplementary info is too short to be DER module info: {} bytes",
+            module_info_der.len()
+        ));
+    }
+    let module_info_hash = BoringSha256 {}
+        .hash(&module_info_der)
+        .map_err(|error| anyhow!("failed to hash MODULE_HASH supplementary info: {error:?}"))?;
+    println!(
+        "module info: der_len={} sha256={}",
+        module_info_der.len(),
+        hex_encode(module_info_hash)
+    );
+
     let tee = get_security_level_with_diagnostics(&service)?;
 
     let alias = format!("aosp-probe-{}", std::process::id());

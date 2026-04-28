@@ -31,9 +31,8 @@ static SECURITY_LEVEL_TARGETS: OnceLock<
     Mutex<HashMap<LocalBinderTarget, SecurityLevelTargetInfo>>,
 > = OnceLock::new();
 static KEY_ID_ROUTE_TARGETS: OnceLock<Mutex<HashMap<i64, RouteTarget>>> = OnceLock::new();
-static SECURITY_LEVEL_CARRIERS: OnceLock<
-    Mutex<HashMap<String, SecurityLevelCarrierBytes>>,
-> = OnceLock::new();
+static SECURITY_LEVEL_CARRIERS: OnceLock<Mutex<HashMap<String, SecurityLevelCarrierBytes>>> =
+    OnceLock::new();
 static KEY_DESCRIPTOR_BRIDGES: OnceLock<Mutex<HashMap<i64, KeyDescriptorBridge>>> = OnceLock::new();
 
 fn security_level_targets() -> &'static Mutex<HashMap<LocalBinderTarget, SecurityLevelTargetInfo>> {

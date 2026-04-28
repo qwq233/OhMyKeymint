@@ -1,7 +1,7 @@
 #!/system/bin/sh
 
 MODDIR=${0%/*}
-STATE_DIR=/data/adb/oh_my_keymint
+STATE_DIR=/data/adb/omk
 RESTART_PROP=persist.sys.omk.restart.keymint
 RESTART_ALL_PROP=persist.sys.omk.restart.all
 RESTART_FILE=$STATE_DIR/restart.keymint
