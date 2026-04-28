@@ -160,13 +160,12 @@ fn run() -> Result<()> {
         Backend::TrickyStore => {
             info!("Using TrickyStore backend");
             info!("Creating keystore service");
-            let dev = KeystoreService::new_native_binder()
-                .context("failed to create omk service")?;
+            let dev =
+                KeystoreService::new_native_binder().context("failed to create omk service")?;
 
             info!("Adding OMK service to hub");
             let service = BnOhMyKsService::new_binder(dev);
-            hub::add_service("omk", service.as_binder())
-                .context("failed to add omk service")?;
+            hub::add_service("omk", service.as_binder()).context("failed to add omk service")?;
         }
     }
 

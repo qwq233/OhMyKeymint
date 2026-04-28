@@ -362,6 +362,16 @@ pub unsafe fn parse_success_reply<T: Deserialize>(
     parcel.read().context("failed to decode reply payload")
 }
 
+pub unsafe fn parse_reply_status(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+) -> Result<Status> {
+    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
+    parcel.read().context("failed to decode binder status")
+}
+
 pub fn parse_owned_success_reply<T: Deserialize>(reply: &mut OwnedReply) -> Result<T> {
     unsafe {
         parse_success_reply(
@@ -418,6 +428,40 @@ pub unsafe fn extract_key_entry_reply_carrier(
     }
 
     carrier.ok_or_else(|| anyhow!("missing key-entry binder carrier"))
+}
+
+pub unsafe fn parse_key_entry_reply_metadata(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+) -> Result<crate::android::system::keystore2::KeyMetadata::KeyMetadata> {
+    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
+    let status: Status = parcel.read().context("failed to decode binder status")?;
+    if !status.is_ok() {
+        bail!("binder status was not OK: {}", status);
+    }
+    read_non_null_parcelable_flag(&mut parcel, "key-entry")?;
+
+    let mut metadata = None;
+    let mut read_error = None;
+    parcel.sized_read(|sub_parcel| {
+        match read_reply_binder_carrier(sub_parcel, data)
+            .and_then(|_| {
+                sub_parcel
+                    .read()
+                    .context("failed to decode key-entry metadata payload")
+            }) {
+            Ok(value) => metadata = Some(value),
+            Err(error) => read_error = Some(error),
+        }
+        Ok(())
+    })?;
+    if let Some(error) = read_error {
+        return Err(error);
+    }
+
+    metadata.ok_or_else(|| anyhow!("missing key-entry metadata payload"))
 }
 
 pub unsafe fn extract_create_operation_reply_carrier(

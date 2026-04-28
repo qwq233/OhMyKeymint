@@ -14,6 +14,7 @@ pub mod logging;
 pub mod parcel;
 pub mod route;
 pub mod sys;
+pub mod tracker;
 pub mod utils;
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));

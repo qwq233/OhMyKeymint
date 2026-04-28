@@ -21,7 +21,9 @@ const CONFIG_PATH: &str = "/data/misc/keystore/omk/config.toml";
 const CONFIG_PATH: &str = "./omk/config.toml";
 
 pub fn config() -> &'static RwLock<Config> {
-    CONFIG.get().expect("CONFIG must be bootstrapped before use")
+    CONFIG
+        .get()
+        .expect("CONFIG must be bootstrapped before use")
 }
 
 pub fn config_path() -> &'static str {
@@ -67,7 +69,10 @@ pub fn persist_config_file(config_file: &ConfigFile) -> Result<()> {
     Ok(())
 }
 
-pub fn install_runtime_config(config_file: ConfigFile, resolved_trust: ResolvedTrust) -> Result<()> {
+pub fn install_runtime_config(
+    config_file: ConfigFile,
+    resolved_trust: ResolvedTrust,
+) -> Result<()> {
     let runtime = Config::from_file(&config_file, resolved_trust);
     if CONFIG.set(RwLock::new(runtime.clone())).is_err() {
         let mut guard = config()
@@ -182,9 +187,7 @@ fn start_config_watcher() -> Result<()> {
             }
 
             if runtime.crypto != new_config_file.crypto {
-                log::warn!(
-                    "Crypto config changed on disk; restart keymint to apply seed changes."
-                );
+                log::warn!("Crypto config changed on disk; restart keymint to apply seed changes.");
             }
 
             let resolved_trust = runtime.trust.clone();
@@ -319,8 +322,7 @@ impl<'de> Deserialize<'de> for CryptoConfig {
         }
 
         let helper = CryptoConfigHelper::deserialize(deserializer)?;
-        let root_kek_seed =
-            hex::decode(&helper.root_kek_seed).map_err(serde::de::Error::custom)?;
+        let root_kek_seed = hex::decode(&helper.root_kek_seed).map_err(serde::de::Error::custom)?;
         let kak_seed = hex::decode(&helper.kak_seed).map_err(serde::de::Error::custom)?;
 
         if root_kek_seed.len() != 32 {

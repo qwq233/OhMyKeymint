@@ -26,6 +26,7 @@ use crate::identify::{self, ServiceMethod};
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 use crate::top::qwq2333::ohmykeymint::IOhMyKsService::IOhMyKsService;
 use crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::IOhMySecurityLevel;
+use crate::tracker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteTarget {
@@ -147,6 +148,18 @@ impl KeystoreServiceBinder {
             && identify::is_omk_service_route_enabled(method, &self.intercept)
     }
 
+    fn default_route(&self, method: ServiceMethod) -> RouteTarget {
+        if self.prefer_omk(method) {
+            RouteTarget::Omk
+        } else {
+            RouteTarget::System
+        }
+    }
+
+    fn route_for_key(&self, method: ServiceMethod, key: &KeyDescriptor) -> RouteTarget {
+        tracker::resolve_route_for_key_descriptor(key, self.default_route(method))
+    }
+
     fn call_system<T>(
         &self,
         call: impl FnOnce(&dyn AospKeystoreService) -> rsbinder::status::Result<T>,
@@ -196,6 +209,7 @@ impl KeystoreServiceBinder {
             r#iSecurityLevel,
             r#metadata,
         } = response;
+        tracker::remember_key_metadata_route(&r#metadata, RouteTarget::System);
         let security_level = r#metadata.r#keySecurityLevel;
         let system_backend =
             r#iSecurityLevel.or_else(|| self.optional_system_security_level(security_level));
@@ -214,6 +228,7 @@ impl KeystoreServiceBinder {
         response: KeyEntryResponse,
         omk_backend: OmkSecurityLevelBinder,
     ) -> KeyEntryResponse {
+        tracker::remember_key_metadata_route(&response.r#metadata, RouteTarget::Omk);
         let security_level = response.r#metadata.r#keySecurityLevel;
         let system_backend = self.optional_system_security_level(security_level);
         KeyEntryResponse {
@@ -301,7 +316,7 @@ impl AospKeystoreService for KeystoreServiceBinder {
     }
 
     fn r#getKeyEntry(&self, key: &KeyDescriptor) -> rsbinder::status::Result<KeyEntryResponse> {
-        if self.prefer_omk(ServiceMethod::GetKeyEntry) {
+        if self.route_for_key(ServiceMethod::GetKeyEntry, key) == RouteTarget::Omk {
             match self.call_omk(|backend, caller| backend.r#getKeyEntry(caller, key)) {
                 Ok(entry) => {
                     let security_level = entry.r#metadata.r#keySecurityLevel;
@@ -340,7 +355,7 @@ impl AospKeystoreService for KeystoreServiceBinder {
         public_cert: Option<&[u8]>,
         certificate_chain: Option<&[u8]>,
     ) -> rsbinder::status::Result<()> {
-        if self.prefer_omk(ServiceMethod::UpdateSubcomponent) {
+        if self.route_for_key(ServiceMethod::UpdateSubcomponent, key) == RouteTarget::Omk {
             match self.call_omk(|backend, caller| {
                 backend.r#updateSubcomponent(caller, key, public_cert, certificate_chain)
             }) {
@@ -384,18 +399,21 @@ impl AospKeystoreService for KeystoreServiceBinder {
     }
 
     fn r#deleteKey(&self, key: &KeyDescriptor) -> rsbinder::status::Result<()> {
-        if self.prefer_omk(ServiceMethod::DeleteKey) {
+        let result = if self.route_for_key(ServiceMethod::DeleteKey, key) == RouteTarget::Omk {
             match self.call_omk(|backend, caller| backend.r#deleteKey(caller, key)) {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    return self.fallback_to_system(ServiceMethod::DeleteKey, error, || {
-                        self.call_system(|backend| backend.r#deleteKey(key))
-                    });
-                }
+                Ok(()) => Ok(()),
+                Err(error) => self.fallback_to_system(ServiceMethod::DeleteKey, error, || {
+                    self.call_system(|backend| backend.r#deleteKey(key))
+                }),
             }
-        }
+        } else {
+            self.call_system(|backend| backend.r#deleteKey(key))
+        };
 
-        self.call_system(|backend| backend.r#deleteKey(key))
+        if result.is_ok() {
+            tracker::forget_key_descriptor_route(key);
+        }
+        result
     }
 
     fn r#grant(
@@ -404,7 +422,7 @@ impl AospKeystoreService for KeystoreServiceBinder {
         grantee_uid: i32,
         access_vector: i32,
     ) -> rsbinder::status::Result<KeyDescriptor> {
-        if self.prefer_omk(ServiceMethod::Grant) {
+        if self.route_for_key(ServiceMethod::Grant, key) == RouteTarget::Omk {
             match self.call_omk(|backend, caller| {
                 backend.r#grant(caller, key, grantee_uid, access_vector)
             }) {
@@ -421,7 +439,7 @@ impl AospKeystoreService for KeystoreServiceBinder {
     }
 
     fn r#ungrant(&self, key: &KeyDescriptor, grantee_uid: i32) -> rsbinder::status::Result<()> {
-        if self.prefer_omk(ServiceMethod::Ungrant) {
+        if self.route_for_key(ServiceMethod::Ungrant, key) == RouteTarget::Omk {
             match self.call_omk(|backend, caller| backend.r#ungrant(caller, key, grantee_uid)) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
@@ -551,6 +569,10 @@ impl KeystoreSecurityLevelBinder {
         self.preferred_route == RouteTarget::Omk && self.omk_backend.is_some()
     }
 
+    fn route_for_descriptor(&self, descriptor: &KeyDescriptor) -> RouteTarget {
+        tracker::resolve_route_for_key_descriptor(descriptor, self.preferred_route)
+    }
+
     fn wrap_operation_response(
         &self,
         mut response: CreateOperationResponse,
@@ -586,7 +608,7 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
         operation_parameters: &[KeyParameter],
         forced: bool,
     ) -> rsbinder::status::Result<CreateOperationResponse> {
-        if self.prefer_omk() {
+        if self.route_for_descriptor(key) == RouteTarget::Omk && self.prefer_omk() {
             match self.call_omk(|backend, caller| {
                 backend.r#createOperation(caller, key, operation_parameters, forced)
             }) {
@@ -618,11 +640,18 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
             match self.call_omk(|backend, caller| {
                 backend.r#generateKey(caller, key, attestation_key, params, flags, entropy)
             }) {
-                Ok(metadata) => return Ok(metadata),
+                Ok(metadata) => {
+                    tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
+                    return Ok(metadata);
+                }
                 Err(error) => {
                     return self.fallback_to_system(error, || {
                         self.call_system(|backend| {
                             backend.r#generateKey(key, attestation_key, params, flags, entropy)
+                        })
+                        .map(|metadata| {
+                            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
+                            metadata
                         })
                     });
                 }
@@ -631,6 +660,10 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
 
         self.call_system(|backend| {
             backend.r#generateKey(key, attestation_key, params, flags, entropy)
+        })
+        .map(|metadata| {
+            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
+            metadata
         })
     }
 
@@ -646,11 +679,18 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
             match self.call_omk(|backend, caller| {
                 backend.r#importKey(caller, key, attestation_key, params, flags, key_data)
             }) {
-                Ok(metadata) => return Ok(metadata),
+                Ok(metadata) => {
+                    tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
+                    return Ok(metadata);
+                }
                 Err(error) => {
                     return self.fallback_to_system(error, || {
                         self.call_system(|backend| {
                             backend.r#importKey(key, attestation_key, params, flags, key_data)
+                        })
+                        .map(|metadata| {
+                            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
+                            metadata
                         })
                     });
                 }
@@ -659,6 +699,10 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
 
         self.call_system(|backend| {
             backend.r#importKey(key, attestation_key, params, flags, key_data)
+        })
+        .map(|metadata| {
+            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
+            metadata
         })
     }
 
@@ -681,7 +725,10 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
                     authenticators,
                 )
             }) {
-                Ok(metadata) => return Ok(metadata),
+                Ok(metadata) => {
+                    tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
+                    return Ok(metadata);
+                }
                 Err(error) => {
                     return self.fallback_to_system(error, || {
                         self.call_system(|backend| {
@@ -693,6 +740,10 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
                                 authenticators,
                             )
                         })
+                        .map(|metadata| {
+                            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
+                            metadata
+                        })
                     });
                 }
             }
@@ -701,13 +752,17 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
         self.call_system(|backend| {
             backend.r#importWrappedKey(key, wrapping_key, masking_key, params, authenticators)
         })
+        .map(|metadata| {
+            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
+            metadata
+        })
     }
 
     fn r#convertStorageKeyToEphemeral(
         &self,
         storage_key: &KeyDescriptor,
     ) -> rsbinder::status::Result<EphemeralStorageKeyResponse> {
-        if self.prefer_omk() {
+        if self.route_for_descriptor(storage_key) == RouteTarget::Omk && self.prefer_omk() {
             match self
                 .call_omk(|backend, _caller| backend.r#convertStorageKeyToEphemeral(storage_key))
             {
@@ -726,18 +781,21 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
     }
 
     fn r#deleteKey(&self, key: &KeyDescriptor) -> rsbinder::status::Result<()> {
-        if self.prefer_omk() {
+        let result = if self.route_for_descriptor(key) == RouteTarget::Omk && self.prefer_omk() {
             match self.call_omk(|backend, _caller| backend.r#deleteKey(key)) {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    return self.fallback_to_system(error, || {
-                        self.call_system(|backend| backend.r#deleteKey(key))
-                    });
-                }
+                Ok(()) => Ok(()),
+                Err(error) => self.fallback_to_system(error, || {
+                    self.call_system(|backend| backend.r#deleteKey(key))
+                }),
             }
-        }
+        } else {
+            self.call_system(|backend| backend.r#deleteKey(key))
+        };
 
-        self.call_system(|backend| backend.r#deleteKey(key))
+        if result.is_ok() {
+            tracker::forget_key_descriptor_route(key);
+        }
+        result
     }
 }
 
@@ -1135,6 +1193,7 @@ mod tests {
 
     #[test]
     fn get_security_level_system_route_returns_functional_wrapper() {
+        tracker::clear_state_for_tests();
         let delete_calls = Arc::new(AtomicUsize::new(0));
         let system_service = build_system_service(
             delete_calls.clone(),
@@ -1161,6 +1220,7 @@ mod tests {
 
     #[test]
     fn get_key_entry_system_route_wraps_returned_security_level() {
+        tracker::clear_state_for_tests();
         let delete_calls = Arc::new(AtomicUsize::new(0));
         let system_service = build_system_service(
             delete_calls.clone(),
@@ -1190,6 +1250,7 @@ mod tests {
 
     #[test]
     fn create_operation_sticks_to_the_backend_that_created_it() {
+        tracker::clear_state_for_tests();
         let counters = OperationCounters {
             system_abort: Arc::new(AtomicUsize::new(0)),
             omk_abort: Arc::new(AtomicUsize::new(0)),
@@ -1239,6 +1300,7 @@ mod tests {
 
     #[test]
     fn failed_omk_create_operation_falls_back_to_system_and_keeps_system_route() {
+        tracker::clear_state_for_tests();
         let counters = OperationCounters {
             system_abort: Arc::new(AtomicUsize::new(0)),
             omk_abort: Arc::new(AtomicUsize::new(0)),
@@ -1287,5 +1349,48 @@ mod tests {
                 .map(|sid| sid.to_string_lossy().into_owned())
                 .unwrap_or_default()
         );
+    }
+
+    #[test]
+    fn key_id_owner_overrides_preferred_route_for_follow_up_calls() {
+        tracker::clear_state_for_tests();
+        let counters = OperationCounters {
+            system_abort: Arc::new(AtomicUsize::new(0)),
+            omk_abort: Arc::new(AtomicUsize::new(0)),
+        };
+        let system_backend = BnKeystoreSecurityLevel::new_binder(CountingSystemSecurityLevel {
+            delete_calls: Arc::new(AtomicUsize::new(0)),
+            operation_aborts: counters.system_abort.clone(),
+        });
+        let omk_backend = rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
+            operation_aborts: counters.omk_abort.clone(),
+            should_fail_create: false,
+        }) as Box<dyn IOhMySecurityLevel>);
+        let wrapper = new_security_level_binder(
+            SecurityLevel::TRUSTED_ENVIRONMENT,
+            RouteTarget::Omk,
+            Some(system_backend),
+            Some(omk_backend),
+        );
+
+        let key_id = KeyDescriptor {
+            domain: Domain::KEY_ID,
+            nspace: 777,
+            alias: None,
+            blob: None,
+        };
+        tracker::remember_key_descriptor_route(&key_id, RouteTarget::System);
+
+        let operation = wrapper
+            .r#createOperation(&key_id, &[], false)
+            .expect("tracked system-owned key-id should stay on the system backend")
+            .r#iOperation
+            .expect("createOperation should return an operation binder");
+        operation
+            .r#abort()
+            .expect("system-owned operation should remain usable");
+
+        assert_eq!(counters.system_abort.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.omk_abort.load(Ordering::SeqCst), 0);
     }
 }

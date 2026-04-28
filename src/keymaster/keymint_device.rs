@@ -427,10 +427,17 @@ impl IKeyMintDevice for KeyMintWrapper {
         );
         let operation = BnKeyMintOperation::new_binder(operation);
 
+        let out_params: Result<Vec<KeyParameter>> =
+            result.params.into_iter().map(key_param_to_aidl).collect();
+        let out_params = out_params.map_err(|error| {
+            log::error!("Failed to convert begin out params to AIDL: {error:#}");
+            Status::new_service_specific_error(ErrorCode::UNKNOWN_ERROR.0, None)
+        })?;
+
         let resp = crate::android::hardware::security::keymint::BeginResult::BeginResult {
             operation: Some(operation),
             challenge: result.challenge,
-            params: params.to_vec(),
+            params: out_params,
         };
 
         Result::Ok(resp)

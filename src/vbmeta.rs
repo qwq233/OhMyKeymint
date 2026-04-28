@@ -22,16 +22,12 @@ use crate::{
             SecurityLevel::SecurityLevel, Tag::Tag,
         },
         system::keystore2::{
-            Domain::Domain,
-            IKeystoreSecurityLevel::IKeystoreSecurityLevel,
-            IKeystoreService::IKeystoreService,
-            KeyDescriptor::KeyDescriptor,
+            Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
+            IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor,
             KeyMetadata::KeyMetadata,
         },
     },
-    config::{
-        ConfigFile, ResolvedTrust, TrustRecord, TrustValueSource, TrustValueSpec,
-    },
+    config::{ConfigFile, ResolvedTrust, TrustRecord, TrustValueSource, TrustValueSpec},
 };
 
 const KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/default";
@@ -97,7 +93,11 @@ pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
     let slot_suffix = read_string_property("ro.boot.slot_suffix").unwrap_or_default();
     let build_fingerprint = read_string_property("ro.build.fingerprint").unwrap_or_default();
 
-    let vb_key = resolve_vb_key(&config_file.trust.vb_key, config_file.trust.device_locked, &slot_suffix);
+    let vb_key = resolve_vb_key(
+        &config_file.trust.vb_key,
+        config_file.trust.device_locked,
+        &slot_suffix,
+    );
     let vb_hash = resolve_vb_hash(&config_file.trust.vb_hash);
 
     let vb_key = match vb_key {
@@ -116,7 +116,13 @@ pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
     };
 
     sync_sysprops_if_needed(&vb_key, &vb_hash)?;
-    update_trust_record(&mut config_file.trust_record, &build_fingerprint, &slot_suffix, &vb_key, &vb_hash);
+    update_trust_record(
+        &mut config_file.trust_record,
+        &build_fingerprint,
+        &slot_suffix,
+        &vb_key,
+        &vb_hash,
+    );
 
     let vb_key_hex = hex::encode(vb_key.value);
     let vb_hash_hex = hex::encode(vb_hash.value);
@@ -241,7 +247,9 @@ fn update_trust_record(
 fn sync_sysprops_if_needed(vb_key: &ResolvedField, vb_hash: &ResolvedField) -> Result<()> {
     let command = match find_resetprop_command() {
         Ok(command) => command,
-        Err(error) if !vb_key.source.needs_sysprop_write() && !vb_hash.source.needs_sysprop_write() => {
+        Err(error)
+            if !vb_key.source.needs_sysprop_write() && !vb_hash.source.needs_sysprop_write() =>
+        {
             log::debug!("No sysprop write needed, skipping resetprop lookup failure: {error:#}");
             return Ok(());
         }
@@ -261,7 +269,11 @@ fn sync_sysprops_if_needed(vb_key: &ResolvedField, vb_hash: &ResolvedField) -> R
     Ok(())
 }
 
-fn write_and_verify_property(command: &ResetpropCommand, property: &str, value: &str) -> Result<()> {
+fn write_and_verify_property(
+    command: &ResetpropCommand,
+    property: &str,
+    value: &str,
+) -> Result<()> {
     let mut process = Command::new(&command.program);
     if let Some(prepend_arg) = &command.prepend_arg {
         process.arg(prepend_arg);
@@ -363,7 +375,10 @@ impl TrustValueSource {
     }
 
     fn should_record_in_config(self) -> bool {
-        matches!(self, TrustValueSource::Computed | TrustValueSource::Original)
+        matches!(
+            self,
+            TrustValueSource::Computed | TrustValueSource::Original
+        )
     }
 }
 
@@ -381,7 +396,9 @@ fn compute_vbmeta_public_key_digest(slot_suffix: &str, device_locked: bool) -> R
 fn find_top_level_vbmeta_path(slot_suffix: &str) -> Result<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if !slot_suffix.is_empty() {
-        candidates.push(PathBuf::from(format!("/dev/block/by-name/vbmeta{slot_suffix}")));
+        candidates.push(PathBuf::from(format!(
+            "/dev/block/by-name/vbmeta{slot_suffix}"
+        )));
         candidates.push(PathBuf::from(format!(
             "/dev/block/bootdevice/by-name/vbmeta{slot_suffix}"
         )));
@@ -421,13 +438,14 @@ fn load_vbmeta_blob(path: &Path) -> Result<Vec<u8>> {
 
     let mut blob = vec![0u8; total_size];
     blob[..AVB_HEADER_SIZE].copy_from_slice(&header);
-    file.read_exact(&mut blob[AVB_HEADER_SIZE..]).with_context(|| {
-        format!(
-            "failed to read {} bytes of vbmeta data from {}",
-            total_size - AVB_HEADER_SIZE,
-            path.display()
-        )
-    })?;
+    file.read_exact(&mut blob[AVB_HEADER_SIZE..])
+        .with_context(|| {
+            format!(
+                "failed to read {} bytes of vbmeta data from {}",
+                total_size - AVB_HEADER_SIZE,
+                path.display()
+            )
+        })?;
     Ok(blob)
 }
 
@@ -477,7 +495,8 @@ fn be_u64(bytes: &[u8]) -> Result<usize> {
 fn probe_original_verified_boot_hash_with_timeout(timeout: Duration) -> Result<[u8; 32]> {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = probe_original_verified_boot_hash_inner().map_err(|error| format!("{error:#}"));
+        let result =
+            probe_original_verified_boot_hash_inner().map_err(|error| format!("{error:#}"));
         let _ = sender.send(result);
     });
 
@@ -619,7 +638,9 @@ fn extract_verified_boot_hash_from_authorization_list(mut bytes: &[u8]) -> Resul
         }
     }
 
-    Err(anyhow!("RootOfTrust tag 704 missing from authorization list"))
+    Err(anyhow!(
+        "RootOfTrust tag 704 missing from authorization list"
+    ))
 }
 
 fn extract_verified_boot_hash_from_root_of_trust(bytes: &[u8]) -> Result<[u8; 32]> {
@@ -814,7 +835,11 @@ mod tests {
         assert!(!TrustValueSource::Property.needs_sysprop_write());
     }
 
-    fn build_test_vbmeta(public_key: &[u8], auth_block_size: usize, aux_block_size: usize) -> Vec<u8> {
+    fn build_test_vbmeta(
+        public_key: &[u8],
+        auth_block_size: usize,
+        aux_block_size: usize,
+    ) -> Vec<u8> {
         let total_size = AVB_HEADER_SIZE + auth_block_size + aux_block_size;
         let mut blob = vec![0u8; total_size];
         blob[..4].copy_from_slice(b"AVB0");

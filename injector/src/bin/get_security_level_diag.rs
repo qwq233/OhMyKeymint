@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rsbinder::{hub, Interface, SIBinder, Status, Strong};
+use rsbinder::{hub, SIBinder, Status, Strong};
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
 
