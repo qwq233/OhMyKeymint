@@ -144,21 +144,31 @@ pub struct SigningKeyType {
     pub algo_hint: SigningAlgorithm,
 }
 
+/// Atomic snapshot of the device attestation signing state for one request.
+#[derive(Clone)]
+pub struct SigningInfoSnapshot {
+    /// Signing key material used for the current request.
+    pub signing_key: KeyMaterial,
+    /// Certificate chain associated with `signing_key`.
+    pub cert_chain: Vec<keymint::Certificate>,
+    /// Identity digest that the signing material was loaded from.
+    pub identity_digest: [u8; 32],
+}
+
 /// Retrieval of attestation certificate signing information.  The caller is expected to drop key
 /// material after use, but may cache public key material.
 pub trait RetrieveCertSigningInfo {
-    /// Return the signing key material for the specified `key_type`.  The `algo_hint` parameter
-    /// indicates what is going to be signed, to allow implementations to (optionally) use EC / RSA
-    /// signing keys for EC /RSA keys respectively.
-    fn signing_key(&self, key_type: SigningKeyType) -> Result<KeyMaterial, Error>;
-
-    /// Return the certificate chain associated with the specified signing key, where:
-    /// - `chain[0]` holds the public key that corresponds to `signing_key`, and which is signed
-    ///   by...
-    /// - the keypair described by the second entry `chain[1]`, which in turn is signed by...
+    /// Return a consistent signing snapshot for the specified `key_type`.  The `algo_hint`
+    /// parameter indicates what is going to be signed, to allow implementations to (optionally)
+    /// use EC / RSA signing keys for EC /RSA keys respectively.
+    ///
+    /// The returned `cert_chain` must satisfy:
+    /// - `cert_chain[0]` holds the public key that corresponds to `signing_key`, and which is
+    ///   signed by...
+    /// - the keypair described by the second entry `cert_chain[1]`, which in turn is signed by...
     /// - ...
     /// - the final certificate in the chain should be a self-signed cert holding a Google root.
-    fn cert_chain(&self, key_type: SigningKeyType) -> Result<Vec<keymint::Certificate>, Error>;
+    fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error>;
 }
 
 /// Retrieval of attestation ID information.  This information will not change (so the caller can
@@ -363,11 +373,7 @@ impl RetrieveKeyMaterial for NoOpRetrieveKeyMaterial {
 /// Stub implementation of [`RetrieveCertSigningInfo`].
 pub struct NoOpRetrieveCertSigningInfo;
 impl RetrieveCertSigningInfo for NoOpRetrieveCertSigningInfo {
-    fn signing_key(&self, _key_type: SigningKeyType) -> Result<KeyMaterial, Error> {
-        unimpl!();
-    }
-
-    fn cert_chain(&self, _key_type: SigningKeyType) -> Result<Vec<keymint::Certificate>, Error> {
+    fn signing_info(&self, _key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error> {
         unimpl!();
     }
 }

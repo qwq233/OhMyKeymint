@@ -112,6 +112,22 @@ impl crate::KeyMintTa {
         self.attestation_chain_info.borrow_mut().clear();
     }
 
+    fn build_attestation_chain_info(
+        chain: &[keymint::Certificate],
+        identity_digest: [u8; 32],
+    ) -> Result<AttestationChainInfo, Error> {
+        let issuer = cert::extract_subject(
+            chain
+                .first()
+                .ok_or_else(|| km_err!(KeymintNotConfigured, "empty attestation chain"))?,
+        )?;
+        Ok(AttestationChainInfo {
+            chain: chain.to_vec(),
+            issuer,
+            identity_digest,
+        })
+    }
+
     /// Retrieve the signing information.
     pub(crate) fn get_signing_info(
         &self,
@@ -123,22 +139,28 @@ impl crate::KeyMintTa {
                 "batch attestation keys not available"
             )
         })?;
-        // The certificate chain is cached, but keybox rotation explicitly clears the cache.
+        let snapshot = sign_info.signing_info(key_type)?;
+        // The certificate chain is cached, but keybox rotation explicitly clears the cache and
+        // the cache is also invalidated if the keybox identity digest changes.
         let mut attestation_chain_info = self.attestation_chain_info.borrow_mut();
         let chain_info = match attestation_chain_info.entry(key_type) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                let chain = sign_info.cert_chain(key_type)?;
-                let issuer =
-                    cert::extract_subject(chain.first().ok_or_else(|| {
-                        km_err!(KeymintNotConfigured, "empty attestation chain")
-                    })?)?;
-                entry.insert(AttestationChainInfo { chain, issuer })
+            Entry::Occupied(mut entry) => {
+                if entry.get().identity_digest != snapshot.identity_digest {
+                    let refreshed = Self::build_attestation_chain_info(
+                        &snapshot.cert_chain,
+                        snapshot.identity_digest,
+                    )?;
+                    entry.insert(refreshed);
+                    entry.into_mut()
+                } else {
+                    entry.into_mut()
+                }
             }
+            Entry::Vacant(entry) => entry.insert(Self::build_attestation_chain_info(
+                &snapshot.cert_chain,
+                snapshot.identity_digest,
+            )?),
         };
-
-        // Retrieve the signing key information (which will be dropped when signing is done).
-        let signing_key = sign_info.signing_key(key_type)?;
 
         log::info!(
             "using attestation key with subject {:?}",
@@ -147,7 +169,7 @@ impl crate::KeyMintTa {
 
         Ok(SigningInfo {
             attestation_info: None,
-            signing_key,
+            signing_key: snapshot.signing_key,
             issuer_subject: chain_info.issuer.clone(),
             chain: chain_info.chain.clone(),
         })

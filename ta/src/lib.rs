@@ -91,11 +91,13 @@ struct UseCount {
 
 /// Attestation chain information.
 struct AttestationChainInfo {
-    /// Chain of certificates from intermediate to root.
+    /// Chain of certificates associated with the current attestation signing key.
     chain: Vec<keymint::Certificate>,
     /// Subject field from the first certificate in the chain, as an ASN.1 DER encoded `Name` (cf
     /// RFC 5280 s4.1.2.4).
     issuer: Vec<u8>,
+    /// Keybox identity digest that this chain was derived from.
+    identity_digest: [u8; 32],
 }
 
 unsafe impl Send for KeyMintTa {}

@@ -13,7 +13,9 @@ use kmr_common::{
     Error,
 };
 use kmr_crypto_boring::{ec::BoringEc, rsa::BoringRsa, sha256::BoringSha256};
-use kmr_ta::device::{RetrieveCertSigningInfo, SigningAlgorithm, SigningKeyType};
+use kmr_ta::device::{
+    RetrieveCertSigningInfo, SigningAlgorithm, SigningInfoSnapshot, SigningKeyType,
+};
 use kmr_wire::keymint;
 use log::{debug, error, info, warn};
 use regex::Regex;
@@ -175,6 +177,19 @@ impl KeyBox {
 
     pub fn identity_digest(&self) -> [u8; 32] {
         self.identity_digest
+    }
+
+    fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error> {
+        let (signing_key, cert_chain) = match key_type.algo_hint {
+            SigningAlgorithm::Rsa => (&self.rsa_info.key, &self.rsa_info.chain),
+            SigningAlgorithm::Ec => (&self.ec_info.key, &self.ec_info.chain),
+        };
+
+        Ok(SigningInfoSnapshot {
+            signing_key: signing_key.clone(),
+            cert_chain: cert_chain.clone(),
+            identity_digest: self.identity_digest,
+        })
     }
 
     pub fn update_rsa_keybox(
@@ -467,9 +482,15 @@ pub fn ensure_keybox_file(path: &str) -> Result<()> {
 }
 
 fn install_keybox(new_keybox: KeyBox) -> bool {
-    let mut keybox = KEYBOX.write().unwrap();
-    let changed = keybox.identity_digest() != new_keybox.identity_digest();
-    *keybox = new_keybox;
+    let changed = {
+        let mut keybox = KEYBOX.write().unwrap();
+        let changed = keybox.identity_digest() != new_keybox.identity_digest();
+        *keybox = new_keybox;
+        changed
+    };
+    if changed {
+        crate::keymaster::keymint_device::clear_initialized_attestation_caches();
+    }
     changed
 }
 
@@ -555,30 +576,18 @@ pub fn current_identity_digest() -> [u8; 32] {
 pub struct KeyboxManager;
 
 impl RetrieveCertSigningInfo for KeyboxManager {
-    fn signing_key(&self, key_type: SigningKeyType) -> Result<KeyMaterial, Error> {
+    fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error> {
         let keybox = KEYBOX
             .read()
             .map_err(|_| kmr_common::km_err!(UnknownError, "failed to lock KEYBOX"))?;
-        Ok(match key_type.algo_hint {
-            SigningAlgorithm::Rsa => keybox.rsa_info.key.clone(),
-            SigningAlgorithm::Ec => keybox.ec_info.key.clone(),
-        })
-    }
-
-    fn cert_chain(&self, key_type: SigningKeyType) -> Result<Vec<keymint::Certificate>, Error> {
-        let keybox = KEYBOX
-            .read()
-            .map_err(|_| kmr_common::km_err!(UnknownError, "failed to lock KEYBOX"))?;
-        Ok(match key_type.algo_hint {
-            SigningAlgorithm::Rsa => keybox.rsa_info.chain.clone(),
-            SigningAlgorithm::Ec => keybox.ec_info.chain.clone(),
-        })
+        keybox.signing_info(key_type)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kmr_ta::device::SigningKey;
 
     fn write_temp_keybox(name: &str, contents: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
@@ -616,6 +625,39 @@ mod tests {
         let ec_cert = encode_pem_block("CERTIFICATE", &keybox.ec_info.chain[0].encoded_certificate);
         let modified_xml = BUNDLED_KEYBOX_XML.replacen(&rsa_cert, &ec_cert, 1);
         assert!(KeyBox::from_xml_str(&modified_xml).is_err());
+    }
+
+    #[test]
+    fn signing_snapshot_keeps_key_chain_and_digest_in_sync() {
+        let keybox = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
+
+        let rsa_snapshot = keybox
+            .signing_info(SigningKeyType {
+                which: SigningKey::Batch,
+                algo_hint: SigningAlgorithm::Rsa,
+            })
+            .unwrap();
+        assert_eq!(rsa_snapshot.identity_digest, keybox.identity_digest());
+        validate_chain_matches_key(
+            &rsa_snapshot.signing_key,
+            &rsa_snapshot.cert_chain,
+            KeyAlgorithm::Rsa,
+        )
+        .unwrap();
+
+        let ec_snapshot = keybox
+            .signing_info(SigningKeyType {
+                which: SigningKey::Batch,
+                algo_hint: SigningAlgorithm::Ec,
+            })
+            .unwrap();
+        assert_eq!(ec_snapshot.identity_digest, keybox.identity_digest());
+        validate_chain_matches_key(
+            &ec_snapshot.signing_key,
+            &ec_snapshot.cert_chain,
+            KeyAlgorithm::Ec,
+        )
+        .unwrap();
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
-use der::Decode;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use der::{Decode, Reader, SliceReader};
 use hex::encode as hex_encode;
 use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::sha256::BoringSha256;
@@ -81,6 +82,8 @@ fn run() -> Result<()> {
         "attested app key generated: alias={} issuer={} chain_sha256={}",
         alias, attestation_issuer, attestation_digest
     );
+    print_pem_chain("generated_attestation", &attested)
+        .context("failed to print generated attestation chain")?;
 
     let fetched = service
         .getKeyEntry(&app_key)
@@ -97,6 +100,8 @@ fn run() -> Result<()> {
         ));
     }
     println!("getKeyEntry matched generated attestation chain");
+    print_pem_chain("fetched_attestation", &fetched.metadata)
+        .context("failed to print fetched attestation chain")?;
 
     service
         .deleteKey(&app_key)
@@ -324,6 +329,56 @@ fn leaf_issuer_cn(metadata: &KeyMetadata) -> Result<String> {
         .context("missing attestation leaf certificate")?;
     let leaf = Certificate::from_der(leaf).context("failed to parse attestation leaf")?;
     Ok(format!("{:?}", leaf.tbs_certificate.issuer))
+}
+
+fn collect_chain_der(metadata: &KeyMetadata) -> Result<Vec<Vec<u8>>> {
+    let mut certs = Vec::new();
+    certs.push(
+        metadata
+            .certificate
+            .as_ref()
+            .context("missing attestation leaf certificate")?
+            .clone(),
+    );
+
+    let mut remaining = metadata.certificateChain.as_deref().unwrap_or_default();
+    while !remaining.is_empty() {
+        let mut reader =
+            SliceReader::new(remaining).context("failed to create DER reader for chain bytes")?;
+        let _ = Certificate::decode(&mut reader).context("failed to decode chain certificate")?;
+        let remaining_len = usize::try_from(reader.remaining_len())
+            .context("failed to convert DER remaining length to usize")?;
+        let consumed = remaining
+            .len()
+            .checked_sub(remaining_len)
+            .context("chain reader consumed more data than available")?;
+        certs.push(remaining[..consumed].to_vec());
+        remaining = &remaining[consumed..];
+    }
+
+    Ok(certs)
+}
+
+fn print_pem_chain(label: &str, metadata: &KeyMetadata) -> Result<()> {
+    let certs = collect_chain_der(metadata)?;
+    println!("{label}_cert_count={}", certs.len());
+    for (index, cert_der) in certs.iter().enumerate() {
+        println!("{label}_cert_{index}_begin");
+        println!("{}", encode_pem(cert_der));
+        println!("{label}_cert_{index}_end");
+    }
+    Ok(())
+}
+
+fn encode_pem(cert_der: &[u8]) -> String {
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    let base64 = STANDARD.encode(cert_der);
+    for chunk in base64.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(chunk).expect("base64 is valid UTF-8"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----");
+    pem
 }
 
 #[allow(dead_code)]

@@ -11,12 +11,12 @@ const GET_DEVICE_ID_FOR_PHONE_TRANSACTION: u32 = 4;
 const GET_IMEI_FOR_SLOT_TRANSACTION: u32 = 148;
 const GET_MEID_FOR_SLOT_TRANSACTION: u32 = 151;
 const CALLING_PACKAGE: &str = "android";
-const SHELL_CALLING_PACKAGE: &str = "com.android.shell";
 const CALLING_FEATURE: &str = "omk";
 const PHONE_SERVICE: &str = "phone";
 const SU_BINARY: &str = "/system/bin/su";
+const SYSTEM_TELEPHONY_HELPER_UID: &str = "1000";
 const TELEPHONY_PROBE_ARG: &str = "--omk-telephony-probe";
-const SHELL_TELEPHONY_HELPER_PATH: &str = "/data/local/tmp/omk_telephony_probe";
+const TELEPHONY_HELPER_PATH: &str = "/data/local/tmp/omk_telephony_probe";
 
 const IMEI_PROPERTIES: &[&str] = &[
     "ro.ril.oem.imei",
@@ -68,26 +68,22 @@ pub fn maybe_run_telephony_probe_command() -> Result<bool> {
     rsbinder::ProcessState::init_default();
 
     for slot in [0_i32, 1_i32] {
-        if let Some(value) = probe_phone_identifier_via_binder(
-            slot,
-            GET_IMEI_FOR_SLOT_TRANSACTION,
-            SHELL_CALLING_PACKAGE,
-        )? {
-            println!("imei\t{slot}\t{}", value.trim());
-        }
+        emit_telephony_probe_result("imei", slot, GET_IMEI_FOR_SLOT_TRANSACTION);
     }
 
     for slot in [0_i32, 1_i32] {
-        if let Some(value) = probe_phone_identifier_via_binder(
-            slot,
-            GET_MEID_FOR_SLOT_TRANSACTION,
-            SHELL_CALLING_PACKAGE,
-        )? {
-            println!("meid\t{slot}\t{}", value.trim());
-        }
+        emit_telephony_probe_result("meid", slot, GET_MEID_FOR_SLOT_TRANSACTION);
     }
 
     Ok(true)
+}
+
+fn emit_telephony_probe_result(kind: &str, slot: i32, transaction: u32) {
+    match probe_phone_identifier_via_binder(slot, transaction, CALLING_PACKAGE) {
+        Ok(Some(value)) => println!("{kind}\t{slot}\t{}", value.trim()),
+        Ok(None) => eprintln!("Telephony probe returned no {kind} for slot {slot}"),
+        Err(error) => eprintln!("Telephony probe skipped {kind} for slot {slot}: {error:#}"),
+    }
 }
 
 pub fn bootstrap_device_ids(config_file: &mut ConfigFile) {
@@ -364,6 +360,7 @@ fn log_device_id_state(device: &DeviceProperty, label: &str) {
     );
 }
 
+#[cfg(target_os = "android")]
 fn probe_telephony_api_candidates() -> Vec<IdentifierCandidate> {
     match invoke_shell_telephony_probe() {
         Ok(output) => parse_shell_telephony_probe_output(&output),
@@ -379,6 +376,7 @@ fn probe_telephony_api_candidates() -> Vec<IdentifierCandidate> {
     Vec::new()
 }
 
+#[cfg(target_os = "android")]
 fn probe_device_id_candidates() -> Vec<IdentifierCandidate> {
     let mut candidates = Vec::new();
 
@@ -485,7 +483,7 @@ fn invoke_shell_telephony_probe() -> Result<String> {
     let helper_path = prepare_shell_accessible_helper()?;
     let helper_command = format!("{} {}", helper_path.display(), TELEPHONY_PROBE_ARG);
     let output = Command::new(SU_BINARY)
-        .arg("2000")
+        .arg(SYSTEM_TELEPHONY_HELPER_UID)
         .arg("-c")
         .arg(&helper_command)
         .output()
@@ -512,7 +510,7 @@ fn invoke_shell_telephony_probe() -> Result<String> {
 
 fn prepare_shell_accessible_helper() -> Result<std::path::PathBuf> {
     let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let helper_path = std::path::PathBuf::from(SHELL_TELEPHONY_HELPER_PATH);
+    let helper_path = std::path::PathBuf::from(TELEPHONY_HELPER_PATH);
 
     fs::copy(&current_exe, &helper_path).with_context(|| {
         format!(
@@ -684,6 +682,13 @@ mod tests {
     }
 
     #[test]
+    fn telephony_probe_helper_uses_system_android_identity() {
+        assert_eq!(SYSTEM_TELEPHONY_HELPER_UID, "1000");
+        assert_eq!(CALLING_PACKAGE, "android");
+        assert_eq!(CALLING_FEATURE, "omk");
+    }
+
+    #[test]
     fn telephony_candidates_fill_distinct_imeis_and_meid() {
         let mut device = empty_device();
         let candidates = vec![
@@ -741,6 +746,62 @@ mod tests {
         assert_eq!(device.meid, "A1000000000001");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].field, "device.imei2");
+    }
+
+    #[test]
+    fn empty_telephony_result_still_falls_through_to_property_candidate() {
+        let mut device = empty_device();
+        let telephony_candidates = Vec::new();
+        let property_candidates = vec![IdentifierCandidate {
+            kind: IdentifierKind::Imei,
+            value: "355231937352445".to_string(),
+            source: "persist.vendor.radio.imei1".to_string(),
+        }];
+
+        let telephony_events = apply_telephony_candidates(&mut device, &telephony_candidates);
+        let property_events = apply_telephony_candidates(&mut device, &property_candidates);
+
+        assert!(telephony_events.is_empty());
+        assert_eq!(property_events.len(), 1);
+        assert_eq!(device.imei, "355231937352445");
+        assert_eq!(property_events[0].source, "persist.vendor.radio.imei1");
+    }
+
+    #[test]
+    fn property_failure_still_falls_through_to_generic_device_id_candidate() {
+        let mut device = empty_device();
+        let telephony_candidates = Vec::new();
+        let property_candidates = Vec::new();
+        let device_id_candidates = vec![IdentifierCandidate {
+            kind: IdentifierKind::Meid,
+            value: "A100000927F62B".to_string(),
+            source: "device id slot 0".to_string(),
+        }];
+
+        apply_telephony_candidates(&mut device, &telephony_candidates);
+        let property_events = apply_telephony_candidates(&mut device, &property_candidates);
+        let device_id_events = apply_telephony_candidates(&mut device, &device_id_candidates);
+
+        assert!(property_events.is_empty());
+        assert_eq!(device_id_events.len(), 1);
+        assert_eq!(device.meid, "A100000927F62B");
+        assert_eq!(device_id_events[0].source, "device id slot 0");
+    }
+
+    #[test]
+    fn field_stays_empty_only_after_all_three_sources_fail() {
+        let mut device = empty_device();
+
+        let telephony_events = apply_telephony_candidates(&mut device, &[]);
+        let property_events = apply_telephony_candidates(&mut device, &[]);
+        let device_id_events = apply_telephony_candidates(&mut device, &[]);
+
+        assert!(telephony_events.is_empty());
+        assert!(property_events.is_empty());
+        assert!(device_id_events.is_empty());
+        assert!(device.imei.is_empty());
+        assert!(device.imei2.is_empty());
+        assert!(device.meid.is_empty());
     }
 
     #[test]

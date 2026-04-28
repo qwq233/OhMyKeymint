@@ -91,7 +91,7 @@ fi
 [ -f "$BINDIR/inject" ] || abort "! Missing $BINDIR/inject"
 chmod 755 "$BINDIR/keymint" "$BINDIR/inject"
 
-CONFIG_DIR=/data/adb/oh_my_keymint
+CONFIG_DIR=/data/adb/omk
 mkdir -p "$CONFIG_DIR"
 rm -f "$CONFIG_DIR/restart.keymint" "$CONFIG_DIR/restart.injector" "$CONFIG_DIR/restart.all" \
   "$CONFIG_DIR/restart.all.keymint" "$CONFIG_DIR/restart.all.injector"
@@ -103,4 +103,8 @@ elif command -v ksud >/dev/null 2>&1; then
   ksud resetprop persist.sys.omk.restart.keymint ""
   ksud resetprop persist.sys.omk.restart.injector ""
   ksud resetprop persist.sys.omk.restart.all ""
+fi
+
+if [ -f "/data/adb/omkdata" ]; then
+  ln -s /data/misc/keystore/omk "/data/adb/omkdata"
 fi

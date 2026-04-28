@@ -1382,6 +1382,24 @@ pub fn reset_initialized_keymint_wrappers() -> Result<()> {
     Ok(())
 }
 
+pub fn clear_initialized_attestation_caches() {
+    if let Some(wrapper) = KM_WRAPPER_TEE.get() {
+        let keymint = KeyMintWrapper {
+            security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
+            inner: wrapper.clone(),
+        };
+        keymint.clear_attestation_cache();
+    }
+
+    if let Some(wrapper) = KM_WRAPPER_STRONGBOX.get() {
+        let keymint = KeyMintWrapper {
+            security_level: SecurityLevel::STRONGBOX,
+            inner: wrapper.clone(),
+        };
+        keymint.clear_attestation_cache();
+    }
+}
+
 fn shared_keymint_wrapper_inner(security_level: SecurityLevel) -> Result<Arc<KeyMintWrapperInner>> {
     match security_level {
         SecurityLevel::STRONGBOX => KM_WRAPPER_STRONGBOX
