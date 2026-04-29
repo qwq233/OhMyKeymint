@@ -17,6 +17,12 @@ const PATTERN: &str = "{d(%Y-%m-%d %H:%M:%S %Z)(utc)} [{h({l})}] {M} - {m}{n}";
 
 static LOGGER_INIT: OnceLock<()> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy)]
+enum LoggerInitMode {
+    Configured,
+    Fixed(LevelFilter),
+}
+
 #[derive(Debug)]
 struct LockedFileAppender {
     path: PathBuf,
@@ -88,21 +94,35 @@ impl Drop for FileLockGuard {
 
 pub fn init_logger() {
     let _ = LOGGER_INIT.get_or_init(|| {
-        if let Err(error) = init_logger_inner() {
+        if let Err(error) = init_logger_inner(LoggerInitMode::Configured) {
             eprintln!("[Injector][Logger] failed to initialize logger: {error:#}");
         }
     });
 }
 
-fn init_logger_inner() -> anyhow::Result<()> {
-    let injector_config = crate::config::get();
-    let configured_level = injector_config.main.log_level_filter();
-    if crate::config::parse_level_filter(&injector_config.main.log_level).is_none() {
-        eprintln!(
-            "[Injector][Logger] unknown log level '{}', falling back to debug",
-            injector_config.main.log_level
-        );
-    }
+pub fn init_logger_fallback(level: LevelFilter) {
+    let _ = LOGGER_INIT.get_or_init(|| {
+        if let Err(error) = init_logger_inner(LoggerInitMode::Fixed(level)) {
+            eprintln!("[Injector][Logger] failed to initialize logger: {error:#}");
+        }
+    });
+}
+
+fn init_logger_inner(mode: LoggerInitMode) -> anyhow::Result<()> {
+    let configured_level = match mode {
+        LoggerInitMode::Configured => {
+            let injector_config = crate::config::get();
+            let configured_level = injector_config.main.log_level_filter();
+            if crate::config::parse_level_filter(&injector_config.main.log_level).is_none() {
+                eprintln!(
+                    "[Injector][Logger] unknown log level '{}', falling back to debug",
+                    injector_config.main.log_level
+                );
+            }
+            configured_level
+        }
+        LoggerInitMode::Fixed(level) => level,
+    };
 
     let (config, file_logging_ready) = build_log4rs_config(LevelFilter::Trace)?;
 
@@ -124,6 +144,13 @@ fn init_logger_inner() -> anyhow::Result<()> {
             "[Injector][Logger] file logging enabled at {} with level {:?}",
             DEFAULT_LOG_PATH,
             configured_level
+        );
+    }
+
+    if let LoggerInitMode::Fixed(level) = mode {
+        log::info!(
+            "[Injector][Logger] initialized fallback logger with fixed level {:?}",
+            level
         );
     }
 

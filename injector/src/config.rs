@@ -11,6 +11,8 @@ use std::time::{Duration, SystemTime};
 
 pub const DEFAULT_CONFIG_PATH: &str = "/data/misc/keystore/omk/injector.toml";
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
+const REPLACE_SAVE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const REPLACE_SAVE_RETRY_LIMIT: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct InjectorConfig {
@@ -155,6 +157,26 @@ enum LoadError {
     Parse(String),
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum LoadContext {
+    Startup,
+    Reload(ReloadTrigger),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ReloadTrigger {
+    CloseWrite,
+    ReplaceSave,
+    Polling,
+    Overflow,
+}
+
+#[derive(Debug)]
+struct LoadedConfig {
+    config: InjectorConfig,
+    retries: usize,
+}
+
 #[derive(Deserialize)]
 struct ScoopHeaderValue {
     package: String,
@@ -171,6 +193,52 @@ struct WritableConfig<'a> {
 static CONFIG: OnceLock<RwLock<InjectorConfig>> = OnceLock::new();
 static WATCHER_STARTED: OnceLock<()> = OnceLock::new();
 
+impl LoadContext {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Reload(trigger) => trigger.label(),
+        }
+    }
+}
+
+impl ReloadTrigger {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CloseWrite => "close-write",
+            Self::ReplaceSave => "replace-save",
+            Self::Polling => "polling",
+            Self::Overflow => "overflow",
+        }
+    }
+
+    fn should_retry_reads(self) -> bool {
+        matches!(self, Self::ReplaceSave | Self::Polling)
+    }
+
+    fn priority(self) -> u8 {
+        match self {
+            Self::CloseWrite => 0,
+            Self::Overflow => 1,
+            Self::ReplaceSave => 2,
+            Self::Polling => 3,
+        }
+    }
+
+    fn from_inotify_mask(mask: u32) -> Option<Self> {
+        if (mask & libc::IN_Q_OVERFLOW) != 0 {
+            return Some(Self::Overflow);
+        }
+        if (mask & (libc::IN_CREATE | libc::IN_MOVED_TO)) != 0 {
+            return Some(Self::ReplaceSave);
+        }
+        if (mask & libc::IN_CLOSE_WRITE) != 0 {
+            return Some(Self::CloseWrite);
+        }
+        None
+    }
+}
+
 pub fn get() -> InjectorConfig {
     ensure_initialized();
     CONFIG
@@ -183,7 +251,7 @@ pub fn get() -> InjectorConfig {
 
 fn ensure_initialized() {
     let path = config_path();
-    CONFIG.get_or_init(|| RwLock::new(load_or_seed(&path)));
+    CONFIG.get_or_init(|| RwLock::new(load_or_seed(&path, LoadContext::Startup)));
     WATCHER_STARTED.get_or_init(|| start_watcher(path));
 }
 
@@ -201,33 +269,52 @@ fn load_from_path(path: &Path) -> Result<InjectorConfig, LoadError> {
     }
 }
 
-fn load_or_seed(path: &Path) -> InjectorConfig {
-    match load_from_path(path) {
-        Ok(config) => {
-            log::info!("[Injector][Config] loaded config from {}", path.display());
-            config
+fn load_with_context(path: &Path, context: LoadContext) -> Result<LoadedConfig, LoadError> {
+    match context {
+        LoadContext::Reload(trigger) if trigger.should_retry_reads() => {
+            retry_read_load(path, context, load_from_path, thread::sleep)
         }
-        Err(LoadError::Missing(error)) => {
-            log::warn!(
-                "[Injector][Config] failed to read {}: {}; writing defaults",
-                path.display(),
-                error
-            );
-            let config = InjectorConfig::default();
-            if let Err(write_error) = write_config(path, &config) {
-                log::error!(
-                    "[Injector][Config] failed to write default config to {}: {}",
+        _ => load_from_path(path).map(|config| LoadedConfig { config, retries: 0 }),
+    }
+}
+
+fn load_or_seed(path: &Path, context: LoadContext) -> InjectorConfig {
+    match load_with_context(path, context) {
+        Ok(loaded) => {
+            if loaded.retries > 0 {
+                log::info!(
+                    "[Injector][Config] {} load from {} succeeded after {} retr{}",
+                    context.label(),
                     path.display(),
-                    write_error
+                    loaded.retries,
+                    if loaded.retries == 1 { "y" } else { "ies" }
                 );
             }
-            config
+            if matches!(context, LoadContext::Startup) {
+                log::info!(
+                    "[Injector][Config] loaded config from {} via {}",
+                    path.display(),
+                    context.label()
+                );
+            }
+            loaded.config
+        }
+        Err(LoadError::Missing(error)) => {
+            let reason = format!("failed to read config: {error}");
+            log::warn!(
+                "[Injector][Config] {} via {} {}; restoring current config",
+                path.display(),
+                context.label(),
+                reason
+            );
+            recover_broken_config(path, &reason)
         }
         Err(LoadError::Read(error)) => {
             let reason = format!("failed to read config: {error}");
             log::warn!(
-                "[Injector][Config] {} {}; rewriting defaults",
+                "[Injector][Config] {} via {} {}; restoring current config",
                 path.display(),
+                context.label(),
                 reason
             );
             recover_broken_config(path, &reason)
@@ -235,8 +322,9 @@ fn load_or_seed(path: &Path) -> InjectorConfig {
         Err(LoadError::Parse(error)) => {
             let reason = format!("failed to parse config: {error}");
             log::warn!(
-                "[Injector][Config] {} {}; rewriting defaults",
+                "[Injector][Config] {} via {} {}; restoring current config",
                 path.display(),
+                context.label(),
                 reason
             );
             recover_broken_config(path, &reason)
@@ -255,15 +343,31 @@ fn recover_broken_config(path: &Path, reason: &str) -> InjectorConfig {
         }
     }
 
-    let config = InjectorConfig::default();
-    if let Err(write_error) = write_config(path, &config) {
+    let replacement = current_config_snapshot();
+    if let Err(write_error) = write_config(path, &replacement) {
         log::error!(
-            "[Injector][Config] failed to write default config to {}: {}",
+            "[Injector][Config] failed to write replacement config to {}: {}",
             path.display(),
             write_error
         );
     }
-    config
+    replacement
+}
+
+fn current_config_snapshot() -> InjectorConfig {
+    match CONFIG.get() {
+        Some(lock) => match lock.read() {
+            Ok(config) => config.clone(),
+            Err(error) => {
+                log::error!(
+                    "[Injector][Config] config lock poisoned while snapshotting current config: {}",
+                    error
+                );
+                InjectorConfig::default()
+            }
+        },
+        None => InjectorConfig::default(),
+    }
 }
 
 fn write_config(path: &Path, config: &InjectorConfig) -> io::Result<()> {
@@ -488,7 +592,7 @@ fn watch_loop_polling(path: PathBuf) {
         }
         last_seen = current;
 
-        reload_runtime_config(&path);
+        reload_runtime_config(&path, ReloadTrigger::Polling);
     }
 }
 
@@ -514,13 +618,10 @@ fn watch_loop_inotify(path: &Path) -> io::Result<()> {
             format!("config path contains NUL byte: {}", parent.display()),
         )
     })?;
-    let watch_mask = libc::IN_ATTRIB
-        | libc::IN_CLOSE_WRITE
-        | libc::IN_CREATE
-        | libc::IN_DELETE
-        | libc::IN_MOVED_FROM
-        | libc::IN_MOVED_TO
-        | libc::IN_Q_OVERFLOW;
+    // Pure metadata-only churn should not trigger a live reload. Content-bearing
+    // events already cover both in-place writes and temp-file rename saves.
+    let watch_mask =
+        libc::IN_CLOSE_WRITE | libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_Q_OVERFLOW;
 
     let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
     if fd < 0 {
@@ -552,7 +653,7 @@ fn watch_loop_inotify(path: &Path) -> io::Result<()> {
             return Err(error);
         }
 
-        let mut reload = false;
+        let mut reload_trigger: Option<ReloadTrigger> = None;
         let mut offset = 0usize;
         while offset < read as usize {
             let event = unsafe { &*(buffer[offset..].as_ptr() as *const libc::inotify_event) };
@@ -564,27 +665,40 @@ fn watch_loop_inotify(path: &Path) -> io::Result<()> {
                 .next()
                 .unwrap_or_default();
 
-            if (event.mask & libc::IN_Q_OVERFLOW) != 0 || name == watched_name.as_slice() {
-                reload = true;
+            let matches_name =
+                (event.mask & libc::IN_Q_OVERFLOW) != 0 || name == watched_name.as_slice();
+            if matches_name {
+                if let Some(candidate) = ReloadTrigger::from_inotify_mask(event.mask) {
+                    reload_trigger = match reload_trigger {
+                        Some(current) if current.priority() <= candidate.priority() => {
+                            Some(current)
+                        }
+                        _ => Some(candidate),
+                    };
+                }
             }
 
             offset += std::mem::size_of::<libc::inotify_event>() + event.len as usize;
         }
 
-        if reload {
-            reload_runtime_config(path);
+        if let Some(trigger) = reload_trigger {
+            reload_runtime_config(path, trigger);
         }
     }
 }
 
-fn reload_runtime_config(path: &Path) {
-    let config = load_or_seed(path);
+fn reload_runtime_config(path: &Path, trigger: ReloadTrigger) {
+    let config = load_or_seed(path, LoadContext::Reload(trigger));
     if let Some(lock) = CONFIG.get() {
         match lock.write() {
             Ok(mut guard) => {
                 *guard = config.clone();
                 crate::logging::update_runtime_level(config.main.log_level_filter());
-                log::info!("[Injector][Config] reloaded config from {}", path.display());
+                log::info!(
+                    "[Injector][Config] reloaded config from {} via {}",
+                    path.display(),
+                    trigger.label()
+                );
             }
             Err(error) => {
                 log::error!(
@@ -592,6 +706,60 @@ fn reload_runtime_config(path: &Path) {
                     path.display(),
                     error
                 );
+            }
+        }
+    }
+}
+
+fn retry_read_load<F, S>(
+    path: &Path,
+    context: LoadContext,
+    mut loader: F,
+    mut sleeper: S,
+) -> Result<LoadedConfig, LoadError>
+where
+    F: FnMut(&Path) -> Result<InjectorConfig, LoadError>,
+    S: FnMut(Duration),
+{
+    let mut retries = 0usize;
+
+    loop {
+        match loader(path) {
+            Ok(config) => {
+                return Ok(LoadedConfig { config, retries });
+            }
+            Err(LoadError::Parse(error)) => return Err(LoadError::Parse(error)),
+            Err(LoadError::Missing(error)) => {
+                if retries >= REPLACE_SAVE_RETRY_LIMIT {
+                    return Err(LoadError::Missing(error));
+                }
+                retries += 1;
+                log::warn!(
+                    "[Injector][Config] {} load from {} hit read-side race on retry {}/{}: {}; waiting {} ms",
+                    context.label(),
+                    path.display(),
+                    retries,
+                    REPLACE_SAVE_RETRY_LIMIT,
+                    error,
+                    REPLACE_SAVE_RETRY_INTERVAL.as_millis()
+                );
+                sleeper(REPLACE_SAVE_RETRY_INTERVAL);
+            }
+            Err(LoadError::Read(error)) => {
+                if retries >= REPLACE_SAVE_RETRY_LIMIT {
+                    return Err(LoadError::Read(error));
+                }
+                retries += 1;
+                log::warn!(
+                    "[Injector][Config] {} load from {} hit read-side race on retry {}/{}: {}; waiting {} ms",
+                    context.label(),
+                    path.display(),
+                    retries,
+                    REPLACE_SAVE_RETRY_LIMIT,
+                    error,
+                    REPLACE_SAVE_RETRY_INTERVAL.as_millis()
+                );
+                sleeper(REPLACE_SAVE_RETRY_INTERVAL);
             }
         }
     }
@@ -817,7 +985,7 @@ allow_packages = ["com.legacy.app"]
             fs::remove_file(&path).expect("stale test config should be removable");
         }
 
-        let loaded = load_or_seed(&path);
+        let loaded = load_or_seed(&path, LoadContext::Startup);
         assert!(path.exists(), "missing config should be written to disk");
         assert_eq!(loaded.scoop, default_scoop());
 
@@ -834,7 +1002,7 @@ allow_packages = ["com.legacy.app"]
         let backup = PathBuf::from(format!("{}.bak", path.display()));
         fs::write(&path, "[main\nbroken").expect("invalid config should be written");
 
-        let loaded = load_or_seed(&path);
+        let loaded = load_or_seed(&path, LoadContext::Startup);
         assert!(backup.exists(), "invalid config should be backed up");
         assert_eq!(
             loaded.scoop,
@@ -862,5 +1030,61 @@ allow_packages = ["com.legacy.app"]
         let template = include_str!("../../template/injector.toml");
         let parsed = parse_config(template).expect("template injector config should parse");
         assert_eq!(parsed.scoop, default_scoop());
+    }
+
+    #[test]
+    fn replace_save_retry_waits_for_readable_file() {
+        let path = temp_config_path("replace-save-retry");
+        let mut attempts = 0usize;
+        let mut sleeps = Vec::new();
+
+        let loaded = retry_read_load(
+            &path,
+            LoadContext::Reload(ReloadTrigger::ReplaceSave),
+            |_path| {
+                attempts += 1;
+                match attempts {
+                    1 | 2 => Err(LoadError::Missing(io::Error::from(io::ErrorKind::NotFound))),
+                    _ => Ok(InjectorConfig::default()),
+                }
+            },
+            |duration| sleeps.push(duration),
+        )
+        .expect("replace-save retry should eventually succeed");
+
+        assert_eq!(loaded.retries, 2);
+        assert_eq!(attempts, 3);
+        assert_eq!(sleeps.len(), 2);
+        assert!(sleeps
+            .iter()
+            .all(|duration| *duration == REPLACE_SAVE_RETRY_INTERVAL));
+    }
+
+    #[test]
+    fn replace_save_retry_does_not_retry_parse_failures() {
+        let path = temp_config_path("replace-save-parse");
+        let mut sleeps = Vec::new();
+
+        let error = retry_read_load(
+            &path,
+            LoadContext::Reload(ReloadTrigger::ReplaceSave),
+            |_path| Err(LoadError::Parse("broken".to_string())),
+            |duration| sleeps.push(duration),
+        )
+        .expect_err("parse failures should bypass replace-save retries");
+
+        assert!(matches!(error, LoadError::Parse(_)));
+        assert!(sleeps.is_empty());
+    }
+
+    #[test]
+    fn reload_trigger_priority_prefers_close_write_over_replace_save() {
+        let mut selected = Some(ReloadTrigger::CloseWrite);
+        let candidate = ReloadTrigger::ReplaceSave;
+        selected = match selected {
+            Some(current) if current.priority() <= candidate.priority() => Some(current),
+            _ => Some(candidate),
+        };
+        assert_eq!(selected, Some(ReloadTrigger::CloseWrite));
     }
 }

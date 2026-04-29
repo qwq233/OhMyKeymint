@@ -9,6 +9,25 @@ use anyhow::{Context, Result};
 
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum WatchTrigger {
+    CloseWrite,
+    ReplaceSave,
+    Polling,
+    Overflow,
+}
+
+impl WatchTrigger {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CloseWrite => "close-write",
+            Self::ReplaceSave => "replace-save",
+            Self::Polling => "polling",
+            Self::Overflow => "overflow",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct PathStamp {
     len: u64,
@@ -17,7 +36,7 @@ struct PathStamp {
 
 pub fn spawn_path_watcher<F>(thread_name: &str, path: PathBuf, on_change: F) -> Result<()>
 where
-    F: Fn() + Send + Sync + 'static,
+    F: Fn(WatchTrigger) + Send + Sync + 'static,
 {
     let callback = Arc::new(on_change);
     thread::Builder::new()
@@ -37,7 +56,7 @@ fn inspect_path(path: &Path) -> Option<PathStamp> {
 
 fn watch_loop<F>(path: PathBuf, callback: Arc<F>)
 where
-    F: Fn() + Send + Sync + 'static,
+    F: Fn(WatchTrigger) + Send + Sync + 'static,
 {
     #[cfg(target_os = "android")]
     {
@@ -58,7 +77,7 @@ where
 
 fn watch_loop_polling<F>(path: &Path, callback: &F)
 where
-    F: Fn() + Send + Sync + 'static,
+    F: Fn(WatchTrigger) + Send + Sync + 'static,
 {
     let mut last_seen = inspect_path(path);
     loop {
@@ -69,14 +88,14 @@ where
             continue;
         }
         last_seen = current;
-        callback();
+        callback(WatchTrigger::Polling);
     }
 }
 
 #[cfg(target_os = "android")]
 fn watch_loop_inotify<F>(path: &Path, callback: &F) -> io::Result<()>
 where
-    F: Fn() + Send + Sync + 'static,
+    F: Fn(WatchTrigger) + Send + Sync + 'static,
 {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -99,13 +118,8 @@ where
             format!("watch path contains NUL byte: {}", parent.display()),
         )
     })?;
-    let watch_mask = libc::IN_ATTRIB
-        | libc::IN_CLOSE_WRITE
-        | libc::IN_CREATE
-        | libc::IN_DELETE
-        | libc::IN_MOVED_FROM
-        | libc::IN_MOVED_TO
-        | libc::IN_Q_OVERFLOW;
+    let watch_mask =
+        libc::IN_CLOSE_WRITE | libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_Q_OVERFLOW;
 
     let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
     if fd < 0 {
@@ -137,7 +151,7 @@ where
             return Err(error);
         }
 
-        let mut reload = false;
+        let mut reload_trigger: Option<WatchTrigger> = None;
         let mut offset = 0usize;
         while offset < read as usize {
             let event = unsafe { &*(buffer[offset..].as_ptr() as *const libc::inotify_event) };
@@ -150,14 +164,63 @@ where
                 .unwrap_or_default();
 
             if (event.mask & libc::IN_Q_OVERFLOW) != 0 || name == watched_name.as_slice() {
-                reload = true;
+                let candidate = if (event.mask & libc::IN_Q_OVERFLOW) != 0 {
+                    Some(WatchTrigger::Overflow)
+                } else if (event.mask & (libc::IN_CREATE | libc::IN_MOVED_TO)) != 0 {
+                    Some(WatchTrigger::ReplaceSave)
+                } else if (event.mask & libc::IN_CLOSE_WRITE) != 0 {
+                    Some(WatchTrigger::CloseWrite)
+                } else {
+                    None
+                };
+
+                if let Some(candidate) = candidate {
+                    reload_trigger = match reload_trigger {
+                        Some(current)
+                            if watch_trigger_priority(current)
+                                <= watch_trigger_priority(candidate) =>
+                        {
+                            Some(current)
+                        }
+                        _ => Some(candidate),
+                    };
+                }
             }
 
             offset += std::mem::size_of::<libc::inotify_event>() + event.len as usize;
         }
 
-        if reload {
-            callback();
+        if let Some(trigger) = reload_trigger {
+            callback(trigger);
         }
+    }
+}
+
+fn watch_trigger_priority(trigger: WatchTrigger) -> u8 {
+    match trigger {
+        WatchTrigger::CloseWrite => 0,
+        WatchTrigger::Overflow => 1,
+        WatchTrigger::ReplaceSave => 2,
+        WatchTrigger::Polling => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn higher_priority_trigger_is_retained() {
+        let selected = match Some(WatchTrigger::CloseWrite) {
+            Some(current)
+                if watch_trigger_priority(current)
+                    <= watch_trigger_priority(WatchTrigger::ReplaceSave) =>
+            {
+                Some(current)
+            }
+            _ => Some(WatchTrigger::ReplaceSave),
+        };
+
+        assert_eq!(selected, Some(WatchTrigger::CloseWrite));
     }
 }

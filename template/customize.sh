@@ -105,6 +105,6 @@ elif command -v ksud >/dev/null 2>&1; then
   ksud resetprop persist.sys.omk.restart.all ""
 fi
 
-if [ -f "/data/adb/omkdata" ]; then
-  ln -s /data/misc/keystore/omk "/data/adb/omkdata"
+if [ -f "$CONFIG_DIR/omkdata" ]; then
+  ln -s /data/misc/keystore/omk "$CONFIG_DIR/omkdata"
 fi

@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 
-use log::{error, info};
+use log::LevelFilter;
+use log::{error, info, warn};
 use nix::unistd::Pid;
 
 pub mod config;
@@ -19,9 +20,20 @@ pub mod utils;
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
 
+fn log_runtime_identity(role: &str) {
+    let uid = unsafe { libc::getuid() };
+    let euid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getgid() };
+    let egid = unsafe { libc::getegid() };
+    info!(
+        "[Injector][Startup][{}] uid={} euid={} gid={} egid={}",
+        role, uid, euid, gid, egid
+    );
+}
+
 fn main() {
-    logging::init_logger();
-    let _ = config::get();
+    logging::init_logger_fallback(LevelFilter::Debug);
+    log_runtime_identity("Launcher");
     match utils::current_exe_identity() {
         Ok(identity) => {
             info!(
@@ -73,8 +85,16 @@ fn main() {
 pub extern "C" fn entry(handle: *const c_void) -> bool {
     // This runs inside the target process, so we must initialize logging again
     // for that process. On Android this enables both logcat and stdout logging.
-    logging::init_logger();
-    let _ = config::get();
+    logging::init_logger_fallback(LevelFilter::Debug);
+    let config = config::get();
+    if config::parse_level_filter(&config.main.log_level).is_none() {
+        warn!(
+            "[Injector][Logger] unknown log level '{}', keeping debug fallback",
+            config.main.log_level
+        );
+    }
+    logging::update_runtime_level(config.main.log_level_filter());
+    log_runtime_identity("Payload");
     println!(
         "[inject::entry] injected library entry called, handle={:?}",
         handle

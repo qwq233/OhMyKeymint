@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fs, io,
     io::Write,
     path::{Path, PathBuf},
     sync::{OnceLock, RwLock},
@@ -19,6 +19,9 @@ const CONFIG_PATH: &str = "/data/misc/keystore/omk/config.toml";
 #[cfg(not(target_os = "android"))]
 const CONFIG_PATH: &str = "./omk/config.toml";
 
+const REPLACE_SAVE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const REPLACE_SAVE_RETRY_LIMIT: usize = 10;
+
 pub fn config() -> &'static RwLock<Config> {
     CONFIG
         .get()
@@ -29,26 +32,41 @@ pub fn config_path() -> &'static str {
     CONFIG_PATH
 }
 
+#[derive(Debug)]
+enum ConfigLoadError {
+    Missing(io::Error),
+    Read(io::Error),
+    Parse(String),
+}
+
+#[derive(Debug)]
+struct LoadedConfigFile {
+    config_file: ConfigFile,
+    retries: usize,
+}
+
 pub fn bootstrap_config_file() -> Result<ConfigFile> {
-    match fs::read_to_string(CONFIG_PATH) {
-        Ok(contents) => match parse_config_file(&contents) {
-            Ok(config_file) => Ok(config_file),
-            Err(error) => {
-                log::error!("Failed to parse config file, repairing: {error:#}");
-                let config_file = ConfigFile::default();
-                rewrite_invalid_config(&config_file, &format!("{error:#}"))?;
-                Ok(config_file)
-            }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let config_file = ConfigFile::default();
-            persist_config_file(&config_file)?;
+    match load_config_file_once() {
+        Ok(loaded) => Ok(loaded.config_file),
+        Err(ConfigLoadError::Missing(error)) => {
+            let reason = format!("config file missing during startup: {error}");
+            log::warn!("{reason}; restoring current config");
+            let config_file = current_config_file_snapshot();
+            rewrite_invalid_config(&config_file, &reason)?;
             Ok(config_file)
         }
-        Err(error) => {
-            log::error!("Failed to read config file, repairing: {error:#}");
-            let config_file = ConfigFile::default();
-            rewrite_invalid_config(&config_file, &format!("{error:#}"))?;
+        Err(ConfigLoadError::Read(error)) => {
+            let reason = format!("failed to read config file: {error}");
+            log::error!("Failed to read config file, restoring current config: {reason}");
+            let config_file = current_config_file_snapshot();
+            rewrite_invalid_config(&config_file, &reason)?;
+            Ok(config_file)
+        }
+        Err(ConfigLoadError::Parse(error)) => {
+            let reason = format!("failed to parse config file: {error}");
+            log::error!("Failed to parse config file, restoring current config: {reason}");
+            let config_file = current_config_file_snapshot();
+            rewrite_invalid_config(&config_file, &reason)?;
             Ok(config_file)
         }
     }
@@ -87,6 +105,96 @@ pub fn install_runtime_config(
     }
     start_config_watcher()?;
     Ok(())
+}
+
+fn load_config_file_once() -> Result<LoadedConfigFile, ConfigLoadError> {
+    match fs::read_to_string(CONFIG_PATH) {
+        Ok(contents) => parse_config_file(&contents)
+            .map(|config_file| LoadedConfigFile {
+                config_file,
+                retries: 0,
+            })
+            .map_err(|error| ConfigLoadError::Parse(format!("{error:#}"))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(ConfigLoadError::Missing(error))
+        }
+        Err(error) => Err(ConfigLoadError::Read(error)),
+    }
+}
+
+fn load_config_file_with_retry(
+    trigger: crate::plat::file_watch::WatchTrigger,
+) -> Result<LoadedConfigFile, ConfigLoadError> {
+    if !matches!(
+        trigger,
+        crate::plat::file_watch::WatchTrigger::ReplaceSave
+            | crate::plat::file_watch::WatchTrigger::Polling
+    ) {
+        return load_config_file_once();
+    }
+
+    let mut retries = 0usize;
+    loop {
+        match load_config_file_once() {
+            Ok(mut loaded) => {
+                loaded.retries = retries;
+                return Ok(loaded);
+            }
+            Err(ConfigLoadError::Parse(error)) => return Err(ConfigLoadError::Parse(error)),
+            Err(ConfigLoadError::Missing(error)) => {
+                if retries >= REPLACE_SAVE_RETRY_LIMIT {
+                    return Err(ConfigLoadError::Missing(error));
+                }
+                retries += 1;
+                log::warn!(
+                    "Config reload via {} hit read-side race on retry {}/{}: {}; waiting {} ms",
+                    trigger.label(),
+                    retries,
+                    REPLACE_SAVE_RETRY_LIMIT,
+                    error,
+                    REPLACE_SAVE_RETRY_INTERVAL.as_millis()
+                );
+                std::thread::sleep(REPLACE_SAVE_RETRY_INTERVAL);
+            }
+            Err(ConfigLoadError::Read(error)) => {
+                if retries >= REPLACE_SAVE_RETRY_LIMIT {
+                    return Err(ConfigLoadError::Read(error));
+                }
+                retries += 1;
+                log::warn!(
+                    "Config reload via {} hit read-side race on retry {}/{}: {}; waiting {} ms",
+                    trigger.label(),
+                    retries,
+                    REPLACE_SAVE_RETRY_LIMIT,
+                    error,
+                    REPLACE_SAVE_RETRY_INTERVAL.as_millis()
+                );
+                std::thread::sleep(REPLACE_SAVE_RETRY_INTERVAL);
+            }
+        }
+    }
+}
+
+fn current_config_file_snapshot() -> ConfigFile {
+    match CONFIG.get() {
+        Some(lock) => match lock.read() {
+            Ok(runtime) => runtime.to_config_file(),
+            Err(_) => {
+                log::error!(
+                    "Config lock poisoned while snapshotting current config; using defaults"
+                );
+                ConfigFile::default()
+            }
+        },
+        None => ConfigFile::default(),
+    }
+}
+
+fn recover_current_config(reason: &str) {
+    let replacement = current_config_file_snapshot();
+    if let Err(error) = rewrite_invalid_config(&replacement, reason) {
+        log::error!("Failed to rewrite current config after reload failure: {error:#}");
+    }
 }
 
 fn parse_config_file(contents: &str) -> Result<ConfigFile> {
@@ -157,19 +265,35 @@ fn start_config_watcher() -> Result<()> {
     )
 }
 
-fn reload_runtime_config() {
-    let contents = match fs::read_to_string(CONFIG_PATH) {
-        Ok(contents) => contents,
-        Err(error) => {
-            log::error!("Failed to read config file after change, ignoring: {error:?}");
+fn reload_runtime_config(trigger: crate::plat::file_watch::WatchTrigger) {
+    let new_config_file = match load_config_file_with_retry(trigger) {
+        Ok(loaded) => {
+            if loaded.retries > 0 {
+                log::info!(
+                    "Config reload via {} succeeded after {} retr{}",
+                    trigger.label(),
+                    loaded.retries,
+                    if loaded.retries == 1 { "y" } else { "ies" }
+                );
+            }
+            loaded.config_file
+        }
+        Err(ConfigLoadError::Missing(error)) => {
+            let reason = format!("failed to read changed config file: {error}");
+            log::error!("{reason}; restoring current config");
+            recover_current_config(&reason);
             return;
         }
-    };
-
-    let new_config_file = match parse_config_file(&contents) {
-        Ok(config_file) => config_file,
-        Err(error) => {
-            log::error!("Failed to parse changed config file, ignoring: {error:#}");
+        Err(ConfigLoadError::Read(error)) => {
+            let reason = format!("failed to read changed config file: {error}");
+            log::error!("{reason}; restoring current config");
+            recover_current_config(&reason);
+            return;
+        }
+        Err(ConfigLoadError::Parse(error)) => {
+            let reason = format!("failed to parse changed config file: {error}");
+            log::error!("{reason}; restoring current config");
+            recover_current_config(&reason);
             return;
         }
     };
@@ -244,7 +368,7 @@ fn reload_runtime_config() {
         }
     };
     *runtime = updated;
-    log::info!("Config updated");
+    log::info!("Config updated via {}", trigger.label());
 }
 
 fn validate_security_patch(value: &str) -> Result<()> {
@@ -291,6 +415,16 @@ impl Config {
             trust_record: config_file.trust_record.clone(),
             device: config_file.device.clone(),
             trust_intent: config_file.trust.clone(),
+        }
+    }
+
+    fn to_config_file(&self) -> ConfigFile {
+        ConfigFile {
+            main: self.main.clone(),
+            crypto: self.crypto.clone(),
+            trust: self.trust_intent.clone(),
+            trust_record: self.trust_record.clone(),
+            device: self.device.clone(),
         }
     }
 }

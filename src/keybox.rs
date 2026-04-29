@@ -541,7 +541,7 @@ pub fn initialize() -> Result<()> {
         if let Err(error) = crate::plat::file_watch::spawn_path_watcher(
             "omk-keybox-watch",
             PathBuf::from(KEYBOX_PATH),
-            || {
+            |_trigger| {
                 if let Err(reload_error) = reload_from_disk() {
                     error!("failed to reload keybox.xml after change: {reload_error:#}");
                 }
