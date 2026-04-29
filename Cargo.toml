@@ -8,6 +8,10 @@ license = "AGPL-3.0-or-later"
 name = "keymint"
 path = "src/main.rs"
 
+[[bin]]
+name = "aosp_tamper_probe"
+path = "tests/bin/aosp_tamper_probe.rs"
+
 [dependencies]
 jni = "0.22.4"
 syscalls = "0.8.1"
@@ -30,6 +34,7 @@ tokio = { version = "1.50.0", features = ["macros", "libc"] }
 lazy_static = "1.5.0"
 thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
 x509-cert = "0.2.5"
 watchdog_rs = { path = "watchdog", version = "0.1.0" }
 nix = { version = "0.31.2", features = ["mman"] }
@@ -42,6 +47,7 @@ regex = "1.12.3"
 hotwatch = "0.5.0"
 base64 = "0.22.1"
 quick-xml = { version = "0.38.3", features = ["serialize"] }
+goblin = "0.10.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15.1"
@@ -86,3 +92,6 @@ rsbinder-aidl = { path = "libs/rsbinder/rsbinder-aidl" }
 [build-dependencies]
 prost-build = "0.14.3"
 rsbinder-aidl = "0.6.0"
+
+[dev-dependencies]
+rcgen = "0.13.2"

@@ -1,4 +1,5 @@
 pub mod aaid;
+pub mod attestation;
 pub mod device_ids;
 pub mod file_watch;
 pub mod property_watcher;

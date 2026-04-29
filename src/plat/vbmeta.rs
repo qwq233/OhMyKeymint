@@ -7,11 +7,9 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use der::{oid::ObjectIdentifier, Decode};
 use kmr_common::crypto::{Rng, Sha256};
 use kmr_crypto_boring::{rng::BoringRng, sha256::BoringSha256};
 use rsbinder::{hub, Strong};
-use x509_cert::Certificate;
 
 use crate::{
     android::{
@@ -27,15 +25,13 @@ use crate::{
         },
     },
     config::{ConfigFile, ResolvedTrust, TrustRecord, TrustValueSource, TrustValueSpec},
-    plat::resetprop,
+    plat::{attestation, resetprop},
 };
 
 const KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/default";
 const SECURITY_PATCH_PROP: &str = "ro.build.version.security_patch";
 const VBMETA_KEY_PROP: &str = "ro.boot.vbmeta.public_key_digest";
 const VBMETA_HASH_PROP: &str = "ro.boot.vbmeta.digest";
-const ANDROID_ATTESTATION_OID: ObjectIdentifier =
-    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.1.17");
 const ORIGINAL_HASH_TIMEOUT: Duration = Duration::from_secs(5);
 const AVB_HEADER_SIZE: usize = 256;
 const BUILD_PROP_PATHS: &[&str] = &[
@@ -53,22 +49,6 @@ const BUILD_PROP_PATHS: &[&str] = &[
 struct ResolvedField {
     value: [u8; 32],
     source: TrustValueSource,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TlvClass {
-    Universal,
-    Application,
-    ContextSpecific,
-    Private,
-}
-
-#[derive(Clone, Copy)]
-struct Tlv<'a> {
-    class: TlvClass,
-    constructed: bool,
-    tag_number: u32,
-    value: &'a [u8],
 }
 
 pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
@@ -586,177 +566,7 @@ fn extract_verified_boot_hash_from_metadata(metadata: &KeyMetadata) -> Result<[u
 }
 
 fn extract_verified_boot_hash_from_leaf_certificate(leaf: &[u8]) -> Result<[u8; 32]> {
-    let certificate = Certificate::from_der(leaf).context("failed to parse attestation leaf")?;
-    let extensions = certificate
-        .tbs_certificate
-        .extensions
-        .as_ref()
-        .ok_or_else(|| anyhow!("attestation leaf has no extensions"))?;
-    let extension = extensions
-        .iter()
-        .find(|extension| extension.extn_id == ANDROID_ATTESTATION_OID)
-        .ok_or_else(|| anyhow!("Android attestation extension missing"))?;
-    extract_verified_boot_hash_from_attestation_extension(extension.extn_value.as_bytes())
-}
-
-fn extract_verified_boot_hash_from_attestation_extension(bytes: &[u8]) -> Result<[u8; 32]> {
-    let (top_level, rest) = parse_tlv(bytes)?;
-    ensure_sequence(top_level, "attestation extension")?;
-    if !rest.is_empty() {
-        bail!("unexpected trailing data after attestation extension");
-    }
-
-    let mut fields = top_level.value;
-    for _ in 0..6 {
-        let (_, next) = parse_tlv(fields)?;
-        fields = next;
-    }
-
-    let (_, next) = parse_tlv(fields)?;
-    fields = next;
-    let (hardware_enforced, rest) = parse_tlv(fields)?;
-    ensure_sequence(hardware_enforced, "hardwareEnforced")?;
-    if !rest.is_empty() {
-        bail!("unexpected trailing data after hardwareEnforced");
-    }
-
-    extract_verified_boot_hash_from_authorization_list(hardware_enforced.value)
-}
-
-fn extract_verified_boot_hash_from_authorization_list(mut bytes: &[u8]) -> Result<[u8; 32]> {
-    while !bytes.is_empty() {
-        let (field, rest) = parse_tlv(bytes)?;
-        bytes = rest;
-        if field.class == TlvClass::ContextSpecific && field.tag_number == 704 {
-            return extract_verified_boot_hash_from_root_of_trust(field.value);
-        }
-    }
-
-    Err(anyhow!(
-        "RootOfTrust tag 704 missing from authorization list"
-    ))
-}
-
-fn extract_verified_boot_hash_from_root_of_trust(bytes: &[u8]) -> Result<[u8; 32]> {
-    let (sequence, rest) = parse_tlv(bytes)?;
-    ensure_sequence(sequence, "RootOfTrust")?;
-    if !rest.is_empty() {
-        bail!("unexpected trailing data after RootOfTrust");
-    }
-
-    let mut fields = sequence.value;
-    let (_, next) = parse_tlv(fields)?;
-    fields = next;
-    let (_, next) = parse_tlv(fields)?;
-    fields = next;
-    let (_, next) = parse_tlv(fields)?;
-    fields = next;
-    let (verified_boot_hash, rest) = parse_tlv(fields)?;
-    ensure_octet_string(verified_boot_hash, "RootOfTrust.verifiedBootHash")?;
-    if !rest.is_empty() {
-        bail!("unexpected trailing data after verifiedBootHash");
-    }
-
-    if verified_boot_hash.value.len() != 32 {
-        bail!(
-            "verifiedBootHash must be 32 bytes, got {}",
-            verified_boot_hash.value.len()
-        );
-    }
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(verified_boot_hash.value);
-    Ok(bytes)
-}
-
-fn parse_tlv(input: &[u8]) -> Result<(Tlv<'_>, &[u8])> {
-    if input.is_empty() {
-        bail!("unexpected end of DER input");
-    }
-
-    let first = input[0];
-    let class = match first >> 6 {
-        0 => TlvClass::Universal,
-        1 => TlvClass::Application,
-        2 => TlvClass::ContextSpecific,
-        _ => TlvClass::Private,
-    };
-    let constructed = (first & 0x20) != 0;
-    let mut tag_number = u32::from(first & 0x1f);
-    let mut offset = 1usize;
-
-    if tag_number == 0x1f {
-        tag_number = 0;
-        loop {
-            if offset >= input.len() {
-                bail!("truncated high-tag DER field");
-            }
-            let byte = input[offset];
-            offset += 1;
-            tag_number = (tag_number << 7) | u32::from(byte & 0x7f);
-            if (byte & 0x80) == 0 {
-                break;
-            }
-        }
-    }
-
-    let (length, length_bytes) = parse_der_length(&input[offset..])?;
-    offset += length_bytes;
-    let end = offset
-        .checked_add(length)
-        .ok_or_else(|| anyhow!("DER length overflow"))?;
-    if end > input.len() {
-        bail!("DER field exceeds remaining input");
-    }
-
-    Ok((
-        Tlv {
-            class,
-            constructed,
-            tag_number,
-            value: &input[offset..end],
-        },
-        &input[end..],
-    ))
-}
-
-fn parse_der_length(input: &[u8]) -> Result<(usize, usize)> {
-    if input.is_empty() {
-        bail!("missing DER length");
-    }
-    let first = input[0];
-    if (first & 0x80) == 0 {
-        return Ok((usize::from(first), 1));
-    }
-
-    let count = usize::from(first & 0x7f);
-    if count == 0 {
-        bail!("indefinite DER lengths are not supported");
-    }
-    if count > std::mem::size_of::<usize>() || input.len() < count + 1 {
-        bail!("invalid DER length encoding");
-    }
-
-    let mut value = 0usize;
-    for byte in &input[1..=count] {
-        value = (value << 8) | usize::from(*byte);
-    }
-    Ok((value, count + 1))
-}
-
-fn ensure_sequence(field: Tlv<'_>, label: &str) -> Result<()> {
-    if field.class == TlvClass::Universal && field.constructed && field.tag_number == 16 {
-        Ok(())
-    } else {
-        bail!("{label} is not a DER SEQUENCE")
-    }
-}
-
-fn ensure_octet_string(field: Tlv<'_>, label: &str) -> Result<()> {
-    if field.class == TlvClass::Universal && !field.constructed && field.tag_number == 4 {
-        Ok(())
-    } else {
-        bail!("{label} is not a DER OCTET STRING")
-    }
+    attestation::extract_verified_boot_hash_from_leaf_certificate(leaf)
 }
 
 #[cfg(test)]
@@ -770,14 +580,6 @@ mod tests {
         let digest = compute_vbmeta_public_key_digest_from_bytes(&vbmeta).unwrap();
         let expected = BoringSha256 {}.hash(public_key).unwrap();
         assert_eq!(digest, expected);
-    }
-
-    #[test]
-    fn attestation_extension_parser_extracts_verified_boot_hash() {
-        let expected = [0xabu8; 32];
-        let extension = build_test_attestation_extension(expected);
-        let parsed = extract_verified_boot_hash_from_attestation_extension(&extension).unwrap();
-        assert_eq!(parsed, expected);
     }
 
     #[test]
@@ -899,94 +701,5 @@ ro.build.version.security_patch.extra = ignored
         let start = AVB_HEADER_SIZE + auth_block_size;
         blob[start..start + public_key.len()].copy_from_slice(public_key);
         blob
-    }
-
-    fn build_test_attestation_extension(hash: [u8; 32]) -> Vec<u8> {
-        let root_of_trust = encode_tlv(
-            TlvClass::Universal,
-            true,
-            16,
-            &[
-                encode_tlv(TlvClass::Universal, false, 4, &[0x11; 32]),
-                encode_tlv(TlvClass::Universal, false, 1, &[0xff]),
-                encode_tlv(TlvClass::Universal, false, 10, &[0x00]),
-                encode_tlv(TlvClass::Universal, false, 4, &hash),
-            ]
-            .concat(),
-        );
-
-        let sw = encode_tlv(TlvClass::Universal, true, 16, &[]);
-        let hw = encode_tlv(
-            TlvClass::Universal,
-            true,
-            16,
-            &encode_tlv(TlvClass::ContextSpecific, true, 704, &root_of_trust),
-        );
-
-        encode_tlv(
-            TlvClass::Universal,
-            true,
-            16,
-            &[
-                encode_tlv(TlvClass::Universal, false, 2, &[0x03]),
-                encode_tlv(TlvClass::Universal, false, 10, &[0x01]),
-                encode_tlv(TlvClass::Universal, false, 2, &[0x64]),
-                encode_tlv(TlvClass::Universal, false, 10, &[0x01]),
-                encode_tlv(TlvClass::Universal, false, 4, b"challenge"),
-                encode_tlv(TlvClass::Universal, false, 4, b"unique"),
-                sw,
-                hw,
-            ]
-            .concat(),
-        )
-    }
-
-    fn encode_tlv(class: TlvClass, constructed: bool, tag_number: u32, value: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        let class_bits = match class {
-            TlvClass::Universal => 0u8,
-            TlvClass::Application => 1u8 << 6,
-            TlvClass::ContextSpecific => 2u8 << 6,
-            TlvClass::Private => 3u8 << 6,
-        };
-        let constructed_bit = if constructed { 0x20 } else { 0x00 };
-        if tag_number < 31 {
-            out.push(class_bits | constructed_bit | tag_number as u8);
-        } else {
-            out.push(class_bits | constructed_bit | 0x1f);
-            let mut stack = Vec::new();
-            let mut value_bits = tag_number;
-            stack.push((value_bits & 0x7f) as u8);
-            value_bits >>= 7;
-            while value_bits != 0 {
-                stack.push(((value_bits & 0x7f) as u8) | 0x80);
-                value_bits >>= 7;
-            }
-            for byte in stack.iter().rev() {
-                out.push(*byte);
-            }
-        }
-
-        encode_length(value.len(), &mut out);
-        out.extend_from_slice(value);
-        out
-    }
-
-    fn encode_length(length: usize, out: &mut Vec<u8>) {
-        if length < 0x80 {
-            out.push(length as u8);
-            return;
-        }
-
-        let mut bytes = Vec::new();
-        let mut remaining = length;
-        while remaining != 0 {
-            bytes.push((remaining & 0xff) as u8);
-            remaining >>= 8;
-        }
-        out.push(0x80 | (bytes.len() as u8));
-        for byte in bytes.iter().rev() {
-            out.push(*byte);
-        }
     }
 }
