@@ -15,7 +15,7 @@ import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SERIAL = "emulator-5554"
-DEFAULT_REMOTE_PATH = "/data/adb/inject"
+DEFAULT_REMOTE_PATH = "/data/adb/omk/inject"
 DEFAULT_STAGING_PATH = "/data/local/tmp/inject.deploy"
 DEFAULT_PLATFORM = 24
 

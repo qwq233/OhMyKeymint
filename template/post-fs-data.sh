@@ -4,7 +4,7 @@ TARGET_KEYMINT=$TARGET_DIR/keymint
 TARGET_KEYBOX=$TARGET_DIR/keybox.xml
 TARGET_INJECTOR_CONFIG=$TARGET_DIR/injector.toml
 STATE_DIR=/data/adb/omk
-TARGET_INJECTOR=/data/adb/inject
+TARGET_INJECTOR=$STATE_DIR/inject
 
 find_module_binary() {
   name=$1

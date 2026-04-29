@@ -2,7 +2,8 @@
 
 MODDIR=${0%/*}
 STATE_DIR=/data/adb/omk
-TARGET_INJECTOR=/data/adb/inject
+TARGET_INJECTOR=$STATE_DIR/inject
+PAYLOAD_STATE_FILE=$STATE_DIR/injector.payload
 RESTART_PROP=persist.sys.omk.restart.injector
 RESTART_ALL_PROP=persist.sys.omk.restart.all
 RESTART_FILE=$STATE_DIR/restart.injector
@@ -83,9 +84,27 @@ is_injected() {
   maps=/proc/$pid/maps
   [ -r "$maps" ] || return 1
 
-  grep -F "/data/adb/inject" "$maps" >/dev/null 2>&1 && return 0
-  grep -F "libinjector_payload.so" "$maps" >/dev/null 2>&1 && return 0
-  grep -F "memfd:libinjector_payload.so" "$maps" >/dev/null 2>&1 && return 0
+  if [ -r "$PAYLOAD_STATE_FILE" ]; then
+    if toybox awk -v want_pid="$pid" '
+      FNR == NR {
+        if ($1 == want_pid && $2 != "") {
+          ident = $2
+        }
+        next
+      }
+      ident != "" && index($0, ident) {
+        found = 1
+        exit
+      }
+      END {
+        exit found ? 0 : 1
+      }
+    ' "$PAYLOAD_STATE_FILE" "$maps" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  grep -F "$TARGET_INJECTOR" "$maps" >/dev/null 2>&1 && return 0
   return 1
 }
 

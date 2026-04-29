@@ -6,13 +6,14 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
 use nix::{sys::signal::Signal, unistd::Pid};
+use rand::TryRngCore;
 
 use crate::sys::wait_pid;
 use crate::{sys, utils};
 
 const ANDROID_DLEXT_USE_LIBRARY_FD: u64 = 0x10;
-const REMOTE_PAYLOAD_IDENTIFIER: &str = "libinjector_payload.so";
 const CMSG_STORAGE_WORDS: usize = 4;
+const REMOTE_PAYLOAD_STATE_PATH: &str = "/data/adb/omk/injector.payload";
 
 #[repr(C)]
 struct android_dlextinfo {
@@ -90,6 +91,42 @@ fn align_down(value: usize, alignment: usize) -> Result<usize> {
         bail!("invalid alignment: {}", alignment);
     }
     Ok(value & !(alignment - 1))
+}
+
+fn format_remote_payload_identifier(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut identifier = String::with_capacity(3 + (bytes.len() * 2) + 3);
+    identifier.push_str("lib");
+    for byte in bytes {
+        identifier.push(HEX[(byte >> 4) as usize] as char);
+        identifier.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    identifier.push_str(".so");
+    identifier
+}
+
+fn generate_remote_payload_identifier() -> Result<String> {
+    let mut random = [0u8; 16];
+    let mut rng = rand::rngs::OsRng;
+    rng.try_fill_bytes(&mut random)
+        .context("failed to fill payload identifier bytes from OsRng")?;
+    Ok(format_remote_payload_identifier(&random))
+}
+
+fn persist_remote_payload_state(pid: Pid, payload_identifier: &str) -> Result<()> {
+    let path = Path::new(REMOTE_PAYLOAD_STATE_PATH);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create injector payload state directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    std::fs::write(path, format!("{} {}\n", pid, payload_identifier))
+        .with_context(|| format!("failed to write injector payload state {}", path.display()))?;
+    Ok(())
 }
 
 fn open_remote_payload_fd_from_path<F, G>(
@@ -218,12 +255,14 @@ pub fn inject_library(pid: Pid) -> Result<()> {
 }
 
 fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
+    let payload_identifier =
+        generate_remote_payload_identifier().context("failed to generate payload identifier")?;
     log_loader_abi();
     info!(
         "[Injector][Loader] starting build_id={} pid={} payload={} self_path={}",
         crate::utils::build_id(),
         pid,
-        REMOTE_PAYLOAD_IDENTIFIER,
+        payload_identifier,
         self_path.display(),
     );
     let mut regs = sys::get_regs(pid)?;
@@ -393,7 +432,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         "[Injector][Loader] local payload file ready: fd={} path={} identifier={} sha256={}",
         local_lib_fd,
         self_path.display(),
-        REMOTE_PAYLOAD_IDENTIFIER,
+        payload_identifier,
         utils::sha256_file(self_path).unwrap_or_else(|_| "<unavailable>".to_string())
     );
 
@@ -611,7 +650,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     };
     let remote_info_ptr = push_to_remote_stack(info_bytes)?;
 
-    let remote_loader_path_c = CString::new(REMOTE_PAYLOAD_IDENTIFIER)?;
+    let remote_loader_path_c = CString::new(payload_identifier.as_str())?;
     let remote_path_ptr = push_to_remote_stack(remote_loader_path_c.as_bytes_with_nul())?;
 
     // Call dlopen
@@ -621,7 +660,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 
     debug!(
         "Remote dlopen handle: 0x{:x} using identifier={} fd={}",
-        handle, REMOTE_PAYLOAD_IDENTIFIER, remote_lib_fd
+        handle, payload_identifier, remote_lib_fd
     );
 
     if handle == 0 {
@@ -659,6 +698,37 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         bail!("Remote entry returned false");
     }
 
+    if let Err(error) = persist_remote_payload_state(pid, &payload_identifier) {
+        warn!(
+            "[Injector][Loader] failed to persist payload identifier state for pid {}: {:#}",
+            pid, error
+        );
+    }
+
     info!("Remote entry called successfully");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formatted_payload_identifier_looks_like_shared_library_name() {
+        let identifier =
+            format_remote_payload_identifier(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+
+        assert_eq!(identifier, "lib0123456789abcdef.so");
+    }
+
+    #[test]
+    fn generated_payload_identifier_has_expected_shape() {
+        let identifier = generate_remote_payload_identifier().expect("identifier should generate");
+        assert!(identifier.starts_with("lib"));
+        assert!(identifier.ends_with(".so"));
+        assert_eq!(identifier.len(), 38);
+        assert!(identifier[3..identifier.len() - 3]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+    }
 }
