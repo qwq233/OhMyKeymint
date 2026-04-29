@@ -13,7 +13,7 @@ cddl-cat = { version = "^0.7.0", optional = true }
 ciborium = { version = "0.2.2", default-features = false }
 ciborium-io = "^0.2.0"
 coset = "0.4.2"
-der = { version = "^0.7.2", features = ["alloc", "derive"] }
+der = { version = "^0.8.0", features = ["alloc", "derive"] }
 enumn = "0.1.4"
 kmr-derive = { path = "../derive", version = "0.1.0" }
 kmr-wire = { path = "../wire", version = "0.1.0" }
