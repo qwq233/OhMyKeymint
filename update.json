@@ -1,6 +1,6 @@
 {
-  "version": "v0.1.2-e5ac4d6",
-  "versionCode": 42,
-  "zipUrl": "https://github.com/qwq233/OhMyKeymint/releases/download/v0.1.2-e5ac4d6/OhMyKeymint-release-0.1.2-e5ac4d6.zip",
+  "version": "v1.0.0-e9fecf0",
+  "versionCode": 59,
+  "zipUrl": "https://github.com/qwq233/OhMyKeymint/releases/download/v1.0.0-e9fecf0/OhMyKeymint-release-arm64-v8a-1.0.0-e9fecf0.zip",
   "changelog": "https://raw.githubusercontent.com/qwq233/OhMyKeymint/changelog/changelog.md"
 }
