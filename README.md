@@ -2,10 +2,6 @@
 
 Custom keystore implementation for Android Keystore Spoofer
 
-> [!WARNING]
-> The program is still in its early stages of development.
-> No ANY guarantees are made regarding performance or stability.
-
 ## What is this?
 
 This is a complete implementation of the keystore, which fully implements the AOSP AIDL interface, referencing the official AOSP implementation.
@@ -70,43 +66,6 @@ imei = ""
 imei2 = ""
 ```
 
-`[trust_record]` is managed by OMK and may be added automatically after startup.
-It records stable derived values such as computed `vb_key`, original-system `vb_hash`,
-and `original_security_patch`.
-Random values are not written back into `config.toml`.
-
-`security_patch` semantics:
-
-1. `auto` resolves from the original `build.prop` value captured at startup.
-
-2. `latest` resolves to the 5th day of the current month.
-
-3. An explicit `YYYY-MM-DD` value forces that exact patch level.
-
-4. Any non-`auto` value overrides `ro.build.version.security_patch` at runtime.
-
-5. Switching back to `auto` restores the saved original patch level.
-
-6. On every start, OMK refreshes the original patch level from `build.prop` again before applying overrides.
-
-Only `security_patch` hot-applies. Other `[trust]` changes still require restarting `keymint`.
-
-If `overrideTelephonyProperties = false` (the default), OMK ignores user-configured
-`[device].imei` and `[device].meid` and resolves them from the device at startup instead.
-
-`[device].imei2` keeps the old behavior: OMK only auto-fills it when it is empty.
-If it still resolves to empty, OMK leaves `imei2 = ""` in `config.toml` and omits
-the second-IMEI attestation field from generated certificates instead of encoding an
-empty value.
-
-For startup auto-fill, OMK resolves telephony identifiers in this order:
-
-1. dedicated telephony APIs from `phone`
-
-2. common radio properties
-
-3. generic device-id fallback from `iphonesubinfo`
-
 OMK writes any successful result back into `config.toml` and leaves still-unavailable
 fields empty.
 
@@ -140,6 +99,7 @@ deny_packages = []
 block_android_package = true
 allow_unknown_package = false
 
+# Do not edit if you have no idea about the things below
 [intercept]
 get_security_level = true
 get_key_entry = true
@@ -156,10 +116,6 @@ get_supplementary_attestation_info = true
 
 `allow_unknown_package = true` allows callers whose package name cannot be resolved to pass
 the filter instead of being rejected.
-
-On Android, `injector.toml` reload also uses `inotify`, with polling kept only as fallback.
-If the system TEE backend is unavailable but OMK is still reachable, injector preserves the
-original OMK binder error instead of replacing it with a synthetic fallback failure.
 
 ## Restarting keymint and injector
 
