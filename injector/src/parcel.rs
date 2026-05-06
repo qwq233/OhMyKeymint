@@ -826,6 +826,42 @@ mod tests {
     }
 
     #[test]
+    fn service_plain_replies_round_trip() {
+        let descriptors = vec![
+            KeyDescriptor {
+                domain: crate::android::system::keystore2::Domain::Domain::APP,
+                nspace: 10001,
+                alias: Some("alpha".to_string()),
+                blob: None,
+            },
+            KeyDescriptor {
+                domain: crate::android::system::keystore2::Domain::Domain::GRANT,
+                nspace: 42,
+                alias: None,
+                blob: None,
+            },
+        ];
+        let mut list_reply =
+            build_plain_reply(&descriptors).expect("descriptor list reply should serialize");
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut list_reply);
+        let parsed: Vec<KeyDescriptor> =
+            unsafe { parse_success_reply(data, data_size, offsets, offsets_size) }.unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].alias.as_deref(), Some("alpha"));
+        assert_eq!(
+            parsed[1].domain,
+            crate::android::system::keystore2::Domain::Domain::GRANT
+        );
+
+        let count = 7i32;
+        let mut count_reply = build_plain_reply(&count).expect("count reply should serialize");
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut count_reply);
+        let parsed_count: i32 =
+            unsafe { parse_success_reply(data, data_size, offsets, offsets_size) }.unwrap();
+        assert_eq!(parsed_count, count);
+    }
+
+    #[test]
     fn key_entry_reply_round_trip_without_binder() {
         let response = KeyEntryResponse {
             r#iSecurityLevel: None,

@@ -450,31 +450,55 @@ impl AospKeystoreService for KeystoreServiceBinder {
             match self.call_omk(|backend, caller| {
                 backend.r#grant(caller, key, grantee_uid, access_vector)
             }) {
-                Ok(granted) => return Ok(granted),
+                Ok(granted) => {
+                    tracker::remember_key_descriptor_route(&granted, RouteTarget::Omk);
+                    tracker::remember_grant_descriptor_for_ungrant(key, grantee_uid, &granted);
+                    return Ok(granted);
+                }
                 Err(error) => {
                     return self.fallback_to_system(ServiceMethod::Grant, error, || {
                         self.call_system(|backend| backend.r#grant(key, grantee_uid, access_vector))
+                            .map(|granted| {
+                                tracker::remember_key_descriptor_route(
+                                    &granted,
+                                    RouteTarget::System,
+                                );
+                                tracker::remember_grant_descriptor_for_ungrant(
+                                    key,
+                                    grantee_uid,
+                                    &granted,
+                                );
+                                granted
+                            })
                     });
                 }
             }
         }
 
         self.call_system(|backend| backend.r#grant(key, grantee_uid, access_vector))
+            .map(|granted| {
+                tracker::remember_key_descriptor_route(&granted, RouteTarget::System);
+                tracker::remember_grant_descriptor_for_ungrant(key, grantee_uid, &granted);
+                granted
+            })
     }
 
     fn r#ungrant(&self, key: &KeyDescriptor, grantee_uid: i32) -> rsbinder::status::Result<()> {
-        if self.route_for_key(ServiceMethod::Ungrant, key) == RouteTarget::Omk {
+        let result = if self.route_for_key(ServiceMethod::Ungrant, key) == RouteTarget::Omk {
             match self.call_omk(|backend, caller| backend.r#ungrant(caller, key, grantee_uid)) {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    return self.fallback_to_system(ServiceMethod::Ungrant, error, || {
-                        self.call_system(|backend| backend.r#ungrant(key, grantee_uid))
-                    });
-                }
+                Ok(()) => Ok(()),
+                Err(error) => self.fallback_to_system(ServiceMethod::Ungrant, error, || {
+                    self.call_system(|backend| backend.r#ungrant(key, grantee_uid))
+                }),
             }
-        }
+        } else {
+            self.call_system(|backend| backend.r#ungrant(key, grantee_uid))
+        };
 
-        self.call_system(|backend| backend.r#ungrant(key, grantee_uid))
+        if result.is_ok() {
+            tracker::retire_grant_descriptor_after_ungrant(key, grantee_uid);
+        }
+        result
     }
 
     fn r#getNumberOfEntries(&self, domain: Domain, nspace: i64) -> rsbinder::status::Result<i32> {
@@ -527,6 +551,23 @@ impl AospKeystoreService for KeystoreServiceBinder {
     }
 
     fn r#getSupplementaryAttestationInfo(&self, tag: Tag) -> rsbinder::status::Result<Vec<u8>> {
+        if self.prefer_omk(ServiceMethod::GetSupplementaryAttestationInfo) {
+            match self.call_omk(|backend, _caller| backend.r#getSupplementaryAttestationInfo(tag)) {
+                Ok(info) => return Ok(info),
+                Err(error) => {
+                    return self.fallback_to_system(
+                        ServiceMethod::GetSupplementaryAttestationInfo,
+                        error,
+                        || {
+                            self.call_system(|backend| {
+                                backend.r#getSupplementaryAttestationInfo(tag)
+                            })
+                        },
+                    );
+                }
+            }
+        }
+
         self.call_system(|backend| backend.r#getSupplementaryAttestationInfo(tag))
     }
 }
@@ -954,6 +995,7 @@ mod tests {
             _operation_parameters: &[KeyParameter],
             _forced: bool,
         ) -> rsbinder::status::Result<CreateOperationResponse> {
+            ensure_binder_process_state();
             Ok(CreateOperationResponse {
                 r#iOperation: Some(BnKeystoreOperation::new_binder(CountingOperation {
                     aborts: self.operation_aborts.clone(),
@@ -1029,6 +1071,7 @@ mod tests {
                 return Err(StatusCode::UnknownTransaction.into());
             }
 
+            ensure_binder_process_state();
             Ok(CreateOperationResponse {
                 r#iOperation: Some(BnKeystoreOperation::new_binder(CountingOperation {
                     aborts: self.operation_aborts.clone(),
@@ -1401,6 +1444,7 @@ mod tests {
         operation_aborts: Arc<AtomicUsize>,
         key_entry_level: SecurityLevel,
     ) -> AospServiceBinder {
+        ensure_binder_process_state();
         let security_level_backend =
             BnKeystoreSecurityLevel::new_binder(CountingSystemSecurityLevel {
                 delete_calls,
@@ -1410,6 +1454,10 @@ mod tests {
             security_level_backend,
             key_entry_level,
         })
+    }
+
+    fn ensure_binder_process_state() {
+        let _ = rsbinder::ProcessState::init_default();
     }
 
     struct SupplementarySystemService;
@@ -1746,7 +1794,7 @@ mod tests {
     }
 
     #[test]
-    fn supplementary_attestation_info_stays_on_system_backend() {
+    fn supplementary_attestation_info_uses_omk_when_enabled() {
         tracker::clear_state_for_tests();
         let wrapper = new_service_binder(
             CallerIdentity::new(1000, 2000),
@@ -1760,9 +1808,9 @@ mod tests {
 
         let result = wrapper
             .r#getSupplementaryAttestationInfo(Tag::MODULE_HASH)
-            .expect("AOSP wrapper should use the system backend for MODULE_HASH");
+            .expect("AOSP wrapper should use the OMK backend for MODULE_HASH");
 
-        assert_eq!(result, vec![1, 2, 3]);
+        assert_eq!(result, vec![9, 9, 9]);
     }
 
     #[test]
@@ -1830,6 +1878,7 @@ mod tests {
 
     #[test]
     fn omk_only_wrapper_preserves_omk_error_when_create_operation_fails() {
+        ensure_binder_process_state();
         tracker::clear_state_for_tests();
         let wrapper = new_security_level_binder(
             SecurityLevel::TRUSTED_ENVIRONMENT,

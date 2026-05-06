@@ -260,16 +260,16 @@ fn route_for_service_request(
     match request {
         ParsedServiceRequest::GetKeyEntry { key }
         | ParsedServiceRequest::UpdateSubcomponent { key, .. }
-        | ParsedServiceRequest::DeleteKey { key } => {
+        | ParsedServiceRequest::DeleteKey { key }
+        | ParsedServiceRequest::Grant { key, .. }
+        | ParsedServiceRequest::Ungrant { key, .. } => {
             tracker::resolve_route_for_key_descriptor(key, fallback)
         }
-        ParsedServiceRequest::GetSecurityLevel { .. } => fallback,
         ParsedServiceRequest::ListEntries { .. }
-        | ParsedServiceRequest::Grant { .. }
-        | ParsedServiceRequest::Ungrant { .. }
+        | ParsedServiceRequest::GetSecurityLevel { .. }
         | ParsedServiceRequest::GetNumberOfEntries { .. }
         | ParsedServiceRequest::ListEntriesBatched { .. }
-        | ParsedServiceRequest::GetSupplementaryAttestationInfo { .. } => RouteTarget::System,
+        | ParsedServiceRequest::GetSupplementaryAttestationInfo { .. } => fallback,
     }
 }
 
@@ -625,13 +625,13 @@ pub(super) unsafe fn handle_br_transaction(
     }
 
     if parcel::contains_keystore_operation_interface(parcel_bytes) {
-        if lookup_operation_target(target).is_none() {
+        let Some(operation_target) = lookup_operation_target(target) else {
             debug!(
                 "[Injector][Decision] skipping IKeystoreOperation request for unmapped target ptr=0x{:x} cookie=0x{:x}",
                 target.ptr, target.cookie
             );
             return false;
-        }
+        };
 
         let request = match parcel::parse_operation_request(
             tr.data.ptr.buffer as *mut u8,
@@ -682,10 +682,7 @@ pub(super) unsafe fn handle_br_transaction(
         );
         info!(
             "[Injector][Route] operation_method={:?} uid={} pid={} route={:?}",
-            method,
-            caller.uid,
-            caller.pid,
-            RouteTarget::Omk
+            method, caller.uid, caller.pid, operation_target.route
         );
 
         if expects_reply {
@@ -1099,12 +1096,168 @@ unsafe fn build_service_reply_rewrite(
                 }
             }
         }
-        ParsedServiceRequest::ListEntries { .. }
-        | ParsedServiceRequest::Grant { .. }
-        | ParsedServiceRequest::Ungrant { .. }
-        | ParsedServiceRequest::GetNumberOfEntries { .. }
-        | ParsedServiceRequest::ListEntriesBatched { .. }
-        | ParsedServiceRequest::GetSupplementaryAttestationInfo { .. } => Ok(None),
+        ParsedServiceRequest::ListEntries { domain, nspace } => {
+            if !system_reply_succeeded(tr) {
+                return Ok(None);
+            }
+            match ipc::with_omk_retry(|omk| {
+                Ok(omk.r#listEntries(Some(&caller), *domain, *nspace)?)
+            }) {
+                Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?)),
+                Err(error) => {
+                    warn!(
+                        "[Injector][Reply] OMK listEntries failed for uid={} pid={}: {:#}; preserving original system reply",
+                        pending.caller.uid,
+                        pending.caller.pid,
+                        error
+                    );
+                    Ok(None)
+                }
+            }
+        }
+        ParsedServiceRequest::Grant {
+            key,
+            grantee_uid,
+            access_vector,
+        } => {
+            let system_grant: crate::android::system::keystore2::KeyDescriptor::KeyDescriptor =
+                match parcel::parse_success_reply(
+                    tr.data.ptr.buffer as *mut u8,
+                    tr.data_size as usize,
+                    tr.data.ptr.offsets as *mut usize,
+                    tr.offsets_size as usize,
+                ) {
+                    Ok(grant) => grant,
+                    Err(error) => {
+                        warn!(
+                            "[Injector][Reply] could not parse system grant reply for uid={} pid={}: {:#}; preserving original system reply",
+                            pending.caller.uid,
+                            pending.caller.pid,
+                            error
+                        );
+                        return Ok(None);
+                    }
+                };
+
+            let omk_key = omk_descriptor_for_app_key(key);
+            match ipc::with_omk_retry(|omk| {
+                Ok(omk.r#grant(Some(&caller), &omk_key, *grantee_uid, *access_vector)?)
+            }) {
+                Ok(omk_grant) => {
+                    tracker::remember_key_descriptor_bridge(
+                        &system_grant,
+                        &system_grant,
+                        &omk_grant,
+                    );
+                    tracker::remember_key_descriptor_route(&system_grant, RouteTarget::Omk);
+                    tracker::remember_grant_descriptor_for_ungrant(
+                        key,
+                        *grantee_uid,
+                        &system_grant,
+                    );
+                    Ok(None)
+                }
+                Err(error) => {
+                    tracker::remember_key_descriptor_route(&system_grant, RouteTarget::System);
+                    warn!(
+                        "[Injector][Reply] OMK grant failed for uid={} pid={}: {:#}; preserving original system reply",
+                        pending.caller.uid,
+                        pending.caller.pid,
+                        error
+                    );
+                    Ok(None)
+                }
+            }
+        }
+        ParsedServiceRequest::Ungrant { key, grantee_uid } => {
+            if !system_reply_succeeded(tr) {
+                return Ok(None);
+            }
+
+            let omk_key = omk_descriptor_for_app_key(key);
+            match ipc::with_omk_retry(|omk| {
+                Ok(omk.r#ungrant(Some(&caller), &omk_key, *grantee_uid)?)
+            }) {
+                Ok(()) => {
+                    tracker::retire_grant_descriptor_after_ungrant(key, *grantee_uid);
+                    Ok(None)
+                }
+                Err(error) => {
+                    tracker::retire_grant_descriptor_after_ungrant(key, *grantee_uid);
+                    warn!(
+                        "[Injector][Reply] OMK ungrant failed for uid={} pid={}: {:#}; preserving original system reply",
+                        pending.caller.uid,
+                        pending.caller.pid,
+                        error
+                    );
+                    Ok(None)
+                }
+            }
+        }
+        ParsedServiceRequest::GetNumberOfEntries { domain, nspace } => {
+            if !system_reply_succeeded(tr) {
+                return Ok(None);
+            }
+            match ipc::with_omk_retry(|omk| {
+                Ok(omk.r#getNumberOfEntries(Some(&caller), *domain, *nspace)?)
+            }) {
+                Ok(count) => Ok(Some(parcel::build_plain_reply(&count)?)),
+                Err(error) => {
+                    warn!(
+                        "[Injector][Reply] OMK getNumberOfEntries failed for uid={} pid={}: {:#}; preserving original system reply",
+                        pending.caller.uid,
+                        pending.caller.pid,
+                        error
+                    );
+                    Ok(None)
+                }
+            }
+        }
+        ParsedServiceRequest::ListEntriesBatched {
+            domain,
+            nspace,
+            starting_past_alias,
+        } => {
+            if !system_reply_succeeded(tr) {
+                return Ok(None);
+            }
+            match ipc::with_omk_retry(|omk| {
+                Ok(omk.r#listEntriesBatched(
+                    Some(&caller),
+                    *domain,
+                    *nspace,
+                    starting_past_alias.as_deref(),
+                )?)
+            }) {
+                Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?)),
+                Err(error) => {
+                    warn!(
+                        "[Injector][Reply] OMK listEntriesBatched failed for uid={} pid={}: {:#}; preserving original system reply",
+                        pending.caller.uid,
+                        pending.caller.pid,
+                        error
+                    );
+                    Ok(None)
+                }
+            }
+        }
+        ParsedServiceRequest::GetSupplementaryAttestationInfo { tag } => {
+            if !system_reply_succeeded(tr) {
+                return Ok(None);
+            }
+            match ipc::with_omk_retry(|omk| Ok(omk.r#getSupplementaryAttestationInfo(*tag)?)) {
+                Ok(info) => Ok(Some(parcel::build_plain_reply(&info)?)),
+                Err(error) => {
+                    warn!(
+                        "[Injector][Reply] OMK getSupplementaryAttestationInfo failed for uid={} pid={}: {:#}; preserving original system reply",
+                        pending.caller.uid,
+                        pending.caller.pid,
+                        error
+                    );
+                    Ok(None)
+                }
+            }
+        }
         ParsedServiceRequest::DeleteKey { key } => {
             let system_status = parcel::parse_reply_status(
                 tr.data.ptr.buffer as *mut u8,
@@ -1136,6 +1289,18 @@ unsafe fn build_service_reply_rewrite(
             }
         }
     }
+}
+
+unsafe fn system_reply_succeeded(tr: &binder_transaction_data) -> bool {
+    matches!(
+        parcel::parse_reply_status(
+            tr.data.ptr.buffer as *mut u8,
+            tr.data_size as usize,
+            tr.data.ptr.offsets as *mut usize,
+            tr.offsets_size as usize,
+        ),
+        Ok(status) if status.is_ok()
+    )
 }
 
 fn build_omk_key_entry_reply_with_fetched_carrier(
@@ -1769,10 +1934,12 @@ mod tests {
     }
 
     fn fake_system_security_level_backend() -> route::AospSecurityLevelBinder {
+        ensure_binder_process_state();
         BnKeystoreSecurityLevel::new_binder(FakeAospSecurityLevel)
     }
 
     fn fake_omk_security_level_backend() -> route::OmkSecurityLevelBinder {
+        ensure_binder_process_state();
         crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::BnOhMySecurityLevel::new_binder(
             FakeOmkSecurityLevel,
         )
@@ -1861,6 +2028,7 @@ mod tests {
     }
 
     fn fake_system_service_backend() -> route::AospServiceBinder {
+        ensure_binder_process_state();
         BnKeystoreService::new_binder(FakeAospService)
     }
 
@@ -1981,7 +2149,12 @@ mod tests {
     }
 
     fn fake_omk_service_backend() -> route::OmkServiceBinder {
+        ensure_binder_process_state();
         BnOhMyKsService::new_binder(FakeOmkService)
+    }
+
+    fn ensure_binder_process_state() {
+        let _ = rsbinder::ProcessState::init_default();
     }
 
     fn sample_key_descriptor() -> KeyDescriptor {
@@ -1990,6 +2163,65 @@ mod tests {
             nspace: 7,
             alias: Some("alias".to_string()),
             blob: None,
+        }
+    }
+
+    fn sample_service_requests() -> Vec<ParsedServiceRequest> {
+        vec![
+            ParsedServiceRequest::GetSecurityLevel {
+                security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
+            },
+            ParsedServiceRequest::GetKeyEntry {
+                key: sample_key_descriptor(),
+            },
+            ParsedServiceRequest::UpdateSubcomponent {
+                key: sample_key_descriptor(),
+                public_cert: None,
+                certificate_chain: None,
+            },
+            ParsedServiceRequest::ListEntries {
+                domain: Domain::APP,
+                nspace: 0,
+            },
+            ParsedServiceRequest::DeleteKey {
+                key: sample_key_descriptor(),
+            },
+            ParsedServiceRequest::Grant {
+                key: sample_key_descriptor(),
+                grantee_uid: 12345,
+                access_vector: 7,
+            },
+            ParsedServiceRequest::Ungrant {
+                key: sample_key_descriptor(),
+                grantee_uid: 12345,
+            },
+            ParsedServiceRequest::GetNumberOfEntries {
+                domain: Domain::APP,
+                nspace: 0,
+            },
+            ParsedServiceRequest::ListEntriesBatched {
+                domain: Domain::APP,
+                nspace: 0,
+                starting_past_alias: Some("alias".to_string()),
+            },
+            ParsedServiceRequest::GetSupplementaryAttestationInfo {
+                tag: Tag::MODULE_HASH,
+            },
+        ]
+    }
+
+    fn disabled_intercept_config() -> config::InterceptConfig {
+        config::InterceptConfig {
+            get_security_level: false,
+            get_key_entry: false,
+            update_subcomponent: false,
+            list_entries: false,
+            delete_key: false,
+            grant: false,
+            ungrant: false,
+            get_number_of_entries: false,
+            list_entries_batched: false,
+            get_supplementary_attestation_info: false,
         }
     }
 
@@ -2071,49 +2303,10 @@ mod tests {
         let system_backend = fake_system_service_backend();
         let omk_backend = fake_omk_service_backend();
 
-        let requests = [
-            ParsedServiceRequest::ListEntries {
-                domain: Domain::APP,
-                nspace: 0,
-            },
-            ParsedServiceRequest::Grant {
-                key: sample_key_descriptor(),
-                grantee_uid: 12345,
-                access_vector: 7,
-            },
-            ParsedServiceRequest::Ungrant {
-                key: sample_key_descriptor(),
-                grantee_uid: 12345,
-            },
-            ParsedServiceRequest::GetNumberOfEntries {
-                domain: Domain::APP,
-                nspace: 0,
-            },
-            ParsedServiceRequest::ListEntriesBatched {
-                domain: Domain::APP,
-                nspace: 0,
-                starting_past_alias: Some("alias".to_string()),
-            },
-            ParsedServiceRequest::GetSupplementaryAttestationInfo {
-                tag: Tag::MODULE_HASH,
-            },
-            ParsedServiceRequest::UpdateSubcomponent {
-                key: sample_key_descriptor(),
-                public_cert: None,
-                certificate_chain: None,
-            },
-            ParsedServiceRequest::GetKeyEntry {
-                key: sample_key_descriptor(),
-            },
-            ParsedServiceRequest::GetSecurityLevel {
-                security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
-            },
-        ];
-
-        for req in &requests {
+        for req in sample_service_requests() {
             assert!(
                 build_request_side_redirect_with_backends(
-                    req,
+                    &req,
                     caller.clone(),
                     intercept.clone(),
                     true,
@@ -2126,7 +2319,7 @@ mod tests {
             );
             assert!(
                 build_request_side_redirect_with_backends(
-                    req,
+                    &req,
                     caller.clone(),
                     intercept.clone(),
                     true,
@@ -2139,7 +2332,7 @@ mod tests {
             );
             assert!(
                 build_request_side_redirect_with_backends(
-                    req,
+                    &req,
                     caller.clone(),
                     intercept.clone(),
                     false,
@@ -2176,43 +2369,57 @@ mod tests {
     }
 
     #[test]
-    fn service_route_stays_system_for_non_bridged_service_methods() {
+    fn service_route_uses_omk_for_bridged_service_methods() {
+        tracker::clear_state_for_tests();
         let intercept = config::InterceptConfig::default();
 
-        for request in [
-            ParsedServiceRequest::ListEntries {
-                domain: Domain::APP,
-                nspace: 0,
-            },
-            ParsedServiceRequest::Grant {
-                key: sample_key_descriptor(),
-                grantee_uid: 12345,
-                access_vector: 7,
-            },
-            ParsedServiceRequest::Ungrant {
-                key: sample_key_descriptor(),
-                grantee_uid: 12345,
-            },
-            ParsedServiceRequest::GetNumberOfEntries {
-                domain: Domain::APP,
-                nspace: 0,
-            },
-            ParsedServiceRequest::ListEntriesBatched {
-                domain: Domain::APP,
-                nspace: 0,
-                starting_past_alias: Some("alias".to_string()),
-            },
-            ParsedServiceRequest::GetSupplementaryAttestationInfo {
-                tag: Tag::MODULE_HASH,
-            },
-        ] {
+        for request in sample_service_requests() {
             assert_eq!(
                 route_for_service_request(&request, &intercept),
-                RouteTarget::System,
-                "{:?} should stay on the system backend until it has a bridged reply-side implementation",
+                RouteTarget::Omk,
+                "{:?} should use the OMK backend when the method is enabled",
                 request.method()
             );
         }
+    }
+
+    #[test]
+    fn service_route_uses_system_when_intercept_methods_are_disabled() {
+        tracker::clear_state_for_tests();
+        let intercept = disabled_intercept_config();
+
+        for request in sample_service_requests() {
+            assert_eq!(
+                route_for_service_request(&request, &intercept),
+                RouteTarget::System,
+                "{:?} should use the system backend when the method is disabled",
+                request.method()
+            );
+        }
+    }
+
+    #[test]
+    fn service_route_preserves_tracked_system_grant_owner() {
+        tracker::clear_state_for_tests();
+        let intercept = config::InterceptConfig::default();
+        let grant = KeyDescriptor {
+            domain: Domain::GRANT,
+            nspace: 123,
+            alias: None,
+            blob: None,
+        };
+        tracker::remember_key_descriptor_route(&grant, RouteTarget::System);
+
+        assert_eq!(
+            route_for_service_request(
+                &ParsedServiceRequest::Ungrant {
+                    key: grant,
+                    grantee_uid: 10001,
+                },
+                &intercept
+            ),
+            RouteTarget::System
+        );
     }
 
     #[test]
@@ -2244,6 +2451,7 @@ mod tests {
 
     #[test]
     fn create_operation_reply_reuses_native_carrier_and_routes_followups_to_omk() {
+        ensure_binder_process_state();
         tracker::clear_state_for_tests();
         operation_targets()
             .lock()
@@ -2420,6 +2628,7 @@ mod tests {
 
     #[test]
     fn omk_route_invalid_update_aad_returns_omk_service_specific_reply() {
+        ensure_binder_process_state();
         tracker::clear_state_for_tests();
         operation_targets()
             .lock()
@@ -2467,6 +2676,107 @@ mod tests {
         assert_eq!(
             lookup_operation_target(target).unwrap().route,
             RouteTarget::Omk
+        );
+    }
+
+    #[test]
+    fn omk_route_finish_clears_operation_mapping() {
+        tracker::clear_state_for_tests();
+        operation_targets()
+            .lock()
+            .expect("operation target map poisoned")
+            .clear();
+
+        let target = LocalBinderTarget {
+            ptr: 0x1234,
+            cookie: 0x5678,
+        };
+        let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
+            update_output: vec![5, 6, 7],
+            aborts: Arc::new(AtomicUsize::new(0)),
+            update_aad_status: None,
+        });
+        remember_operation_target(
+            target,
+            OperationTargetInfo {
+                route: RouteTarget::Omk,
+                aad_allowed: true,
+                backend: Some(backend),
+            },
+        );
+
+        let reply = build_operation_reply_rewrite(&PendingOperationCall {
+            request: ParsedOperationRequest::Finish {
+                input: Some(vec![1, 2, 3]),
+                signature: None,
+            },
+            method: OperationMethod::Finish,
+            caller: CallerIdentity::new(1000, 2000),
+            packages: vec!["com.example".to_string()],
+            target,
+        })
+        .expect("finish rewrite should succeed")
+        .expect("OMK finish should return an OMK-owned reply");
+        let mut reply = reply;
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let output: Option<Vec<u8>> =
+            unsafe { parcel::parse_success_reply(data, data_size, offsets, offsets_size) }
+                .expect("finish reply should deserialize");
+
+        assert_eq!(output.as_deref(), Some(&[5, 6, 7][..]));
+        assert!(
+            lookup_operation_target(target).is_none(),
+            "finish should clear the operation mapping"
+        );
+    }
+
+    #[test]
+    fn omk_route_abort_clears_operation_mapping() {
+        ensure_binder_process_state();
+        tracker::clear_state_for_tests();
+        operation_targets()
+            .lock()
+            .expect("operation target map poisoned")
+            .clear();
+
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let target = LocalBinderTarget {
+            ptr: 0x1234,
+            cookie: 0x5678,
+        };
+        let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
+            update_output: vec![5, 6, 7],
+            aborts: aborts.clone(),
+            update_aad_status: None,
+        });
+        remember_operation_target(
+            target,
+            OperationTargetInfo {
+                route: RouteTarget::Omk,
+                aad_allowed: true,
+                backend: Some(backend),
+            },
+        );
+
+        let reply = build_operation_reply_rewrite(&PendingOperationCall {
+            request: ParsedOperationRequest::Abort,
+            method: OperationMethod::Abort,
+            caller: CallerIdentity::new(1000, 2000),
+            packages: vec!["com.example".to_string()],
+            target,
+        })
+        .expect("abort rewrite should succeed")
+        .expect("OMK abort should return an OMK-owned reply");
+        let mut reply = reply;
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let status = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("abort reply should deserialize");
+
+        assert!(status.is_ok());
+        assert_eq!(aborts.load(Ordering::SeqCst), 1);
+        assert!(
+            lookup_operation_target(target).is_none(),
+            "abort should clear the operation mapping"
         );
     }
 }
