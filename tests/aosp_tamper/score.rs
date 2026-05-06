@@ -231,4 +231,163 @@ mod tests {
             "Local blind probes raised review items while attestation stayed aligned."
         );
     }
+
+    #[test]
+    fn advisory_only_rows_do_not_change_core_verdict() {
+        let baseline = evaluate(
+            vec![ProbeRow::new(
+                "Challenge",
+                "challenge matched",
+                SignalLevel::Pass,
+                Some(ScoredCategory::PolicyHard),
+            )],
+            Vec::new(),
+        );
+        let with_advisory = evaluate(
+            baseline.rows.clone(),
+            vec![
+                ProbeRow::new("Native maps", "none", SignalLevel::Info, None),
+                ProbeRow::new("Native fd", "none", SignalLevel::Warn, None),
+                ProbeRow::new(
+                    "Boot consistency",
+                    "unavailable",
+                    SignalLevel::Unavailable,
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(with_advisory.verdict, baseline.verdict);
+        assert_eq!(with_advisory.tamper_score, baseline.tamper_score);
+        assert_eq!(with_advisory.policy_hard_count, baseline.policy_hard_count);
+        assert_eq!(with_advisory.policy_soft_count, baseline.policy_soft_count);
+        assert_eq!(
+            with_advisory.supplementary_count,
+            baseline.supplementary_count
+        );
+        assert_eq!(with_advisory.headline, baseline.headline);
+        assert_eq!(with_advisory.summary, baseline.summary);
+    }
+
+    #[test]
+    fn advisory_native_rows_do_not_change_review_surface() {
+        let baseline = evaluate(
+            vec![ProbeRow::new(
+                "Challenge",
+                "challenge matched",
+                SignalLevel::Pass,
+                Some(ScoredCategory::PolicyHard),
+            )],
+            Vec::new(),
+        );
+        let output = evaluate(
+            baseline.rows.clone(),
+            vec![ProbeRow::new(
+                "Native",
+                "ioctl target escaped libc",
+                SignalLevel::Fail,
+                None,
+            )],
+        );
+
+        assert_eq!(output.verdict, baseline.verdict);
+        assert_eq!(output.tamper_score, baseline.tamper_score);
+        assert_eq!(output.policy_hard_count, baseline.policy_hard_count);
+        assert_eq!(output.policy_soft_count, baseline.policy_soft_count);
+        assert_eq!(output.supplementary_count, baseline.supplementary_count);
+        assert_eq!(output.headline, baseline.headline);
+        assert_eq!(output.summary, baseline.summary);
+    }
+
+    #[test]
+    fn supplementary_policy_rows_still_change_review_surface() {
+        let output = evaluate(
+            vec![
+                ProbeRow::new(
+                    "Challenge",
+                    "challenge matched",
+                    SignalLevel::Pass,
+                    Some(ScoredCategory::PolicyHard),
+                ),
+                ProbeRow::new(
+                    "Native",
+                    "legacy supplementary review item",
+                    SignalLevel::Fail,
+                    Some(ScoredCategory::Supplementary),
+                ),
+            ],
+            vec![ProbeRow::new(
+                "Native maps",
+                "none",
+                SignalLevel::Info,
+                None,
+            )],
+        );
+
+        assert_eq!(output.verdict, Verdict::Consistent);
+        assert_eq!(output.tamper_score, 10);
+        assert_eq!(output.policy_hard_count, 0);
+        assert_eq!(output.policy_soft_count, 0);
+        assert_eq!(output.supplementary_count, 1);
+        assert_eq!(
+            output.headline,
+            "Attestation aligned; local probes need review"
+        );
+        assert_eq!(
+            output.summary,
+            "Local blind probes raised review items while attestation stayed aligned."
+        );
+    }
+
+    #[test]
+    fn policy_rows_drive_verdict_in_documented_order() {
+        let broken = evaluate(
+            vec![ProbeRow::new(
+                "Key pair consistency",
+                "signature verification unavailable",
+                SignalLevel::Broken,
+                Some(ScoredCategory::PolicyHard),
+            )],
+            Vec::new(),
+        );
+        assert_eq!(broken.verdict, Verdict::Broken);
+
+        let suspicious = evaluate(
+            vec![
+                ProbeRow::new(
+                    "Oversized challenge",
+                    "accepted 256B",
+                    SignalLevel::Warn,
+                    Some(ScoredCategory::PolicySoft),
+                ),
+                ProbeRow::new(
+                    "Native",
+                    "branch-like ioctl prologue",
+                    SignalLevel::Fail,
+                    Some(ScoredCategory::Supplementary),
+                ),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(suspicious.verdict, Verdict::Suspicious);
+
+        let tampered = evaluate(
+            vec![
+                ProbeRow::new(
+                    "Certificate chain",
+                    "issuerLinks=false",
+                    SignalLevel::Fail,
+                    Some(ScoredCategory::PolicyHard),
+                ),
+                ProbeRow::new(
+                    "Oversized challenge",
+                    "accepted 256B",
+                    SignalLevel::Warn,
+                    Some(ScoredCategory::PolicySoft),
+                ),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(tampered.verdict, Verdict::Tampered);
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "OhMyKeymint"
-version = "0.1.2"
+version = "1.0.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
@@ -20,17 +20,17 @@ kmr-common = { path = "common" }
 kmr-crypto-boring = { path = "boringssl" }
 kmr-ta = { path = "ta" }
 kmr-wire = { path = "wire" }
-libc = "0.2.180"
+libc = "0.2.186"
 prost = "0.14.3"
 prost-types = "0.14.3"
 hex = "0.4.3"
 log4rs = "1.4.0"
 log = "0.4.29"
-rsbinder = { version = "0.6.0", features = ["android_12_plus"] }
+rsbinder = { version = "0.7.0", features = ["android_12_plus"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 anyhow = "1.0.102"
 async-trait = "0.1.89"
-tokio = { version = "1.50.0", features = ["macros", "libc"] }
+tokio = { version = "1.52.2", features = ["macros", "libc"] }
 lazy_static = "1.5.0"
 thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -40,14 +40,15 @@ watchdog_rs = { path = "watchdog", version = "0.1.0" }
 nix = { version = "0.31.2", features = ["mman"] }
 rsproperties = { version = "0.3.0", features = ["builder"] }
 libsqlite3-sys = "0.37.0"
-rand = "0.10.0"
+rand = "0.10.1"
 der = "0.7.10"
 toml = "1.1.0"
 regex = "1.12.3"
 hotwatch = "0.5.0"
 base64 = "0.22.1"
-quick-xml = { version = "0.38.3", features = ["serialize"] }
+quick-xml = { version = "0.39.3", features = ["serialize"] }
 goblin = "0.10.3"
+ring = "0.17.14"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15.1"
@@ -91,7 +92,7 @@ rsbinder-aidl = { path = "libs/rsbinder/rsbinder-aidl" }
 
 [build-dependencies]
 prost-build = "0.14.3"
-rsbinder-aidl = "0.6.0"
+rsbinder-aidl = "0.7.0"
 
 [dev-dependencies]
-rcgen = "0.13.2"
+rcgen = "0.14.7"

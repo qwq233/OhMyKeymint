@@ -76,7 +76,18 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         sha256.update(&buffer[..read]);
     }
 
-    Ok(format!("{:x}", sha256.finalize()))
+    Ok(hex_encode(&sha256.finalize()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 pub fn describe_elf(path: &Path) -> Result<String> {
@@ -299,4 +310,14 @@ pub fn find_process_by_name(target_name: &str) -> Result<(i32, PathBuf)> {
         format!("Process '{}' not found", target_name),
     ))
     .context("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hex_encode;
+
+    #[test]
+    fn hex_encode_uses_lowercase_fixed_width_bytes() {
+        assert_eq!(hex_encode(&[0x00, 0x01, 0x0f, 0x10, 0xab, 0xff]), "00010f10abff");
+    }
 }

@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
 use nix::{sys::signal::Signal, unistd::Pid};
-use rand::TryRngCore;
+use rand::TryRng;
 
 use crate::sys::wait_pid;
 use crate::{sys, utils};
@@ -108,9 +108,9 @@ fn format_remote_payload_identifier(bytes: &[u8]) -> String {
 
 fn generate_remote_payload_identifier() -> Result<String> {
     let mut random = [0u8; 16];
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rngs::SysRng;
     rng.try_fill_bytes(&mut random)
-        .context("failed to fill payload identifier bytes from OsRng")?;
+        .context("failed to fill payload identifier bytes from SysRng")?;
     Ok(format_remote_payload_identifier(&random))
 }
 
