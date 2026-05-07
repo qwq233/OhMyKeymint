@@ -254,6 +254,21 @@ mod tests {
                     SignalLevel::Unavailable,
                     None,
                 ),
+                ProbeRow::new("Raw error matrix", "native", SignalLevel::Warn, None),
+                ProbeRow::new("AES-GCM operation", "roundtrip", SignalLevel::Info, None),
+                ProbeRow::new("Import marker", "preserved", SignalLevel::Warn, None),
+                ProbeRow::new(
+                    "StrongBox tier",
+                    "unavailable",
+                    SignalLevel::Unavailable,
+                    None,
+                ),
+                ProbeRow::new(
+                    "Dual algorithm attestation",
+                    "unavailable",
+                    SignalLevel::Unavailable,
+                    None,
+                ),
             ],
         );
 

@@ -18,6 +18,18 @@ pub struct MissingKeyReplyFingerprint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceSpecificReplyFingerprint {
+    pub java_shortcut_detected: bool,
+    pub native_style_response: bool,
+    pub error_code: Option<i32>,
+    pub expected_error_code: Option<i32>,
+    pub expected_error_matched: bool,
+    pub message_length: Option<i32>,
+    pub detail: String,
+    pub raw_prefix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerateKeyReplyParcelParseResult {
     pub parse_succeeded: bool,
     pub authorization_count: Option<usize>,
@@ -54,67 +66,113 @@ pub fn snapshot_reply(bytes: &[u8]) -> ReplySnapshot {
 }
 
 pub fn classify_missing_key_reply(bytes: &[u8]) -> MissingKeyReplyFingerprint {
+    let parsed = classify_service_specific_reply(bytes, Some(RESPONSE_KEY_NOT_FOUND));
+    MissingKeyReplyFingerprint {
+        java_hook_detected: parsed.java_shortcut_detected,
+        native_style_response: parsed.native_style_response,
+        error_code: parsed.error_code,
+        message_length: parsed.message_length,
+        detail: if parsed.java_shortcut_detected {
+            "Keystore2 reply skipped the String16 slot and jumped straight to KEY_NOT_FOUND."
+                .to_string()
+        } else if parsed.native_style_response {
+            format!(
+                "Native-style Keystore2 reply msgLen={} error={}",
+                parsed
+                    .message_length
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".into()),
+                parsed
+                    .error_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "n/a".into())
+            )
+        } else {
+            parsed.detail
+        },
+        raw_prefix: parsed.raw_prefix,
+    }
+}
+
+pub fn classify_service_specific_reply(
+    bytes: &[u8],
+    expected_error_code: Option<i32>,
+) -> ServiceSpecificReplyFingerprint {
     let snapshot = snapshot_reply(bytes);
     if snapshot.data_size < 8 {
-        return MissingKeyReplyFingerprint {
-            java_hook_detected: false,
+        return ServiceSpecificReplyFingerprint {
+            java_shortcut_detected: false,
             native_style_response: false,
             error_code: None,
+            expected_error_code,
+            expected_error_matched: false,
             message_length: None,
-            detail: "Keystore2 reply was too small to fingerprint.".to_string(),
+            detail: "Binder reply was too small to fingerprint.".to_string(),
             raw_prefix: snapshot.raw_prefix,
         };
     }
 
     let exception_code = snapshot.exception_code;
     if exception_code != Some(EX_SERVICE_SPECIFIC) {
-        return MissingKeyReplyFingerprint {
-            java_hook_detected: false,
+        return ServiceSpecificReplyFingerprint {
+            java_shortcut_detected: false,
             native_style_response: false,
             error_code: None,
+            expected_error_code,
+            expected_error_matched: false,
             message_length: None,
             detail: match exception_code {
-                Some(0) => "Missing-key transaction unexpectedly succeeded.".to_string(),
-                Some(code) => format!("Keystore2 reply used exception code {code}."),
-                None => "Keystore2 reply did not expose an exception code.".to_string(),
+                Some(0) => "Transaction unexpectedly succeeded.".to_string(),
+                Some(code) => format!("Binder reply used exception code {code}."),
+                None => "Binder reply did not expose an exception code.".to_string(),
             },
             raw_prefix: snapshot.raw_prefix,
         };
     }
 
     let Some(second_word) = snapshot.second_word else {
-        return MissingKeyReplyFingerprint {
-            java_hook_detected: false,
+        return ServiceSpecificReplyFingerprint {
+            java_shortcut_detected: false,
             native_style_response: false,
             error_code: None,
+            expected_error_code,
+            expected_error_matched: false,
             message_length: None,
-            detail: "Keystore2 reply was missing the secondary fingerprint word.".to_string(),
+            detail: "Binder reply was missing the secondary fingerprint word.".to_string(),
             raw_prefix: snapshot.raw_prefix,
         };
     };
 
-    if second_word == RESPONSE_KEY_NOT_FOUND {
-        return MissingKeyReplyFingerprint {
-            java_hook_detected: true,
+    if Some(second_word) == expected_error_code {
+        return ServiceSpecificReplyFingerprint {
+            java_shortcut_detected: true,
             native_style_response: false,
-            error_code: Some(RESPONSE_KEY_NOT_FOUND),
+            error_code: Some(second_word),
+            expected_error_code,
+            expected_error_matched: true,
             message_length: None,
-            detail:
-                "Keystore2 reply skipped the String16 slot and jumped straight to KEY_NOT_FOUND."
-                    .to_string(),
+            detail: format!(
+                "service-specific shortcut response; error={second_word}; rawPrefix={}",
+                snapshot.raw_prefix
+            ),
             raw_prefix: snapshot.raw_prefix,
         };
     }
 
     if second_word == STRING16_NULL || second_word >= 0 {
-        let error_code = snapshot.trailing_ints.get(1).copied();
-        return MissingKeyReplyFingerprint {
-            java_hook_detected: false,
+        let error_code =
+            service_specific_error_code_from_native_reply(&snapshot, expected_error_code);
+        return ServiceSpecificReplyFingerprint {
+            java_shortcut_detected: false,
             native_style_response: true,
             error_code,
+            expected_error_code,
+            expected_error_matched: expected_error_code
+                .map(|expected| error_code == Some(expected))
+                .unwrap_or(error_code.is_some()),
             message_length: Some(second_word),
             detail: format!(
-                "Native-style Keystore2 reply msgLen={} error={}",
+                "native service-specific response; msgLen={}; error={}",
                 second_word,
                 error_code
                     .map(|code| code.to_string())
@@ -124,15 +182,32 @@ pub fn classify_missing_key_reply(bytes: &[u8]) -> MissingKeyReplyFingerprint {
         };
     }
 
-    MissingKeyReplyFingerprint {
-        java_hook_detected: false,
+    ServiceSpecificReplyFingerprint {
+        java_shortcut_detected: false,
         native_style_response: false,
         error_code: None,
+        expected_error_code,
+        expected_error_matched: false,
         message_length: None,
-        detail: format!(
-            "Keystore2 reply used an unknown serialization fingerprint ({second_word})."
-        ),
+        detail: format!("Binder reply used an unknown serialization fingerprint ({second_word})."),
         raw_prefix: snapshot.raw_prefix,
+    }
+}
+
+fn service_specific_error_code_from_native_reply(
+    snapshot: &ReplySnapshot,
+    expected_error_code: Option<i32>,
+) -> Option<i32> {
+    if let Some(expected) = expected_error_code {
+        if snapshot.trailing_ints.iter().any(|code| *code == expected) {
+            return Some(expected);
+        }
+    }
+
+    if snapshot.second_word == Some(STRING16_NULL) {
+        snapshot.trailing_ints.get(1).copied()
+    } else {
+        snapshot.trailing_ints.last().copied()
     }
 }
 
@@ -322,6 +397,64 @@ mod tests {
     }
 
     #[test]
+    fn classifies_raw_error_matrix_service_specific_shapes() {
+        let cases = [
+            ("missing-key", RESPONSE_KEY_NOT_FOUND),
+            ("delete", RESPONSE_KEY_NOT_FOUND),
+            ("update", RESPONSE_KEY_NOT_FOUND),
+            ("createOperation", RESPONSE_KEY_NOT_FOUND),
+        ];
+
+        for (label, expected_error) in cases {
+            let parsed = classify_service_specific_reply(
+                &native_service_specific_reply(expected_error),
+                Some(expected_error),
+            );
+            assert!(
+                parsed.native_style_response,
+                "{label} should keep native Binder Status shape"
+            );
+            assert!(!parsed.java_shortcut_detected);
+            assert_eq!(parsed.error_code, Some(expected_error));
+            assert!(parsed.expected_error_matched);
+        }
+    }
+
+    #[test]
+    fn service_specific_classifier_marks_shortcut_and_wrong_error() {
+        let shortcut = classify_service_specific_reply(
+            &java_shortcut_service_specific_reply(RESPONSE_KEY_NOT_FOUND),
+            Some(RESPONSE_KEY_NOT_FOUND),
+        );
+        assert!(shortcut.java_shortcut_detected);
+        assert!(!shortcut.native_style_response);
+        assert!(shortcut.expected_error_matched);
+
+        let wrong = classify_service_specific_reply(
+            &native_service_specific_reply(20),
+            Some(RESPONSE_KEY_NOT_FOUND),
+        );
+        assert!(wrong.native_style_response);
+        assert_eq!(wrong.error_code, Some(20));
+        assert!(!wrong.expected_error_matched);
+    }
+
+    #[test]
+    fn service_specific_classifier_handles_empty_message_slot() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&EX_SERVICE_SPECIFIC.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&RESPONSE_KEY_NOT_FOUND.to_le_bytes());
+
+        let parsed = classify_service_specific_reply(&bytes, Some(RESPONSE_KEY_NOT_FOUND));
+        assert!(parsed.native_style_response);
+        assert_eq!(parsed.message_length, Some(0));
+        assert_eq!(parsed.error_code, Some(RESPONSE_KEY_NOT_FOUND));
+    }
+
+    #[test]
     fn generate_mode_parser_matches_duck_signature() {
         let mut bytes = vec![0u8; 64];
         bytes[0..4].copy_from_slice(&0i32.to_le_bytes());
@@ -358,5 +491,22 @@ mod tests {
         let parsed = parse_generate_key_reply(&bytes);
         assert!(parsed.parse_succeeded);
         assert!(!generate_mode_fingerprint_matched(&parsed));
+    }
+
+    fn native_service_specific_reply(error_code: i32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&EX_SERVICE_SPECIFIC.to_le_bytes());
+        bytes.extend_from_slice(&STRING16_NULL.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&error_code.to_le_bytes());
+        bytes
+    }
+
+    fn java_shortcut_service_specific_reply(error_code: i32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&EX_SERVICE_SPECIFIC.to_le_bytes());
+        bytes.extend_from_slice(&error_code.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes
     }
 }

@@ -2,9 +2,11 @@ use std::ffi::{c_char, c_int, CString};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use der::{Decode, Encode, Reader, SliceReader};
 use hex::encode as hex_encode;
-use ring::signature::{self, UnparsedPublicKey, VerificationAlgorithm};
+use ring::rand::SystemRandom;
+use ring::signature::{self, EcdsaKeyPair, UnparsedPublicKey, VerificationAlgorithm};
 use rsbinder::{hub, ExceptionCode, Status, StatusCode, Strong};
 use x509_cert::Certificate;
 
@@ -21,17 +23,21 @@ use crate::android::system::keystore2::{
     KeyDescriptor::KeyDescriptor,
     KeyEntryResponse::KeyEntryResponse,
     KeyMetadata::KeyMetadata,
+    ResponseCode::ResponseCode,
 };
 use crate::aosp_tamper::classify::{
-    binder_chain_has_issue, filter_outlier_pairs, metadata_key_is_normalized,
-    metadata_shape_is_valid, native_flags_have_issue, paired_diff_series,
-    pure_cert_top_level_security_level_exposed, timing_side_channel_suspicious, BinderChainView,
-    MetadataKeyView, MetadataShapeView, NativeTraceFlags, PureCertLevelView,
+    alias_is_strictly_after_cursor, aliases_contain_all, binder_chain_has_issue,
+    filter_outlier_pairs, list_entries_batched_cursor_echoed,
+    list_entries_batched_expected_next_missing, list_entries_batched_view,
+    metadata_key_is_normalized, metadata_shape_is_valid, native_flags_have_issue,
+    paired_diff_series, pure_cert_top_level_security_level_exposed, timing_side_channel_suspicious,
+    BinderChainView, MetadataKeyView, MetadataShapeView, NativeTraceFlags, PureCertLevelView,
 };
 use crate::aosp_tamper::model::{ProbeOutput, ProbeRow, ScoredCategory, SignalLevel};
 use crate::aosp_tamper::native;
 use crate::aosp_tamper::parcel::{
-    classify_missing_key_reply, generate_mode_fingerprint_matched, parse_generate_key_reply,
+    classify_missing_key_reply, classify_service_specific_reply, generate_mode_fingerprint_matched,
+    parse_generate_key_reply, ServiceSpecificReplyFingerprint,
 };
 use crate::aosp_tamper::score;
 use crate::attestation::{
@@ -51,6 +57,19 @@ const OID_ECDSA_WITH_SHA384: &str = "1.2.840.10045.4.3.3";
 const OID_RSA_WITH_SHA256: &str = "1.2.840.113549.1.1.11";
 const OID_RSA_WITH_SHA384: &str = "1.2.840.113549.1.1.12";
 const OID_RSA_WITH_SHA512: &str = "1.2.840.113549.1.1.13";
+const APP_LIST_IGNORED_NAMESPACE: i64 = i64::MIN + 0x4b32;
+const RAW_ERROR_UPDATE_CERT_DER_B64: &str = concat!(
+    "MIIBrDCCAVKgAwIBAgIUEDMxnKtJLyq85qO8+47LPYIKctAwCgYIKoZIzj0EAwIw",
+    "TTEeMBwGA1UEAwwVRWx0YXZpbmVNYXJrZXItS2V5Ym94MR4wHAYDVQQKDBVFbHRh",
+    "dmluZSBEdWNrRGV0ZWN0b3IxCzAJBgNVBAYTAlVTMB4XDTI2MDMxNTA3MDExOVoX",
+    "DTM2MDMxMzA3MDExOVowTTEeMBwGA1UEAwwVRWx0YXZpbmVNYXJrZXItS2V5Ym94",
+    "MR4wHAYDVQQKDBVFbHRhdmluZSBEdWNrRGV0ZWN0b3IxCzAJBgNVBAYTAlVTMFkw",
+    "EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE27fIn5FqZMiCjrzJVb+cbrldYjQXnRDD",
+    "u++w8FC7vkOs8+iXvGYEQU66Iz18/OxQrw/DtXCWIaaV9soPfMTiyKMQMA4wDAYD",
+    "VR0TAQH/BAIwADAKBggqhkjOPQQDAgNIADBFAiEArLJ6IUmlCAo5qDxUMaC5xS/X",
+    "yEAI3GWQyzWBtHoJSA4CIFxNM3we4MxMk0Zk/UEhUz+Nmp2kyb6nNNgUj7yj1JxI"
+);
+const IMPORT_MARKER_SUBJECT: &str = "EltavineMarker-Keybox";
 
 pub fn run_probe(quick: bool) -> Result<ProbeOutput> {
     rsbinder::ProcessState::init_default();
@@ -93,10 +112,14 @@ impl BlindProbe {
         advisory_rows.push(self.probe_der_attestation_sanity());
         rows.push(self.probe_keystore2_reply_fingerprint());
         rows.push(self.probe_generate_mode_fingerprint());
+        advisory_rows.push(self.probe_raw_error_matrix());
 
         let (metadata_key, metadata_shape) = self.probe_metadata_semantics();
         rows.push(metadata_key);
         rows.push(metadata_shape);
+        rows.push(self.probe_entry_listing());
+        rows.push(self.probe_list_entries_batched());
+        rows.push(self.probe_operation_security_level());
 
         let (pure_cert_level, pure_cert_metadata) = self.probe_pure_certificate_security_level();
         advisory_rows.push(pure_cert_level);
@@ -116,6 +139,9 @@ impl BlindProbe {
         advisory_rows.extend(native_advisory_rows);
 
         advisory_rows.push(self.probe_aes_gcm_operation());
+        advisory_rows.push(self.probe_import_marker());
+        advisory_rows.push(self.probe_strongbox_tier());
+        advisory_rows.push(self.probe_dual_algorithm_attestation());
         advisory_rows.push(self.probe_timing_anomaly());
         advisory_rows.push(self.probe_operation_pruning());
 
@@ -327,6 +353,99 @@ impl BlindProbe {
                 ScoredCategory::Supplementary,
             ),
         }
+    }
+
+    fn probe_raw_error_matrix(&self) -> ProbeRow {
+        if self.quick {
+            return advisory_row(
+                "Raw error matrix",
+                "skipped by --quick".to_string(),
+                SignalLevel::Unavailable,
+            );
+        }
+
+        let missing_alias = unique_alias("raw-missing");
+        let missing_descriptor = app_descriptor(&missing_alias);
+        let marker_cert = match marker_certificate_der() {
+            Ok(cert) => cert,
+            Err(error) => {
+                return advisory_row(
+                    "Raw error matrix",
+                    format!("marker certificate unavailable: {error:#}"),
+                    SignalLevel::Unavailable,
+                );
+            }
+        };
+
+        let params = sign_operation_params(false);
+        let cases = [
+            RawReplyCapture {
+                label: "getKeyEntry",
+                expected_error_code: ResponseCode::KEY_NOT_FOUND.0,
+                raw: self.raw_service_reply(service_tx::r#getKeyEntry, |parcel| {
+                    parcel.write(&missing_descriptor)
+                }),
+            },
+            RawReplyCapture {
+                label: "deleteKey",
+                expected_error_code: ResponseCode::KEY_NOT_FOUND.0,
+                raw: self.raw_service_reply(service_tx::r#deleteKey, |parcel| {
+                    parcel.write(&missing_descriptor)
+                }),
+            },
+            RawReplyCapture {
+                label: "updateSubcomponent",
+                expected_error_code: ResponseCode::KEY_NOT_FOUND.0,
+                raw: self.raw_service_reply(service_tx::r#updateSubcomponent, |parcel| {
+                    parcel.write(&missing_descriptor)?;
+                    parcel.write(&Option::<Vec<u8>>::Some(marker_cert.clone()))?;
+                    parcel.write(&Option::<Vec<u8>>::None)
+                }),
+            },
+            RawReplyCapture {
+                label: "createOperation",
+                expected_error_code: ResponseCode::KEY_NOT_FOUND.0,
+                raw: self.raw_security_level_reply(security_tx::r#createOperation, |parcel| {
+                    parcel.write(&missing_descriptor)?;
+                    parcel.write(&params)?;
+                    parcel.write(&false)
+                }),
+            },
+        ];
+
+        let mut observations = Vec::new();
+        let mut unavailable = 0usize;
+        let mut suspicious = false;
+        for case in cases {
+            match case.raw {
+                Ok(bytes) => {
+                    let fingerprint =
+                        classify_service_specific_reply(&bytes, Some(case.expected_error_code));
+                    suspicious |= raw_reply_fingerprint_suspicious(&fingerprint);
+                    observations.push(format!(
+                        "{}={}",
+                        case.label,
+                        raw_reply_case_label(&fingerprint)
+                    ));
+                }
+                Err(error) => {
+                    unavailable += 1;
+                    observations.push(format!("{}=captureErr({error:#})", case.label));
+                }
+            }
+        }
+
+        advisory_row(
+            "Raw error matrix",
+            format!("{}; unavailable={unavailable}", observations.join(", ")),
+            if unavailable == observations.len() {
+                SignalLevel::Unavailable
+            } else if suspicious {
+                SignalLevel::Warn
+            } else {
+                SignalLevel::Info
+            },
+        )
     }
 
     fn probe_key_pair_consistency(&self) -> ProbeRow {
@@ -607,6 +726,285 @@ impl BlindProbe {
                 )
             }
         }
+    }
+
+    fn probe_entry_listing(&self) -> ProbeRow {
+        let prefix = unique_alias("entry-listing");
+        let alias0 = format!("{prefix}_00");
+        let alias1 = format!("{prefix}_01");
+        let descriptor0 = app_descriptor(&alias0);
+        let descriptor1 = app_descriptor(&alias1);
+
+        let before_count = match self
+            .service
+            .getNumberOfEntries(Domain::APP, APP_LIST_IGNORED_NAMESPACE)
+        {
+            Ok(count) => count,
+            Err(status) => {
+                return scored_row(
+                    "Entry listing",
+                    format!(
+                        "getNumberOfEntries(APP) failed: {}",
+                        describe_status(&status)
+                    ),
+                    SignalLevel::Unavailable,
+                    ScoredCategory::Supplementary,
+                );
+            }
+        };
+
+        let generated0 = self
+            .tee
+            .generateKey(&descriptor0, None, &signing_ec_params(), 0, &[]);
+        let generated1 = self
+            .tee
+            .generateKey(&descriptor1, None, &signing_ec_params(), 0, &[]);
+        let after_create_count = self
+            .service
+            .getNumberOfEntries(Domain::APP, APP_LIST_IGNORED_NAMESPACE)
+            .ok();
+        let listed = self
+            .service
+            .listEntries(Domain::APP, APP_LIST_IGNORED_NAMESPACE);
+        let aliases = listed
+            .as_ref()
+            .ok()
+            .map(|entries| descriptor_aliases(entries));
+        let count_grew = after_create_count
+            .map(|count| count >= before_count.saturating_add(2))
+            .unwrap_or(false);
+        let contains_both = aliases
+            .as_ref()
+            .map(|aliases| aliases_contain_all(aliases, &[&alias0, &alias1]))
+            .unwrap_or(false);
+        let lexically_ordered = aliases
+            .as_ref()
+            .and_then(|aliases| alias_positions(aliases, &alias0, &alias1))
+            .map(|(left, right)| left < right)
+            .unwrap_or(false)
+            && alias_is_strictly_after_cursor(&alias1, &alias0);
+
+        let _ = self.service.deleteKey(&descriptor0);
+        let _ = self.service.deleteKey(&descriptor1);
+        let cleanup_removed = self.service.getKeyEntry(&descriptor0).is_err()
+            && self.service.getKeyEntry(&descriptor1).is_err();
+        let after_cleanup_count = self
+            .service
+            .getNumberOfEntries(Domain::APP, APP_LIST_IGNORED_NAMESPACE)
+            .ok();
+        let cleanup_count_ok = after_cleanup_count
+            .map(|count| count <= before_count)
+            .unwrap_or(false);
+
+        let available = generated0.is_ok()
+            && generated1.is_ok()
+            && after_create_count.is_some()
+            && listed.is_ok()
+            && after_cleanup_count.is_some();
+        let all_ok = available
+            && count_grew
+            && contains_both
+            && lexically_ordered
+            && cleanup_removed
+            && cleanup_count_ok;
+        scored_row(
+            "Entry listing",
+            format!(
+                "created0={}, created1={}, beforeCount={}, afterCreateCount={}, listedBoth={}, lexicalOrder={}, cleanupRemoved={}, afterCleanupCount={}",
+                generated0.is_ok(),
+                generated1.is_ok(),
+                before_count,
+                option_i32_label(after_create_count),
+                contains_both,
+                lexically_ordered,
+                cleanup_removed,
+                option_i32_label(after_cleanup_count)
+            ),
+            if !available {
+                SignalLevel::Unavailable
+            } else if all_ok {
+                SignalLevel::Pass
+            } else {
+                SignalLevel::Fail
+            },
+            ScoredCategory::Supplementary,
+        )
+    }
+
+    fn probe_list_entries_batched(&self) -> ProbeRow {
+        let prefix = unique_alias("batched-listing");
+        let alias0 = format!("{prefix}_00");
+        let alias1 = format!("{prefix}_01");
+        let descriptor0 = app_descriptor(&alias0);
+        let descriptor1 = app_descriptor(&alias1);
+
+        let generated0 = self
+            .tee
+            .generateKey(&descriptor0, None, &signing_ec_params(), 0, &[]);
+        let generated1 = self
+            .tee
+            .generateKey(&descriptor1, None, &signing_ec_params(), 0, &[]);
+        if let Err(status) = generated0.as_ref() {
+            let detail = format!("first key generation failed: {}", describe_status(status));
+            let _ = self.service.deleteKey(&descriptor0);
+            let _ = self.service.deleteKey(&descriptor1);
+            return scored_row(
+                "Batched listing",
+                detail,
+                SignalLevel::Unavailable,
+                ScoredCategory::Supplementary,
+            );
+        }
+        if let Err(status) = generated1.as_ref() {
+            let detail = format!("second key generation failed: {}", describe_status(status));
+            let _ = self.service.deleteKey(&descriptor0);
+            let _ = self.service.deleteKey(&descriptor1);
+            return scored_row(
+                "Batched listing",
+                detail,
+                SignalLevel::Unavailable,
+                ScoredCategory::Supplementary,
+            );
+        }
+        let listed = self.service.listEntriesBatched(
+            Domain::APP,
+            APP_LIST_IGNORED_NAMESPACE,
+            Some(alias0.as_str()),
+        );
+        let aliases = listed
+            .as_ref()
+            .ok()
+            .map(|entries| descriptor_aliases(entries));
+        let view = aliases
+            .as_ref()
+            .map(|aliases| list_entries_batched_view(aliases, &alias0, &alias1));
+
+        let _ = self.service.deleteKey(&descriptor0);
+        let _ = self.service.deleteKey(&descriptor1);
+
+        match (listed, aliases, view) {
+            (Ok(_), Some(aliases), Some(view)) => {
+                let cursor_echoed = list_entries_batched_cursor_echoed(view);
+                let expected_next_missing = list_entries_batched_expected_next_missing(view);
+                scored_row(
+                    "Batched listing",
+                    format!(
+                        "cursorEchoed={}, expectedNextMissing={}, returnedAliases={}",
+                        cursor_echoed,
+                        expected_next_missing,
+                        aliases.len()
+                    ),
+                    if !cursor_echoed && !expected_next_missing {
+                        SignalLevel::Pass
+                    } else {
+                        SignalLevel::Fail
+                    },
+                    ScoredCategory::Supplementary,
+                )
+            }
+            (Err(status), _, _) if status_is_unknown_transaction(&status) => scored_row(
+                "Batched listing",
+                "listEntriesBatched unavailable on this API surface".to_string(),
+                SignalLevel::Unavailable,
+                ScoredCategory::Supplementary,
+            ),
+            (Err(status), _, _) => scored_row(
+                "Batched listing",
+                format!("listEntriesBatched failed: {}", describe_status(&status)),
+                SignalLevel::Unavailable,
+                ScoredCategory::Supplementary,
+            ),
+            _ => scored_row(
+                "Batched listing",
+                "probe unavailable: listEntriesBatched returned no comparable aliases".to_string(),
+                SignalLevel::Unavailable,
+                ScoredCategory::Supplementary,
+            ),
+        }
+    }
+
+    fn probe_operation_security_level(&self) -> ProbeRow {
+        let alias = unique_alias("operation-level");
+        let descriptor = app_descriptor(&alias);
+        let generated = self
+            .tee
+            .generateKey(&descriptor, None, &signing_ec_params(), 0, &[]);
+        let entry = generated
+            .as_ref()
+            .ok()
+            .and_then(|_| self.service.getKeyEntry(&descriptor).ok());
+
+        let row = match entry {
+            Some(entry) => {
+                let leaf = entry.metadata.certificate.as_deref();
+                let key_descriptor = entry.metadata.key.clone();
+                match (leaf, entry.iSecurityLevel.as_ref()) {
+                    (Some(leaf), Some(entry_level)) => {
+                        let entry_payload = b"blind-entry-security-level";
+                        let cached_payload = b"blind-cached-security-level";
+                        let entry_signature =
+                            sign_payload_with_level(entry_level, &key_descriptor, entry_payload);
+                        let cached_signature =
+                            sign_payload_with_level(&self.tee, &key_descriptor, cached_payload);
+                        let entry_verified = entry_signature.as_ref().ok().and_then(|signature| {
+                            verify_signature_with_certificate(leaf, entry_payload, signature).ok()
+                        });
+                        let cached_verified =
+                            cached_signature.as_ref().ok().and_then(|signature| {
+                                verify_signature_with_certificate(leaf, cached_payload, signature)
+                                    .ok()
+                            });
+                        let entry_operation_ok = entry_signature.is_ok();
+                        let cached_operation_ok = cached_signature.is_ok();
+                        let comparable = entry_operation_ok || cached_operation_ok;
+                        let equivalent = entry_operation_ok == cached_operation_ok
+                            && entry_verified == cached_verified;
+                        scored_row(
+                            "Operation security level",
+                            format!(
+                                "entryLevelPresent=true, entryOperationOk={}, cachedOperationOk={}, entrySignatureVerified={}, cachedSignatureVerified={}, equivalent={}",
+                                entry_operation_ok,
+                                cached_operation_ok,
+                                bool_label(entry_verified),
+                                bool_label(cached_verified),
+                                equivalent
+                            ),
+                            if !comparable {
+                                SignalLevel::Unavailable
+                            } else if equivalent {
+                                SignalLevel::Pass
+                            } else {
+                                SignalLevel::Fail
+                            },
+                            ScoredCategory::Supplementary,
+                        )
+                    }
+                    (None, _) => scored_row(
+                        "Operation security level",
+                        "leaf certificate missing for verification".to_string(),
+                        SignalLevel::Unavailable,
+                        ScoredCategory::Supplementary,
+                    ),
+                    (_, None) => scored_row(
+                        "Operation security level",
+                        "getKeyEntry returned no iSecurityLevel".to_string(),
+                        SignalLevel::Fail,
+                        ScoredCategory::Supplementary,
+                    ),
+                }
+            }
+            None => scored_row(
+                "Operation security level",
+                generated
+                    .err()
+                    .map(|status| format!("generateKey failed: {}", describe_status(&status)))
+                    .unwrap_or_else(|| "getKeyEntry failed".to_string()),
+                SignalLevel::Unavailable,
+                ScoredCategory::Supplementary,
+            ),
+        };
+        let _ = self.service.deleteKey(&descriptor);
+        row
     }
 
     fn probe_pure_certificate_security_level(&self) -> (ProbeRow, ProbeRow) {
@@ -1291,8 +1689,9 @@ impl BlindProbe {
                 "AES-GCM operation",
                 observation.detail,
                 if observation.operation_finished
-                    && observation.output_bytes > 0
+                    && observation.ciphertext_bytes > 0
                     && observation.nonce_len.is_some()
+                    && observation.decrypt_matches
                 {
                     SignalLevel::Info
                 } else {
@@ -1305,6 +1704,213 @@ impl BlindProbe {
                 SignalLevel::Unavailable,
             ),
         }
+    }
+
+    fn probe_import_marker(&self) -> ProbeRow {
+        let alias = unique_alias("import-marker");
+        let descriptor = app_descriptor(&alias);
+        let private_key = match import_marker_private_key_der() {
+            Ok(key) => key,
+            Err(error) => {
+                return advisory_row(
+                    "Import marker",
+                    format!("marker key unavailable: {error:#}"),
+                    SignalLevel::Unavailable,
+                );
+            }
+        };
+        let certificate = match marker_certificate_der() {
+            Ok(cert) => cert,
+            Err(error) => {
+                return advisory_row(
+                    "Import marker",
+                    format!("marker certificate unavailable: {error:#}"),
+                    SignalLevel::Unavailable,
+                );
+            }
+        };
+
+        let imported =
+            self.tee
+                .importKey(&descriptor, None, &imported_ec_params(), 0, &private_key);
+        let row = match imported {
+            Ok(_) => {
+                let updated = self.service.updateSubcomponent(
+                    &descriptor,
+                    Some(certificate.as_slice()),
+                    None,
+                );
+                match updated.and_then(|_| self.service.getKeyEntry(&descriptor)) {
+                    Ok(entry) => {
+                        let fetched_cert = entry.metadata.certificate.as_deref();
+                        let der_preserved = fetched_cert == Some(certificate.as_slice());
+                        let subject = fetched_cert
+                            .and_then(|cert| Certificate::from_der(cert).ok())
+                            .map(|cert| cert.tbs_certificate.subject.to_string());
+                        let subject_preserved = subject
+                            .as_deref()
+                            .map(|subject| subject.contains(IMPORT_MARKER_SUBJECT))
+                            .unwrap_or(false);
+                        advisory_row(
+                            "Import marker",
+                            format!(
+                                "imported=true, certDerPreserved={}, subjectPreserved={}",
+                                der_preserved, subject_preserved
+                            ),
+                            if der_preserved && subject_preserved {
+                                SignalLevel::Info
+                            } else {
+                                SignalLevel::Warn
+                            },
+                        )
+                    }
+                    Err(status) => advisory_row(
+                        "Import marker",
+                        format!("update/fetch failed: {}", describe_status(&status)),
+                        SignalLevel::Unavailable,
+                    ),
+                }
+            }
+            Err(status) => advisory_row(
+                "Import marker",
+                format!("import unavailable: {}", describe_status(&status)),
+                SignalLevel::Unavailable,
+            ),
+        };
+        let _ = self.service.deleteKey(&descriptor);
+        row
+    }
+
+    fn probe_strongbox_tier(&self) -> ProbeRow {
+        if self.quick {
+            return advisory_row(
+                "StrongBox tier",
+                "skipped by --quick".to_string(),
+                SignalLevel::Unavailable,
+            );
+        }
+
+        let strongbox = match self.service.getSecurityLevel(SecurityLevel::STRONGBOX) {
+            Ok(strongbox) => strongbox,
+            Err(status) => {
+                return advisory_row(
+                    "StrongBox tier",
+                    format!("StrongBox unavailable: {}", describe_status(&status)),
+                    SignalLevel::Unavailable,
+                );
+            }
+        };
+
+        let alias = unique_alias("strongbox");
+        let descriptor = app_descriptor(&alias);
+        let generated = strongbox.generateKey(&descriptor, None, &signing_ec_params(), 0, &[]);
+        let fetched = generated
+            .as_ref()
+            .ok()
+            .and_then(|_| self.service.getKeyEntry(&descriptor).ok());
+        let _ = self.service.deleteKey(&descriptor);
+
+        match (generated, fetched) {
+            (Ok(metadata), Some(entry)) => advisory_row(
+                "StrongBox tier",
+                format!(
+                    "generateOk=true, generatedLevel={:?}, fetchedLevel={:?}, entryLevelPresent={}",
+                    metadata.keySecurityLevel,
+                    entry.metadata.keySecurityLevel,
+                    entry.iSecurityLevel.is_some()
+                ),
+                SignalLevel::Info,
+            ),
+            (Err(status), _) => advisory_row(
+                "StrongBox tier",
+                format!("StrongBox generation failed: {}", describe_status(&status)),
+                SignalLevel::Warn,
+            ),
+            (Ok(metadata), None) => advisory_row(
+                "StrongBox tier",
+                format!(
+                    "generateOk=true, generatedLevel={:?}, getKeyEntry unavailable",
+                    metadata.keySecurityLevel
+                ),
+                SignalLevel::Unavailable,
+            ),
+        }
+    }
+
+    fn probe_dual_algorithm_attestation(&self) -> ProbeRow {
+        if self.quick {
+            return advisory_row(
+                "Dual algorithm attestation",
+                "skipped by --quick".to_string(),
+                SignalLevel::Unavailable,
+            );
+        }
+
+        let ec_alias = unique_alias("dual-ec");
+        let rsa_alias = unique_alias("dual-rsa");
+        let ec_descriptor = app_descriptor(&ec_alias);
+        let rsa_descriptor = app_descriptor(&rsa_alias);
+        let ec = self.tee.generateKey(
+            &ec_descriptor,
+            None,
+            &attested_ec_params(b"dual-algorithm-ec"),
+            0,
+            &[],
+        );
+        let rsa = self.tee.generateKey(
+            &rsa_descriptor,
+            None,
+            &attested_rsa_params(b"dual-algorithm-rsa"),
+            0,
+            &[],
+        );
+        let row = match (ec.as_ref(), rsa.as_ref()) {
+            (Ok(ec_metadata), Ok(rsa_metadata)) => {
+                let ec_chain = collect_chain_der(ec_metadata);
+                let rsa_chain = collect_chain_der(rsa_metadata);
+                match (ec_chain, rsa_chain) {
+                    (Ok(ec_chain), Ok(rsa_chain)) => {
+                        let ec_leaf_sig_oid = certificate_signature_oid(ec_chain.first());
+                        let rsa_leaf_sig_oid = certificate_signature_oid(rsa_chain.first());
+                        let chains_equal = ec_chain == rsa_chain;
+                        advisory_row(
+                            "Dual algorithm attestation",
+                            format!(
+                                "ecCerts={}, rsaCerts={}, ecLeafSigOid={}, rsaLeafSigOid={}, chainsEqual={}",
+                                ec_chain.len(),
+                                rsa_chain.len(),
+                                ec_leaf_sig_oid.unwrap_or_else(|| "unavailable".to_string()),
+                                rsa_leaf_sig_oid.unwrap_or_else(|| "unavailable".to_string()),
+                                chains_equal
+                            ),
+                            if chains_equal {
+                                SignalLevel::Warn
+                            } else {
+                                SignalLevel::Info
+                            },
+                        )
+                    }
+                    (Err(error), _) | (_, Err(error)) => advisory_row(
+                        "Dual algorithm attestation",
+                        format!("chain collection unavailable: {error:#}"),
+                        SignalLevel::Unavailable,
+                    ),
+                }
+            }
+            (Err(status), _) => advisory_row(
+                "Dual algorithm attestation",
+                format!("EC attestation unavailable: {}", describe_status(status)),
+                SignalLevel::Unavailable,
+            ),
+            (_, Err(status)) => advisory_row(
+                "Dual algorithm attestation",
+                format!("RSA attestation unavailable: {}", describe_status(status)),
+                SignalLevel::Unavailable,
+            ),
+        };
+        let _ = self.service.deleteKey(&ec_descriptor);
+        let _ = self.service.deleteKey(&rsa_descriptor);
+        row
     }
 
     fn probe_timing_anomaly(&self) -> ProbeRow {
@@ -1521,34 +2127,62 @@ impl BlindProbe {
             .unwrap_or_else(|_| descriptor.clone());
         let response = self
             .tee
-            .createOperation(&key_descriptor, &aes_gcm_operation_params(), false)
-            .context("createOperation failed")?;
-        let nonce_len = response_nonce_len(&response);
+            .createOperation(&key_descriptor, &aes_gcm_encrypt_operation_params(), false)
+            .context("encrypt createOperation failed")?;
+        let nonce = response_nonce(&response);
+        let nonce_len = nonce.as_ref().map(Vec::len);
         let operation = response
             .iOperation
-            .context("createOperation returned no IKeystoreOperation")?;
+            .context("encrypt createOperation returned no IKeystoreOperation")?;
 
         let operation_result = (|| -> Result<AesGcmObservation> {
+            let plaintext = b"blind-aosp-aes-gcm";
+            let aad = b"blind-aad";
             operation
-                .updateAad(b"blind-aad")
-                .context("updateAad failed")?;
+                .updateAad(aad)
+                .context("encrypt updateAad failed")?;
             let update = operation
-                .update(b"blind-aosp-aes-gcm")
-                .context("update failed")?;
-            let finish = operation.finish(None, None).context("finish failed")?;
-            let update_len = update.as_ref().map_or(0, Vec::len);
-            let finish_len = finish.as_ref().map_or(0, Vec::len);
+                .update(plaintext)
+                .context("encrypt update failed")?;
+            let finish = operation
+                .finish(None, None)
+                .context("encrypt finish failed")?;
+            let ciphertext = concat_operation_outputs(update, finish);
+            let nonce = nonce.context("encrypt response did not return a nonce")?;
+            let decrypt_response = self
+                .tee
+                .createOperation(
+                    &key_descriptor,
+                    &aes_gcm_decrypt_operation_params(&nonce),
+                    false,
+                )
+                .context("decrypt createOperation failed")?;
+            let decrypt_operation = decrypt_response
+                .iOperation
+                .context("decrypt createOperation returned no IKeystoreOperation")?;
+            decrypt_operation
+                .updateAad(aad)
+                .context("decrypt updateAad failed")?;
+            let decrypt_update = decrypt_operation
+                .update(&ciphertext)
+                .context("decrypt update failed")?;
+            let decrypt_finish = decrypt_operation
+                .finish(None, None)
+                .context("decrypt finish failed")?;
+            let decrypted = concat_operation_outputs(decrypt_update, decrypt_finish);
+            let decrypt_matches = aes_gcm_round_trip_matches(plaintext, &decrypted);
             Ok(AesGcmObservation {
                 operation_finished: true,
-                output_bytes: update_len + finish_len,
+                ciphertext_bytes: ciphertext.len(),
                 nonce_len,
+                decrypt_matches,
                 detail: format!(
-                    "updateOut={}B, finishOut={}B, nonceLen={}",
-                    update_len,
-                    finish_len,
+                    "ciphertext={}B, nonceLen={}, decryptMatches={}",
+                    ciphertext.len(),
                     nonce_len
                         .map(|value| value.to_string())
-                        .unwrap_or_else(|| "missing".to_string())
+                        .unwrap_or_else(|| "missing".to_string()),
+                    decrypt_matches
                 ),
             })
         })();
@@ -1677,8 +2311,9 @@ struct DerSanityInspection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AesGcmObservation {
     operation_finished: bool,
-    output_bytes: usize,
+    ciphertext_bytes: usize,
     nonce_len: Option<usize>,
+    decrypt_matches: bool,
     detail: String,
 }
 
@@ -1744,6 +2379,34 @@ fn attested_ec_params(challenge: &[u8]) -> Vec<KeyParameter> {
     params
 }
 
+fn imported_ec_params() -> Vec<KeyParameter> {
+    signing_ec_params()
+}
+
+fn attested_rsa_params(challenge: &[u8]) -> Vec<KeyParameter> {
+    vec![
+        kp(Tag::ALGORITHM, KeyParameterValue::Algorithm(Algorithm::RSA)),
+        kp(Tag::KEY_SIZE, KeyParameterValue::Integer(2048)),
+        kp(
+            Tag::RSA_PUBLIC_EXPONENT,
+            KeyParameterValue::LongInteger(65_537),
+        ),
+        kp(
+            Tag::PURPOSE,
+            KeyParameterValue::KeyPurpose(KeyPurpose::SIGN),
+        ),
+        kp(Tag::DIGEST, KeyParameterValue::Digest(Digest::SHA_2_256)),
+        kp(
+            Tag::PADDING,
+            KeyParameterValue::PaddingMode(PaddingMode::RSA_PKCS1_1_5_SIGN),
+        ),
+        kp(
+            Tag::ATTESTATION_CHALLENGE,
+            KeyParameterValue::Blob(challenge.to_vec()),
+        ),
+    ]
+}
+
 fn sign_operation_params(compat: bool) -> Vec<KeyParameter> {
     let mut params = vec![
         kp(
@@ -1770,6 +2433,10 @@ fn aes_gcm_key_params() -> Vec<KeyParameter> {
             KeyParameterValue::KeyPurpose(KeyPurpose::ENCRYPT),
         ),
         kp(
+            Tag::PURPOSE,
+            KeyParameterValue::KeyPurpose(KeyPurpose::DECRYPT),
+        ),
+        kp(
             Tag::BLOCK_MODE,
             KeyParameterValue::BlockMode(BlockMode::GCM),
         ),
@@ -1781,7 +2448,7 @@ fn aes_gcm_key_params() -> Vec<KeyParameter> {
     ]
 }
 
-fn aes_gcm_operation_params() -> Vec<KeyParameter> {
+fn aes_gcm_encrypt_operation_params() -> Vec<KeyParameter> {
     vec![
         kp(
             Tag::PURPOSE,
@@ -1799,7 +2466,26 @@ fn aes_gcm_operation_params() -> Vec<KeyParameter> {
     ]
 }
 
-fn response_nonce_len(response: &CreateOperationResponse) -> Option<usize> {
+fn aes_gcm_decrypt_operation_params(nonce: &[u8]) -> Vec<KeyParameter> {
+    vec![
+        kp(
+            Tag::PURPOSE,
+            KeyParameterValue::KeyPurpose(KeyPurpose::DECRYPT),
+        ),
+        kp(
+            Tag::BLOCK_MODE,
+            KeyParameterValue::BlockMode(BlockMode::GCM),
+        ),
+        kp(
+            Tag::PADDING,
+            KeyParameterValue::PaddingMode(PaddingMode::NONE),
+        ),
+        kp(Tag::MAC_LENGTH, KeyParameterValue::Integer(128)),
+        kp(Tag::NONCE, KeyParameterValue::Blob(nonce.to_vec())),
+    ]
+}
+
+fn response_nonce(response: &CreateOperationResponse) -> Option<Vec<u8>> {
     response
         .parameters
         .as_ref()?
@@ -1807,10 +2493,22 @@ fn response_nonce_len(response: &CreateOperationResponse) -> Option<usize> {
         .iter()
         .find_map(|param| {
             (param.tag == Tag::NONCE).then(|| match &param.value {
-                KeyParameterValue::Blob(bytes) => Some(bytes.len()),
+                KeyParameterValue::Blob(bytes) => Some(bytes.clone()),
                 _ => None,
             })?
         })
+}
+
+fn concat_operation_outputs(update: Option<Vec<u8>>, finish: Option<Vec<u8>>) -> Vec<u8> {
+    let mut output = update.unwrap_or_default();
+    if let Some(finish) = finish {
+        output.extend_from_slice(&finish);
+    }
+    output
+}
+
+fn aes_gcm_round_trip_matches(expected_plaintext: &[u8], decrypted: &[u8]) -> bool {
+    expected_plaintext == decrypted
 }
 
 fn parcel_bytes(parcel: &rsbinder::Parcel) -> Vec<u8> {
@@ -1978,9 +2676,17 @@ fn sign_payload(
     key_descriptor: &KeyDescriptor,
     payload: &[u8],
 ) -> Result<Vec<u8>> {
-    let response = probe
-        .create_sign_operation(key_descriptor, false)
-        .or_else(|_| probe.create_sign_operation(key_descriptor, true))
+    sign_payload_with_level(&probe.tee, key_descriptor, payload)
+}
+
+fn sign_payload_with_level(
+    level: &Strong<dyn IKeystoreSecurityLevel>,
+    key_descriptor: &KeyDescriptor,
+    payload: &[u8],
+) -> Result<Vec<u8>> {
+    let response = level
+        .createOperation(key_descriptor, &sign_operation_params(false), false)
+        .or_else(|_| level.createOperation(key_descriptor, &sign_operation_params(true), false))
         .context("createOperation failed for both minimal and compatibility params")?;
     let operation = response
         .iOperation
@@ -2323,7 +3029,12 @@ fn verify_signature_with_certificate(
         .subject_public_key_info
         .to_der()
         .context("failed to encode leaf SPKI")?;
-    verify_with_algorithm(&signature::ECDSA_P256_SHA256_ASN1, &leaf_spki, payload, signature)
+    verify_with_algorithm(
+        &signature::ECDSA_P256_SHA256_ASN1,
+        &leaf_spki,
+        payload,
+        signature,
+    )
 }
 
 fn verify_signed_message(
@@ -2378,6 +3089,74 @@ fn bool_label(value: Option<bool>) -> &'static str {
         Some(false) => "false",
         None => "unavailable",
     }
+}
+
+fn option_i32_label(value: Option<i32>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+fn descriptor_aliases(entries: &[KeyDescriptor]) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(|descriptor| descriptor.alias.clone())
+        .collect()
+}
+
+fn alias_positions(aliases: &[String], alias0: &str, alias1: &str) -> Option<(usize, usize)> {
+    let pos0 = aliases.iter().position(|alias| alias == alias0)?;
+    let pos1 = aliases.iter().position(|alias| alias == alias1)?;
+    Some((pos0, pos1))
+}
+
+fn raw_reply_fingerprint_suspicious(fingerprint: &ServiceSpecificReplyFingerprint) -> bool {
+    fingerprint.java_shortcut_detected
+        || !fingerprint.native_style_response
+        || !fingerprint.expected_error_matched
+}
+
+fn raw_reply_case_label(fingerprint: &ServiceSpecificReplyFingerprint) -> String {
+    let shape = if fingerprint.java_shortcut_detected {
+        "shortcut"
+    } else if fingerprint.native_style_response {
+        "native"
+    } else {
+        "unknown"
+    };
+    format!(
+        "{}({})",
+        shape,
+        fingerprint
+            .error_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    )
+}
+
+fn marker_certificate_der() -> Result<Vec<u8>> {
+    STANDARD
+        .decode(RAW_ERROR_UPDATE_CERT_DER_B64)
+        .context("failed to decode marker certificate DER")
+}
+
+fn import_marker_private_key_der() -> Result<Vec<u8>> {
+    let rng = SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&signature::ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
+        .map_err(|_| anyhow!("failed to generate ephemeral EC marker key"))?;
+    Ok(pkcs8.as_ref().to_vec())
+}
+
+fn certificate_signature_oid(certificate_der: Option<&Vec<u8>>) -> Option<String> {
+    certificate_der
+        .and_then(|der| Certificate::from_der(der).ok())
+        .map(|certificate| certificate.signature_algorithm.oid.to_string())
+}
+
+struct RawReplyCapture {
+    label: &'static str,
+    expected_error_code: i32,
+    raw: Result<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2558,22 +3337,62 @@ mod tests {
     #[test]
     fn aes_gcm_params_match_keymint_operation_shape() {
         let key_params = aes_gcm_key_params();
-        let op_params = aes_gcm_operation_params();
+        let encrypt_params = aes_gcm_encrypt_operation_params();
+        let decrypt_params = aes_gcm_decrypt_operation_params(&[1, 2, 3, 4]);
         assert!(key_params
             .iter()
             .any(|param| param.tag == Tag::MIN_MAC_LENGTH));
-        assert!(op_params.iter().any(|param| param.tag == Tag::MAC_LENGTH));
+        assert!(key_params.iter().any(|param| {
+            param.tag == Tag::PURPOSE
+                && matches!(
+                    &param.value,
+                    KeyParameterValue::KeyPurpose(KeyPurpose::ENCRYPT)
+                )
+        }));
+        assert!(key_params.iter().any(|param| {
+            param.tag == Tag::PURPOSE
+                && matches!(
+                    &param.value,
+                    KeyParameterValue::KeyPurpose(KeyPurpose::DECRYPT)
+                )
+        }));
+        assert!(encrypt_params
+            .iter()
+            .any(|param| param.tag == Tag::MAC_LENGTH));
+        assert!(decrypt_params.iter().any(|param| param.tag == Tag::NONCE));
         assert!(key_params.iter().any(|param| {
             param.tag == Tag::BLOCK_MODE
                 && matches!(&param.value, KeyParameterValue::BlockMode(BlockMode::GCM))
         }));
-        assert!(op_params.iter().any(|param| {
+        assert!(encrypt_params.iter().any(|param| {
             param.tag == Tag::PADDING
                 && matches!(
                     &param.value,
                     KeyParameterValue::PaddingMode(PaddingMode::NONE)
                 )
         }));
+    }
+
+    #[test]
+    fn aes_gcm_output_concat_and_round_trip_helpers_match_plaintext() {
+        let ciphertext = concat_operation_outputs(Some(vec![1, 2]), Some(vec![3, 4]));
+        assert_eq!(ciphertext, [1, 2, 3, 4]);
+        assert_eq!(concat_operation_outputs(None, Some(vec![9])), [9]);
+        assert!(aes_gcm_round_trip_matches(b"plain", b"plain"));
+        assert!(!aes_gcm_round_trip_matches(b"plain", b"other"));
+    }
+
+    #[test]
+    fn marker_material_decodes_and_subject_is_preserved() {
+        let private_key = import_marker_private_key_der().unwrap();
+        let certificate = marker_certificate_der().unwrap();
+        assert!(private_key.starts_with(&[0x30]));
+        let parsed = Certificate::from_der(&certificate).unwrap();
+        assert!(parsed
+            .tbs_certificate
+            .subject
+            .to_string()
+            .contains(IMPORT_MARKER_SUBJECT));
     }
 
     fn self_signed_cert_der(common_name: &str) -> Vec<u8> {

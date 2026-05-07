@@ -65,6 +65,41 @@ pub fn list_entries_batched_expected_next_missing(view: ListEntriesBatchedView) 
     view.expected_next_missing
 }
 
+#[cfg(test)]
+pub fn sorted_aliases<I, S>(aliases: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut aliases = aliases
+        .into_iter()
+        .map(|alias| alias.as_ref().to_string())
+        .collect::<Vec<_>>();
+    aliases.sort();
+    aliases
+}
+
+pub fn aliases_contain_all(aliases: &[String], expected: &[&str]) -> bool {
+    expected
+        .iter()
+        .all(|expected_alias| aliases.iter().any(|alias| alias == expected_alias))
+}
+
+pub fn alias_is_strictly_after_cursor(alias: &str, cursor: &str) -> bool {
+    alias > cursor
+}
+
+pub fn list_entries_batched_view(
+    aliases: &[String],
+    cursor: &str,
+    expected_next: &str,
+) -> ListEntriesBatchedView {
+    ListEntriesBatchedView {
+        cursor_echoed: aliases.iter().any(|alias| alias == cursor),
+        expected_next_missing: !aliases.iter().any(|alias| alias == expected_next),
+    }
+}
+
 pub fn binder_chain_has_issue(view: BinderChainView) -> bool {
     !view.generate_matches_get
         || !view.repeated_consistent
@@ -200,6 +235,35 @@ mod tests {
         };
         assert!(list_entries_batched_cursor_echoed(view));
         assert!(!list_entries_batched_expected_next_missing(view));
+    }
+
+    #[test]
+    fn alias_helpers_extract_containment_and_lexicographic_cursor_order() {
+        let aliases = sorted_aliases(["probe_01", "probe_00", "other"]);
+        assert_eq!(aliases, ["other", "probe_00", "probe_01"]);
+        assert!(aliases_contain_all(&aliases, &["probe_00", "probe_01"]));
+        assert!(!aliases_contain_all(&aliases, &["probe_00", "probe_02"]));
+        assert!(alias_is_strictly_after_cursor("probe_01", "probe_00"));
+        assert!(!alias_is_strictly_after_cursor("probe_00", "probe_00"));
+        assert!(!alias_is_strictly_after_cursor("probe_00", "probe_01"));
+    }
+
+    #[test]
+    fn list_entries_batched_view_reports_pass_and_fail_cases() {
+        let pass_aliases = vec!["probe_01".to_string(), "probe_02".to_string()];
+        let pass = list_entries_batched_view(&pass_aliases, "probe_00", "probe_01");
+        assert!(!list_entries_batched_cursor_echoed(pass));
+        assert!(!list_entries_batched_expected_next_missing(pass));
+
+        let echoed_aliases = vec!["probe_00".to_string(), "probe_01".to_string()];
+        let echoed = list_entries_batched_view(&echoed_aliases, "probe_00", "probe_01");
+        assert!(list_entries_batched_cursor_echoed(echoed));
+        assert!(!list_entries_batched_expected_next_missing(echoed));
+
+        let missing_aliases = vec!["probe_02".to_string()];
+        let missing = list_entries_batched_view(&missing_aliases, "probe_00", "probe_01");
+        assert!(!list_entries_batched_cursor_echoed(missing));
+        assert!(list_entries_batched_expected_next_missing(missing));
     }
 
     #[test]
