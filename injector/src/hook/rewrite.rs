@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use log::{debug, info, warn};
-use rsbinder::Parcel;
+use rsbinder::{ExceptionCode, Parcel, Status};
 
 use super::binder::{
     binder_transaction_data, binder_transaction_data_target, describe_transaction_objects,
     format_target, parse_local_binder_target_from_parcel_bytes, LocalBinderTarget,
 };
+use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::config;
 use crate::filter::{self, FilterReason};
 use crate::forward::{self, BypassGuard};
@@ -857,6 +858,42 @@ fn surface_omk_metadata_with_system_descriptor(
     omk_metadata
 }
 
+fn status_for_reply(status: &Status) -> Status {
+    if status.is_ok() {
+        return Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None);
+    }
+
+    match status.exception_code() {
+        ExceptionCode::None => {
+            Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None)
+        }
+        ExceptionCode::TransactionFailed => {
+            Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None)
+        }
+        ExceptionCode::ServiceSpecific => {
+            Status::new_service_specific_error(status.service_specific_error(), None)
+        }
+        exception => Status::from(exception),
+    }
+}
+
+fn build_omk_status_reply(status: &Status) -> anyhow::Result<parcel::OwnedReply> {
+    parcel::build_status_reply(&status_for_reply(status))
+}
+
+fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<parcel::OwnedReply> {
+    let status = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Status>());
+    match status {
+        Some(status) => build_omk_status_reply(status),
+        None => parcel::build_status_reply(&Status::new_service_specific_error(
+            ResponseCode::SYSTEM_ERROR.0,
+            None,
+        )),
+    }
+}
+
 unsafe fn observe_system_service_reply(
     tr: &binder_transaction_data,
     pending: &PendingServiceCall,
@@ -980,14 +1017,14 @@ unsafe fn build_service_reply_rewrite(
             }) {
                 Ok(entry) => entry,
                 Err(error) => {
+                    let reply = build_omk_error_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK getKeyEntry failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK getKeyEntry failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    observe_system_service_reply(tr, pending)?;
-                    return Ok(None);
+                    return Ok(Some(reply));
                 }
             };
             let system_metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata =
@@ -1086,13 +1123,14 @@ unsafe fn build_service_reply_rewrite(
             }) {
                 Ok(()) => Ok(None),
                 Err(error) => {
+                    let reply = build_omk_error_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK updateSubcomponent failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK updateSubcomponent failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    Ok(None)
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1105,13 +1143,14 @@ unsafe fn build_service_reply_rewrite(
             }) {
                 Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?)),
                 Err(error) => {
+                    let reply = build_omk_error_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK listEntries failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK listEntries failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    Ok(None)
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1158,14 +1197,14 @@ unsafe fn build_service_reply_rewrite(
                     Ok(None)
                 }
                 Err(error) => {
-                    tracker::remember_key_descriptor_route(&system_grant, RouteTarget::System);
+                    let reply = build_omk_error_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK grant failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK grant failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    Ok(None)
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1183,14 +1222,14 @@ unsafe fn build_service_reply_rewrite(
                     Ok(None)
                 }
                 Err(error) => {
-                    tracker::retire_grant_descriptor_after_ungrant(key, *grantee_uid);
+                    let reply = build_omk_error_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK ungrant failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK ungrant failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    Ok(None)
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1203,13 +1242,14 @@ unsafe fn build_service_reply_rewrite(
             }) {
                 Ok(count) => Ok(Some(parcel::build_plain_reply(&count)?)),
                 Err(error) => {
+                    let reply = build_omk_error_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK getNumberOfEntries failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK getNumberOfEntries failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    Ok(None)
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1231,13 +1271,14 @@ unsafe fn build_service_reply_rewrite(
             }) {
                 Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?)),
                 Err(error) => {
+                    let reply = build_omk_error_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK listEntriesBatched failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK listEntriesBatched failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    Ok(None)
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1248,13 +1289,14 @@ unsafe fn build_service_reply_rewrite(
             match ipc::with_omk_retry(|omk| Ok(omk.r#getSupplementaryAttestationInfo(*tag)?)) {
                 Ok(info) => Ok(Some(parcel::build_plain_reply(&info)?)),
                 Err(error) => {
+                    let reply = build_omk_error_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK getSupplementaryAttestationInfo failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK getSupplementaryAttestationInfo failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    Ok(None)
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1277,14 +1319,14 @@ unsafe fn build_service_reply_rewrite(
                     Ok(Some(parcel::build_void_reply()?))
                 }
                 Err(error) => {
+                    let reply = build_omk_error_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK deleteKey failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK deleteKey failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    observe_system_service_reply(tr, pending)?;
-                    Ok(None)
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1395,15 +1437,15 @@ unsafe fn build_security_level_reply_rewrite(
     }) {
         Ok(level) => level,
         Err(error) => {
+            let reply = build_omk_error_reply(&error)?;
             warn!(
-                "[Injector][Reply] OMK security-level lookup failed for {:?} uid={} pid={}: {:#}; preserving original system reply",
+                "[Injector][Reply] OMK security-level lookup failed for {:?} uid={} pid={}: {:#}; returning OMK error",
                 pending.security_level,
                 pending.caller.uid,
                 pending.caller.pid,
                 error
             );
-            observe_system_security_level_reply(tr, pending)?;
-            return Ok(None);
+            return Ok(Some(reply));
         }
     };
 
@@ -1422,14 +1464,14 @@ unsafe fn build_security_level_reply_rewrite(
             ) {
                 Ok(response) => response,
                 Err(error) => {
+                    let reply = build_omk_status_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK createOperation failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK createOperation failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    observe_system_security_level_reply(tr, pending)?;
-                    return Ok(None);
+                    return Ok(Some(reply));
                 }
             };
             let carrier = match parcel::extract_create_operation_reply_carrier(
@@ -1504,14 +1546,14 @@ unsafe fn build_security_level_reply_rewrite(
                     Ok(Some(parcel::build_plain_reply(&surfaced_metadata)?))
                 }
                 Err(error) => {
+                    let reply = build_omk_status_reply(&error)?;
                     warn!(
-                    "[Injector][Reply] OMK generateKey failed for uid={} pid={}: {:#}; preserving original system reply",
-                    pending.caller.uid,
-                    pending.caller.pid,
-                    error
-                );
-                    observe_system_security_level_reply(tr, pending)?;
-                    Ok(None)
+                        "[Injector][Reply] OMK generateKey failed for uid={} pid={}: {:#}; returning OMK error",
+                        pending.caller.uid,
+                        pending.caller.pid,
+                        error
+                    );
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1563,14 +1605,14 @@ unsafe fn build_security_level_reply_rewrite(
                     Ok(Some(parcel::build_plain_reply(&surfaced_metadata)?))
                 }
                 Err(error) => {
+                    let reply = build_omk_status_reply(&error)?;
                     warn!(
-                    "[Injector][Reply] OMK importKey failed for uid={} pid={}: {:#}; preserving original system reply",
-                    pending.caller.uid,
-                    pending.caller.pid,
-                    error
-                );
-                    observe_system_security_level_reply(tr, pending)?;
-                    Ok(None)
+                        "[Injector][Reply] OMK importKey failed for uid={} pid={}: {:#}; returning OMK error",
+                        pending.caller.uid,
+                        pending.caller.pid,
+                        error
+                    );
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1622,14 +1664,14 @@ unsafe fn build_security_level_reply_rewrite(
                     Ok(Some(parcel::build_plain_reply(&surfaced_metadata)?))
                 }
                 Err(error) => {
+                    let reply = build_omk_status_reply(&error)?;
                     warn!(
-                    "[Injector][Reply] OMK importWrappedKey failed for uid={} pid={}: {:#}; preserving original system reply",
-                    pending.caller.uid,
-                    pending.caller.pid,
-                    error
-                );
-                    observe_system_security_level_reply(tr, pending)?;
-                    Ok(None)
+                        "[Injector][Reply] OMK importWrappedKey failed for uid={} pid={}: {:#}; returning OMK error",
+                        pending.caller.uid,
+                        pending.caller.pid,
+                        error
+                    );
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1638,14 +1680,14 @@ unsafe fn build_security_level_reply_rewrite(
             match omk_level.r#convertStorageKeyToEphemeral(&omk_storage_key) {
                 Ok(response) => Ok(Some(parcel::build_plain_reply(&response)?)),
                 Err(error) => {
+                    let reply = build_omk_status_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK convertStorageKeyToEphemeral failed for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK convertStorageKeyToEphemeral failed for uid={} pid={}: {:#}; returning OMK error",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    observe_system_security_level_reply(tr, pending)?;
-                    Ok(None)
+                    Ok(Some(reply))
                 }
             }
         }
@@ -1657,14 +1699,14 @@ unsafe fn build_security_level_reply_rewrite(
                     Ok(Some(parcel::build_void_reply()?))
                 }
                 Err(error) => {
+                    let reply = build_omk_status_reply(&error)?;
                     warn!(
-                    "[Injector][Reply] OMK deleteKey failed for uid={} pid={}: {:#}; preserving original system reply",
-                    pending.caller.uid,
-                    pending.caller.pid,
-                    error
-                );
-                    observe_system_security_level_reply(tr, pending)?;
-                    Ok(None)
+                        "[Injector][Reply] OMK deleteKey failed for uid={} pid={}: {:#}; returning OMK error",
+                        pending.caller.uid,
+                        pending.caller.pid,
+                        error
+                    );
+                    Ok(Some(reply))
                 }
             }
         }
@@ -2273,6 +2315,77 @@ mod tests {
             },
             reply.offsets_size(),
         )
+    }
+
+    #[test]
+    fn omk_service_specific_error_can_replace_system_success_reply() {
+        let status = Status::new_service_specific_error(7, None);
+        let mut reply =
+            build_omk_status_reply(&status).expect("service-specific status should serialize");
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("status reply should parse");
+
+        assert_eq!(
+            parsed.exception_code(),
+            rsbinder::ExceptionCode::ServiceSpecific
+        );
+        assert_eq!(parsed.service_specific_error(), 7);
+    }
+
+    #[test]
+    fn omk_transaction_error_becomes_system_error_reply() {
+        let status: Status = StatusCode::UnknownTransaction.into();
+        let mut reply = build_omk_status_reply(&status)
+            .expect("transaction status should be converted into a reply");
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("status reply should parse");
+
+        assert_eq!(
+            parsed.exception_code(),
+            rsbinder::ExceptionCode::ServiceSpecific
+        );
+        assert_eq!(
+            parsed.service_specific_error(),
+            ResponseCode::SYSTEM_ERROR.0
+        );
+    }
+
+    #[test]
+    fn plain_omk_error_becomes_system_error_reply() {
+        let error = anyhow::anyhow!("plain OMK failure");
+        let mut reply =
+            build_omk_error_reply(&error).expect("plain error should produce a status reply");
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("status reply should parse");
+
+        assert_eq!(
+            parsed.exception_code(),
+            rsbinder::ExceptionCode::ServiceSpecific
+        );
+        assert_eq!(
+            parsed.service_specific_error(),
+            ResponseCode::SYSTEM_ERROR.0
+        );
+    }
+
+    #[test]
+    fn contextual_omk_status_error_keeps_service_specific_code() {
+        let status = Status::new_service_specific_error(7, None);
+        let error = anyhow::Error::new(status).context("wrapped OMK failure");
+        let mut reply =
+            build_omk_error_reply(&error).expect("wrapped status should produce a status reply");
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("status reply should parse");
+
+        assert_eq!(
+            parsed.exception_code(),
+            rsbinder::ExceptionCode::ServiceSpecific
+        );
+        assert_eq!(parsed.service_specific_error(), 7);
     }
 
     #[test]

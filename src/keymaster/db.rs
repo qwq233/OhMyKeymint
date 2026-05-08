@@ -2058,6 +2058,58 @@ impl KeymasterDb {
     }
 
     pub fn terminate_uuid(&mut self, km_uuid: &Uuid) -> Result<()> {
+        self.terminate_uuid_with_count(km_uuid).map(|_| ())
+    }
+
+    pub fn retire_stale_keybox_bound_entries(
+        &mut self,
+        current_identity_digest: [u8; 32],
+    ) -> Result<usize> {
+        let _wp = wd::watch("KeystoreDB::retire_stale_keybox_bound_entries");
+
+        self.with_transaction(Immediate("TX_retire_stale_keybox_bound_entries"), |tx| {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, km_uuid FROM persistent.keyentry
+                     WHERE key_type = ?
+                       AND state != ?;",
+                )
+                .context("Failed to prepare keybox-bound stale key query.")?;
+
+            let mut rows = stmt
+                .query(params![KeyType::Client, KeyLifeCycle::Unreferenced])
+                .context("Failed to query keybox-bound stale keys.")?;
+
+            let mut stale_keys: Vec<(i64, Uuid)> = Vec::new();
+            utils::with_rows_extract_all(&mut rows, |row| {
+                let key_id = row.get(0).context("Failed to read stale key id.")?;
+                let km_uuid: Uuid = row.get(1).context("Failed to read stale key UUID.")?;
+                if km_uuid.is_keybox_bound()
+                    && !km_uuid.is_bound_to_keybox_digest(current_identity_digest)
+                {
+                    stale_keys.push((key_id, km_uuid));
+                }
+                Ok(())
+            })
+            .context("Failed to extract stale keybox-bound rows.")?;
+
+            let key_count = stale_keys.len();
+            info!("Found {} stale keybox-bound keys to retire.", key_count);
+
+            let mut notify_gc = false;
+            for (key_id, km_uuid) in stale_keys {
+                debug!("Retiring stale keybox-bound key {key_id:#x} for UUID {km_uuid:?}");
+                notify_gc = Self::mark_unreferenced(tx, key_id)
+                    .context("Retiring stale keybox-bound key.")?
+                    || notify_gc;
+            }
+
+            Ok(key_count).do_gc(notify_gc)
+        })
+        .context(err!())
+    }
+
+    fn terminate_uuid_with_count(&mut self, km_uuid: &Uuid) -> Result<usize> {
         info!("Terminating all keys created by UUID {:0x?}", km_uuid);
         let _wp = wd::watch("KeystoreDB::terminate_uuid");
 
@@ -2081,7 +2133,8 @@ impl KeymasterDb {
                 Ok(())
             })
             .context("Failed to extract rows.")?;
-            info!("Found {} keys to terminate.", key_ids.len());
+            let key_count = key_ids.len();
+            info!("Found {} keys to terminate.", key_count);
 
             let mut notify_gc = false;
             for key_id in key_ids {
@@ -2103,7 +2156,7 @@ impl KeymasterDb {
                 notify_gc =
                     Self::mark_unreferenced(tx, key_id).context("In terminate_uuid.")? || notify_gc;
             }
-            Ok(()).do_gc(notify_gc)
+            Ok(key_count).do_gc(notify_gc)
         })
         .context(err!())
     }
@@ -2413,15 +2466,20 @@ impl BlobMetaData {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Uuid(pub(crate) [u8; 16]);
 
+const KEYBOX_UUID_DIGEST_BYTES: usize = 12;
+
 impl From<SecurityLevel> for Uuid {
     fn from(sec_level: SecurityLevel) -> Self {
-        let digest = crate::keybox::current_identity_digest();
+        Self::from_keybox_digest(sec_level, crate::keybox::current_identity_digest())
+    }
+}
 
+impl Uuid {
+    pub(crate) fn from_keybox_digest(sec_level: SecurityLevel, digest: [u8; 32]) -> Self {
         let mut uuid_bytes = [0u8; 16];
 
         // First 12 bytes: digest (truncate or pad as needed)
-        let digest_len = digest.len().min(12);
-        uuid_bytes[..digest_len].copy_from_slice(&digest[..digest_len]);
+        uuid_bytes[..KEYBOX_UUID_DIGEST_BYTES].copy_from_slice(&digest[..KEYBOX_UUID_DIGEST_BYTES]);
 
         // Last 4 bytes: security level in big-endian
         let sec_level_bytes = (sec_level.0 as u32).to_be_bytes();
@@ -2429,9 +2487,7 @@ impl From<SecurityLevel> for Uuid {
 
         Self(uuid_bytes)
     }
-}
 
-impl Uuid {
     /// Convert UUID back to SecurityLevel by reading the last 4 bytes
     pub fn to_security_level(&self) -> Option<SecurityLevel> {
         // Read the last 4 bytes as big-endian u32
@@ -2448,7 +2504,15 @@ impl Uuid {
 
     /// Get the digest portion (first 12 bytes) of the UUID
     pub fn get_digest(&self) -> &[u8] {
-        &self.0[..12]
+        &self.0[..KEYBOX_UUID_DIGEST_BYTES]
+    }
+
+    pub(crate) fn is_bound_to_keybox_digest(&self, digest: [u8; 32]) -> bool {
+        self.get_digest() == &digest[..KEYBOX_UUID_DIGEST_BYTES]
+    }
+
+    pub(crate) fn is_keybox_bound(&self) -> bool {
+        *self != KEYSTORE_UUID && self.to_security_level().is_some()
     }
 }
 
@@ -2902,4 +2966,174 @@ struct KeyAccessInfo {
     key_id: i64,
     descriptor: KeyDescriptor,
     vector: Option<KeyPermSet>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_NAMESPACE: i64 = 10001;
+
+    fn make_test_db() -> KeymasterDb {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("ATTACH DATABASE ':memory:' AS persistent;", [])
+            .unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            KeymasterDb::init_tables(&tx).unwrap();
+            tx.commit().unwrap();
+        }
+        KeymasterDb {
+            conn,
+            gc: None,
+            perboot: crate::keymaster::database::perboot::PERBOOT_DB.clone(),
+        }
+    }
+
+    fn insert_live_client_key(tx: &Transaction, id: i64, uuid: Uuid, alias: &str) -> Result<()> {
+        insert_key_entry(tx, id, KeyType::Client, KeyLifeCycle::Live, uuid, alias)
+    }
+
+    fn insert_key_entry(
+        tx: &Transaction,
+        id: i64,
+        key_type: KeyType,
+        state: KeyLifeCycle,
+        uuid: Uuid,
+        alias: &str,
+    ) -> Result<()> {
+        tx.execute(
+            "INSERT INTO persistent.keyentry
+             (id, key_type, domain, namespace, alias, state, km_uuid)
+             VALUES (?, ?, ?, ?, ?, ?, ?);",
+            params![
+                id,
+                key_type,
+                Domain::APP.0,
+                TEST_NAMESPACE,
+                alias,
+                state,
+                uuid
+            ],
+        )
+        .context("insert keyentry")?;
+        tx.execute(
+            "INSERT INTO persistent.blobentry
+             (id, subcomponent_type, keyentryid, blob, state)
+             VALUES (?, ?, ?, ?, ?);",
+            params![
+                id * 10,
+                SubComponentType::KEY_BLOB,
+                id,
+                vec![id as u8],
+                BlobState::Current
+            ],
+        )
+        .context("insert blobentry")?;
+        let mut metadata = BlobMetaData::new();
+        metadata.add(BlobMetaEntry::KmUuid(uuid));
+        metadata
+            .store_in_db(id * 10, tx)
+            .context("insert blob metadata")
+    }
+
+    fn key_entry_count(db: &KeymasterDb, key_id: i64) -> i64 {
+        db.conn
+            .query_row(
+                "SELECT COUNT(*) FROM persistent.keyentry WHERE id = ?;",
+                params![key_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn blob_state(db: &KeymasterDb, key_id: i64) -> BlobState {
+        db.conn
+            .query_row(
+                "SELECT state FROM persistent.blobentry WHERE keyentryid = ?;",
+                params![key_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn uuid_from_keybox_digest_uses_digest_prefix_and_security_level() {
+        let mut digest = [0u8; 32];
+        for (idx, byte) in digest.iter_mut().enumerate() {
+            *byte = idx as u8;
+        }
+
+        let uuid = Uuid::from_keybox_digest(SecurityLevel::STRONGBOX, digest);
+
+        assert_eq!(uuid.get_digest(), &digest[..12]);
+        assert_eq!(uuid.to_security_level(), Some(SecurityLevel::STRONGBOX));
+    }
+
+    #[test]
+    fn retire_stale_keybox_bound_entries_orphans_stale_digest_entries() {
+        let mut db = make_test_db();
+        let old_digest = [0x11u8; 32];
+        let new_digest = [0x22u8; 32];
+        let old_tee_uuid = Uuid::from_keybox_digest(SecurityLevel::TRUSTED_ENVIRONMENT, old_digest);
+        let old_strongbox_uuid = Uuid::from_keybox_digest(SecurityLevel::STRONGBOX, old_digest);
+        let new_tee_uuid = Uuid::from_keybox_digest(SecurityLevel::TRUSTED_ENVIRONMENT, new_digest);
+
+        {
+            let tx = db.conn.transaction().unwrap();
+            insert_live_client_key(&tx, 1, old_tee_uuid, "attest").unwrap();
+            insert_live_client_key(&tx, 2, old_strongbox_uuid, "strongbox-attest").unwrap();
+            insert_live_client_key(&tx, 3, new_tee_uuid, "current").unwrap();
+            insert_live_client_key(&tx, 4, KEYSTORE_UUID, "pure-cert").unwrap();
+            tx.commit().unwrap();
+        }
+
+        assert_eq!(db.retire_stale_keybox_bound_entries(new_digest).unwrap(), 2);
+
+        assert_eq!(key_entry_count(&db, 1), 0);
+        assert_eq!(key_entry_count(&db, 2), 0);
+        assert_eq!(blob_state(&db, 1), BlobState::Orphaned);
+        assert_eq!(blob_state(&db, 2), BlobState::Orphaned);
+        assert_eq!(key_entry_count(&db, 3), 1);
+        assert_eq!(blob_state(&db, 3), BlobState::Current);
+        assert_eq!(key_entry_count(&db, 4), 1);
+        assert_eq!(blob_state(&db, 4), BlobState::Current);
+    }
+
+    #[test]
+    fn alias_lookup_rebinds_after_stale_keybox_entry_is_retired() {
+        let mut db = make_test_db();
+        let old_digest = [0x33u8; 32];
+        let new_digest = [0x44u8; 32];
+        let old_uuid = Uuid::from_keybox_digest(SecurityLevel::TRUSTED_ENVIRONMENT, old_digest);
+        let new_uuid = Uuid::from_keybox_digest(SecurityLevel::TRUSTED_ENVIRONMENT, new_digest);
+
+        {
+            let tx = db.conn.transaction().unwrap();
+            insert_live_client_key(&tx, 1, old_uuid, "attest").unwrap();
+            tx.commit().unwrap();
+        }
+
+        assert_eq!(db.retire_stale_keybox_bound_entries(new_digest).unwrap(), 1);
+
+        {
+            let tx = db.conn.transaction().unwrap();
+            insert_live_client_key(&tx, 2, new_uuid, "attest").unwrap();
+            tx.commit().unwrap();
+        }
+
+        let key_descriptor = KeyDescriptor {
+            domain: Domain::APP,
+            nspace: TEST_NAMESPACE,
+            alias: Some("attest".to_string()),
+            blob: None,
+        };
+        let tx = db.conn.unchecked_transaction().unwrap();
+        let loaded_key_id =
+            KeymasterDb::load_key_entry_id(&tx, &key_descriptor, KeyType::Client).unwrap();
+        drop(tx);
+
+        assert_eq!(loaded_key_id, 2);
+        assert_eq!(blob_state(&db, 1), BlobState::Orphaned);
+    }
 }

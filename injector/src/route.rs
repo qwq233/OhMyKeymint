@@ -209,6 +209,16 @@ impl KeystoreServiceBinder {
         error: rsbinder::Status,
         system_call: impl FnOnce() -> rsbinder::status::Result<T>,
     ) -> rsbinder::status::Result<T> {
+        if self.omk_backend.is_some() {
+            warn!(
+                "[Injector][Route] OMK service backend for {:?} failed for uid={} pid={}: {}; preserving OMK error",
+                method,
+                self.caller.uid,
+                self.caller.pid,
+                error
+            );
+            return Err(error);
+        }
         warn!(
             "[Injector][Route] OMK service backend for {:?} failed for uid={} pid={}: {}; falling back to system",
             method,
@@ -225,7 +235,7 @@ impl KeystoreServiceBinder {
         error: rsbinder::Status,
     ) -> rsbinder::status::Result<T> {
         warn!(
-            "[Injector][Route] OMK service backend for {:?} failed for uid={} pid={}: {}; system fallback unavailable, preserving OMK error",
+            "[Injector][Route] OMK service backend for {:?} failed for uid={} pid={}: {}; preserving OMK error",
             method,
             self.caller.uid,
             self.caller.pid,
@@ -315,15 +325,7 @@ impl AospKeystoreService for KeystoreServiceBinder {
                     ));
                 }
                 Err(error) => {
-                    return match self.optional_system_security_level(security_level) {
-                        Some(system_backend) => Ok(new_security_level_binder(
-                            security_level,
-                            RouteTarget::System,
-                            Some(system_backend),
-                            None,
-                        )),
-                        None => self.preserve_omk_error(ServiceMethod::GetSecurityLevel, error),
-                    };
+                    return self.preserve_omk_error(ServiceMethod::GetSecurityLevel, error);
                 }
             }
         }
@@ -638,9 +640,9 @@ impl KeystoreSecurityLevelBinder {
         system_call: impl FnOnce() -> rsbinder::status::Result<T>,
     ) -> rsbinder::status::Result<T> {
         let caller = current_calling_identity();
-        if self.system_backend.is_none() && self.omk_backend.is_some() {
+        if self.omk_backend.is_some() {
             warn!(
-                "[Injector][Route] OMK backend for {:?} failed for uid={} pid={}: {}; system fallback unavailable, preserving OMK error",
+                "[Injector][Route] OMK backend for {:?} failed for uid={} pid={}: {}; preserving OMK error",
                 self.security_level,
                 caller.uid,
                 caller.pid,
@@ -1716,6 +1718,38 @@ mod tests {
     }
 
     #[test]
+    fn get_key_entry_omk_route_preserves_omk_error() {
+        tracker::clear_state_for_tests();
+        let system_service = build_system_service(
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            SecurityLevel::TRUSTED_ENVIRONMENT,
+        );
+        let wrapper = new_service_binder(
+            CallerIdentity::new(1000, 2000),
+            InterceptConfig::default(),
+            true,
+            system_service,
+            Some(rsbinder::Strong::new(
+                Box::new(OmkOnlySecurityLevelService {
+                    omk_backend: rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
+                        operation_aborts: Arc::new(AtomicUsize::new(0)),
+                        should_fail_create: false,
+                    })
+                        as Box<dyn IOhMySecurityLevel>),
+                    fail_get_ohmy_security_level: false,
+                }) as Box<dyn IOhMyKsService>,
+            )),
+        );
+
+        let status = wrapper
+            .r#getKeyEntry(&sample_key_descriptor())
+            .expect_err("OMK route should preserve the OMK getKeyEntry error");
+
+        assert_eq!(status.transaction_error(), StatusCode::UnknownTransaction);
+    }
+
+    #[test]
     fn get_security_level_omk_route_survives_missing_system_backend() {
         tracker::clear_state_for_tests();
         let omk_backend = rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
@@ -1814,7 +1848,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_omk_create_operation_falls_back_to_system_and_keeps_system_route() {
+    fn failed_omk_create_operation_preserves_omk_error() {
         tracker::clear_state_for_tests();
         let counters = OperationCounters {
             system_abort: Arc::new(AtomicUsize::new(0)),
@@ -1836,16 +1870,12 @@ mod tests {
             Some(omk_backend),
         );
 
-        let operation = wrapper
+        let status = wrapper
             .r#createOperation(&sample_key_descriptor(), &[], false)
-            .expect("system fallback should satisfy createOperation")
-            .r#iOperation
-            .expect("fallback result should still return an operation binder");
-        operation
-            .r#abort()
-            .expect("fallback operation should stay pinned to system");
+            .expect_err("OMK route should preserve the OMK createOperation error");
 
-        assert_eq!(counters.system_abort.load(Ordering::SeqCst), 1);
+        assert_eq!(status.transaction_error(), StatusCode::UnknownTransaction);
+        assert_eq!(counters.system_abort.load(Ordering::SeqCst), 0);
         assert_eq!(counters.omk_abort.load(Ordering::SeqCst), 0);
     }
 

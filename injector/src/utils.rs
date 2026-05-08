@@ -318,6 +318,9 @@ mod tests {
 
     #[test]
     fn hex_encode_uses_lowercase_fixed_width_bytes() {
-        assert_eq!(hex_encode(&[0x00, 0x01, 0x0f, 0x10, 0xab, 0xff]), "00010f10abff");
+        assert_eq!(
+            hex_encode(&[0x00, 0x01, 0x0f, 0x10, 0xab, 0xff]),
+            "00010f10abff"
+        );
     }
 }

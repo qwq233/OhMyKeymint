@@ -77,10 +77,26 @@ struct SecurityLevels {
     uuid_by_sec_level: HashMap<SecurityLevel, Uuid>,
 }
 
+impl SecurityLevels {
+    fn unregister(&mut self, sec_level: SecurityLevel) -> Option<Uuid> {
+        let cur_uuid = self.uuid_by_sec_level.remove(&sec_level)?;
+        self.i_sec_level_by_uuid.remove(&cur_uuid);
+        self.i_osec_level_by_uuid.remove(&cur_uuid);
+        Some(cur_uuid)
+    }
+}
+
 impl KeystoreService {
     /// Create a new instance of the Keystore 2.0 service.
     pub fn new_native_binder() -> Result<KeystoreService> {
         let result: Self = Default::default();
+
+        let retired = result.retire_stale_keybox_bound_entries().context(err!(
+            "retiring stale keybox-bound entries during service startup"
+        ))?;
+        if retired != 0 {
+            log::info!("Retired {retired} stale keybox-bound entries during service startup.");
+        }
 
         match result.register_security_level(SecurityLevel::TRUSTED_ENVIRONMENT) {
             Result::Ok(v) => v,
@@ -100,6 +116,21 @@ impl KeystoreService {
         };
 
         Ok(result)
+    }
+
+    fn retire_stale_keybox_bound_entries(&self) -> Result<usize> {
+        if !keybox::db_retirement_allowed() {
+            log::warn!(
+                "Skipping stale keybox-bound entry retirement while keybox fallback is active."
+            );
+            return Ok(0);
+        }
+
+        let current_identity = keybox::current_identity_digest();
+        DB.with(|db| {
+            db.borrow_mut()
+                .retire_stale_keybox_bound_entries(current_identity)
+        })
     }
 
     fn ensure_security_levels_current(&self) -> Result<()> {
@@ -159,14 +190,21 @@ impl KeystoreService {
 
         if let Some(cur_uuid) = old_uuid_to_terminate {
             log::warn!("Security level {sec_level:?} was registered with a different UUID {cur_uuid:?}, overwriting with {uuid:?}.");
-            log::warn!("Terminating the old UUID from database.");
+            log::warn!("Retiring stale keybox-bound entries from database.");
 
-            DB.with(|db| {
-                log::warn!("Terminating old UUID {cur_uuid:?} from database.");
-                db.borrow_mut().terminate_uuid(&cur_uuid).map_err(|e| {
-                    anyhow::anyhow!(err!("Failed to terminate old UUID {cur_uuid:?}: {e:?}"))
-                })
+            self.retire_stale_keybox_bound_entries().map_err(|e| {
+                anyhow::anyhow!(err!(
+                    "Failed to retire stale keybox-bound entries for old UUID {cur_uuid:?}: {e:?}"
+                ))
             })?;
+
+            let mut security_levels = self.security_levels.write().unwrap();
+            if security_levels.uuid_by_sec_level.get(&sec_level) == Some(&cur_uuid) {
+                security_levels.unregister(sec_level);
+                log::warn!(
+                    "Unregistered stale security level {sec_level:?} for UUID {cur_uuid:?}."
+                );
+            }
         }
 
         // Create security level instances BEFORE acquiring write lock to avoid holding lock during hardware calls
@@ -188,17 +226,13 @@ impl KeystoreService {
         let mut security_levels = self.security_levels.write().unwrap();
         debug!("Obtained exclusive lock to register security level");
 
-        if security_levels.uuid_by_sec_level.contains_key(&sec_level) {
-            // Unregister if already registered
-            let cur_uuid = security_levels
-                .uuid_by_sec_level
-                .get(&sec_level)
-                .cloned()
-                .unwrap();
-            security_levels.i_sec_level_by_uuid.remove(&cur_uuid);
-            security_levels.i_osec_level_by_uuid.remove(&cur_uuid);
-            security_levels.uuid_by_sec_level.remove(&sec_level);
+        if let Some(cur_uuid) = security_levels.unregister(sec_level) {
             log::warn!("Security level {sec_level:?} was already registered, overwriting.");
+            if cur_uuid != uuid {
+                log::warn!(
+                    "Overwriting stale security level {sec_level:?} UUID {cur_uuid:?} with {uuid:?}."
+                );
+            }
         }
 
         security_levels

@@ -164,9 +164,19 @@ impl KeystoreSecurityLevel {
 
         if let Some(old_uuid) = stale_uuid {
             self.km_wrapper.clear_attestation_cache();
-            DB.with(|db| db.borrow_mut().terminate_uuid(&old_uuid))
+            if crate::keybox::db_retirement_allowed() {
+                DB.with(|db| {
+                    db.borrow_mut()
+                        .retire_stale_keybox_bound_entries(crate::keybox::current_identity_digest())
+                })
                 .context(err!("Failed to invalidate keys for rotated keybox"))?;
+            } else {
+                log::warn!(
+                    "Skipping stale keybox-bound entry retirement while keybox fallback is active."
+                );
+            }
             *self.km_uuid.write().unwrap() = current_uuid;
+            debug!("Refreshed rotated UUID {old_uuid:?} to {current_uuid:?}");
         }
 
         Ok(())

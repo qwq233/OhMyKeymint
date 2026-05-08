@@ -65,6 +65,10 @@ fn get_pm() -> anyhow::Result<rsbinder::Strong<dyn IKeyAttestationApplicationIdP
 }
 
 const ERROR_GET_ATTESTATION_APPLICATION_ID_FAILED: i32 = 1;
+const KEY_ATTESTATION_APPLICATION_ID_MAX_SIZE: usize = 1024;
+const AAID_PKG_INFO_OVERHEAD: usize = 15;
+const AAID_SIGNATURE_SIZE: usize = 34;
+const AAID_GENERAL_OVERHEAD: usize = 16;
 
 fn reset_pm() {
     PM.with(|p| {
@@ -153,37 +157,59 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
 fn encode_application_id(
     application_id: KeyAttestationApplicationId,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let mut package_info_set = SetOfVec::new();
-    let mut signature_digests = SetOfVec::new();
     let sha256 = BoringSha256 {};
+    let package_infos = application_id.packageInfos;
+    let first_package = package_infos
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("AttestationApplicationId has no package info"))?;
 
-    for pkg in application_id.packageInfos {
-        for sig in pkg.signatures {
-            let result = sha256
-                .hash(sig.data.as_slice())
-                .map_err(|e| anyhow::anyhow!("Failed to hash signature: {:?}", e))?;
+    let mut estimated_encoded_size = AAID_GENERAL_OVERHEAD;
 
-            let octet_string = x509_cert::der::asn1::OctetString::new(result)?;
-
-            let result = signature_digests.insert_ordered(octet_string).map_err(|e| {
-                anyhow::anyhow!(err!("Failed to encode AttestationApplicationId: {:?}", e))
-            });
-            if result.is_err() {
-                error!(
-                    "Failed to insert signature digest: {:?}",
-                    result.unwrap_err()
-                );
-            }
-        }
-
+    let mut package_info_records = Vec::new();
+    for pkg in &package_infos {
+        let package_name = pkg.packageName.as_bytes();
         let package_info = super::aaid::PackageInfoRecord {
-            package_name: der::asn1::OctetString::new(pkg.packageName.as_bytes())?,
-            version: pkg.versionCode,
+            package_name: der::asn1::OctetString::new(package_name)?,
+            version: pkg.versionCode as u64,
         };
-        package_info_set.insert_ordered(package_info).map_err(|e| {
-            anyhow::anyhow!(err!("Failed to encode AttestationApplicationId: {:?}", e))
-        })?;
+
+        estimated_encoded_size = estimated_encoded_size
+            .saturating_add(AAID_PKG_INFO_OVERHEAD)
+            .saturating_add(package_name.len());
+        if estimated_encoded_size > KEY_ATTESTATION_APPLICATION_ID_MAX_SIZE {
+            break;
+        }
+        package_info_records.push(package_info);
     }
+    let package_info_set = SetOfVec::from_iter(package_info_records).map_err(|e| {
+        anyhow::anyhow!(err!(
+            "Failed to encode AttestationApplicationId package infos: {:?}",
+            e
+        ))
+    })?;
+
+    let mut signature_digests = Vec::new();
+    for sig in &first_package.signatures {
+        let result = sha256
+            .hash(sig.data.as_slice())
+            .map_err(|e| anyhow::anyhow!("Failed to hash signature: {:?}", e))?;
+        signature_digests.push(result);
+    }
+
+    let mut signature_digest_records = Vec::new();
+    for sig_digest in signature_digests {
+        estimated_encoded_size = estimated_encoded_size.saturating_add(AAID_SIGNATURE_SIZE);
+        if estimated_encoded_size > KEY_ATTESTATION_APPLICATION_ID_MAX_SIZE {
+            break;
+        }
+        signature_digest_records.push(x509_cert::der::asn1::OctetString::new(sig_digest)?);
+    }
+    let signature_digests = SetOfVec::from_iter(signature_digest_records).map_err(|e| {
+        anyhow::anyhow!(err!(
+            "Failed to encode AttestationApplicationId signature digests: {:?}",
+            e
+        ))
+    })?;
 
     let result = super::aaid::AttestationApplicationId {
         package_info_records: package_info_set,
@@ -232,4 +258,113 @@ pub fn multiuser_get_app_id(uid: u32) -> u32 {
 /// Extracts the android user from the given uid.
 pub fn uid_to_android_user(uid: u32) -> u32 {
     multiuser_get_user_id(uid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::android::security::keystore::Signature::Signature;
+    use crate::plat::aaid::AttestationApplicationId as DerAttestationApplicationId;
+    use der::Decode;
+
+    fn signature(data: &[u8]) -> Signature {
+        Signature {
+            data: data.to_vec(),
+        }
+    }
+
+    fn package(
+        package_name: &str,
+        version_code: i64,
+        signatures: Vec<Signature>,
+    ) -> KeyAttestationPackageInfo {
+        KeyAttestationPackageInfo {
+            packageName: package_name.to_string(),
+            versionCode: version_code,
+            signatures,
+        }
+    }
+
+    #[test]
+    fn aaid_encoder_uses_first_package_signatures_and_sorts_sets() {
+        let app_id = KeyAttestationApplicationId {
+            packageInfos: vec![
+                package("z.example", 2, vec![signature(b"shared-signature")]),
+                package("a.example", 1, vec![signature(b"shared-signature")]),
+            ],
+        };
+
+        let der = encode_application_id(app_id).expect("AAID should encode");
+        let parsed =
+            DerAttestationApplicationId::from_der(&der).expect("encoded AAID should parse");
+
+        assert_eq!(parsed.package_info_records.len(), 2);
+        assert_eq!(parsed.signature_digests.len(), 1);
+    }
+
+    #[test]
+    fn aaid_encoder_uses_aosp_package_size_limit() {
+        let mut package_infos = Vec::new();
+        for idx in 0..9 {
+            let package_name = format!("pkg{:02}.{}", idx, "a".repeat(94));
+            package_infos.push(package(
+                &package_name,
+                idx,
+                vec![
+                    signature(b"signature-1"),
+                    signature(b"signature-2"),
+                    signature(b"signature-3"),
+                ],
+            ));
+        }
+
+        let der = encode_application_id(KeyAttestationApplicationId {
+            packageInfos: package_infos,
+        })
+        .expect("AAID should encode");
+        let parsed =
+            DerAttestationApplicationId::from_der(&der).expect("encoded AAID should parse");
+
+        assert!(der.len() <= KEY_ATTESTATION_APPLICATION_ID_MAX_SIZE);
+        assert_eq!(parsed.package_info_records.len(), 8);
+        assert_eq!(parsed.signature_digests.len(), 0);
+    }
+
+    #[test]
+    fn aaid_encoder_uses_aosp_signature_size_limit() {
+        let signatures = (0..35)
+            .map(|idx| signature(format!("signature-{idx}").as_bytes()))
+            .collect();
+        let app_id = KeyAttestationApplicationId {
+            packageInfos: vec![package("a", 1, signatures)],
+        };
+
+        let der = encode_application_id(app_id).expect("AAID should encode");
+        let parsed =
+            DerAttestationApplicationId::from_der(&der).expect("encoded AAID should parse");
+
+        assert!(der.len() <= KEY_ATTESTATION_APPLICATION_ID_MAX_SIZE);
+        assert_eq!(parsed.package_info_records.len(), 1);
+        assert_eq!(parsed.signature_digests.len(), 29);
+    }
+
+    #[test]
+    fn aaid_encoder_casts_version_code_to_unsigned() {
+        let app_id = KeyAttestationApplicationId {
+            packageInfos: vec![package("negative.version", -1, vec![])],
+        };
+
+        let der = encode_application_id(app_id).expect("AAID should encode");
+        let parsed =
+            DerAttestationApplicationId::from_der(&der).expect("encoded AAID should parse");
+
+        assert_eq!(
+            parsed
+                .package_info_records
+                .get(0)
+                .expect("package info")
+                .version,
+            u64::MAX
+        );
+    }
 }
