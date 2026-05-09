@@ -10,67 +10,344 @@ jobs:
     permissions:
       contents: write
 
+    env:
+      GH_TOKEN: ${{ secrets.PAT }}
+      SOURCE_REPO: ${{ github.repository }}
+      TARGET_REPO: KernelSU-Modules-Repo/oh_my_keymint
+
     steps:
       - name: Checkout repository (master)
         uses: actions/checkout@v4
         with:
           ref: master
           fetch-depth: 0
+          token: ${{ secrets.PAT }}
 
-      - name: Get commit count (versionCode)
-        id: commit_count
-        run: |
-          COUNT=$(git rev-list --count HEAD)
-          echo "versionCode=$COUNT" >> $GITHUB_OUTPUT
-
-      - name: Extract release info
+      - name: Wait for source release assets
         id: release_info
         env:
-          ASSETS_JSON: ${{ toJson(github.event.release.assets) }}
+          RELEASE_ID: ${{ github.event.release.id }}
         run: |
-          TAG_NAME="${{ github.event.release.tag_name }}"
-          RELEASE_BODY="${{ github.event.release.body }}"
-          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "release_body<<EOF" >> $GITHUB_OUTPUT
-          echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          set -euo pipefail
 
-          ASSET_URL=$(echo "$ASSETS_JSON" | jq -r '.[] | select(.name | contains("release")) | .browser_download_url' | head -n1)
-          
-          if [ -z "$ASSET_URL" ]; then
-            echo "::error::No release zip found in assets! Names:"
-            echo "$ASSETS_JSON" | jq -r '.[].name'
+          RELEASE_JSON="$RUNNER_TEMP/source-release.json"
+          ASSET_DIR="$RUNNER_TEMP/source-release-assets"
+          mkdir -p "$ASSET_DIR"
+
+          previous_names=""
+          stable_count=0
+
+          for attempt in $(seq 1 30); do
+            gh api "repos/$SOURCE_REPO/releases/$RELEASE_ID" > "$RELEASE_JSON"
+
+            asset_count=$(jq '.assets | length' "$RELEASE_JSON")
+            uploaded_count=$(jq '[.assets[] | select(.state == "uploaded")] | length' "$RELEASE_JSON")
+            current_names=$(jq -r '[.assets[].name] | sort | join("\n")' "$RELEASE_JSON")
+
+            if [ "$asset_count" -gt 0 ] && [ "$asset_count" -eq "$uploaded_count" ] && [ "$current_names" = "$previous_names" ]; then
+              stable_count=$((stable_count + 1))
+            else
+              stable_count=0
+            fi
+
+            if [ "$stable_count" -ge 1 ]; then
+              break
+            fi
+
+            previous_names="$current_names"
+            echo "Waiting for source release assets to finish uploading (attempt $attempt/30)..."
+            sleep 10
+          done
+
+          asset_count=$(jq '.assets | length' "$RELEASE_JSON")
+          uploaded_count=$(jq '[.assets[] | select(.state == "uploaded")] | length' "$RELEASE_JSON")
+          if [ "$asset_count" -eq 0 ] || [ "$asset_count" -ne "$uploaded_count" ]; then
+            echo "::error::Source release assets are not fully uploaded."
+            jq -r '.assets[]? | "\(.name)\t\(.state)"' "$RELEASE_JSON"
             exit 1
           fi
-          echo "asset_url=$ASSET_URL" >> $GITHUB_OUTPUT
+
+          tag_name=$(jq -r '.tag_name' "$RELEASE_JSON")
+          release_zip_url=$(jq -r '.assets[] | select((.name | contains("release")) and (.name | endswith(".zip"))) | .browser_download_url' "$RELEASE_JSON" | head -n1)
+          if [ -z "$release_zip_url" ]; then
+            echo "::error::No release zip found in source release assets. Names:"
+            jq -r '.assets[].name' "$RELEASE_JSON"
+            exit 1
+          fi
+
+          git fetch --force --tags origin
+          version_code=$(git rev-list --count "$tag_name")
+
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "release_zip_url=$release_zip_url" >> "$GITHUB_OUTPUT"
+          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "source_release_json=$RELEASE_JSON" >> "$GITHUB_OUTPUT"
+          echo "asset_dir=$ASSET_DIR" >> "$GITHUB_OUTPUT"
+
+          jq -c '.assets[] | {name, url, size, digest}' "$RELEASE_JSON" | while read -r asset; do
+            name=$(jq -r '.name' <<< "$asset")
+            url=$(jq -r '.url' <<< "$asset")
+            digest=$(jq -r '.digest // ""' <<< "$asset")
+            output="$ASSET_DIR/$name"
+
+            curl --fail --location \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/octet-stream" \
+              --output "$output" \
+              "$url"
+
+            if [[ "$digest" == sha256:* ]]; then
+              expected="${digest#sha256:}"
+              actual=$(sha256sum "$output" | awk '{print $1}')
+              if [ "$actual" != "$expected" ]; then
+                echo "::error::Digest mismatch for $name: expected $expected, got $actual"
+                exit 1
+              fi
+            fi
+          done
 
       - name: Checkout changelog branch
         uses: actions/checkout@v4
         with:
           ref: changelog
           path: changelog-branch
+          fetch-depth: 0
+          token: ${{ secrets.PAT }}
 
-      - name: Create/update files
+      - name: Update changelog branch
+        id: changelog
         run: |
-          cd changelog-branch
-          
-          echo "${{ steps.release_info.outputs.release_body }}" > changelog.md
-          
-          cat <<EOF > update.json
-          {
-            "version": "${{ steps.release_info.outputs.tag_name }}",
-            "versionCode": ${{ steps.commit_count.outputs.versionCode }},
-            "zipUrl": "${{ steps.release_info.outputs.asset_url }}",
-            "changelog": "https://raw.githubusercontent.com/qwq233/OhMyKeymint/changelog/changelog.md"
-          }
-          EOF
+          set -euo pipefail
 
-      - name: Commit and push changes
-        run: |
           cd changelog-branch
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
+
+          jq -r '.body // ""' "${{ steps.release_info.outputs.source_release_json }}" > changelog.md
+
+          jq -n \
+            --arg version "${{ steps.release_info.outputs.tag_name }}" \
+            --argjson versionCode "${{ steps.release_info.outputs.version_code }}" \
+            --arg zipUrl "${{ steps.release_info.outputs.release_zip_url }}" \
+            --arg changelog "https://raw.githubusercontent.com/qwq233/OhMyKeymint/changelog/changelog.md" \
+            '{
+              version: $version,
+              versionCode: $versionCode,
+              zipUrl: $zipUrl,
+              changelog: $changelog
+            }' > update.json
+
           git add changelog.md update.json
-          git commit -m "Update ${{ steps.release_info.outputs.tag_name }}"
-          git push origin changelog -f
+          if git diff --cached --quiet; then
+            echo "No changelog changes to commit."
+          else
+            git commit -m "Update ${{ steps.release_info.outputs.tag_name }}"
+          fi
+
+          sync_commit=$(git rev-parse HEAD)
+          git push origin "HEAD:changelog" --force
+          echo "sync_commit=$sync_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Sync target branch and tag
+        run: |
+          set -euo pipefail
+
+          cd changelog-branch
+          target_url="https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git"
+          sync_commit="${{ steps.changelog.outputs.sync_commit }}"
+          tag_name="${{ steps.release_info.outputs.tag_name }}"
+
+          git remote remove target 2>/dev/null || true
+          git remote add target "$target_url"
+          git push target "$sync_commit:refs/heads/master" --force
+
+          release_json="$RUNNER_TEMP/target-release.json"
+          find_target_release() {
+            local output="$1"
+            local tmp_output="$output.tmp"
+            if ! gh api --paginate "repos/$TARGET_REPO/releases" \
+              --jq ".[] | select(.tag_name == \"$tag_name\")" > "$tmp_output"; then
+              echo "::error::Failed to list target releases."
+              exit 1
+            fi
+            mv "$tmp_output" "$output"
+            [ -s "$output" ]
+          }
+
+          if find_target_release "$release_json"; then
+            immutable=$(jq -r '.immutable // false' "$release_json")
+          else
+            immutable=false
+          fi
+
+          if [ "$immutable" = "true" ]; then
+            target_tag_commit=$(git ls-remote --tags target "refs/tags/$tag_name^{}" | awk '{print $1}')
+            if [ -z "$target_tag_commit" ]; then
+              target_tag_commit=$(git ls-remote --tags target "refs/tags/$tag_name" | awk '{print $1}')
+            fi
+            if [ "$target_tag_commit" != "$sync_commit" ]; then
+              echo "::error::Target release $tag_name is immutable, and its tag points to ${target_tag_commit:-missing} instead of $sync_commit."
+              exit 1
+            fi
+          else
+            git push target "$sync_commit:refs/tags/$tag_name" --force
+          fi
+
+      - name: Sync target release and assets
+        run: |
+          set -euo pipefail
+
+          source_release_json="${{ steps.release_info.outputs.source_release_json }}"
+          asset_dir="${{ steps.release_info.outputs.asset_dir }}"
+          tag_name="${{ steps.release_info.outputs.tag_name }}"
+          target_release_json="$RUNNER_TEMP/target-release.json"
+          create_release_payload="$RUNNER_TEMP/create-target-release-payload.json"
+          update_release_payload="$RUNNER_TEMP/update-target-release-payload.json"
+          target_release_id=""
+          immutable=false
+
+          release_name=$(jq -r '.name // .tag_name' "$source_release_json")
+          release_body=$(jq -r '.body // ""' "$source_release_json")
+          prerelease=$(jq -r '.prerelease' "$source_release_json")
+
+          find_target_release() {
+            local output="$1"
+            local tmp_output="$output.tmp"
+            if ! gh api --paginate "repos/$TARGET_REPO/releases" \
+              --jq ".[] | select(.tag_name == \"$tag_name\")" > "$tmp_output"; then
+              echo "::error::Failed to list target releases."
+              exit 1
+            fi
+            mv "$tmp_output" "$output"
+            [ -s "$output" ]
+          }
+
+          jq -n \
+            --arg tag_name "$tag_name" \
+            --arg target_commitish "master" \
+            --arg name "$release_name" \
+            --arg body "$release_body" \
+            --argjson draft true \
+            --argjson prerelease "$prerelease" \
+            '{
+              tag_name: $tag_name,
+              target_commitish: $target_commitish,
+              name: $name,
+              body: $body,
+              draft: $draft,
+              prerelease: $prerelease
+            }' > "$create_release_payload"
+
+          jq -n \
+            --arg tag_name "$tag_name" \
+            --arg name "$release_name" \
+            --arg body "$release_body" \
+            --argjson prerelease "$prerelease" \
+            '{
+              tag_name: $tag_name,
+              name: $name,
+              body: $body,
+              prerelease: $prerelease
+            }' > "$update_release_payload"
+
+          if find_target_release "$target_release_json"; then
+            target_release_id=$(jq -r '.id' "$target_release_json")
+            immutable=$(jq -r '.immutable // false' "$target_release_json")
+          else
+            target_release_id=$(gh api "repos/$TARGET_REPO/releases" \
+              --method POST \
+              --input "$create_release_payload" \
+              --jq '.id')
+            gh api "repos/$TARGET_REPO/releases/$target_release_id" > "$target_release_json"
+          fi
+
+          if [ "$immutable" = "true" ]; then
+            source_summary="$RUNNER_TEMP/source-assets-summary.json"
+            target_summary="$RUNNER_TEMP/target-assets-summary.json"
+
+            jq '[.assets[] | {name, size, digest, state}] | sort_by(.name)' "$source_release_json" > "$source_summary"
+            jq '[.assets[] | {name, size, digest, state}] | sort_by(.name)' "$target_release_json" > "$target_summary"
+
+            if ! diff -u "$source_summary" "$target_summary"; then
+              echo "::error::Target release $tag_name is immutable, and its assets do not match the source release."
+              exit 1
+            fi
+
+            if [ "$(jq -r '.name // ""' "$target_release_json")" != "$release_name" ] || \
+               [ "$(jq -r '.body // ""' "$target_release_json")" != "$release_body" ] || \
+               [ "$(jq -r '.prerelease' "$target_release_json")" != "$prerelease" ]; then
+              echo "::error::Target release $tag_name is immutable, and its metadata differs from the source release."
+              exit 1
+            fi
+
+            echo "Target release is immutable and already matches the source release."
+            exit 0
+          fi
+
+          gh api "repos/$TARGET_REPO/releases/$target_release_id" \
+            --method PATCH \
+            --input "$update_release_payload" > "$target_release_json"
+
+          jq -c '.assets[]' "$target_release_json" | while read -r target_asset; do
+            target_name=$(jq -r '.name' <<< "$target_asset")
+            target_id=$(jq -r '.id' <<< "$target_asset")
+            target_state=$(jq -r '.state' <<< "$target_asset")
+            source_asset=$(jq -c --arg name "$target_name" '.assets[] | select(.name == $name)' "$source_release_json" | head -n1)
+
+            if [ -z "$source_asset" ] || [ "$target_state" != "uploaded" ]; then
+              gh api "repos/$TARGET_REPO/releases/assets/$target_id" --method DELETE
+              continue
+            fi
+
+            target_size=$(jq -r '.size' <<< "$target_asset")
+            target_digest=$(jq -r '.digest // ""' <<< "$target_asset")
+            source_size=$(jq -r '.size' <<< "$source_asset")
+            source_digest=$(jq -r '.digest // ""' <<< "$source_asset")
+
+            if [ "$target_size" != "$source_size" ] || [ "$target_digest" != "$source_digest" ]; then
+              gh api "repos/$TARGET_REPO/releases/assets/$target_id" --method DELETE
+            fi
+          done
+
+          gh api "repos/$TARGET_REPO/releases/$target_release_id" > "$target_release_json"
+          jq -r '.assets[].name' "$source_release_json" | while read -r source_name; do
+            if jq -e --arg name "$source_name" '.assets[] | select(.name == $name)' "$target_release_json" >/dev/null; then
+              continue
+            fi
+
+            upload_base=$(jq -r '.upload_url | sub("\\{.*"; "")' "$target_release_json")
+            encoded_name=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$source_name")
+            curl --fail --location \
+              --request POST \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@$asset_dir/$source_name" \
+              "$upload_base?name=$encoded_name"
+          done
+
+          gh api "repos/$TARGET_REPO/releases/$target_release_id" > "$target_release_json"
+          source_summary="$RUNNER_TEMP/source-assets-summary.json"
+          target_summary="$RUNNER_TEMP/target-assets-summary.json"
+
+          assets_match=false
+          for attempt in $(seq 1 12); do
+            gh api "repos/$TARGET_REPO/releases/$target_release_id" > "$target_release_json"
+            jq '[.assets[] | {name, size, digest, state}] | sort_by(.name)' "$source_release_json" > "$source_summary"
+            jq '[.assets[] | {name, size, digest, state}] | sort_by(.name)' "$target_release_json" > "$target_summary"
+
+            if cmp -s "$source_summary" "$target_summary"; then
+              assets_match=true
+              break
+            fi
+
+            echo "Waiting for target release assets to settle (attempt $attempt/12)..."
+            sleep 5
+          done
+
+          if [ "$assets_match" != "true" ]; then
+            diff -u "$source_summary" "$target_summary" || true
+            echo "::error::Target release assets do not match the source release after sync."
+            exit 1
+          fi
+
+          echo "Target release and assets are synchronized."
