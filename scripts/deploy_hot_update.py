@@ -25,7 +25,7 @@ DEFAULT_ABI = "arm64-v8a"
 DEFAULT_PROFILE = "debug"
 DEFAULT_REMOTE_DIR = "/data/adb/omk"
 DEFAULT_STAGING_DIR = "/data/local/tmp"
-DEFAULT_WAIT_SECONDS = 10
+DEFAULT_WAIT_SECONDS = 15
 
 ABI_TO_TARGET = {
     "arm64-v8a": "aarch64-linux-android",

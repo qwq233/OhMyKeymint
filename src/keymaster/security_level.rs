@@ -17,7 +17,10 @@ use crate::{
             Domain::Domain,
             EphemeralStorageKeyResponse::EphemeralStorageKeyResponse,
             IKeystoreOperation::IKeystoreOperation,
-            IKeystoreSecurityLevel::{BnKeystoreSecurityLevel, IKeystoreSecurityLevel},
+            IKeystoreSecurityLevel::{
+                BnKeystoreSecurityLevel, IKeystoreSecurityLevel,
+                KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING,
+            },
             KeyDescriptor::KeyDescriptor,
             KeyMetadata::KeyMetadata,
             KeyParameters::KeyParameters,
@@ -45,7 +48,7 @@ use crate::{
         super_key::{KeyBlob, SuperKeyManager},
         utils::{key_characteristics_to_internal, key_parameters_to_authorizations, log_params},
     },
-    plat::utils::multiuser_get_user_id,
+    plat::{resetprop, utils::multiuser_get_user_id},
     top::qwq2333::ohmykeymint::{
         CallerInfo::CallerInfo,
         IOhMySecurityLevel::{BnOhMySecurityLevel, IOhMySecurityLevel},
@@ -59,11 +62,32 @@ use crate::watchdog as wd;
 
 use anyhow::{anyhow, Context, Result};
 use kmr_wire::keymint::KeyMintHardwareInfo;
-use log::debug;
+use log::{debug, warn};
 use rsbinder::{thread_state::CallingContext, BinderFeatures, Interface, Status, Strong};
 
 // Blob of 32 zeroes used as empty masking key.
 static ZERO_BLOB_32: &[u8] = &[0; 32];
+fn key_creation_result_marker<T>(result: &Result<T>) -> &'static str {
+    if result.is_ok() {
+        "success"
+    } else {
+        "failure"
+    }
+}
+
+fn log_generate_key_result<T>(
+    security_level: SecurityLevel,
+    params: &[KeyParameter],
+    calling_uid: i64,
+    result: &Result<T>,
+) {
+    log_key_creation_event_stats(security_level, params, result);
+    debug!(
+        "generateKey: calling uid: {}, result={}",
+        calling_uid,
+        key_creation_result_marker(result)
+    );
+}
 
 pub struct KeystoreSecurityLevel {
     security_level: SecurityLevel,
@@ -86,6 +110,48 @@ fn sid_features() -> BinderFeatures {
     BinderFeatures {
         set_requesting_sid: true,
     }
+}
+
+fn should_retry_without_lskf_binding(
+    domain: &Domain,
+    key_parameters: &[KsKeyParam],
+    flags: Option<i32>,
+    user_id: u32,
+    error: &anyhow::Error,
+) -> bool {
+    if *domain != Domain::APP {
+        return false;
+    }
+    if flags.unwrap_or_default() & KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING != 0 {
+        return false;
+    }
+    if !key_parameters.iter().any(|parameter| {
+        matches!(
+            parameter.key_parameter_value(),
+            KsKeyParamValue::UserSecureID(_)
+        )
+    }) {
+        return false;
+    }
+    if !error_has_response_code(error, ResponseCode::UNINITIALIZED)
+        && !error_has_response_code(error, ResponseCode::LOCKED)
+    {
+        return false;
+    }
+    // Hot updates can miss the user unlock event.  If Android reports that CE
+    // storage is available, preserve key creation while keeping KeyMint's
+    // user-authentication tags enforced at operation time.
+    resetprop::read_string_property(&format!("sys.user.{user_id}.ce_available")).as_deref()
+        == Some("true")
+}
+
+fn error_has_response_code(error: &anyhow::Error, code: ResponseCode) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<KsError>(),
+            Some(KsError::Rc(candidate)) if *candidate == code
+        )
+    })
 }
 
 impl KeystoreSecurityLevel {
@@ -444,46 +510,45 @@ impl KeystoreSecurityLevel {
                 blob: Some(key_blob.to_vec()),
                 ..Default::default()
             },
-            _ => DB
-                .with::<_, Result<KeyDescriptor>>(|db| {
-                    let mut db = db.borrow_mut();
-
-                    let (key_blob, mut blob_metadata) = SUPER_KEY
-                        .read()
-                        .unwrap()
-                        .handle_super_encryption_on_key_init(
-                            &mut db,
-                            &(key.domain),
-                            &key_parameters,
-                            flags,
-                            user_id,
-                            &key_blob,
-                        )
-                        .context(err!("Failed to handle super encryption."))?;
-
-                    let mut key_metadata = KeyMetaData::new();
-                    key_metadata.add(KeyMetaEntry::CreationDate(creation_date));
-                    let km_uuid = self.effective_km_uuid();
-                    blob_metadata.add(BlobMetaEntry::KmUuid(km_uuid));
-
-                    let key_id = db
-                        .store_new_key(
-                            &key,
-                            KeyType::Client,
-                            &key_parameters,
-                            &BlobInfo::new(&key_blob, &blob_metadata),
-                            &cert_info,
-                            &key_metadata,
-                            &km_uuid,
-                        )
-                        .context(err!())?;
-                    Ok(KeyDescriptor {
-                        domain: Domain::KEY_ID,
-                        nspace: key_id.id(),
-                        ..Default::default()
-                    })
-                })
-                .context(err!())?,
+            _ => match self.store_new_key_descriptor(
+                &key,
+                &key_blob,
+                &key_parameters,
+                flags,
+                user_id,
+                &cert_info,
+                creation_date,
+            ) {
+                Ok(descriptor) => descriptor,
+                Err(error)
+                    if should_retry_without_lskf_binding(
+                        &key.domain,
+                        &key_parameters,
+                        flags,
+                        user_id,
+                        &error,
+                    ) =>
+                {
+                    warn!(
+                        "User {user_id} CE storage is available, but OMK has no unlocked user super key; \
+                         retrying auth-bound key storage without cryptographic LSKF binding"
+                    );
+                    self.store_new_key_descriptor(
+                        &key,
+                        &key_blob,
+                        &key_parameters,
+                        Some(
+                            flags.unwrap_or_default()
+                                | KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING,
+                        ),
+                        user_id,
+                        &cert_info,
+                        creation_date,
+                    )
+                    .context(err!("retrying key storage without LSKF binding"))?
+                }
+                Err(error) => return Err(error).context(err!()),
+            },
         };
 
         Ok(KeyMetadata {
@@ -494,6 +559,57 @@ impl KeystoreSecurityLevel {
             authorizations: key_parameters_to_authorizations(key_parameters),
             modificationTimeMs: creation_date.to_millis_epoch(),
         })
+    }
+
+    fn store_new_key_descriptor(
+        &self,
+        key: &KeyDescriptor,
+        key_blob: &[u8],
+        key_parameters: &[KsKeyParam],
+        flags: Option<i32>,
+        user_id: u32,
+        cert_info: &CertificateInfo,
+        creation_date: DateTime,
+    ) -> Result<KeyDescriptor> {
+        DB.with::<_, Result<KeyDescriptor>>(|db| {
+            let mut db = db.borrow_mut();
+
+            let (key_blob, mut blob_metadata) = SUPER_KEY
+                .read()
+                .unwrap()
+                .handle_super_encryption_on_key_init(
+                    &mut db,
+                    &(key.domain),
+                    key_parameters,
+                    flags,
+                    user_id,
+                    key_blob,
+                )
+                .context(err!("Failed to handle super encryption."))?;
+
+            let mut key_metadata = KeyMetaData::new();
+            key_metadata.add(KeyMetaEntry::CreationDate(creation_date));
+            let km_uuid = self.effective_km_uuid();
+            blob_metadata.add(BlobMetaEntry::KmUuid(km_uuid));
+
+            let key_id = db
+                .store_new_key(
+                    key,
+                    KeyType::Client,
+                    key_parameters,
+                    &BlobInfo::new(&key_blob, &blob_metadata),
+                    cert_info,
+                    &key_metadata,
+                    &km_uuid,
+                )
+                .context(err!())?;
+            Ok(KeyDescriptor {
+                domain: Domain::KEY_ID,
+                nspace: key_id.id(),
+                ..Default::default()
+            })
+        })
+        .context(err!())
     }
 
     #[allow(unused_variables)]
@@ -1169,11 +1285,11 @@ impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
         // time than other operations
         let _wp = self.watch_millis("IKeystoreSecurityLevel::generateKey", 5000);
         let result = self.generate_key(None, key, attestation_key, params, flags, entropy);
-        log_key_creation_event_stats(self.security_level, params, &result);
-        debug!(
-            "generateKey: calling uid: {}, result: {:02x?}",
-            CallingContext::default().uid,
-            result
+        log_generate_key_result(
+            self.security_level,
+            params,
+            CallingContext::default().uid.into(),
+            &result,
         );
         result.map_err(into_logged_binder)
     }
@@ -1261,13 +1377,12 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         // time than other operations
         let _wp = self.watch_millis("IOhMySecurityLevel::generateKey", 5000);
         let result = self.generate_key(ctx, key, attestation_key, params, flags, entropy);
-        log_key_creation_event_stats(self.security_level, params, &result);
-        debug!(
-            "generateKey: calling uid: {}, result: {:02x?}",
-            ctx.is_some()
-                .then(|| ctx.unwrap().callingUid)
+        log_generate_key_result(
+            self.security_level,
+            params,
+            ctx.map(|ctx| ctx.callingUid)
                 .unwrap_or(CallingContext::default().uid.into()),
-            result
+            &result,
         );
         result.map_err(into_logged_binder)
     }
@@ -1364,11 +1479,11 @@ impl IKeystoreSecurityLevel for AospSecurityLevelWrapper {
         let result = self
             .inner
             .generate_key(None, key, attestation_key, params, flags, entropy);
-        log_key_creation_event_stats(self.inner.security_level, params, &result);
-        debug!(
-            "generateKey: calling uid: {}, result: {:02x?}",
-            CallingContext::default().uid,
-            result
+        log_generate_key_result(
+            self.inner.security_level,
+            params,
+            CallingContext::default().uid.into(),
+            &result,
         );
         result.map_err(into_logged_binder)
     }
@@ -1475,12 +1590,12 @@ impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
         let result = self
             .inner
             .generate_key(ctx, key, attestation_key, params, flags, entropy);
-        log_key_creation_event_stats(self.inner.security_level, params, &result);
-        debug!(
-            "generateKey: calling uid: {}, result: {:02x?}",
+        log_generate_key_result(
+            self.inner.security_level,
+            params,
             ctx.map(|ctx| ctx.callingUid)
                 .unwrap_or(CallingContext::default().uid.into()),
-            result
+            &result,
         );
         result.map_err(into_logged_binder)
     }

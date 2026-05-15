@@ -1,12 +1,43 @@
+use crate::android::security::authorization::IKeystoreAuthorization::transactions as authorization_tx;
+use crate::android::security::maintenance::IKeystoreMaintenance::transactions as maintenance_tx;
 use crate::android::system::keystore2::IKeystoreOperation::transactions as operation_tx;
 use crate::android::system::keystore2::IKeystoreSecurityLevel::transactions as security_level_tx;
 use crate::android::system::keystore2::IKeystoreService::transactions as service_tx;
 use crate::config::InterceptConfig;
 
+pub const KEYSTORE_AUTHORIZATION_INTERFACE: &str =
+    "android.security.authorization.IKeystoreAuthorization";
+pub const KEYSTORE_MAINTENANCE_INTERFACE: &str =
+    "android.security.maintenance.IKeystoreMaintenance";
 pub const KEYSTORE_SERVICE_INTERFACE: &str = "android.system.keystore2.IKeystoreService";
 pub const KEYSTORE_SECURITY_LEVEL_INTERFACE: &str =
     "android.system.keystore2.IKeystoreSecurityLevel";
 pub const KEYSTORE_OPERATION_INTERFACE: &str = "android.system.keystore2.IKeystoreOperation";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorizationMethod {
+    AddAuthToken,
+    OnDeviceUnlocked,
+    OnDeviceLocked,
+    OnUserStorageLocked,
+    OnWeakUnlockMethodsExpired,
+    OnNonLskfUnlockMethodsExpired,
+    GetAuthTokensForCredStore,
+    GetLastAuthTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceMethod {
+    OnUserAdded,
+    InitUserSuperKeys,
+    OnUserRemoved,
+    OnUserLskfRemoved,
+    ClearNamespace,
+    EarlyBootEnded,
+    MigrateKeyNamespace,
+    DeleteAllKeys,
+    GetAppUidsAffectedBySid,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceMethod {
@@ -38,6 +69,43 @@ pub enum OperationMethod {
     Update,
     Finish,
     Abort,
+}
+
+pub fn authorization_method_from_code(code: u32) -> Option<AuthorizationMethod> {
+    match code {
+        authorization_tx::r#addAuthToken => Some(AuthorizationMethod::AddAuthToken),
+        authorization_tx::r#onDeviceUnlocked => Some(AuthorizationMethod::OnDeviceUnlocked),
+        authorization_tx::r#onDeviceLocked => Some(AuthorizationMethod::OnDeviceLocked),
+        authorization_tx::r#onUserStorageLocked => Some(AuthorizationMethod::OnUserStorageLocked),
+        authorization_tx::r#onWeakUnlockMethodsExpired => {
+            Some(AuthorizationMethod::OnWeakUnlockMethodsExpired)
+        }
+        authorization_tx::r#onNonLskfUnlockMethodsExpired => {
+            Some(AuthorizationMethod::OnNonLskfUnlockMethodsExpired)
+        }
+        authorization_tx::r#getAuthTokensForCredStore => {
+            Some(AuthorizationMethod::GetAuthTokensForCredStore)
+        }
+        authorization_tx::r#getLastAuthTime => Some(AuthorizationMethod::GetLastAuthTime),
+        _ => None,
+    }
+}
+
+pub fn maintenance_method_from_code(code: u32) -> Option<MaintenanceMethod> {
+    match code {
+        maintenance_tx::r#onUserAdded => Some(MaintenanceMethod::OnUserAdded),
+        maintenance_tx::r#initUserSuperKeys => Some(MaintenanceMethod::InitUserSuperKeys),
+        maintenance_tx::r#onUserRemoved => Some(MaintenanceMethod::OnUserRemoved),
+        maintenance_tx::r#onUserLskfRemoved => Some(MaintenanceMethod::OnUserLskfRemoved),
+        maintenance_tx::r#clearNamespace => Some(MaintenanceMethod::ClearNamespace),
+        maintenance_tx::r#earlyBootEnded => Some(MaintenanceMethod::EarlyBootEnded),
+        maintenance_tx::r#migrateKeyNamespace => Some(MaintenanceMethod::MigrateKeyNamespace),
+        maintenance_tx::r#deleteAllKeys => Some(MaintenanceMethod::DeleteAllKeys),
+        maintenance_tx::r#getAppUidsAffectedBySid => {
+            Some(MaintenanceMethod::GetAppUidsAffectedBySid)
+        }
+        _ => None,
+    }
 }
 
 pub fn service_method_from_code(code: u32) -> Option<ServiceMethod> {
@@ -102,6 +170,50 @@ pub fn is_omk_service_route_enabled(method: ServiceMethod, intercept: &Intercept
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorization_method_codes_follow_generated_aidl_constants() {
+        let cases = [
+            (
+                authorization_tx::r#addAuthToken,
+                AuthorizationMethod::AddAuthToken,
+            ),
+            (
+                authorization_tx::r#onDeviceUnlocked,
+                AuthorizationMethod::OnDeviceUnlocked,
+            ),
+            (
+                authorization_tx::r#onDeviceLocked,
+                AuthorizationMethod::OnDeviceLocked,
+            ),
+            (
+                authorization_tx::r#onUserStorageLocked,
+                AuthorizationMethod::OnUserStorageLocked,
+            ),
+            (
+                authorization_tx::r#onWeakUnlockMethodsExpired,
+                AuthorizationMethod::OnWeakUnlockMethodsExpired,
+            ),
+            (
+                authorization_tx::r#onNonLskfUnlockMethodsExpired,
+                AuthorizationMethod::OnNonLskfUnlockMethodsExpired,
+            ),
+            (
+                authorization_tx::r#getAuthTokensForCredStore,
+                AuthorizationMethod::GetAuthTokensForCredStore,
+            ),
+            (
+                authorization_tx::r#getLastAuthTime,
+                AuthorizationMethod::GetLastAuthTime,
+            ),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(authorization_method_from_code(code), Some(expected));
+        }
+
+        assert_eq!(authorization_method_from_code(u32::MAX), None);
+    }
 
     #[test]
     fn service_method_codes_follow_generated_aidl_constants() {

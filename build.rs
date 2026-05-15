@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, vec};
+use std::{fs, path::PathBuf, process::Command, vec};
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
@@ -26,16 +26,25 @@ fn main() {
         .join("\n");
 
     std::fs::write(&mod_file, mod_content).unwrap();
+    let _ = Command::new("rustfmt")
+        .args([&mod_file, &format!("{}/storage.rs", out_dir)])
+        .status();
 
     let mut aidl = rsbinder_aidl::Builder::new()
         .include_dir(PathBuf::from("aidl/android/system/keystore2"))
         .include_dir(PathBuf::from("aidl/android/hardware/security/keymint"))
+        .include_dir(PathBuf::from("aidl/android/hardware/security/secureclock"))
+        .include_dir(PathBuf::from("aidl/android/security/authorization"))
+        .include_dir(PathBuf::from("aidl/android/security/maintenance"))
         .output(PathBuf::from("aidl.rs"));
 
     let dirs = vec![
         "aidl/android/content/pm",
         "aidl/android/system/keystore2",
         "aidl/android/hardware/security/keymint",
+        "aidl/android/hardware/security/secureclock",
+        "aidl/android/security/authorization",
+        "aidl/android/security/maintenance",
         "aidl/android/security/metrics",
         "aidl/android/security/keystore",
         "aidl/android/apex",
@@ -53,14 +62,7 @@ fn main() {
             }
         }
     }
-    aidl.source(PathBuf::from(
-        "aidl/android/security/authorization/ResponseCode.aidl",
-    ))
-    .source(PathBuf::from(
-        "aidl/android/hardware/security/secureclock/ISecureClock.aidl",
-    ))
-    .generate()
-    .unwrap();
+    aidl.generate().unwrap();
 
     let generated_path = PathBuf::from(format!("{}/aidl.rs", std::env::var("OUT_DIR").unwrap()));
     let content = fs::read_to_string(&generated_path).unwrap();

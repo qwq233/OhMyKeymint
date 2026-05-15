@@ -482,7 +482,13 @@ impl Enforcements {
                     no_auth_required = true;
                 }
                 KeyParameterValue::AuthTimeout(t) => {
-                    key_time_out = Some(*t as i64);
+                    if *t < 0 {
+                        return Err(Error::Km(Ec::INVALID_KEY_BLOB))
+                            .context(err!("negative AUTH_TIMEOUT is invalid"));
+                    }
+                    if *t > 0 {
+                        key_time_out = Some(*t as i64);
+                    }
                 }
                 KeyParameterValue::HardwareAuthenticatorType(a) => {
                     user_auth_type = Some(*a);
@@ -604,8 +610,8 @@ impl Enforcements {
             })
             .ok_or(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED))
             .context(err!(
-                "No suitable auth token for sids {:?} type {:?} received in last {}s found.",
-                user_secure_ids,
+                "No suitable auth token for {} sid(s) type {:?} received in last {}s found.",
+                user_secure_ids.len(),
                 user_auth_type,
                 key_time_out
             ))?;
@@ -619,18 +625,10 @@ impl Enforcements {
 
             if token_age.seconds() > key_time_out {
                 return Err(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED)).context(err!(
-                    concat!(
-                        "matching auth token (challenge={}, userId={}, authId={}, ",
-                        "authType={:#x}, timestamp={}ms) rcved={:?} ",
-                        "for sids {:?} type {:?} is expired ({}s old > timeout={}s)"
-                    ),
-                    hat.auth_token().challenge,
-                    hat.auth_token().userId,
-                    hat.auth_token().authenticatorId,
+                    "matching auth token challengeTag={:04x} authType={:#x} for {} sid(s) type {:?} is expired ({}s old > timeout={}s)",
+                    challenge_tag(hat.auth_token().challenge),
                     hat.auth_token().authenticatorType.0,
-                    hat.auth_token().timestamp.milliSeconds,
-                    hat.time_received(),
-                    user_secure_ids,
+                    user_secure_ids.len(),
                     user_auth_type,
                     token_age.seconds(),
                     key_time_out
@@ -829,4 +827,76 @@ impl Enforcements {
     }
 }
 
+fn challenge_tag(challenge: i64) -> u16 {
+    (challenge as u64 & 0xffff) as u16
+}
+
 // TODO: Add tests to enforcement module (b/175578618).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+
+    fn auth_info(state: DeferredAuthState) -> AuthInfo {
+        AuthInfo {
+            state,
+            key_usage_limited: None,
+            confirmation_token_receiver: None,
+        }
+    }
+
+    fn key_param(value: KeyParameterValue) -> KeyParameter {
+        KeyParameter::new(value, SecurityLevel::TRUSTED_ENVIRONMENT)
+    }
+
+    fn aes_encrypt_auth_key(auth_timeout: i32) -> (i64, Vec<KeyParameter>) {
+        (
+            1,
+            vec![
+                key_param(KeyParameterValue::Algorithm(Algorithm::AES)),
+                key_param(KeyParameterValue::KeyPurpose(KeyPurpose::ENCRYPT)),
+                key_param(KeyParameterValue::UserSecureID(42)),
+                key_param(KeyParameterValue::HardwareAuthenticatorType(
+                    HardwareAuthenticatorType::FINGERPRINT,
+                )),
+                key_param(KeyParameterValue::AuthTimeout(auth_timeout)),
+            ],
+        )
+    }
+
+    #[test]
+    fn no_auth_finalization_does_not_return_operation_challenge() {
+        let mut info = auth_info(DeferredAuthState::NoAuthRequired);
+
+        assert!(info.finalize_create_authorization(0x1001).is_none());
+    }
+
+    #[test]
+    fn per_operation_finalization_returns_operation_challenge() {
+        let mut info = auth_info(DeferredAuthState::OpAuthRequired);
+
+        let challenge = info
+            .finalize_create_authorization(0x1002)
+            .expect("per-operation auth must return a challenge");
+
+        assert_eq!(challenge.challenge, 0x1002);
+        assert!(matches!(info.state, DeferredAuthState::Waiting(_)));
+    }
+
+    #[test]
+    fn auth_timeout_zero_authorizes_as_per_operation_key() {
+        let enforcements = Enforcements::default();
+        let key = aes_encrypt_auth_key(0);
+
+        let (hat, mut info) = enforcements
+            .authorize_create(KeyPurpose::ENCRYPT, Some(&key), &[], false)
+            .expect("AUTH_TIMEOUT=0 should not require a cached token at begin");
+
+        assert!(hat.is_none());
+        assert!(matches!(info.state, DeferredAuthState::OpAuthRequired));
+        let challenge = info
+            .finalize_create_authorization(0x1003)
+            .expect("per-operation auth should return an operation challenge");
+        assert_eq!(challenge.challenge, 0x1003);
+    }
+}

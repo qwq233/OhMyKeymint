@@ -427,11 +427,18 @@ impl crate::KeyMintTa {
         purpose: keyblob::SlotPurpose,
     ) -> Result<KeyCreationResult, Error> {
         debug!(
-            "finish_keyblob_creation: params {:?} attestKey {:?}",
-            params, attestation_key
+            "finish_keyblob_creation: params_count={} attest_key_present={}",
+            params.len(),
+            attestation_key.is_some()
         );
-        debug!("key characteristics: {:?}", chars);
-        debug!("key material: {:?}", key_material);
+        debug!(
+            "key characteristics summary: {:?}",
+            chars
+                .iter()
+                .map(|c| (c.security_level, c.authorizations.len()))
+                .collect::<Vec<_>>()
+        );
+        debug!("key material: <redacted>");
         debug!("keyblob purpose: {:?}", purpose);
 
         let keyblob = keyblob::PlaintextKeyBlob {

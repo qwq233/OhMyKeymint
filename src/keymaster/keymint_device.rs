@@ -27,11 +27,11 @@ use crate::android::hardware::security::keymint::{
 use crate::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
 };
-use crate::config::config;
+use crate::config::{config, CryptoConfig};
 use crate::global::{AID_KEYSTORE, DB};
 use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_binder_status, map_ks_error, map_ks_result};
-use crate::keymaster::utils::{key_creation_result_to_aidl, key_param_to_aidl};
+use crate::keymaster::utils::{key_creation_result_to_aidl, key_params_to_aidl};
 use crate::keymint::{clock, sdd, soft};
 use crate::plat::resetprop;
 use crate::{
@@ -58,7 +58,7 @@ use kmr_ta::{HardwareInfo, KeyMintTa, RpcInfo, RpcInfoV3};
 use kmr_wire::keymint::{AttestationKey, KeyParam};
 use kmr_wire::rpc::MINIMUM_SUPPORTED_KEYS_IN_CSR;
 use kmr_wire::*;
-use log::{error, warn};
+use log::{error, info, warn};
 use rsbinder::{ExceptionCode, Interface, Status, Strong};
 
 /// Wrapper for operating directly on a KeyMint device.
@@ -429,8 +429,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         );
         let operation = BnKeyMintOperation::new_binder(operation);
 
-        let out_params: Result<Vec<KeyParameter>> =
-            result.params.into_iter().map(key_param_to_aidl).collect();
+        let out_params = key_params_to_aidl(&result.params);
         let out_params = out_params.map_err(|error| {
             log::error!("Failed to convert begin out params to AIDL: {error:#}");
             Status::new_service_specific_error(ErrorCode::UNKNOWN_ERROR.0, None)
@@ -787,12 +786,9 @@ impl IKeyMintDevice for KeyMintWrapper {
         };
 
         let result: Result<Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>, rsbinder::Status> = result.iter().map(|kc| {
-            let params: Result<Vec<crate::android::hardware::security::keymint::KeyParameter::KeyParameter>, rsbinder::Status> = kc.authorizations.iter().map(|p| {
-                    key_param_to_aidl(p.clone())
-                        .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
-                        .map_err(map_ks_error)
-            }).collect();
-            let params = params?;
+            let params = key_params_to_aidl(&kc.authorizations)
+                .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+                .map_err(map_ks_error)?;
 
             Result::Ok(crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics {
                 authorizations: params,
@@ -904,6 +900,30 @@ impl KeyMintWrapper {
 
     pub fn clear_attestation_cache(&self) {
         self.inner.keymint.lock().unwrap().clear_attestation_cache();
+    }
+
+    pub fn localize_auth_token(&self, auth_token: &HardwareAuthToken) -> Result<HardwareAuthToken> {
+        let km_token = auth_token
+            .to_km()
+            .context(err!("invalid auth token fields"))?;
+        let mac_input = kmr_ta::hardware_auth_token_mac_input(&km_token)
+            .map_err(|error| anyhow::anyhow!("{error:?}"))
+            .context(err!("failed to build auth token MAC input"))?;
+        let hmac_key = self
+            .inner
+            .keymint
+            .lock()
+            .unwrap()
+            .get_hmac_key()
+            .ok_or(Error::Km(ErrorCode::HARDWARE_NOT_YET_AVAILABLE))
+            .context(err!("auth-token HMAC key is not initialized"))?;
+        let mac = kmr_common::crypto::hmac_sha256(&BoringHmac, &hmac_key.0, &mac_input)
+            .map_err(|error| anyhow::anyhow!("{error:?}"))
+            .context(err!("failed to localize auth token MAC"))?;
+
+        let mut localized = auth_token.clone();
+        localized.mac = mac;
+        Ok(localized)
     }
 
     pub fn get_hardware_info(&self) -> Result<keymint::KeyMintHardwareInfo, Error> {
@@ -1227,6 +1247,42 @@ fn parse_security_patch_level(value: &str) -> Result<u32> {
         .with_context(|| format!("invalid resolved security_patch value: {value}"))
 }
 
+fn bootstrap_auth_token_hmac(ta: &mut KeyMintTa, crypto: &CryptoConfig) -> Result<()> {
+    if let Some(key) = crypto.auth_token_hmac_key {
+        ta.set_device_hmac_key(&key)
+            .map_err(|error| anyhow::anyhow!("{error:?}"))
+            .context(err!("Failed to configure auth-token HMAC key"))?;
+        info!("Initialized auth-token HMAC key from configured key material");
+        return Ok(());
+    }
+
+    let params = kmr_wire::sharedsecret::SharedSecretParameters {
+        seed: crypto.shared_secret_seed.to_vec(),
+        nonce: crypto.shared_secret_nonce.to_vec(),
+    };
+
+    ta.set_shared_secret_params(params.clone())
+        .map_err(|error| anyhow::anyhow!("{error:?}"))
+        .context(err!("Failed to configure shared secret parameters"))?;
+
+    let req = PerformOpReq::SharedSecretComputeSharedSecret(ComputeSharedSecretRequest {
+        params: vec![params],
+    });
+    let resp = ta.process_req(req);
+    if resp.error_code != 0 {
+        return Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
+            .context(err!("Failed to bootstrap auth-token HMAC key"));
+    }
+    match resp.rsp {
+        Some(PerformOpRsp::SharedSecretComputeSharedSecret(rsp)) if rsp.ret.len() == 32 => {
+            info!("Initialized auth-token HMAC key from configured shared-secret parameters");
+            Ok(())
+        }
+        _ => Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
+            .context(err!("Unexpected shared-secret bootstrap response")),
+    }
+}
+
 fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
     let config = config().read().unwrap();
     let security_level = get_keymint_security_level(security_level)?;
@@ -1304,6 +1360,7 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
     };
 
     let mut ta = KeyMintTa::new(hw_info, RpcInfo::V3(rpc_info_v3), imp, dev);
+    bootstrap_auth_token_hmac(&mut ta, &config.crypto)?;
 
     let patch_level = parse_security_patch_level(&config.trust.security_patch).unwrap_or(20250605);
     let boot_patchlevel = patch_level;
@@ -1356,6 +1413,10 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
 
 pub fn get_keymint_wrapper(security_level: SecurityLevel) -> Result<KeyMintWrapper> {
     KeyMintWrapper::new(security_level)
+}
+
+pub fn localize_auth_token_for_omk(auth_token: &HardwareAuthToken) -> Result<HardwareAuthToken> {
+    get_keymint_wrapper(SecurityLevel::TRUSTED_ENVIRONMENT)?.localize_auth_token(auth_token)
 }
 
 pub fn reset_initialized_keymint_wrappers() -> Result<()> {

@@ -132,6 +132,9 @@ impl AuthInfo {
                     }
                 }
                 KeyParam::AuthTimeout(secs) => {
+                    if *secs == 0 {
+                        continue;
+                    }
                     if timeout_secs.is_none() {
                         timeout_secs = Some(*secs)
                     } else {

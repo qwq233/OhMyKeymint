@@ -20,6 +20,35 @@ use kmr_wire::{keymint::Digest, sharedsecret::SharedSecretParameters};
 use log::info;
 
 impl crate::KeyMintTa {
+    pub fn set_device_hmac_key(&mut self, key: &[u8]) -> Result<(), Error> {
+        if key.len() != kmr_common::crypto::SHA256_DIGEST_LEN {
+            return Err(km_err!(
+                InvalidArgument,
+                "device HMAC key len {} not 32",
+                key.len()
+            ));
+        }
+        self.device_hmac = Some(Box::new(SoftDeviceHmac {
+            key: hmac::Key::new(key.to_vec()),
+        }));
+        Ok(())
+    }
+
+    pub fn set_shared_secret_params(
+        &mut self,
+        params: SharedSecretParameters,
+    ) -> Result<(), Error> {
+        if params.nonce.len() != 32 {
+            return Err(km_err!(
+                InvalidArgument,
+                "nonce len {} not 32",
+                params.nonce.len()
+            ));
+        }
+        self.shared_secret_params = Some(params);
+        Ok(())
+    }
+
     pub(crate) fn get_shared_secret_params(&mut self) -> Result<SharedSecretParameters, Error> {
         if self.shared_secret_params.is_none() {
             let mut nonce = vec_try![0u8; 32]?;

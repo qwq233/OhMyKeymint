@@ -8,6 +8,9 @@ use rsbinder::{
 use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
 use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
 use crate::android::hardware::security::keymint::Tag::Tag;
+use crate::android::hardware::security::keymint::{
+    HardwareAuthToken::HardwareAuthToken, HardwareAuthenticatorType::HardwareAuthenticatorType,
+};
 use crate::android::system::keystore2::AuthenticatorSpec::AuthenticatorSpec;
 use crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse;
 use crate::android::system::keystore2::Domain::Domain;
@@ -22,8 +25,10 @@ use crate::hook::binder::{
     BINDER_TYPE_WEAK_HANDLE,
 };
 use crate::identify::{
-    operation_method_from_code, security_level_method_from_code, service_method_from_code,
-    OperationMethod, SecurityLevelMethod, ServiceMethod, KEYSTORE_OPERATION_INTERFACE,
+    authorization_method_from_code, maintenance_method_from_code, operation_method_from_code,
+    security_level_method_from_code, service_method_from_code, AuthorizationMethod,
+    MaintenanceMethod, OperationMethod, SecurityLevelMethod, ServiceMethod,
+    KEYSTORE_AUTHORIZATION_INTERFACE, KEYSTORE_MAINTENANCE_INTERFACE, KEYSTORE_OPERATION_INTERFACE,
     KEYSTORE_SECURITY_LEVEL_INTERFACE, KEYSTORE_SERVICE_INTERFACE,
 };
 
@@ -55,6 +60,109 @@ impl OwnedReply {
 pub struct ReplyBinderCarrier {
     pub bytes: Vec<u8>,
     pub is_object: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum ParsedAuthorizationRequest {
+    AddAuthToken {
+        auth_token: HardwareAuthToken,
+    },
+    OnDeviceUnlocked {
+        user_id: i32,
+        password: Option<Vec<u8>>,
+    },
+    OnDeviceLocked {
+        user_id: i32,
+        unlocking_sids: Vec<i64>,
+        weak_unlock_enabled: bool,
+    },
+    OnUserStorageLocked {
+        user_id: i32,
+    },
+    OnWeakUnlockMethodsExpired {
+        user_id: i32,
+    },
+    OnNonLskfUnlockMethodsExpired {
+        user_id: i32,
+    },
+    GetAuthTokensForCredStore {
+        challenge: i64,
+        secure_user_id: i64,
+        auth_token_max_age_millis: i64,
+    },
+    GetLastAuthTime {
+        secure_user_id: i64,
+        auth_types: Vec<HardwareAuthenticatorType>,
+    },
+}
+
+impl ParsedAuthorizationRequest {
+    pub fn method(&self) -> AuthorizationMethod {
+        match self {
+            Self::AddAuthToken { .. } => AuthorizationMethod::AddAuthToken,
+            Self::OnDeviceUnlocked { .. } => AuthorizationMethod::OnDeviceUnlocked,
+            Self::OnDeviceLocked { .. } => AuthorizationMethod::OnDeviceLocked,
+            Self::OnUserStorageLocked { .. } => AuthorizationMethod::OnUserStorageLocked,
+            Self::OnWeakUnlockMethodsExpired { .. } => {
+                AuthorizationMethod::OnWeakUnlockMethodsExpired
+            }
+            Self::OnNonLskfUnlockMethodsExpired { .. } => {
+                AuthorizationMethod::OnNonLskfUnlockMethodsExpired
+            }
+            Self::GetAuthTokensForCredStore { .. } => {
+                AuthorizationMethod::GetAuthTokensForCredStore
+            }
+            Self::GetLastAuthTime { .. } => AuthorizationMethod::GetLastAuthTime,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ParsedMaintenanceRequest {
+    OnUserAdded {
+        user_id: i32,
+    },
+    InitUserSuperKeys {
+        user_id: i32,
+        password: Vec<u8>,
+        allow_existing: bool,
+    },
+    OnUserRemoved {
+        user_id: i32,
+    },
+    OnUserLskfRemoved {
+        user_id: i32,
+    },
+    ClearNamespace {
+        domain: Domain,
+        nspace: i64,
+    },
+    EarlyBootEnded,
+    MigrateKeyNamespace {
+        source: KeyDescriptor,
+        destination: KeyDescriptor,
+    },
+    DeleteAllKeys,
+    GetAppUidsAffectedBySid {
+        user_id: i32,
+        sid: i64,
+    },
+}
+
+impl ParsedMaintenanceRequest {
+    pub fn method(&self) -> MaintenanceMethod {
+        match self {
+            Self::OnUserAdded { .. } => MaintenanceMethod::OnUserAdded,
+            Self::InitUserSuperKeys { .. } => MaintenanceMethod::InitUserSuperKeys,
+            Self::OnUserRemoved { .. } => MaintenanceMethod::OnUserRemoved,
+            Self::OnUserLskfRemoved { .. } => MaintenanceMethod::OnUserLskfRemoved,
+            Self::ClearNamespace { .. } => MaintenanceMethod::ClearNamespace,
+            Self::EarlyBootEnded => MaintenanceMethod::EarlyBootEnded,
+            Self::MigrateKeyNamespace { .. } => MaintenanceMethod::MigrateKeyNamespace,
+            Self::DeleteAllKeys => MaintenanceMethod::DeleteAllKeys,
+            Self::GetAppUidsAffectedBySid { .. } => MaintenanceMethod::GetAppUidsAffectedBySid,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +302,128 @@ impl ParsedOperationRequest {
             Self::Abort => OperationMethod::Abort,
         }
     }
+}
+
+pub unsafe fn parse_authorization_request(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+    code: u32,
+) -> Result<ParsedAuthorizationRequest> {
+    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
+    let interface = read_request_interface(&mut parcel)?;
+    if interface != KEYSTORE_AUTHORIZATION_INTERFACE {
+        bail!("unexpected interface token: {}", interface);
+    }
+
+    let method = authorization_method_from_code(code)
+        .ok_or_else(|| anyhow!("unknown IKeystoreAuthorization transaction code {}", code))?;
+
+    let parsed = match method {
+        AuthorizationMethod::AddAuthToken => ParsedAuthorizationRequest::AddAuthToken {
+            auth_token: parcel.read()?,
+        },
+        AuthorizationMethod::OnDeviceUnlocked => ParsedAuthorizationRequest::OnDeviceUnlocked {
+            user_id: parcel.read()?,
+            password: parcel.read()?,
+        },
+        AuthorizationMethod::OnDeviceLocked => ParsedAuthorizationRequest::OnDeviceLocked {
+            user_id: parcel.read()?,
+            unlocking_sids: parcel.read()?,
+            weak_unlock_enabled: parcel.read()?,
+        },
+        AuthorizationMethod::OnUserStorageLocked => {
+            ParsedAuthorizationRequest::OnUserStorageLocked {
+                user_id: parcel.read()?,
+            }
+        }
+        AuthorizationMethod::OnWeakUnlockMethodsExpired => {
+            ParsedAuthorizationRequest::OnWeakUnlockMethodsExpired {
+                user_id: parcel.read()?,
+            }
+        }
+        AuthorizationMethod::OnNonLskfUnlockMethodsExpired => {
+            ParsedAuthorizationRequest::OnNonLskfUnlockMethodsExpired {
+                user_id: parcel.read()?,
+            }
+        }
+        AuthorizationMethod::GetAuthTokensForCredStore => {
+            ParsedAuthorizationRequest::GetAuthTokensForCredStore {
+                challenge: parcel.read()?,
+                secure_user_id: parcel.read()?,
+                auth_token_max_age_millis: parcel.read()?,
+            }
+        }
+        AuthorizationMethod::GetLastAuthTime => ParsedAuthorizationRequest::GetLastAuthTime {
+            secure_user_id: parcel.read()?,
+            auth_types: parcel.read()?,
+        },
+    };
+
+    Ok(parsed)
+}
+
+pub unsafe fn peek_request_interface(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+) -> Result<String> {
+    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
+    read_request_interface(&mut parcel)
+}
+
+pub unsafe fn parse_maintenance_request(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+    code: u32,
+) -> Result<ParsedMaintenanceRequest> {
+    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
+    let interface = read_request_interface(&mut parcel)?;
+    if interface != KEYSTORE_MAINTENANCE_INTERFACE {
+        bail!("unexpected interface token: {}", interface);
+    }
+
+    let method = maintenance_method_from_code(code)
+        .ok_or_else(|| anyhow!("unknown IKeystoreMaintenance transaction code {}", code))?;
+
+    let parsed = match method {
+        MaintenanceMethod::OnUserAdded => ParsedMaintenanceRequest::OnUserAdded {
+            user_id: parcel.read()?,
+        },
+        MaintenanceMethod::InitUserSuperKeys => ParsedMaintenanceRequest::InitUserSuperKeys {
+            user_id: parcel.read()?,
+            password: parcel.read()?,
+            allow_existing: parcel.read()?,
+        },
+        MaintenanceMethod::OnUserRemoved => ParsedMaintenanceRequest::OnUserRemoved {
+            user_id: parcel.read()?,
+        },
+        MaintenanceMethod::OnUserLskfRemoved => ParsedMaintenanceRequest::OnUserLskfRemoved {
+            user_id: parcel.read()?,
+        },
+        MaintenanceMethod::ClearNamespace => ParsedMaintenanceRequest::ClearNamespace {
+            domain: parcel.read()?,
+            nspace: parcel.read()?,
+        },
+        MaintenanceMethod::EarlyBootEnded => ParsedMaintenanceRequest::EarlyBootEnded,
+        MaintenanceMethod::MigrateKeyNamespace => ParsedMaintenanceRequest::MigrateKeyNamespace {
+            source: parcel.read()?,
+            destination: parcel.read()?,
+        },
+        MaintenanceMethod::DeleteAllKeys => ParsedMaintenanceRequest::DeleteAllKeys,
+        MaintenanceMethod::GetAppUidsAffectedBySid => {
+            ParsedMaintenanceRequest::GetAppUidsAffectedBySid {
+                user_id: parcel.read()?,
+                sid: parcel.read()?,
+            }
+        }
+    };
+
+    Ok(parsed)
 }
 
 pub unsafe fn parse_service_request(
@@ -670,6 +900,14 @@ pub fn build_status_reply(status: &Status) -> Result<OwnedReply> {
     Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
 }
 
+pub fn contains_keystore_authorization_interface(parcel: &[u8]) -> bool {
+    contains_utf16_token(parcel, KEYSTORE_AUTHORIZATION_INTERFACE)
+}
+
+pub fn contains_keystore_maintenance_interface(parcel: &[u8]) -> bool {
+    contains_utf16_token(parcel, KEYSTORE_MAINTENANCE_INTERFACE)
+}
+
 pub fn contains_keystore_service_interface(parcel: &[u8]) -> bool {
     contains_utf16_token(parcel, KEYSTORE_SERVICE_INTERFACE)
 }
@@ -683,7 +921,9 @@ pub fn contains_keystore_operation_interface(parcel: &[u8]) -> bool {
 }
 
 pub fn contains_known_keystore_interface(parcel: &[u8]) -> bool {
-    contains_utf16_token(parcel, KEYSTORE_SERVICE_INTERFACE)
+    contains_utf16_token(parcel, KEYSTORE_AUTHORIZATION_INTERFACE)
+        || contains_utf16_token(parcel, KEYSTORE_MAINTENANCE_INTERFACE)
+        || contains_utf16_token(parcel, KEYSTORE_SERVICE_INTERFACE)
         || contains_utf16_token(parcel, KEYSTORE_SECURITY_LEVEL_INTERFACE)
         || contains_utf16_token(parcel, KEYSTORE_OPERATION_INTERFACE)
 }
@@ -801,6 +1041,7 @@ mod tests {
     use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
     use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
     use crate::android::system::keystore2::KeyMetadata::KeyMetadata;
+    use crate::android::system::keystore2::OperationChallenge::OperationChallenge;
 
     fn raw_parts(reply: &mut OwnedReply) -> (*mut u8, usize, *mut usize, usize) {
         (
@@ -813,6 +1054,33 @@ mod tests {
             },
             reply.offsets_size(),
         )
+    }
+
+    fn build_request(interface: &str, payload_token: Option<&str>) -> OwnedReply {
+        let mut parcel = Parcel::new();
+        parcel.write(&0i32).unwrap();
+        parcel.write(&0i32).unwrap();
+        parcel.write(&0u32).unwrap();
+        parcel.write(&interface.to_string()).unwrap();
+        if let Some(payload_token) = payload_token {
+            parcel.write(&payload_token.to_string()).unwrap();
+        }
+        owned_reply_from_parcel(parcel, std::iter::empty::<usize>())
+    }
+
+    #[test]
+    fn request_interface_peek_uses_header_token_only() {
+        let mut request = build_request(
+            KEYSTORE_SERVICE_INTERFACE,
+            Some(KEYSTORE_AUTHORIZATION_INTERFACE),
+        );
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        assert!(contains_keystore_authorization_interface(unsafe {
+            std::slice::from_raw_parts(data, data_size)
+        }));
+        let interface = unsafe { peek_request_interface(data, data_size, offsets, offsets_size) }
+            .expect("request interface should parse");
+        assert_eq!(interface, KEYSTORE_SERVICE_INTERFACE);
     }
 
     #[test]
@@ -895,7 +1163,7 @@ mod tests {
     fn create_operation_reply_round_trip_without_binder() {
         let response = CreateOperationResponse {
             r#iOperation: None,
-            r#operationChallenge: None,
+            r#operationChallenge: Some(OperationChallenge { challenge: 0x1234 }),
             r#parameters: None,
             r#upgradedBlob: Some(vec![9, 8, 7]),
         };
@@ -905,6 +1173,36 @@ mod tests {
         let parsed: CreateOperationResponse =
             unsafe { parse_success_reply(data, data_size, offsets, offsets_size) }.unwrap();
         assert!(parsed.r#iOperation.is_none());
+        assert_eq!(
+            parsed
+                .r#operationChallenge
+                .map(|challenge| challenge.challenge),
+            Some(0x1234)
+        );
         assert_eq!(parsed.r#upgradedBlob.as_deref(), Some(&[9, 8, 7][..]));
+    }
+
+    #[test]
+    fn create_operation_carrier_reply_preserves_operation_challenge() {
+        let carrier = vec![0u8; size_of::<flat_binder_object>() + size_of::<i32>()];
+        let mut reply = build_create_operation_reply_with_carrier_bytes(
+            Some(OperationChallenge { challenge: 0x5678 }),
+            None,
+            Some(vec![1, 2, 3]),
+            &carrier,
+            false,
+        )
+        .expect("create operation carrier reply should serialize");
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let parsed: CreateOperationResponse =
+            unsafe { parse_success_reply(data, data_size, offsets, offsets_size) }.unwrap();
+        assert!(parsed.r#iOperation.is_none());
+        assert_eq!(
+            parsed
+                .r#operationChallenge
+                .map(|challenge| challenge.challenge),
+            Some(0x5678)
+        );
+        assert_eq!(parsed.r#upgradedBlob.as_deref(), Some(&[1, 2, 3][..]));
     }
 }

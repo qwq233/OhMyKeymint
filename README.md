@@ -22,6 +22,8 @@ Configuration file is located at `/data/misc/keystore/omk/config.toml` and `/dat
 [main]
 # We can only use Injector as backend at this point.
 backend = "Injector"
+# Insecure fallback for broken system TEE biometric HAT verification.
+force_skip_system_biometric_hat_verification = false
 
 # The following values ​​are used to generate the seed for device encryption 
 # and verification. Please be sure to save the following values. If you lose
@@ -30,6 +32,10 @@ backend = "Injector"
 [crypto]
 root_kek_seed = "4b61c4b3bdf72bb700c351e020270846fb67ba3885e5fb67547e626af5cc1a7f"
 kak_seed = "d6fa5bb024540928a7d554ab5831a0553dd2f688f5d6cb3cb1645be2ff49e357"
+shared_secret_seed = "3f1a22d9f0fdf7c2e7d2abf8f9465b563c1a7c5adfc443f0b7b327bd35a1d75a"
+shared_secret_nonce = "884ae5e90744bc1c590c4a9959a9c11d1989a9f2b7cc31a50a31c9fc4df7e614"
+# Optional. If omitted, OMK derives the auth-token HMAC key through shared secret.
+# auth_token_hmac_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 [trust]
 os_version = 15
@@ -68,6 +74,11 @@ imei2 = ""
 
 OMK writes any successful result back into `config.toml` and leaves still-unavailable
 fields empty.
+
+All `[crypto]` values are 32-byte hex strings. Keep the generated values stable across
+updates; changing them can make existing OMK key material or localized authentication
+tokens unusable. Older configs without `shared_secret_seed` and `shared_secret_nonce`
+are still accepted, and OMK will generate those fields when it rewrites the config.
 
 If `config.toml` becomes invalid, OMK rewrites a canonical default config, renames the broken
 file to `config.toml.bak`, and appends the parse error to the backup.

@@ -57,6 +57,11 @@ pub fn map_binder_status<T>(r: rsbinder::status::Result<T>) -> Result<T, KsError
     }
 }
 
+pub fn is_dead_object_status(status: &Status) -> bool {
+    status.exception_code() == ExceptionCode::TransactionFailed
+        && status.transaction_error() == StatusCode::DeadObject
+}
+
 pub fn map_ks_error(r: KsError) -> Status {
     match r {
         KsError::Rc(rc) => {

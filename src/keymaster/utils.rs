@@ -1,8 +1,9 @@
 use crate::{
     android::hardware::security::keymint::{
-        ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice,
-        KeyCharacteristics::KeyCharacteristics, KeyParameter::KeyParameter as KmKeyParameter,
-        KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel,
+        ErrorCode::ErrorCode, HardwareAuthenticatorType::HardwareAuthenticatorType,
+        IKeyMintDevice::IKeyMintDevice, KeyCharacteristics::KeyCharacteristics,
+        KeyParameter::KeyParameter as KmKeyParameter, KeyParameterValue::KeyParameterValue,
+        SecurityLevel::SecurityLevel, Tag::Tag,
     },
     consts, err,
     keymaster::{
@@ -20,7 +21,34 @@ use kmr_wire::{
 };
 
 pub fn log_params(params: &[KmKeyParameter]) -> Vec<KmKeyParameter> {
-    params.to_vec()
+    params
+        .iter()
+        .map(|param| KmKeyParameter {
+            tag: param.tag,
+            value: redact_key_parameter_value(param),
+        })
+        .collect()
+}
+
+fn redact_key_parameter_value(param: &KmKeyParameter) -> KeyParameterValue {
+    if param.tag == Tag::USER_SECURE_ID {
+        return KeyParameterValue::LongInteger(0);
+    }
+
+    if param.tag == Tag::ATTESTATION_CHALLENGE
+        || param.tag == Tag::APPLICATION_ID
+        || param.tag == Tag::APPLICATION_DATA
+    {
+        return match &param.value {
+            KeyParameterValue::Blob(_) => KeyParameterValue::Blob(Vec::new()),
+            KeyParameterValue::LongInteger(_) => KeyParameterValue::LongInteger(0),
+            KeyParameterValue::Integer(_) => KeyParameterValue::Integer(0),
+            KeyParameterValue::DateTime(_) => KeyParameterValue::DateTime(0),
+            _ => param.value.clone(),
+        };
+    }
+
+    param.value.clone()
 }
 
 /// Converts a set of key characteristics as returned from KeyMint into the internal
@@ -339,6 +367,7 @@ impl crate::android::hardware::security::keymint::KeyParameter::KeyParameter {
             keymint::Tag::NoAuthRequired => Ok(KeyParam::NoAuthRequired),
             keymint::Tag::UserAuthType => {
                 let value = match value {
+                    KeyParameterValue::HardwareAuthenticatorType(v) => Ok(v.0),
                     KeyParameterValue::Integer(v) => Ok(v),
                     _ => return Err(anyhow!("Mismatched key parameter value type")),
                 }?;
@@ -620,12 +649,9 @@ pub fn key_creation_result_to_aidl(
             .collect();
 
     let key_characteristics: Result<Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>, rsbinder::Status> = result.key_characteristics.iter().map(|kc| {
-            let params: Result<Vec<crate::android::hardware::security::keymint::KeyParameter::KeyParameter>, rsbinder::Status> = kc.authorizations.iter().map(|p| {
-                    key_param_to_aidl(p.clone())
-                        .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
-                        .map_err(map_ks_error)
-            }).collect();
-            let params = params?;
+            let params = key_params_to_aidl(&kc.authorizations)
+                .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+                .map_err(map_ks_error)?;
 
             Result::Ok(crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics {
                 authorizations: params,
@@ -649,6 +675,10 @@ pub fn key_creation_result_to_aidl(
     };
 
     Result::Ok(resp)
+}
+
+pub fn key_params_to_aidl(params: &[KeyParam]) -> Result<Vec<KmKeyParameter>> {
+    params.iter().cloned().map(key_param_to_aidl).collect()
 }
 
 pub fn key_param_to_aidl(
@@ -882,7 +912,9 @@ pub fn key_param_to_aidl(
         KeyParam::UserId(v) => KeyParameterValue::Integer(v as i32),
         KeyParam::UserSecureId(v) => KeyParameterValue::LongInteger(v as i64),
         KeyParam::NoAuthRequired => KeyParameterValue::BoolValue(true),
-        KeyParam::UserAuthType(v) => KeyParameterValue::Integer(v as i32),
+        KeyParam::UserAuthType(v) => {
+            KeyParameterValue::HardwareAuthenticatorType(HardwareAuthenticatorType(v as i32))
+        }
         KeyParam::AuthTimeout(v) => KeyParameterValue::Integer(v as i32),
         KeyParam::AllowWhileOnBody => KeyParameterValue::BoolValue(true),
         KeyParam::TrustedUserPresenceRequired => KeyParameterValue::BoolValue(true),
@@ -930,4 +962,33 @@ pub fn key_param_to_aidl(
     };
 
     Ok(crate::android::hardware::security::keymint::KeyParameter::KeyParameter { tag, value })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::android::hardware::security::keymint::{KeyParameter::KeyParameter, Tag::Tag};
+
+    #[test]
+    fn user_auth_type_accepts_aidl_authenticator_union() {
+        let param = KeyParameter {
+            tag: Tag::USER_AUTH_TYPE,
+            value: KeyParameterValue::HardwareAuthenticatorType(
+                HardwareAuthenticatorType::FINGERPRINT,
+            ),
+        };
+
+        assert_eq!(param.to_km().unwrap(), KeyParam::UserAuthType(2));
+    }
+
+    #[test]
+    fn user_auth_type_returns_aidl_authenticator_union() {
+        let param = key_param_to_aidl(KeyParam::UserAuthType(2)).unwrap();
+
+        assert_eq!(param.tag, Tag::USER_AUTH_TYPE);
+        assert_eq!(
+            param.value,
+            KeyParameterValue::HardwareAuthenticatorType(HardwareAuthenticatorType::FINGERPRINT)
+        );
+    }
 }

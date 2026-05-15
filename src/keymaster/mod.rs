@@ -1,6 +1,7 @@
 pub mod apex;
 pub mod async_task;
 pub mod attestation_key_utils;
+pub mod authorization;
 pub mod boot_key;
 pub mod crypto;
 pub mod database;
@@ -12,6 +13,7 @@ pub mod id_rotation;
 pub mod key_parameter;
 pub mod keymint_device;
 pub mod keymint_operation;
+pub mod maintenance;
 pub mod metrics_store;
 pub mod operation;
 pub mod permission;

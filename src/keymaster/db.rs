@@ -1532,6 +1532,9 @@ impl KeymasterDb {
         let _wp = wd::watch("KeystoreDB::unbind_keys_for_user");
 
         self.with_transaction(Immediate("TX_unbind_keys_for_user"), |tx| {
+            Self::delete_received_grants(tx, user_id)
+                .context("In unbind_keys_for_user: deleting grants received by user.")?;
+
             let mut stmt = tx
                 .prepare(&format!(
                     "SELECT id from persistent.keyentry
@@ -1580,6 +1583,192 @@ impl KeymasterDb {
             for key_id in key_ids {
                 notify_gc = Self::mark_unreferenced(tx, key_id)
                     .context("In unbind_keys_for_user.")?
+                    || notify_gc;
+            }
+            Ok(()).do_gc(notify_gc)
+        })
+        .context(err!())
+    }
+
+    /// Deletes auth-bound app keys for the given user.
+    pub fn unbind_auth_bound_keys_for_user(&mut self, user_id: u32) -> Result<()> {
+        let _wp = wd::watch("KeystoreDB::unbind_auth_bound_keys_for_user");
+
+        self.with_transaction(Immediate("TX_unbind_auth_bound_keys_for_user"), |tx| {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT DISTINCT ke.id FROM persistent.keyentry AS ke
+                     JOIN persistent.keyparameter AS kp ON kp.keyentryid = ke.id
+                     WHERE ke.key_type = ?
+                       AND ke.domain = ?
+                       AND cast((ke.namespace/{aid_user_offset}) as int) = ?
+                       AND ke.state = ?
+                       AND kp.tag = ?;",
+                    aid_user_offset = AID_USER_OFFSET
+                ))
+                .context(err!(
+                    "Failed to prepare query for auth-bound keys created by apps."
+                ))?;
+
+            let mut rows = stmt
+                .query(params![
+                    KeyType::Client,
+                    Domain::APP.0 as u32,
+                    user_id,
+                    KeyLifeCycle::Live,
+                    Tag::USER_SECURE_ID.0,
+                ])
+                .context(err!("Failed to query auth-bound keys created by apps."))?;
+
+            let mut key_ids: Vec<i64> = Vec::new();
+            utils::with_rows_extract_all(&mut rows, |row| {
+                key_ids.push(row.get(0).context("Failed to read auth-bound key id.")?);
+                Ok(())
+            })
+            .context(err!())?;
+
+            let mut notify_gc = false;
+            for key_id in key_ids {
+                notify_gc = Self::mark_unreferenced(tx, key_id)
+                    .context("In unbind_auth_bound_keys_for_user.")?
+                    || notify_gc;
+            }
+            Ok(()).do_gc(notify_gc)
+        })
+        .context(err!())
+    }
+
+    /// Moves a live client key to a new APP or SELINUX namespace.
+    pub fn migrate_key_namespace(
+        &mut self,
+        source: &KeyDescriptor,
+        destination: &KeyDescriptor,
+        caller_uid: u32,
+    ) -> Result<()> {
+        let _wp = wd::watch("KeystoreDB::migrate_key_namespace");
+
+        if !(matches!(
+            source.domain,
+            Domain::APP | Domain::SELINUX | Domain::KEY_ID
+        )) {
+            return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
+                .context(err!("Source domain must be APP, SELINUX, or KEY_ID."));
+        }
+        if !(matches!(destination.domain, Domain::APP | Domain::SELINUX)) {
+            return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
+                .context(err!("Destination domain must be APP or SELINUX."));
+        }
+        let alias = destination
+            .alias
+            .as_ref()
+            .ok_or(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
+            .context(err!("Destination alias must be specified."))?;
+
+        self.with_transaction(Immediate("TX_migrate_key_namespace"), |tx| {
+            let access = Self::load_access_tuple(tx, source, KeyType::Client, caller_uid)
+                .context(err!("Loading migration source."))?;
+
+            match Self::load_key_entry_id(tx, destination, KeyType::Client) {
+                Ok(_) => {
+                    return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
+                        .context(err!("Destination key already exists."));
+                }
+                Err(error) => match error.root_cause().downcast_ref::<KsError>() {
+                    Some(KsError::Rc(ResponseCode::KEY_NOT_FOUND)) => {}
+                    _ => return Err(error).context(err!("Checking migration destination.")),
+                },
+            }
+
+            let updated = tx
+                .execute(
+                    "UPDATE persistent.keyentry
+                     SET domain = ?, namespace = ?, alias = ?
+                     WHERE id = ? AND key_type = ? AND state = ?;",
+                    params![
+                        destination.domain.0 as u32,
+                        destination.nspace,
+                        alias,
+                        access.key_id,
+                        KeyType::Client,
+                        KeyLifeCycle::Live
+                    ],
+                )
+                .context(err!("Updating key namespace."))?;
+            if updated != 1 {
+                return Err(KsError::sys()).context(err!(
+                    "Expected to update a single key during migration, updated {updated}."
+                ));
+            }
+
+            Ok(()).no_gc()
+        })
+        .context(err!())
+    }
+
+    /// Returns app UIDs under user_id that have auth-bound keys for the given SID.
+    pub fn app_uids_affected_by_sid(&mut self, user_id: u32, sid: i64) -> Result<Vec<i64>> {
+        let _wp = wd::watch("KeystoreDB::app_uids_affected_by_sid");
+
+        self.with_transaction(TransactionBehavior::Deferred, |tx| {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT DISTINCT ke.namespace FROM persistent.keyentry AS ke
+                     JOIN persistent.keyparameter AS kp ON kp.keyentryid = ke.id
+                     WHERE ke.key_type = ?
+                       AND ke.domain = ?
+                       AND cast((ke.namespace/{aid_user_offset}) as int) = ?
+                       AND ke.state = ?
+                       AND kp.tag = ?
+                       AND kp.data = ?
+                     ORDER BY ke.namespace ASC;",
+                    aid_user_offset = AID_USER_OFFSET
+                ))
+                .context(err!("Preparing affected UID query."))?;
+            let mut rows = stmt
+                .query(params![
+                    KeyType::Client,
+                    Domain::APP.0 as u32,
+                    user_id,
+                    KeyLifeCycle::Live,
+                    Tag::USER_SECURE_ID.0,
+                    sid,
+                ])
+                .context(err!("Querying affected UIDs."))?;
+
+            let mut uids = Vec::new();
+            utils::with_rows_extract_all(&mut rows, |row| {
+                uids.push(row.get(0).context("Failed to read affected UID.")?);
+                Ok(())
+            })
+            .context(err!("Extracting affected UIDs."))?;
+
+            Ok(uids).no_gc()
+        })
+        .context(err!())
+    }
+
+    /// Removes every known key entry after KeyMint deleteAllKeys succeeds.
+    pub fn unbind_all_keys(&mut self) -> Result<()> {
+        let _wp = wd::watch("KeystoreDB::unbind_all_keys");
+
+        self.with_transaction(Immediate("TX_unbind_all_keys"), |tx| {
+            let mut stmt = tx
+                .prepare("SELECT id FROM persistent.keyentry;")
+                .context(err!("Preparing full key deletion query."))?;
+            let mut rows = stmt
+                .query([])
+                .context(err!("Querying keys for full deletion."))?;
+
+            let mut key_ids = Vec::new();
+            utils::with_rows_extract_all(&mut rows, |row| {
+                key_ids.push(row.get(0).context("Failed to read key id.")?);
+                Ok(())
+            })
+            .context(err!("Extracting keys for full deletion."))?;
+
+            let mut notify_gc = false;
+            for key_id in key_ids {
+                notify_gc = Self::mark_unreferenced(tx, key_id).context("In unbind_all_keys.")?
                     || notify_gc;
             }
             Ok(()).do_gc(notify_gc)

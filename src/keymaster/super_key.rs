@@ -1161,6 +1161,22 @@ impl SuperKeyManager {
             .context(err!("Failed to create UnlockedDeviceRequired super keys"))
     }
 
+    /// Unlocks an existing user, or initializes the user's super keys if OMK missed the
+    /// original maintenance event before being hot-replaced into the keystore process.
+    pub fn unlock_or_initialize_user(
+        &mut self,
+        db: &mut KeymasterDb,
+        user_id: UserId,
+        password: &Password,
+    ) -> Result<()> {
+        match self.get_user_state(db, user_id)? {
+            UserState::Uninitialized => self.initialize_user(db, user_id, password, true),
+            UserState::BeforeFirstUnlock | UserState::AfterFirstUnlock(_) => {
+                self.unlock_user(db, user_id, password)
+            }
+        }
+    }
+
     /// Unlocks the given user with the given password.
     ///
     /// If the user state is BeforeFirstUnlock:

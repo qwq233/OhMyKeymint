@@ -1,6 +1,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
+};
 
 use log::{debug, info, warn};
 use rsbinder::{ExceptionCode, Parcel, Status};
@@ -13,13 +16,29 @@ use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::config;
 use crate::filter::{self, FilterReason};
 use crate::forward::{self, BypassGuard};
-use crate::identify::{self, OperationMethod, SecurityLevelMethod, ServiceMethod};
+use crate::identify::{
+    self, AuthorizationMethod, MaintenanceMethod, OperationMethod, SecurityLevelMethod,
+    ServiceMethod,
+};
 use crate::ipc;
 use crate::parcel::{
-    self, ParsedOperationRequest, ParsedSecurityLevelRequest, ParsedServiceRequest,
+    self, ParsedAuthorizationRequest, ParsedMaintenanceRequest, ParsedOperationRequest,
+    ParsedSecurityLevelRequest, ParsedServiceRequest,
 };
 use crate::route::{self, CallerIdentity, RouteTarget};
 use crate::tracker::{self, SecurityLevelTargetInfo};
+
+struct PendingAuthorizationCall {
+    request: ParsedAuthorizationRequest,
+    method: AuthorizationMethod,
+    caller: CallerIdentity,
+}
+
+struct PendingMaintenanceCall {
+    request: ParsedMaintenanceRequest,
+    method: MaintenanceMethod,
+    caller: CallerIdentity,
+}
 
 struct PendingServiceCall {
     request: ParsedServiceRequest,
@@ -50,6 +69,8 @@ struct PendingOperationCall {
 }
 
 enum PendingCall {
+    Authorization(PendingAuthorizationCall),
+    Maintenance(PendingMaintenanceCall),
     Service(PendingServiceCall),
     SecurityLevel(PendingSecurityLevelCall),
     Operation(PendingOperationCall),
@@ -77,10 +98,12 @@ struct OperationTargetInfo {
     route: RouteTarget,
     aad_allowed: bool,
     backend: Option<route::AospOperationBinder>,
+    finalized: bool,
 }
 
 static OPERATION_TARGETS: OnceLock<Mutex<HashMap<LocalBinderTarget, OperationTargetInfo>>> =
     OnceLock::new();
+static MIRROR_STATE_DIRTY: AtomicBool = AtomicBool::new(false);
 
 fn should_attempt_request_side_redirect(
     _request: &ParsedServiceRequest,
@@ -258,7 +281,7 @@ fn route_for_service_request(
     } else {
         RouteTarget::System
     };
-    match request {
+    let route = match request {
         ParsedServiceRequest::GetKeyEntry { key }
         | ParsedServiceRequest::UpdateSubcomponent { key, .. }
         | ParsedServiceRequest::DeleteKey { key }
@@ -271,6 +294,15 @@ fn route_for_service_request(
         | ParsedServiceRequest::GetNumberOfEntries { .. }
         | ParsedServiceRequest::ListEntriesBatched { .. }
         | ParsedServiceRequest::GetSupplementaryAttestationInfo { .. } => fallback,
+    };
+    if route == RouteTarget::Omk && mirror_state_dirty() {
+        debug!(
+            "[Injector][Route] forcing service_method={:?} to System because OMK mirror state is dirty",
+            request.method()
+        );
+        RouteTarget::System
+    } else {
+        route
     }
 }
 
@@ -278,14 +310,50 @@ fn route_for_security_level_request(
     request: &ParsedSecurityLevelRequest,
     carrier_route: RouteTarget,
 ) -> RouteTarget {
-    match request {
+    let route = match request {
         ParsedSecurityLevelRequest::CreateOperation { key, .. }
         | ParsedSecurityLevelRequest::DeleteKey { key }
         | ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral { storage_key: key } => {
             tracker::resolve_route_for_key_descriptor(key, carrier_route)
         }
         _ => carrier_route,
+    };
+    if route == RouteTarget::Omk && mirror_state_dirty() {
+        debug!(
+            "[Injector][Route] forcing security_level_method={:?} to System because OMK mirror state is dirty",
+            request.method()
+        );
+        RouteTarget::System
+    } else {
+        route
     }
+}
+
+fn mirror_state_dirty() -> bool {
+    MIRROR_STATE_DIRTY.load(Ordering::SeqCst)
+}
+
+fn is_known_keystore_interface(interface: &str) -> bool {
+    matches!(
+        interface,
+        identify::KEYSTORE_AUTHORIZATION_INTERFACE
+            | identify::KEYSTORE_MAINTENANCE_INTERFACE
+            | identify::KEYSTORE_SERVICE_INTERFACE
+            | identify::KEYSTORE_SECURITY_LEVEL_INTERFACE
+            | identify::KEYSTORE_OPERATION_INTERFACE
+    )
+}
+
+fn mark_mirror_state_dirty(kind: &str, method: impl std::fmt::Debug, caller: &CallerIdentity) {
+    let was_dirty = MIRROR_STATE_DIRTY.swap(true, Ordering::SeqCst);
+    warn!(
+        "[Injector][Mirror] marked OMK mirror state dirty after failed {} {:?} mirror for uid={} pid={}{}",
+        kind,
+        method,
+        caller.uid,
+        caller.pid,
+        if was_dirty { " (already dirty)" } else { "" }
+    );
 }
 
 fn operation_targets() -> &'static Mutex<HashMap<LocalBinderTarget, OperationTargetInfo>> {
@@ -293,10 +361,21 @@ fn operation_targets() -> &'static Mutex<HashMap<LocalBinderTarget, OperationTar
 }
 
 fn remember_operation_target(target: LocalBinderTarget, info: OperationTargetInfo) {
-    operation_targets()
+    let previous = operation_targets()
         .lock()
         .expect("operation target map poisoned")
         .insert(target, info);
+    if let Some(previous) = previous {
+        if let Some(backend) = previous.backend {
+            let _guard = BypassGuard::enter();
+            if let Err(status) = backend.r#abort() {
+                debug!(
+                    "[Injector][Route] previous OMK operation for carrier ptr=0x{:x} cookie=0x{:x} could not be aborted while replacing mapping: {}",
+                    target.ptr, target.cookie, status
+                );
+            }
+        }
+    }
 }
 
 fn lookup_operation_target(target: LocalBinderTarget) -> Option<OperationTargetInfo> {
@@ -312,6 +391,17 @@ fn forget_operation_target(target: LocalBinderTarget) {
         .lock()
         .expect("operation target map poisoned")
         .remove(&target);
+}
+
+fn mark_operation_target_finalized(target: LocalBinderTarget) {
+    if let Some(info) = operation_targets()
+        .lock()
+        .expect("operation target map poisoned")
+        .get_mut(&target)
+    {
+        info.backend = None;
+        info.finalized = true;
+    }
 }
 
 fn rewrite_create_operation_reply_with_native_carrier(
@@ -342,6 +432,7 @@ fn rewrite_create_operation_reply_with_native_carrier(
             route: RouteTarget::Omk,
             aad_allowed,
             backend: Some(backend),
+            finalized: false,
         },
     );
     info!(
@@ -367,6 +458,33 @@ fn operation_allows_aad(
                 )
             )
     })
+}
+
+fn abort_omk_operation_response(
+    response: &crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse,
+    reason: &str,
+) {
+    if let Some(operation) = response.r#iOperation.as_ref() {
+        let _guard = BypassGuard::enter();
+        match operation.r#abort() {
+            Ok(()) => debug!("[Injector][Route] aborted unused OMK operation: {reason}"),
+            Err(status) => debug!(
+                "[Injector][Route] unused OMK operation abort failed after {reason}: {}",
+                status
+            ),
+        }
+    }
+}
+
+fn fallback_create_operation_carrier(
+    security_level: crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel,
+    pending: &PendingSecurityLevelCall,
+) -> Option<parcel::ReplyBinderCarrier> {
+    warn!(
+        "[Injector][Reply] refusing to reuse cached security-level carrier for createOperation uid={} pid={} security_level={:?}; preserving native reply",
+        pending.caller.uid, pending.caller.pid, security_level
+    );
+    None
 }
 
 unsafe fn register_operation_target_from_reply(
@@ -396,6 +514,7 @@ unsafe fn register_operation_target_from_reply(
             route,
             aad_allowed,
             backend,
+            finalized: false,
         },
     );
     info!(
@@ -442,9 +561,111 @@ pub(super) unsafe fn handle_br_transaction(
 
     let caller = CallerIdentity::new(tr.sender_euid.max(0) as u32, tr.sender_pid)
         .with_sid(caller_sid.unwrap_or_default());
+    let request_interface = match parcel::peek_request_interface(
+        tr.data.ptr.buffer as *mut u8,
+        tr.data_size as usize,
+        tr.data.ptr.offsets as *mut usize,
+        tr.offsets_size as usize,
+    ) {
+        Ok(interface) => interface,
+        Err(error) => {
+            if parcel::contains_known_keystore_interface(parcel_bytes) {
+                debug!(
+                    "[Injector][Decision] failed to read keystore request interface code=0x{:x}: {:#}",
+                    tr.code, error
+                );
+            }
+            return false;
+        }
+    };
+
+    // Authorization events are emitted by system auth components, not by the
+    // app that later uses an auth-bound key. Mirror this global keystore state
+    // after the system service accepts it; scoop still gates app key traffic.
+    if request_interface == identify::KEYSTORE_AUTHORIZATION_INTERFACE {
+        let request = match parcel::parse_authorization_request(
+            tr.data.ptr.buffer as *mut u8,
+            tr.data_size as usize,
+            tr.data.ptr.offsets as *mut usize,
+            tr.offsets_size as usize,
+            tr.code,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                debug!(
+                    "[Injector][Decision] failed to parse IKeystoreAuthorization request code=0x{:x}: {:#}",
+                    tr.code, error
+                );
+                return false;
+            }
+        };
+
+        let method = request.method();
+        info!(
+            "[Injector][Decision] command={} authorization_method={:?} code=0x{:x} uid={} pid={} sid='{}'; mirroring auth state to OMK after system success",
+            command_name,
+            method,
+            tr.code,
+            caller.uid,
+            caller.pid,
+            caller.sid,
+        );
+
+        if expects_reply {
+            replace_top_pending(PendingCall::Authorization(PendingAuthorizationCall {
+                request,
+                method,
+                caller,
+            }));
+        }
+        return false;
+    }
+
+    // Maintenance calls carry keystore user lifecycle and super-key state. They
+    // are global system state, so mirror them after system success rather than
+    // gating them by scoop package routing.
+    if request_interface == identify::KEYSTORE_MAINTENANCE_INTERFACE {
+        let request = match parcel::parse_maintenance_request(
+            tr.data.ptr.buffer as *mut u8,
+            tr.data_size as usize,
+            tr.data.ptr.offsets as *mut usize,
+            tr.offsets_size as usize,
+            tr.code,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                debug!(
+                    "[Injector][Decision] failed to parse IKeystoreMaintenance request code=0x{:x}: {:#}",
+                    tr.code, error
+                );
+                return false;
+            }
+        };
+
+        let method = request.method();
+        info!(
+            "[Injector][Decision] command={} maintenance_method={:?} code=0x{:x} uid={} pid={} sid='{}'; mirroring maintenance state to OMK after system success",
+            command_name,
+            method,
+            tr.code,
+            caller.uid,
+            caller.pid,
+            caller.sid,
+        );
+
+        if expects_reply {
+            replace_top_pending(PendingCall::Maintenance(PendingMaintenanceCall {
+                request,
+                method,
+                caller,
+            }));
+        }
+        return false;
+    }
+
     let decision = evaluate_caller(&caller, &cfg);
 
-    if parcel::contains_keystore_service_interface(parcel_bytes) {
+    if request_interface == identify::KEYSTORE_SERVICE_INTERFACE {
         let request = match parcel::parse_service_request(
             tr.data.ptr.buffer as *mut u8,
             tr.data_size as usize,
@@ -534,7 +755,7 @@ pub(super) unsafe fn handle_br_transaction(
     }
 
     let Some(target) = target_from_transaction(tr) else {
-        if parcel::contains_known_keystore_interface(parcel_bytes) {
+        if is_known_keystore_interface(&request_interface) {
             debug!(
                 "[Injector][Decision] skipping keystore request without local target code=0x{:x} target={}",
                 tr.code,
@@ -544,7 +765,7 @@ pub(super) unsafe fn handle_br_transaction(
         return false;
     };
 
-    if parcel::contains_keystore_security_level_interface(parcel_bytes) {
+    if request_interface == identify::KEYSTORE_SECURITY_LEVEL_INTERFACE {
         let Some(target_info) = tracker::lookup_security_level_target(target) else {
             debug!(
                 "[Injector][Decision] skipping IKeystoreSecurityLevel request for unmapped target ptr=0x{:x} cookie=0x{:x}",
@@ -625,7 +846,7 @@ pub(super) unsafe fn handle_br_transaction(
         return false;
     }
 
-    if parcel::contains_keystore_operation_interface(parcel_bytes) {
+    if request_interface == identify::KEYSTORE_OPERATION_INTERFACE {
         let Some(operation_target) = lookup_operation_target(target) else {
             debug!(
                 "[Injector][Decision] skipping IKeystoreOperation request for unmapped target ptr=0x{:x} cookie=0x{:x}",
@@ -698,7 +919,7 @@ pub(super) unsafe fn handle_br_transaction(
         return false;
     }
 
-    if parcel::contains_known_keystore_interface(parcel_bytes) {
+    if is_known_keystore_interface(&request_interface) {
         debug!(
             "[Injector][Decision] skipping unsupported keystore interface request code=0x{:x}",
             tr.code
@@ -720,6 +941,40 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
         let original_objects = describe_transaction_objects(tr);
 
         let result = match &pending {
+            PendingCall::Authorization(call) => {
+                debug!(
+                    "[Injector][Reply] handling authorization {:?} uid={} pid={}",
+                    call.method, call.caller.uid, call.caller.pid
+                );
+                build_authorization_reply_mirror(tr, call).map(|reply| {
+                    reply.map(|reply| {
+                        (
+                            "authorization",
+                            format!("{:?}", call.method),
+                            call.caller.uid,
+                            call.caller.pid,
+                            reply,
+                        )
+                    })
+                })
+            }
+            PendingCall::Maintenance(call) => {
+                debug!(
+                    "[Injector][Reply] handling maintenance {:?} uid={} pid={}",
+                    call.method, call.caller.uid, call.caller.pid
+                );
+                build_maintenance_reply_mirror(tr, call).map(|reply| {
+                    reply.map(|reply| {
+                        (
+                            "maintenance",
+                            format!("{:?}", call.method),
+                            call.caller.uid,
+                            call.caller.pid,
+                            reply,
+                        )
+                    })
+                })
+            }
             PendingCall::Service(call) => {
                 debug!(
                     "[Injector][Reply] handling service {:?} route={:?} uid={} pid={} packages={:?}",
@@ -957,6 +1212,186 @@ unsafe fn observe_system_service_reply(
     Ok(())
 }
 
+unsafe fn build_authorization_reply_mirror(
+    tr: &binder_transaction_data,
+    call: &PendingAuthorizationCall,
+) -> anyhow::Result<Option<parcel::OwnedReply>> {
+    let status = parcel::parse_reply_status(
+        tr.data.ptr.buffer as *mut u8,
+        tr.data_size as usize,
+        tr.data.ptr.offsets as *mut usize,
+        tr.offsets_size as usize,
+    )?;
+    if !status.is_ok() {
+        debug!(
+            "[Injector][Authorization] system {:?} failed with {}; skipping OMK mirror",
+            call.method, status
+        );
+        return Ok(None);
+    }
+
+    let caller = call.caller.to_caller_info();
+    let result = match &call.request {
+        ParsedAuthorizationRequest::AddAuthToken { auth_token } => {
+            ipc::with_omk_authorization_retry(|auth| {
+                Ok(auth.r#addAuthToken(Some(&caller), auth_token)?)
+            })
+        }
+        ParsedAuthorizationRequest::OnDeviceUnlocked { user_id, password } => {
+            ipc::with_omk_authorization_retry(|auth| {
+                Ok(auth.r#onDeviceUnlocked(Some(&caller), *user_id, password.as_deref())?)
+            })
+        }
+        ParsedAuthorizationRequest::OnDeviceLocked {
+            user_id,
+            unlocking_sids,
+            weak_unlock_enabled,
+        } => ipc::with_omk_authorization_retry(|auth| {
+            Ok(auth.r#onDeviceLocked(
+                Some(&caller),
+                *user_id,
+                unlocking_sids,
+                *weak_unlock_enabled,
+            )?)
+        }),
+        ParsedAuthorizationRequest::OnUserStorageLocked { user_id } => {
+            ipc::with_omk_authorization_retry(|auth| {
+                Ok(auth.r#onUserStorageLocked(Some(&caller), *user_id)?)
+            })
+        }
+        ParsedAuthorizationRequest::OnWeakUnlockMethodsExpired { user_id } => {
+            ipc::with_omk_authorization_retry(|auth| {
+                Ok(auth.r#onWeakUnlockMethodsExpired(Some(&caller), *user_id)?)
+            })
+        }
+        ParsedAuthorizationRequest::OnNonLskfUnlockMethodsExpired { user_id } => {
+            ipc::with_omk_authorization_retry(|auth| {
+                Ok(auth.r#onNonLskfUnlockMethodsExpired(Some(&caller), *user_id)?)
+            })
+        }
+        ParsedAuthorizationRequest::GetAuthTokensForCredStore { .. }
+        | ParsedAuthorizationRequest::GetLastAuthTime { .. } => {
+            debug!(
+                "[Injector][Authorization] {:?} is read-only; preserving system reply",
+                call.method
+            );
+            Ok(())
+        }
+    };
+
+    match result {
+        Ok(()) => {
+            debug!(
+                "[Injector][Authorization] mirrored {:?} to OMK for uid={} pid={}",
+                call.method, call.caller.uid, call.caller.pid
+            );
+        }
+        Err(error) => {
+            warn!(
+                "[Injector][Authorization] failed to mirror {:?} to OMK for uid={} pid={}: {:#}",
+                call.method, call.caller.uid, call.caller.pid, error
+            );
+            mark_mirror_state_dirty("authorization", call.method, &call.caller);
+        }
+    }
+
+    Ok(None)
+}
+
+unsafe fn build_maintenance_reply_mirror(
+    tr: &binder_transaction_data,
+    call: &PendingMaintenanceCall,
+) -> anyhow::Result<Option<parcel::OwnedReply>> {
+    let status = parcel::parse_reply_status(
+        tr.data.ptr.buffer as *mut u8,
+        tr.data_size as usize,
+        tr.data.ptr.offsets as *mut usize,
+        tr.offsets_size as usize,
+    )?;
+    if !status.is_ok() {
+        debug!(
+            "[Injector][Maintenance] system {:?} failed with {}; skipping OMK mirror",
+            call.method, status
+        );
+        return Ok(None);
+    }
+
+    let caller = call.caller.to_caller_info();
+    let result = match &call.request {
+        ParsedMaintenanceRequest::OnUserAdded { user_id } => {
+            ipc::with_omk_maintenance_retry(|maintenance| {
+                Ok(maintenance.r#onUserAdded(Some(&caller), *user_id)?)
+            })
+        }
+        ParsedMaintenanceRequest::InitUserSuperKeys {
+            user_id,
+            password,
+            allow_existing,
+        } => ipc::with_omk_maintenance_retry(|maintenance| {
+            Ok(maintenance.r#initUserSuperKeys(
+                Some(&caller),
+                *user_id,
+                password,
+                *allow_existing,
+            )?)
+        }),
+        ParsedMaintenanceRequest::OnUserRemoved { user_id } => {
+            ipc::with_omk_maintenance_retry(|maintenance| {
+                Ok(maintenance.r#onUserRemoved(Some(&caller), *user_id)?)
+            })
+        }
+        ParsedMaintenanceRequest::OnUserLskfRemoved { user_id } => {
+            ipc::with_omk_maintenance_retry(|maintenance| {
+                Ok(maintenance.r#onUserLskfRemoved(Some(&caller), *user_id)?)
+            })
+        }
+        ParsedMaintenanceRequest::ClearNamespace { domain, nspace } => {
+            ipc::with_omk_maintenance_retry(|maintenance| {
+                Ok(maintenance.r#clearNamespace(Some(&caller), *domain, *nspace)?)
+            })
+        }
+        ParsedMaintenanceRequest::EarlyBootEnded => {
+            ipc::with_omk_maintenance_retry(|maintenance| {
+                Ok(maintenance.r#earlyBootEnded(Some(&caller))?)
+            })
+        }
+        ParsedMaintenanceRequest::MigrateKeyNamespace {
+            source,
+            destination,
+        } => ipc::with_omk_maintenance_retry(|maintenance| {
+            Ok(maintenance.r#migrateKeyNamespace(Some(&caller), source, destination)?)
+        }),
+        ParsedMaintenanceRequest::DeleteAllKeys => ipc::with_omk_maintenance_retry(|maintenance| {
+            Ok(maintenance.r#deleteAllKeys(Some(&caller))?)
+        }),
+        ParsedMaintenanceRequest::GetAppUidsAffectedBySid { .. } => {
+            debug!(
+                "[Injector][Maintenance] {:?} is read-only; preserving system reply",
+                call.method
+            );
+            Ok(())
+        }
+    };
+
+    match result {
+        Ok(()) => {
+            debug!(
+                "[Injector][Maintenance] mirrored {:?} to OMK for uid={} pid={}",
+                call.method, call.caller.uid, call.caller.pid
+            );
+        }
+        Err(error) => {
+            warn!(
+                "[Injector][Maintenance] failed to mirror {:?} to OMK for uid={} pid={}: {:#}",
+                call.method, call.caller.uid, call.caller.pid, error
+            );
+            mark_mirror_state_dirty("maintenance", call.method, &call.caller);
+        }
+    }
+
+    Ok(None)
+}
+
 unsafe fn build_service_reply_rewrite(
     tr: &binder_transaction_data,
     pending: &PendingServiceCall,
@@ -1037,12 +1472,25 @@ unsafe fn build_service_reply_rewrite(
                     Ok(response) => response,
                     Err(error) => {
                         warn!(
-                            "[Injector][Reply] OMK getKeyEntry could not parse the original system metadata for uid={} pid={}: {:#}; preserving original system reply",
+                            "[Injector][Reply] OMK getKeyEntry could not parse the original system metadata for uid={} pid={}: {:#}; returning OMK metadata with a fetched carrier",
                             pending.caller.uid,
                             pending.caller.pid,
                             error
                         );
-                        observe_system_service_reply(tr, pending)?;
+                        match build_omk_key_entry_reply_with_fetched_carrier(
+                            entry.r#metadata,
+                            pending,
+                        )? {
+                            Some(reply) => return Ok(Some(reply)),
+                            None => {
+                                warn!(
+                                    "[Injector][Reply] OMK getKeyEntry could not find a reusable security-level carrier for uid={} pid={}; preserving original system reply",
+                                    pending.caller.uid,
+                                    pending.caller.pid
+                                );
+                                observe_system_service_reply(tr, pending)?;
+                            }
+                        }
                         return Ok(None);
                     }
                 };
@@ -1347,13 +1795,34 @@ unsafe fn system_reply_succeeded(tr: &binder_transaction_data) -> bool {
 
 fn build_omk_key_entry_reply_with_fetched_carrier(
     metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata,
-    _pending: &PendingServiceCall,
+    pending: &PendingServiceCall,
 ) -> anyhow::Result<Option<parcel::OwnedReply>> {
     let security_level = metadata.r#keySecurityLevel;
-    let Some(carrier) = tracker::lookup_security_level_carrier(security_level, RouteTarget::Omk)
-    else {
+    let carrier = tracker::lookup_security_level_carrier(security_level, RouteTarget::Omk)
+        .or_else(|| {
+            let carrier = tracker::lookup_security_level_carrier(security_level, RouteTarget::System);
+            if carrier.is_some() {
+                warn!(
+                    "[Injector][Reply] reusing a cached system security-level carrier for OMK getKeyEntry uid={} pid={} security_level={:?}",
+                    pending.caller.uid,
+                    pending.caller.pid,
+                    security_level
+                );
+            }
+            carrier
+        });
+    let Some(carrier) = carrier else {
         return Ok(None);
     };
+    if !carrier.is_object {
+        warn!(
+            "[Injector][Reply] cached security-level carrier for OMK getKeyEntry was null uid={} pid={} security_level={:?}",
+            pending.caller.uid,
+            pending.caller.pid,
+            security_level
+        );
+        return Ok(None);
+    }
     register_security_level_carrier(
         &parcel::ReplyBinderCarrier {
             bytes: carrier.bytes.clone(),
@@ -1483,13 +1952,27 @@ unsafe fn build_security_level_reply_rewrite(
                 Ok(carrier) => carrier,
                 Err(error) => {
                     warn!(
-                        "[Injector][Reply] OMK createOperation could not reuse the original system carrier for uid={} pid={}: {:#}; preserving original system reply",
+                        "[Injector][Reply] OMK createOperation could not reuse the original system operation carrier for uid={} pid={}: {:#}",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    observe_system_security_level_reply(tr, pending)?;
-                    return Ok(None);
+                    let Some(carrier) =
+                        fallback_create_operation_carrier(pending.security_level, pending)
+                    else {
+                        abort_omk_operation_response(
+                            &omk_response,
+                            "createOperation had no reusable native carrier",
+                        );
+                        warn!(
+                            "[Injector][Reply] OMK createOperation had no cached native carrier for uid={} pid={}; preserving original system reply",
+                            pending.caller.uid,
+                            pending.caller.pid
+                        );
+                        observe_system_security_level_reply(tr, pending)?;
+                        return Ok(None);
+                    };
+                    carrier
                 }
             };
             Ok(Some(rewrite_create_operation_reply_with_native_carrier(
@@ -1525,13 +2008,14 @@ unsafe fn build_security_level_reply_rewrite(
                         Ok(metadata) => metadata,
                         Err(error) => {
                             warn!(
-                                "[Injector][Reply] OMK generateKey could not parse the original system metadata for uid={} pid={}: {:#}; preserving original system reply",
+                                "[Injector][Reply] OMK generateKey could not parse the original system metadata for uid={} pid={}: {:#}; returning OMK metadata directly",
                                 pending.caller.uid,
                                 pending.caller.pid,
                                 error
                             );
-                            observe_system_security_level_reply(tr, pending)?;
-                            return Ok(None);
+                            tracker::remember_key_descriptor_route(key, RouteTarget::Omk);
+                            tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
+                            return Ok(Some(parcel::build_plain_reply(&metadata)?));
                         }
                     };
                     let omk_descriptor = metadata.r#key.clone();
@@ -1729,9 +2213,25 @@ fn build_operation_reply_rewrite(
         return Ok(None);
     }
 
-    let backend = target
-        .backend
-        .ok_or_else(|| anyhow::anyhow!("missing OMK operation backend mapping"))?;
+    let Some(backend) = target.backend else {
+        if target.finalized {
+            if matches!(pending.request, ParsedOperationRequest::Abort) {
+                debug!(
+                    "[Injector][Reply] treating cleanup abort for finalized OMK operation carrier ptr=0x{:x} cookie=0x{:x} as complete",
+                    pending.target.ptr, pending.target.cookie
+                );
+                forget_operation_target(pending.target);
+                return Ok(Some(parcel::build_void_reply()?));
+            }
+            return Ok(Some(parcel::build_status_reply(
+                &Status::new_service_specific_error(
+                    crate::android::hardware::security::keymint::ErrorCode::ErrorCode::INVALID_OPERATION_HANDLE.0,
+                    None,
+                ),
+            )?));
+        }
+        anyhow::bail!("missing OMK operation backend mapping");
+    };
     let _guard = BypassGuard::enter();
 
     let reply = match &pending.request {
@@ -1753,7 +2253,7 @@ fn build_operation_reply_rewrite(
         ParsedOperationRequest::Finish { input, signature } => {
             match backend.r#finish(input.as_deref(), signature.as_deref()) {
                 Ok(output) => {
-                    forget_operation_target(pending.target);
+                    mark_operation_target_finalized(pending.target);
                     parcel::build_plain_reply(&output)?
                 }
                 Err(status) => parcel::build_status_reply(&status)?,
@@ -1776,6 +2276,7 @@ unsafe fn install_outbound_reply(tr: &mut binder_transaction_data, reply: parcel
         let mut buffers = slot.borrow_mut();
         buffers.push(reply);
         let reply = buffers.last().expect("outbound reply buffer just pushed");
+        tr.flags &= !super::binder::TF_STATUS_CODE;
         tr.data_size = reply.data_size();
         tr.offsets_size = reply.offsets_size();
         tr.data.ptr.buffer = reply.data_ptr() as libc::c_ulong;
@@ -2563,6 +3064,102 @@ mod tests {
     }
 
     #[test]
+    fn omk_key_entry_reply_reuses_cached_carrier_after_system_miss() {
+        ensure_binder_process_state();
+        tracker::clear_state_for_tests();
+
+        let security_level = SecurityLevel::TRUSTED_ENVIRONMENT;
+        let system_level = BnKeystoreSecurityLevel::new_binder(FakeAospSecurityLevel);
+        let mut system_level_reply = parcel::build_get_security_level_reply(system_level)
+            .expect("system security-level reply should serialize");
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut system_level_reply);
+        let carrier = unsafe {
+            parcel::extract_direct_binder_reply_carrier(data, data_size, offsets, offsets_size)
+        }
+        .expect("security-level carrier should be extractable");
+        register_security_level_carrier(
+            &carrier,
+            security_level,
+            RouteTarget::System,
+            ServiceMethod::GetSecurityLevel,
+        )
+        .expect("system carrier should be cacheable");
+
+        let metadata = KeyMetadata {
+            key: KeyDescriptor {
+                domain: Domain::KEY_ID,
+                nspace: 0x1234,
+                alias: None,
+                blob: None,
+            },
+            keySecurityLevel: security_level,
+            authorizations: vec![],
+            certificate: None,
+            certificateChain: None,
+            modificationTimeMs: 0,
+        };
+        let expected_key = KeyDescriptor {
+            domain: Domain::KEY_ID,
+            nspace: 0x1234,
+            alias: None,
+            blob: None,
+        };
+        let pending = PendingServiceCall {
+            request: ParsedServiceRequest::GetKeyEntry {
+                key: sample_key_descriptor(),
+            },
+            method: ServiceMethod::GetKeyEntry,
+            caller: CallerIdentity::new(1000, 2000),
+            packages: vec!["com.example".to_string()],
+            route: RouteTarget::Omk,
+            execution_mode: ServiceExecutionMode::ReplyRewrite,
+            redirect_applied: false,
+            _redirect_keepalive: None,
+        };
+
+        let mut reply = build_omk_key_entry_reply_with_fetched_carrier(metadata, &pending)
+            .expect("fetched-carrier reply should build")
+            .expect("cached carrier should produce a key-entry reply");
+        let (reply_data, reply_data_size, reply_offsets, reply_offsets_size) =
+            raw_parts(&mut reply);
+        let parsed_metadata = unsafe {
+            parcel::parse_key_entry_reply_metadata(
+                reply_data,
+                reply_data_size,
+                reply_offsets,
+                reply_offsets_size,
+            )
+        }
+        .expect("rewritten key-entry metadata should parse");
+        assert_eq!(parsed_metadata.r#key, expected_key);
+        assert_eq!(parsed_metadata.r#keySecurityLevel, security_level);
+
+        let reply_carrier = unsafe {
+            parcel::extract_key_entry_reply_carrier(
+                reply_data,
+                reply_data_size,
+                reply_offsets,
+                reply_offsets_size,
+            )
+        }
+        .expect("rewritten key-entry carrier should parse");
+        assert_eq!(reply_carrier.bytes, carrier.bytes);
+        assert_eq!(reply_carrier.is_object, carrier.is_object);
+        assert_eq!(
+            route_for_security_level_request(
+                &ParsedSecurityLevelRequest::CreateOperation {
+                    key: expected_key,
+                    operation_parameters: vec![],
+                    forced: false,
+                },
+                RouteTarget::System,
+            ),
+            RouteTarget::Omk,
+            "the surfaced key entry should pin follow-up operations to OMK"
+        );
+    }
+
+    #[test]
     fn create_operation_reply_reuses_native_carrier_and_routes_followups_to_omk() {
         ensure_binder_process_state();
         tracker::clear_state_for_tests();
@@ -2699,6 +3296,63 @@ mod tests {
     }
 
     #[test]
+    fn omk_create_operation_without_operation_carrier_does_not_reuse_security_level_carrier() {
+        ensure_binder_process_state();
+        tracker::clear_state_for_tests();
+        operation_targets()
+            .lock()
+            .expect("operation target map poisoned")
+            .clear();
+
+        let security_level = SecurityLevel::TRUSTED_ENVIRONMENT;
+        let system_level = BnKeystoreSecurityLevel::new_binder(FakeAospSecurityLevel);
+        let mut system_level_reply = parcel::build_get_security_level_reply(system_level)
+            .expect("system security-level reply should serialize");
+        let (level_data, level_data_size, level_offsets, level_offsets_size) =
+            raw_parts(&mut system_level_reply);
+        let level_carrier = unsafe {
+            parcel::extract_direct_binder_reply_carrier(
+                level_data,
+                level_data_size,
+                level_offsets,
+                level_offsets_size,
+            )
+        }
+        .expect("security-level carrier should be extractable");
+        register_security_level_carrier(
+            &level_carrier,
+            security_level,
+            RouteTarget::System,
+            ServiceMethod::GetSecurityLevel,
+        )
+        .expect("system carrier should be cacheable");
+
+        let pending = PendingSecurityLevelCall {
+            request: ParsedSecurityLevelRequest::CreateOperation {
+                key: sample_key_descriptor(),
+                operation_parameters: vec![],
+                forced: false,
+            },
+            method: SecurityLevelMethod::CreateOperation,
+            caller: CallerIdentity::new(1000, 2000),
+            packages: vec!["com.example".to_string()],
+            route: RouteTarget::Omk,
+            security_level,
+        };
+        assert!(
+            fallback_create_operation_carrier(security_level, &pending).is_none(),
+            "createOperation must not reuse a security-level carrier as an operation carrier"
+        );
+        assert!(
+            operation_targets()
+                .lock()
+                .expect("operation target map poisoned")
+                .is_empty(),
+            "refusing fallback must not register an operation mapping"
+        );
+    }
+
+    #[test]
     fn system_route_invalid_update_aad_preserves_native_reply() {
         tracker::clear_state_for_tests();
         operation_targets()
@@ -2716,6 +3370,7 @@ mod tests {
                 route: RouteTarget::System,
                 aad_allowed: false,
                 backend: None,
+                finalized: false,
             },
         );
 
@@ -2763,6 +3418,7 @@ mod tests {
                 route: RouteTarget::Omk,
                 aad_allowed: false,
                 backend: Some(backend),
+                finalized: false,
             },
         );
 
@@ -2793,20 +3449,21 @@ mod tests {
     }
 
     #[test]
-    fn omk_route_finish_clears_operation_mapping() {
+    fn omk_route_finish_allows_late_cleanup_abort() {
         tracker::clear_state_for_tests();
         operation_targets()
             .lock()
             .expect("operation target map poisoned")
             .clear();
 
+        let aborts = Arc::new(AtomicUsize::new(0));
         let target = LocalBinderTarget {
             ptr: 0x1234,
             cookie: 0x5678,
         };
         let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
             update_output: vec![5, 6, 7],
-            aborts: Arc::new(AtomicUsize::new(0)),
+            aborts: aborts.clone(),
             update_aad_status: None,
         });
         remember_operation_target(
@@ -2815,6 +3472,7 @@ mod tests {
                 route: RouteTarget::Omk,
                 aad_allowed: true,
                 backend: Some(backend),
+                finalized: false,
             },
         );
 
@@ -2837,9 +3495,43 @@ mod tests {
                 .expect("finish reply should deserialize");
 
         assert_eq!(output.as_deref(), Some(&[5, 6, 7][..]));
+        let target_info = lookup_operation_target(target)
+            .expect("finish should keep a finalized cleanup tombstone");
+        assert_eq!(target_info.route, RouteTarget::Omk);
+        assert!(target_info.finalized);
+        assert!(target_info.backend.is_none());
+
+        let cleanup_reply = build_operation_reply_rewrite(&PendingOperationCall {
+            request: ParsedOperationRequest::Abort,
+            method: OperationMethod::Abort,
+            caller: CallerIdentity::new(1000, 2000),
+            packages: vec!["com.example".to_string()],
+            target,
+        })
+        .expect("cleanup abort rewrite should succeed")
+        .expect("cleanup abort should return an OMK-owned reply");
+        let mut cleanup_reply = cleanup_reply;
+        let (cleanup_data, cleanup_data_size, cleanup_offsets, cleanup_offsets_size) =
+            raw_parts(&mut cleanup_reply);
+        let cleanup_status = unsafe {
+            parcel::parse_reply_status(
+                cleanup_data,
+                cleanup_data_size,
+                cleanup_offsets,
+                cleanup_offsets_size,
+            )
+        }
+        .expect("cleanup abort reply should deserialize");
+
+        assert!(cleanup_status.is_ok());
+        assert_eq!(
+            aborts.load(Ordering::SeqCst),
+            0,
+            "finalized cleanup should not abort the already-finished backend again"
+        );
         assert!(
             lookup_operation_target(target).is_none(),
-            "finish should clear the operation mapping"
+            "cleanup abort should clear the finalized tombstone"
         );
     }
 
@@ -2868,6 +3560,7 @@ mod tests {
                 route: RouteTarget::Omk,
                 aad_allowed: true,
                 backend: Some(backend),
+                finalized: false,
             },
         );
 

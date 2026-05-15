@@ -1428,7 +1428,7 @@ impl From<keymint::VerifiedBootState> for VerifiedBootState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::KeyMintHalVersion;
+    use crate::{AttestationIdInfo, KeyMintHalVersion};
 
     #[test]
     fn test_attest_ext_encode_decode() {

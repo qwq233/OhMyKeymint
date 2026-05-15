@@ -9,6 +9,7 @@ use crate::android::system::keystore2::Domain::Domain;
 use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use crate::android::system::keystore2::KeyPermission::KeyPermission;
 use crate::android::system::keystore2::ResponseCode::ResponseCode;
+use crate::global::AID_KEYSTORE;
 use crate::keymaster::error::KsError;
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 
@@ -450,13 +451,33 @@ impl IntoIterator for KeyPermSet {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeystorePerm {
+    AddAuth,
+    ChangePassword,
+    ChangeUser,
+    ClearUid,
+    DeleteAllKeys,
+    EarlyBootEnded,
+    GetAuthToken,
+    GetLastAuthTime,
     List,
+    Lock,
+    Unlock,
 }
 
 impl KeystorePerm {
     pub const fn name(self) -> &'static str {
         match self {
+            Self::AddAuth => "add_auth",
+            Self::ChangePassword => "change_password",
+            Self::ChangeUser => "change_user",
+            Self::ClearUid => "clear_uid",
+            Self::DeleteAllKeys => "delete_all_keys",
+            Self::EarlyBootEnded => "early_boot_ended",
+            Self::GetAuthToken => "get_auth_token",
+            Self::GetLastAuthTime => "get_last_auth_time",
             Self::List => "list",
+            Self::Lock => "lock",
+            Self::Unlock => "unlock",
         }
     }
 
@@ -529,6 +550,7 @@ const DEFAULT_DEVICE_ID: i32 = 0;
 const PERMISSION_GRANTED: i32 = 0;
 const READ_PRIVILEGED_PHONE_STATE: &str = "android.permission.READ_PRIVILEGED_PHONE_STATE";
 const REQUEST_UNIQUE_ID_ATTESTATION: &str = "android.permission.REQUEST_UNIQUE_ID_ATTESTATION";
+const MANAGE_USERS: &str = "android.permission.MANAGE_USERS";
 const AOSP_KEYSTORE_CONTEXT: &str = "u:r:keystore:s0";
 
 const KEYSTORE2_KEY_CONTEXT_FILES: &[&str] = &[
@@ -1005,6 +1027,25 @@ pub fn check_keystore_permission(
     )
 }
 
+pub fn forwarded_caller_is_trusted_keystore(caller: &CallerCtx) -> bool {
+    caller.uid == AID_KEYSTORE
+        && caller
+            .sid
+            .as_ref()
+            .is_some_and(|sid| sid.to_bytes().starts_with(b"u:r:keystore:"))
+}
+
+pub fn check_forwarded_caller_provenance(label: &str) -> Result<()> {
+    let caller = CallerCtx::from_caller_info(None);
+    if forwarded_caller_is_trusted_keystore(&caller) {
+        return Ok(());
+    }
+
+    Err(KsError::perm()).context(format!(
+        "{label} forwarded CallerInfo was not provided by the trusted keystore injector"
+    ))
+}
+
 pub fn check_device_attestation_permissions(caller: Option<&CallerInfo>) -> Result<()> {
     let caller = CallerCtx::from_caller_info(caller);
     check_android_permission_for_uid(
@@ -1021,6 +1062,11 @@ pub fn check_unique_id_attestation_permissions(caller: Option<&CallerInfo>) -> R
         REQUEST_UNIQUE_ID_ATTESTATION,
         KsError::Km(ErrorCode::CANNOT_ATTEST_IDS),
     )
+}
+
+pub fn check_manage_users_permission(caller: Option<&CallerInfo>) -> Result<()> {
+    let caller = CallerCtx::from_caller_info(caller);
+    check_android_permission_for_uid(caller.uid, MANAGE_USERS, KsError::perm())
 }
 
 pub fn is_device_id_attestation_tag(tag: Tag) -> bool {

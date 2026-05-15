@@ -34,3 +34,5 @@ cert.der
 /refs
 
 /.cargo/config.toml
+
+__pycache__/

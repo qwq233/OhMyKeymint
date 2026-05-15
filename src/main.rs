@@ -12,6 +12,7 @@ use crate::{
     android::system::keystore2::IKeystoreService::BnKeystoreService,
     config::{config, Backend},
     keymaster::service::KeystoreService,
+    keymaster::{authorization::AuthorizationManager, maintenance::MaintenanceManager},
     top::qwq2333::ohmykeymint::IOhMyKsService::BnOhMyKsService,
 };
 
@@ -185,6 +186,20 @@ fn run() -> Result<()> {
             info!("Adding keystore service to hub");
             hub::add_service("keystore3", service.as_binder())
                 .context("failed to add keystore3 service")?;
+
+            info!("Creating authorization service");
+            let auth = AuthorizationManager::new_native_binder()
+                .context("failed to create authorization service")?;
+            info!("Adding authorization service to hub");
+            hub::add_service("android.security.authorization", auth.as_binder())
+                .context("failed to add authorization service")?;
+
+            info!("Creating maintenance service");
+            let maintenance = MaintenanceManager::new_native_binder()
+                .context("failed to create maintenance service")?;
+            info!("Adding maintenance service to hub");
+            hub::add_service("android.security.maintenance", maintenance.as_binder())
+                .context("failed to add maintenance service")?;
         }
         Backend::Injector => {
             info!("Using Injector backend");
@@ -195,6 +210,20 @@ fn run() -> Result<()> {
             info!("Adding OMK service to hub");
             let service = BnOhMyKsService::new_binder_with_features(dev, sid_features());
             hub::add_service("omk", service.as_binder()).context("failed to add omk service")?;
+
+            info!("Creating OMK authorization service");
+            let auth = AuthorizationManager::new_omk_binder()
+                .context("failed to create OMK authorization service")?;
+            info!("Adding OMK authorization service to hub");
+            hub::add_service("omk_authorization", auth.as_binder())
+                .context("failed to add omk_authorization service")?;
+
+            info!("Creating OMK maintenance service");
+            let maintenance = MaintenanceManager::new_omk_binder()
+                .context("failed to create OMK maintenance service")?;
+            info!("Adding OMK maintenance service to hub");
+            hub::add_service("omk_maintenance", maintenance.as_binder())
+                .context("failed to add omk_maintenance service")?;
         }
     }
 

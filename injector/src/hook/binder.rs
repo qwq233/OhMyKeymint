@@ -14,6 +14,7 @@ pub(crate) const BC_REPLY_SG_NR: u32 = 18;
 pub(crate) const BR_TRANSACTION_NR: u32 = 2;
 pub(crate) const BR_REPLY_NR: u32 = 3;
 pub(crate) const TF_ONE_WAY: u32 = 0x01;
+pub(crate) const TF_STATUS_CODE: u32 = 0x08;
 pub(crate) const BINDER_TYPE_BINDER: u32 = b_pack_chars(b's', b'b', b'*', B_TYPE_LARGE as u8);
 pub(crate) const BINDER_TYPE_WEAK_BINDER: u32 = b_pack_chars(b'w', b'b', b'*', B_TYPE_LARGE as u8);
 pub(crate) const BINDER_TYPE_HANDLE: u32 = b_pack_chars(b's', b'h', b'*', B_TYPE_LARGE as u8);

@@ -22,6 +22,26 @@ const CONFIG_PATH: &str = "./omk/config.toml";
 const REPLACE_SAVE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 const REPLACE_SAVE_RETRY_LIMIT: usize = 10;
 
+fn decode_hex32_field<E>(field: &str, value: &str) -> Result<[u8; 32], E>
+where
+    E: serde::de::Error,
+{
+    let decoded = hex::decode(value).map_err(E::custom)?;
+    if decoded.len() != 32 {
+        return Err(E::custom(format!("{field} must be 32 bytes")));
+    }
+
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&decoded);
+    Ok(bytes)
+}
+
+fn random_32(rng: &mut impl Rng) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    rng.fill_bytes(&mut bytes);
+    bytes
+}
+
 pub fn config() -> &'static RwLock<Config> {
     CONFIG
         .get()
@@ -471,12 +491,17 @@ pub struct MainConfig {
     /// default to tricky store for compatibility, we will
     /// switch to omk later when we are sure everything works
     pub backend: Backend,
+    /// Insecure fallback for devices whose system TEE cannot verify biometric
+    /// HATs. Only mirrored system-successful biometric auth tokens may use it.
+    #[serde(default)]
+    pub force_skip_system_biometric_hat_verification: bool,
 }
 
 impl Default for MainConfig {
     fn default() -> Self {
         Self {
             backend: Backend::Injector,
+            force_skip_system_biometric_hat_verification: false,
         }
     }
 }
@@ -485,6 +510,9 @@ impl Default for MainConfig {
 pub struct CryptoConfig {
     pub root_kek_seed: [u8; 32],
     pub kak_seed: [u8; 32],
+    pub shared_secret_seed: [u8; 32],
+    pub shared_secret_nonce: [u8; 32],
+    pub auth_token_hmac_key: Option<[u8; 32]>,
 }
 
 impl Serialize for CryptoConfig {
@@ -492,9 +520,20 @@ impl Serialize for CryptoConfig {
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("CryptoConfig", 2)?;
+        let mut state = serializer.serialize_struct(
+            "CryptoConfig",
+            4 + usize::from(self.auth_token_hmac_key.is_some()),
+        )?;
         state.serialize_field("root_kek_seed", &hex::encode(self.root_kek_seed))?;
         state.serialize_field("kak_seed", &hex::encode(self.kak_seed))?;
+        state.serialize_field("shared_secret_seed", &hex::encode(self.shared_secret_seed))?;
+        state.serialize_field(
+            "shared_secret_nonce",
+            &hex::encode(self.shared_secret_nonce),
+        )?;
+        if let Some(key) = self.auth_token_hmac_key {
+            state.serialize_field("auth_token_hmac_key", &hex::encode(key))?;
+        }
         state.end()
     }
 }
@@ -508,28 +547,37 @@ impl<'de> Deserialize<'de> for CryptoConfig {
         struct CryptoConfigHelper {
             root_kek_seed: String,
             kak_seed: String,
+            #[serde(default)]
+            shared_secret_seed: Option<String>,
+            #[serde(default)]
+            shared_secret_nonce: Option<String>,
+            #[serde(default)]
+            auth_token_hmac_key: Option<String>,
         }
 
         let helper = CryptoConfigHelper::deserialize(deserializer)?;
-        let root_kek_seed = hex::decode(&helper.root_kek_seed).map_err(serde::de::Error::custom)?;
-        let kak_seed = hex::decode(&helper.kak_seed).map_err(serde::de::Error::custom)?;
-
-        if root_kek_seed.len() != 32 {
-            return Err(serde::de::Error::custom("root_kek_seed must be 32 bytes"));
-        }
-        if kak_seed.len() != 32 {
-            return Err(serde::de::Error::custom("kak_seed must be 32 bytes"));
-        }
-
-        let mut root_kek_array = [0u8; 32];
-        root_kek_array.copy_from_slice(&root_kek_seed);
-
-        let mut kak_array = [0u8; 32];
-        kak_array.copy_from_slice(&kak_seed);
+        let root_kek_seed = decode_hex32_field("root_kek_seed", &helper.root_kek_seed)?;
+        let kak_seed = decode_hex32_field("kak_seed", &helper.kak_seed)?;
+        let defaults = CryptoConfig::default();
+        let shared_secret_seed = match helper.shared_secret_seed {
+            Some(value) => decode_hex32_field("shared_secret_seed", &value)?,
+            None => defaults.shared_secret_seed,
+        };
+        let shared_secret_nonce = match helper.shared_secret_nonce {
+            Some(value) => decode_hex32_field("shared_secret_nonce", &value)?,
+            None => defaults.shared_secret_nonce,
+        };
+        let auth_token_hmac_key = match helper.auth_token_hmac_key {
+            Some(value) => Some(decode_hex32_field("auth_token_hmac_key", &value)?),
+            None => None,
+        };
 
         Ok(CryptoConfig {
-            root_kek_seed: root_kek_array,
-            kak_seed: kak_array,
+            root_kek_seed,
+            kak_seed,
+            shared_secret_seed,
+            shared_secret_nonce,
+            auth_token_hmac_key,
         })
     }
 }
@@ -538,16 +586,11 @@ impl Default for CryptoConfig {
     fn default() -> Self {
         let mut rng = BoringRng {};
         Self {
-            root_kek_seed: {
-                let mut key = [0u8; 32];
-                rng.fill_bytes(&mut key);
-                key
-            },
-            kak_seed: {
-                let mut key = [0u8; 32];
-                rng.fill_bytes(&mut key);
-                key
-            },
+            root_kek_seed: random_32(&mut rng),
+            kak_seed: random_32(&mut rng),
+            shared_secret_seed: random_32(&mut rng),
+            shared_secret_nonce: random_32(&mut rng),
+            auth_token_hmac_key: None,
         }
     }
 }
@@ -810,6 +853,8 @@ backend = "injector"
 [crypto]
 root_kek_seed = "0000000000000000000000000000000000000000000000000000000000000000"
 kak_seed = "1111111111111111111111111111111111111111111111111111111111111111"
+shared_secret_seed = "2222222222222222222222222222222222222222222222222222222222222222"
+shared_secret_nonce = "3333333333333333333333333333333333333333333333333333333333333333"
 
 [trust]
 os_version = 16
