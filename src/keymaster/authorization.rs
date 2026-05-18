@@ -18,7 +18,7 @@ use crate::global::{DB, ENFORCEMENTS, SUPER_KEY};
 use crate::keymaster::error::{anyhow_error_to_string, is_dead_object_status, KsError};
 use crate::keymaster::keymint_device::localize_auth_token_for_omk;
 use crate::keymaster::permission::{
-    check_forwarded_caller_provenance, check_keystore_permission, KeystorePerm,
+    check_forwarded_context, check_keystore_permission, KeystorePerm,
 };
 use crate::keymaster::utils::key_params_to_aidl;
 use crate::top::qwq2333::ohmykeymint::{
@@ -246,9 +246,7 @@ fn check_authorization_permission(
     ctx: Option<&CallerInfo>,
     label: &str,
 ) -> Result<()> {
-    if ctx.is_some() {
-        check_forwarded_caller_provenance(label)?;
-    }
+    check_forwarded_context(ctx, label)?;
     check_keystore_permission(permission, ctx)
 }
 

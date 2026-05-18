@@ -16,7 +16,7 @@ use crate::keymaster::db::KeyType;
 use crate::keymaster::error::{into_logged_binder, map_binder_status, KsError};
 use crate::keymaster::keymint_device::{get_keymint_wrapper, KeyMintWrapper};
 use crate::keymaster::permission::{
-    check_forwarded_caller_provenance, check_key_permission, check_keystore_permission,
+    check_forwarded_context, check_key_permission, check_keystore_permission,
     check_manage_users_permission, CallerCtx, KeyPerm, KeystorePerm,
 };
 use crate::top::qwq2333::ohmykeymint::{
@@ -182,13 +182,6 @@ impl MaintenanceManager {
         })
         .context(err!("removing user {user_id} keys"))
     }
-}
-
-fn check_forwarded_context(ctx: Option<&CallerInfo>, label: &str) -> Result<()> {
-    if ctx.is_some() {
-        check_forwarded_caller_provenance(label)?;
-    }
-    Ok(())
 }
 
 fn check_maintenance_permission(

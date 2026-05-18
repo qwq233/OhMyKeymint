@@ -823,9 +823,9 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
         storage_key: &KeyDescriptor,
     ) -> rsbinder::status::Result<EphemeralStorageKeyResponse> {
         if self.route_for_descriptor(storage_key) == RouteTarget::Omk && self.prefer_omk() {
-            match self
-                .call_omk(|backend, _caller| backend.r#convertStorageKeyToEphemeral(storage_key))
-            {
+            match self.call_omk(|backend, caller| {
+                backend.r#convertStorageKeyToEphemeral(caller, storage_key)
+            }) {
                 Ok(response) => return Ok(response),
                 Err(error) => {
                     return self.fallback_to_system(error, || {
@@ -842,7 +842,7 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
 
     fn r#deleteKey(&self, key: &KeyDescriptor) -> rsbinder::status::Result<()> {
         let result = if self.route_for_descriptor(key) == RouteTarget::Omk && self.prefer_omk() {
-            match self.call_omk(|backend, _caller| backend.r#deleteKey(key)) {
+            match self.call_omk(|backend, caller| backend.r#deleteKey(caller, key)) {
                 Ok(()) => Ok(()),
                 Err(error) => self.fallback_to_system(error, || {
                     self.call_system(|backend| backend.r#deleteKey(key))
@@ -1122,12 +1122,17 @@ mod tests {
 
         fn r#convertStorageKeyToEphemeral(
             &self,
+            _ctx: Option<&CallerInfo>,
             _storage_key: &KeyDescriptor,
         ) -> rsbinder::status::Result<EphemeralStorageKeyResponse> {
             Err(StatusCode::UnknownTransaction.into())
         }
 
-        fn r#deleteKey(&self, _key: &KeyDescriptor) -> rsbinder::status::Result<()> {
+        fn r#deleteKey(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _key: &KeyDescriptor,
+        ) -> rsbinder::status::Result<()> {
             Ok(())
         }
     }

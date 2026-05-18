@@ -310,6 +310,14 @@ pub fn setup_remote_call(
         }
 
         if args.len() > 6 {
+            let padding = if (args.len() - 6) % 2 == 1 {
+                std::mem::size_of::<usize>()
+            } else {
+                0
+            };
+            sp = sp
+                .checked_sub(padding)
+                .ok_or_else(|| anyhow!("Stack overflow when reserving x86_64 call padding"))?;
             for i in (6..args.len()).rev() {
                 let arg_bytes = args[i].to_ne_bytes();
                 sp = push_stack(pid, sp, &arg_bytes, false)?;
@@ -502,6 +510,11 @@ pub struct RemoteCallSession {
     return_addr: usize,
 }
 
+pub struct RemoteCallPostStatus {
+    pub result: Result<usize>,
+    pub restored: bool,
+}
+
 pub fn remote_pre_call(
     pid: Pid,
     func_addr: usize,
@@ -514,7 +527,16 @@ pub fn remote_pre_call(
     );
     let original_regs = get_regs(pid).context("Failed to backup registers.")?;
     let mut regs = original_regs;
-    setup_remote_call(pid, &mut regs, func_addr, return_addr, args)?;
+    if let Err(error) = setup_remote_call(pid, &mut regs, func_addr, return_addr, args) {
+        if let Err(restore_error) = set_regs(pid, &original_regs)
+            .context("Failed to restore registers after remote call setup failure")
+        {
+            return Err(error.context(format!(
+                "remote call setup failed and register restore also failed: {restore_error:#}"
+            )));
+        }
+        return Err(error);
+    }
 
     Ok(RemoteCallSession {
         original_regs,
@@ -523,16 +545,34 @@ pub fn remote_pre_call(
 }
 
 pub fn remote_post_call(pid: Pid, session: RemoteCallSession) -> Result<usize> {
+    remote_post_call_with_status(pid, session).result
+}
+
+pub fn remote_post_call_with_status(pid: Pid, session: RemoteCallSession) -> RemoteCallPostStatus {
     let wait_result = wait_remote_call(pid, session.return_addr);
     let restore_result =
         set_regs(pid, &session.original_regs).context("Failed to restore registers.");
+    let restored = restore_result.is_ok();
 
-    match (wait_result, restore_result) {
+    let result = match (wait_result, restore_result) {
         (Ok(ret), Ok(())) => Ok(ret),
         (Err(wait_error), Ok(())) => Err(wait_error),
         (Ok(_), Err(restore_error)) => Err(restore_error),
-        (Err(wait_error), Err(restore_error)) => Err(wait_error.context(restore_error)),
-    }
+        (Err(wait_error), Err(restore_error)) => Err(wait_error).with_context(|| {
+            format!("Failed to restore registers after remote call failure: {restore_error:#}")
+        }),
+    };
+
+    RemoteCallPostStatus { result, restored }
+}
+
+pub fn remote_cancel_call(pid: Pid, session: RemoteCallSession) -> Result<()> {
+    nix::sys::signal::kill(pid, Signal::SIGSTOP)
+        .context("Failed to stop remote process for remote call cancellation")?;
+    wait_pid(pid, Signal::SIGSTOP)
+        .context("Failed to wait for remote process to stop during remote call cancellation")?;
+    set_regs(pid, &session.original_regs)
+        .context("Failed to restore registers after remote call cancellation")
 }
 
 pub fn remote_call(
@@ -543,4 +583,26 @@ pub fn remote_call(
 ) -> Result<usize> {
     let session = remote_pre_call(pid, func_addr, return_addr, args)?;
     remote_post_call(pid, session)
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_64_stack_padding_preserves_abi_entry_alignment() {
+        const START_SP_MOD_16: usize = 0;
+        for stack_arg_count in 0..8 {
+            let padding = if stack_arg_count % 2 == 1 {
+                std::mem::size_of::<usize>()
+            } else {
+                0
+            };
+            let pushed_bytes = (stack_arg_count + 1) * std::mem::size_of::<usize>();
+            let final_mod = (START_SP_MOD_16 + 16 - (padding + pushed_bytes) % 16) % 16;
+            assert_eq!(
+                final_mod, 8,
+                "stack_arg_count={stack_arg_count} padding={padding}"
+            );
+        }
+    }
 }

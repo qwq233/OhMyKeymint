@@ -2161,7 +2161,7 @@ unsafe fn build_security_level_reply_rewrite(
         }
         ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral { storage_key } => {
             let omk_storage_key = omk_descriptor_for_app_key(storage_key);
-            match omk_level.r#convertStorageKeyToEphemeral(&omk_storage_key) {
+            match omk_level.r#convertStorageKeyToEphemeral(Some(&caller), &omk_storage_key) {
                 Ok(response) => Ok(Some(parcel::build_plain_reply(&response)?)),
                 Err(error) => {
                     let reply = build_omk_status_reply(&error)?;
@@ -2177,7 +2177,7 @@ unsafe fn build_security_level_reply_rewrite(
         }
         ParsedSecurityLevelRequest::DeleteKey { key } => {
             let omk_key = omk_descriptor_for_app_key(key);
-            match omk_level.r#deleteKey(&omk_key) {
+            match omk_level.r#deleteKey(Some(&caller), &omk_key) {
                 Ok(()) => {
                     tracker::forget_key_descriptor_route(key);
                     Ok(Some(parcel::build_void_reply()?))
@@ -2402,12 +2402,17 @@ mod tests {
 
         fn r#convertStorageKeyToEphemeral(
             &self,
+            _arg_ctx: Option<&CallerInfo>,
             _arg_storage_key: &KeyDescriptor,
         ) -> rsbinder::status::Result<EphemeralStorageKeyResponse> {
             Err(StatusCode::UnknownTransaction.into())
         }
 
-        fn r#deleteKey(&self, _arg_key: &KeyDescriptor) -> rsbinder::status::Result<()> {
+        fn r#deleteKey(
+            &self,
+            _arg_ctx: Option<&CallerInfo>,
+            _arg_key: &KeyDescriptor,
+        ) -> rsbinder::status::Result<()> {
             Err(StatusCode::UnknownTransaction.into())
         }
     }

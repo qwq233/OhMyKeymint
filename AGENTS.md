@@ -1,5 +1,7 @@
 # Guide
 
+- You must always pay absolute attention: has the functionality you want to implement been implemented before? If it has, reuse that method, call that method. Instead of blindly fucking adding methods yourself, writing redundant code, and fucking gilding the lily.
+- You are allowed to use web search and subagents to do whatever you want.
 - Build & check & test target should be `aarch64-linux-android`
 - Compile using cargo-ndk with the target ABI set to aarch64
   i.e.: `cargo ndk -t arm64-v8a --platform 24 build`

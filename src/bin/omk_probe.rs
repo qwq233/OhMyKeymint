@@ -117,7 +117,7 @@ fn run() -> Result<()> {
         .context("abort() on second operation failed")?;
 
     level
-        .deleteKey(&generated_key)
+        .deleteKey(None, &generated_key)
         .context("deleteKey(generated AES-GCM key) failed")?;
 
     let imported_storage = match level.importKey(
@@ -140,7 +140,7 @@ fn run() -> Result<()> {
     };
     let imported_storage_key = expect_blob_key(&imported_storage.key, "imported storage key")?;
 
-    match level.convertStorageKeyToEphemeral(&imported_storage_key) {
+    match level.convertStorageKeyToEphemeral(None, &imported_storage_key) {
         Ok(EphemeralStorageKeyResponse {
             ephemeralKey,
             upgradedBlob,
@@ -162,7 +162,7 @@ fn run() -> Result<()> {
     }
 
     level
-        .deleteKey(&imported_storage_key)
+        .deleteKey(None, &imported_storage_key)
         .context("deleteKey(imported storage key) failed")?;
 
     negative_import_wrapped_smoke(&level, &generated_key)

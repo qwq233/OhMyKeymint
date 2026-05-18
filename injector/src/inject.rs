@@ -3,7 +3,7 @@ use std::mem::{offset_of, size_of};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use log::{debug, error, info, warn};
 use nix::{sys::signal::Signal, unistd::Pid};
 use rand::TryRng;
@@ -114,6 +114,36 @@ fn generate_remote_payload_identifier() -> Result<String> {
     Ok(format_remote_payload_identifier(&random))
 }
 
+fn remote_c_int_result(value: usize) -> i32 {
+    value as u32 as i32
+}
+
+fn cleanup_error_message(errors: &[anyhow::Error]) -> String {
+    errors
+        .iter()
+        .map(|error| format!("{error:#}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn finish_injection_result(result: Result<()>, cleanup_errors: Vec<anyhow::Error>) -> Result<()> {
+    if cleanup_errors.is_empty() {
+        return result;
+    }
+
+    for cleanup_error in &cleanup_errors {
+        error!("[Injector][Loader] cleanup failed: {cleanup_error:#}");
+    }
+
+    let cleanup_message = cleanup_error_message(&cleanup_errors);
+    match result {
+        Ok(()) => Err(anyhow!("injection cleanup failed: {cleanup_message}")),
+        Err(error) => Err(error.context(format!(
+            "injection failed and cleanup also failed: {cleanup_message}"
+        ))),
+    }
+}
+
 fn persist_remote_payload_state(pid: Pid, payload_identifier: &str) -> Result<()> {
     let path = Path::new(REMOTE_PAYLOAD_STATE_PATH);
     if let Some(parent) = path.parent() {
@@ -149,7 +179,8 @@ where
         (libc::O_RDONLY | libc::O_CLOEXEC) as usize,
         0,
     ];
-    let remote_lib_fd = sys::remote_call(pid, open_addr, libc_return_addr, &args)? as i32;
+    let remote_lib_fd =
+        remote_c_int_result(sys::remote_call(pid, open_addr, libc_return_addr, &args)?);
     if remote_lib_fd == -1 {
         let err = get_remote_errno()?;
         bail!(
@@ -166,7 +197,33 @@ where
     Ok(remote_lib_fd)
 }
 
-fn validate_received_remote_fd(remote_cmsg_data: &[u8], remote_socket_fd: i32) -> Result<i32> {
+fn validate_received_remote_fd(
+    remote_msg: &libc::msghdr,
+    recv_res: isize,
+    remote_cmsg_data: &[u8],
+    remote_socket_fd: i32,
+) -> Result<i32> {
+    if recv_res != 1 {
+        bail!("remote recvmsg returned {recv_res} bytes, expected 1 payload byte");
+    }
+
+    let trunc_flags = libc::MSG_CTRUNC | libc::MSG_TRUNC;
+    if remote_msg.msg_flags & trunc_flags != 0 {
+        bail!(
+            "remote recvmsg reported truncated data/control: msg_flags=0x{:x}",
+            remote_msg.msg_flags
+        );
+    }
+
+    let expected_len = unsafe { libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as usize };
+    if remote_msg.msg_controllen < expected_len {
+        bail!(
+            "remote msg_controllen too small: got {}, expected at least {}",
+            remote_msg.msg_controllen,
+            expected_len
+        );
+    }
+
     if remote_cmsg_data.len() < size_of::<libc::cmsghdr>() {
         bail!(
             "remote control buffer too small: {} < {}",
@@ -177,7 +234,6 @@ fn validate_received_remote_fd(remote_cmsg_data: &[u8], remote_socket_fd: i32) -
 
     let header =
         unsafe { std::ptr::read_unaligned(remote_cmsg_data.as_ptr() as *const libc::cmsghdr) };
-    let expected_len = unsafe { libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as usize };
     if header.cmsg_len != expected_len {
         bail!(
             "invalid remote cmsghdr length: got {}, expected {}",
@@ -228,30 +284,51 @@ pub fn inject_library(pid: Pid) -> Result<()> {
     let self_path =
         std::fs::read_link("/proc/self/exe").context("Failed to read link /proc/self/exe")?;
 
-    nix::sys::ptrace::attach(pid)?;
+    nix::sys::ptrace::attach(pid).with_context(|| format!("Failed to attach to process {pid}"))?;
     debug!("Attached to process {}", pid);
 
     if let Err(e) = wait_pid(pid, Signal::SIGSTOP) {
         warn!("Wait failed, detaching: {}", e);
-        let _ = nix::sys::ptrace::detach(pid, None);
-        bail!("Failed to wait for process {} to stop: {}", pid, e);
+        if let Err(detach_error) = nix::sys::ptrace::detach(pid, None)
+            .with_context(|| format!("Failed to detach from process {pid} after wait failure"))
+        {
+            return Err(e.context(format!(
+                "Failed to wait for process {pid} to stop; cleanup also failed: {detach_error:#}"
+            )));
+        }
+        return Err(e.context(format!("Failed to wait for process {pid} to stop")));
     }
 
-    let backup_regs = sys::get_regs(pid)?;
+    let backup_regs = match sys::get_regs(pid).context("Failed to backup registers.") {
+        Ok(regs) => regs,
+        Err(error) => {
+            if let Err(detach_error) = nix::sys::ptrace::detach(pid, None).with_context(|| {
+                format!("Failed to detach from process {pid} after get_regs failure")
+            }) {
+                return Err(error.context(format!(
+                    "cleanup after get_regs failure also failed: {detach_error:#}"
+                )));
+            }
+            return Err(error);
+        }
+    };
 
     // Run actual injection; regardless of success/failure we MUST restore regs and detach
     let result = do_inject(pid, &self_path);
 
     // === CLEANUP: Always restore registers and detach ===
     debug!("Restoring registers and detaching");
+    let mut cleanup_errors = Vec::new();
     if let Err(e) = sys::set_regs(pid, &backup_regs) {
-        error!("Failed to restore registers: {}", e);
+        cleanup_errors.push(e.context("Failed to restore registers"));
     }
-    if let Err(e) = nix::sys::ptrace::detach(pid, None) {
-        error!("Failed to detach from process {}: {}", pid, e);
+    if let Err(e) = nix::sys::ptrace::detach(pid, None)
+        .with_context(|| format!("Failed to detach from process {pid}"))
+    {
+        cleanup_errors.push(e);
     }
 
-    result
+    finish_injection_result(result, cleanup_errors)
 }
 
 fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
@@ -387,8 +464,15 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 
     let close_remote = |fd: i32| -> Result<()> {
         let args = vec![fd as usize];
-        if sys::remote_call(pid, close_addr, libc_return_addr, &args)? != 0 {
-            error!("Remote close failed for fd {}", fd);
+        let close_res = sys::remote_call(pid, close_addr, libc_return_addr, &args)?;
+        if close_res != 0 {
+            let err = get_remote_errno().unwrap_or(0);
+            bail!(
+                "Remote close failed for fd {}: result={} errno={}",
+                fd,
+                close_res,
+                err
+            );
         }
         Ok(())
     };
@@ -441,7 +525,8 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         (libc::SOCK_DGRAM | libc::SOCK_CLOEXEC) as usize,
         0,
     ];
-    let remote_fd = sys::remote_call(pid, socket_addr, libc_return_addr, &args)? as i32;
+    let remote_fd =
+        remote_c_int_result(sys::remote_call(pid, socket_addr, libc_return_addr, &args)?);
     if remote_fd == -1 {
         let err = get_remote_errno()?;
         bail!("Failed to create remote socket. Remote errno: {}", err);
@@ -466,8 +551,8 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     let remote_addr_ptr = push_to_remote_stack(&addr_bytes)?;
 
     let args = vec![remote_fd as usize, remote_addr_ptr, addr_len];
-    let bind_res = sys::remote_call(pid, bind_addr, libc_return_addr, &args)?;
-    if (bind_res as isize) == -1 {
+    let bind_res = remote_c_int_result(sys::remote_call(pid, bind_addr, libc_return_addr, &args)?);
+    if bind_res == -1 {
         let err = get_remote_errno()?;
         close_remote(remote_fd)?;
         bail!("Failed to bind remote socket. Remote errno: {}", err);
@@ -560,15 +645,42 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 
     let send_res = unsafe { libc::sendmsg(local_socket, &local_hdr, 0) };
     if send_res == -1 {
-        close_remote(remote_fd)?;
-        bail!(
-            "Failed to send FD locally: {}",
-            std::io::Error::last_os_error()
-        );
+        let send_error = std::io::Error::last_os_error();
+        if let Err(cancel_error) = sys::remote_cancel_call(pid, recvmsg_call) {
+            return Err(
+                anyhow!("Failed to send FD locally: {send_error}").context(format!(
+                    "failed to cancel remote recvmsg after local sendmsg failure: {cancel_error:#}"
+                )),
+            );
+        }
+        if let Err(close_error) = close_remote(remote_fd) {
+            return Err(
+                anyhow!("Failed to send FD locally: {send_error}").context(format!(
+                    "failed to close remote socket after canceling recvmsg: {close_error:#}"
+                )),
+            );
+        }
+        bail!("Failed to send FD locally: {}", send_error);
     }
     debug!("Sent FD {} to remote abstract socket", local_lib_fd);
 
-    let recv_res = sys::remote_post_call(pid, recvmsg_call)? as isize;
+    let recv_status = sys::remote_post_call_with_status(pid, recvmsg_call);
+    let recv_res = match recv_status.result {
+        Ok(recv_res) => recv_res as isize,
+        Err(error) => {
+            if recv_status.restored {
+                if let Err(close_error) = close_remote(remote_fd) {
+                    return Err(error.context(format!(
+                        "remote recvmsg failed after register restore; remote socket close also failed: {close_error:#}"
+                    )));
+                }
+                return Err(error.context("remote recvmsg failed after register restore"));
+            }
+            return Err(error.context(
+                "remote recvmsg failed and register restore failed; remote socket not closed because tracee state is uncertain",
+            ));
+        }
+    };
 
     let remote_lib_fd = if recv_res == -1 {
         let err = get_remote_errno()?;
@@ -603,7 +715,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 
         let mut remote_cmsg_data = vec![0u8; cmsg_space];
         sys::read_stack(pid, remote_cmsg_ptr, &mut remote_cmsg_data)?;
-        match validate_received_remote_fd(&remote_cmsg_data, remote_fd) {
+        match validate_received_remote_fd(&remote_msg, recv_res, &remote_cmsg_data, remote_fd) {
             Ok(fd) => {
                 debug!("Remote received FD: {}", fd);
                 close_remote(remote_fd)?;
@@ -730,5 +842,85 @@ mod tests {
         assert!(identifier[3..identifier.len() - 3]
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn remote_c_int_result_interprets_low_32_bits_as_signed() {
+        assert_eq!(remote_c_int_result(0), 0);
+        assert_eq!(remote_c_int_result(42), 42);
+        assert_eq!(remote_c_int_result(0xffff_ffff), -1);
+        assert_eq!(remote_c_int_result(0xffff_ffff_ffff_ffff), -1);
+    }
+
+    fn remote_msg_with_control(msg_flags: i32, msg_controllen: usize) -> libc::msghdr {
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_flags = msg_flags;
+        msg.msg_controllen = msg_controllen;
+        msg
+    }
+
+    fn scm_rights_cmsg(fd: i32) -> Vec<u8> {
+        let cmsg_space =
+            unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) as usize };
+        let cmsg_len =
+            unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as usize };
+        let mut data = vec![0u8; cmsg_space];
+        let header = libc::cmsghdr {
+            cmsg_len,
+            cmsg_level: libc::SOL_SOCKET,
+            cmsg_type: libc::SCM_RIGHTS,
+        };
+
+        unsafe {
+            std::ptr::write_unaligned(data.as_mut_ptr() as *mut libc::cmsghdr, header);
+        }
+        let data_offset = unsafe { libc::CMSG_LEN(0) as usize };
+        data[data_offset..data_offset + std::mem::size_of::<libc::c_int>()]
+            .copy_from_slice(&fd.to_ne_bytes());
+        data
+    }
+
+    #[test]
+    fn scm_rights_validation_accepts_complete_payload() {
+        let data = scm_rights_cmsg(42);
+        let msg = remote_msg_with_control(0, data.len());
+
+        let fd = validate_received_remote_fd(&msg, 1, &data, 7)
+            .expect("complete SCM_RIGHTS message should validate");
+
+        assert_eq!(fd, 42);
+    }
+
+    #[test]
+    fn scm_rights_validation_rejects_unexpected_payload_length() {
+        let data = scm_rights_cmsg(42);
+        let msg = remote_msg_with_control(0, data.len());
+
+        let error = validate_received_remote_fd(&msg, 0, &data, 7)
+            .expect_err("recvmsg payload length must be exactly one byte");
+
+        assert!(format!("{error:#}").contains("expected 1 payload byte"));
+    }
+
+    #[test]
+    fn scm_rights_validation_rejects_truncation_flags() {
+        let data = scm_rights_cmsg(42);
+        let msg = remote_msg_with_control(libc::MSG_CTRUNC | libc::MSG_TRUNC, data.len());
+
+        let error = validate_received_remote_fd(&msg, 1, &data, 7)
+            .expect_err("truncated SCM_RIGHTS message must be rejected");
+
+        assert!(format!("{error:#}").contains("truncated"));
+    }
+
+    #[test]
+    fn scm_rights_validation_rejects_short_control_length() {
+        let data = scm_rights_cmsg(42);
+        let msg = remote_msg_with_control(0, unsafe { libc::CMSG_LEN(0) as usize });
+
+        let error = validate_received_remote_fd(&msg, 1, &data, 7)
+            .expect_err("short control length must be rejected");
+
+        assert!(format!("{error:#}").contains("msg_controllen too small"));
     }
 }

@@ -27,7 +27,7 @@ interface IOhMySecurityLevel {
                                  in @nullable byte[] maskingKey, in KeyParameter[] params,
                                  in AuthenticatorSpec[] authenticators);
 
-    EphemeralStorageKeyResponse convertStorageKeyToEphemeral(in KeyDescriptor storageKey);
+    EphemeralStorageKeyResponse convertStorageKeyToEphemeral(in @nullable CallerInfo ctx, in KeyDescriptor storageKey);
 
-    void deleteKey(in KeyDescriptor key);
+    void deleteKey(in @nullable CallerInfo ctx, in KeyDescriptor key);
 }

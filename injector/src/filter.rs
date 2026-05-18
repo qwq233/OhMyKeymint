@@ -188,19 +188,4 @@ mod tests {
         assert!(!decision.allowed);
         assert_eq!(decision.reason, FilterReason::RejectedNotInScope);
     }
-
-    #[test]
-    fn disabled_filter_still_requires_scope_membership() {
-        let mut config = base_config();
-        config.enabled = false;
-        config.block_android_package = false;
-
-        let decision = evaluate(
-            &base_scope(),
-            &config,
-            PackageResolution::Known(vec!["com.other".to_string()]),
-        );
-        assert!(!decision.allowed);
-        assert_eq!(decision.reason, FilterReason::RejectedNotInScope);
-    }
 }

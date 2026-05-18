@@ -109,6 +109,6 @@ pub extern "C" fn entry(handle: *const c_void) -> bool {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string()),
     );
-    hook::init_hook();
+    hook::init_hook().expect("failed to initialize binder ioctl hook");
     true
 }

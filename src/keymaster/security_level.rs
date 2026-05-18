@@ -42,7 +42,7 @@ use crate::{
         metrics_store::log_key_creation_event_stats,
         operation::{KeystoreOperation, LoggingInfo, OperationDb},
         permission::{
-            check_device_attestation_permissions, check_key_permission,
+            check_device_attestation_permissions, check_forwarded_context, check_key_permission,
             check_unique_id_attestation_permissions, is_device_id_attestation_tag, KeyPerm,
         },
         super_key::{KeyBlob, SuperKeyManager},
@@ -950,6 +950,7 @@ impl KeystoreSecurityLevel {
 
     fn convert_storage_key_to_ephemeral(
         &self,
+        ctx: Option<&CallerInfo>,
         storage_key: &KeyDescriptor,
     ) -> Result<EphemeralStorageKeyResponse> {
         self.ensure_current_uuid()?;
@@ -967,7 +968,7 @@ impl KeystoreSecurityLevel {
             KeyPerm::ConvertStorageKeyToEphemeral,
             storage_key,
             None,
-            None,
+            ctx,
         )
         .context(err!("Check permission"))?;
 
@@ -1234,7 +1235,7 @@ impl KeystoreSecurityLevel {
         })
     }
 
-    fn delete_key(&self, key: &KeyDescriptor) -> Result<()> {
+    fn delete_key(&self, ctx: Option<&CallerInfo>, key: &KeyDescriptor) -> Result<()> {
         self.ensure_current_uuid()?;
         if key.domain != Domain::BLOB {
             return Err(KsError::Km(ErrorCode::INVALID_ARGUMENT))
@@ -1247,7 +1248,7 @@ impl KeystoreSecurityLevel {
             .ok_or(KsError::Km(ErrorCode::INVALID_ARGUMENT))
             .context(err!("delete_key: No key blob specified"))?;
 
-        check_key_permission(KeyPerm::Delete, key, None, None)
+        check_key_permission(KeyPerm::Delete, key, None, ctx)
             .context(err!("delete_key: Checking delete permissions"))?;
 
         let km_dev = self.get_keymint_wrapper();
@@ -1336,12 +1337,12 @@ impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
         storage_key: &KeyDescriptor,
     ) -> Result<EphemeralStorageKeyResponse, Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::convertStorageKeyToEphemeral");
-        self.convert_storage_key_to_ephemeral(storage_key)
+        self.convert_storage_key_to_ephemeral(None, storage_key)
             .map_err(into_logged_binder)
     }
     fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::deleteKey");
-        let result = self.delete_key(key);
+        let result = self.delete_key(None, key);
         debug!(
             "deleteKey: calling uid: {}, result: {:?}",
             CallingContext::default().uid,
@@ -1360,6 +1361,8 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         forced: bool,
     ) -> Result<CreateOperationResponse, Status> {
         let _wp = self.watch("IOhMySecurityLevel::createOperation");
+        check_forwarded_context(ctx, "IOhMySecurityLevel::createOperation")
+            .map_err(into_logged_binder)?;
         self.create_operation(ctx, key, operation_parameters, forced)
             .map_err(into_logged_binder)
     }
@@ -1376,6 +1379,8 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         // Duration is set to 5 seconds, because generateKey - especially for RSA keys, takes more
         // time than other operations
         let _wp = self.watch_millis("IOhMySecurityLevel::generateKey", 5000);
+        check_forwarded_context(ctx, "IOhMySecurityLevel::generateKey")
+            .map_err(into_logged_binder)?;
         let result = self.generate_key(ctx, key, attestation_key, params, flags, entropy);
         log_generate_key_result(
             self.security_level,
@@ -1397,6 +1402,8 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         key_data: &[u8],
     ) -> Result<KeyMetadata, Status> {
         let _wp = self.watch("IOhMySecurityLevel::importKey");
+        check_forwarded_context(ctx, "IOhMySecurityLevel::importKey")
+            .map_err(into_logged_binder)?;
         let result = self.import_key(ctx, key, attestation_key, params, flags, key_data);
         log_key_creation_event_stats(self.security_level, params, &result);
         debug!(
@@ -1418,6 +1425,8 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         authenticators: &[AuthenticatorSpec],
     ) -> Result<KeyMetadata, Status> {
         let _wp = self.watch("IOhMySecurityLevel::importWrappedKey");
+        check_forwarded_context(ctx, "IOhMySecurityLevel::importWrappedKey")
+            .map_err(into_logged_binder)?;
         let result =
             self.import_wrapped_key(ctx, key, wrapping_key, masking_key, params, authenticators);
         log_key_creation_event_stats(self.security_level, params, &result);
@@ -1432,18 +1441,24 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
     }
     fn convertStorageKeyToEphemeral(
         &self,
+        ctx: Option<&CallerInfo>,
         storage_key: &KeyDescriptor,
     ) -> Result<EphemeralStorageKeyResponse, Status> {
         let _wp = self.watch("IOhMySecurityLevel::convertStorageKeyToEphemeral");
-        self.convert_storage_key_to_ephemeral(storage_key)
+        check_forwarded_context(ctx, "IOhMySecurityLevel::convertStorageKeyToEphemeral")
+            .map_err(into_logged_binder)?;
+        self.convert_storage_key_to_ephemeral(ctx, storage_key)
             .map_err(into_logged_binder)
     }
-    fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
+    fn deleteKey(&self, ctx: Option<&CallerInfo>, key: &KeyDescriptor) -> Result<(), Status> {
         let _wp = self.watch("IOhMySecurityLevel::deleteKey");
-        let result = self.delete_key(key);
+        check_forwarded_context(ctx, "IOhMySecurityLevel::deleteKey")
+            .map_err(into_logged_binder)?;
+        let result = self.delete_key(ctx, key);
         debug!(
             "deleteKey: calling uid: {}, result: {:?}",
-            CallingContext::default().uid,
+            ctx.map(|ctx| ctx.callingUid)
+                .unwrap_or(CallingContext::default().uid.into()),
             result
         );
         result.map_err(into_logged_binder)
@@ -1543,13 +1558,13 @@ impl IKeystoreSecurityLevel for AospSecurityLevelWrapper {
             .inner
             .watch("IKeystoreSecurityLevel::convertStorageKeyToEphemeral");
         self.inner
-            .convert_storage_key_to_ephemeral(storage_key)
+            .convert_storage_key_to_ephemeral(None, storage_key)
             .map_err(into_logged_binder)
     }
 
     fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
         let _wp = self.inner.watch("IKeystoreSecurityLevel::deleteKey");
-        let result = self.inner.delete_key(key);
+        let result = self.inner.delete_key(None, key);
         debug!(
             "deleteKey: calling uid: {}, result: {:?}",
             CallingContext::default().uid,
@@ -1570,6 +1585,8 @@ impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
         forced: bool,
     ) -> Result<CreateOperationResponse, Status> {
         let _wp = self.inner.watch("IOhMySecurityLevel::createOperation");
+        check_forwarded_context(ctx, "IOhMySecurityLevel::createOperation")
+            .map_err(into_logged_binder)?;
         self.inner
             .create_operation(ctx, key, operation_parameters, forced)
             .map_err(into_logged_binder)
@@ -1587,6 +1604,8 @@ impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
         let _wp = self
             .inner
             .watch_millis("IOhMySecurityLevel::generateKey", 5000);
+        check_forwarded_context(ctx, "IOhMySecurityLevel::generateKey")
+            .map_err(into_logged_binder)?;
         let result = self
             .inner
             .generate_key(ctx, key, attestation_key, params, flags, entropy);
@@ -1610,6 +1629,8 @@ impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
         key_data: &[u8],
     ) -> Result<KeyMetadata, Status> {
         let _wp = self.inner.watch("IOhMySecurityLevel::importKey");
+        check_forwarded_context(ctx, "IOhMySecurityLevel::importKey")
+            .map_err(into_logged_binder)?;
         let result = self
             .inner
             .import_key(ctx, key, attestation_key, params, flags, key_data);
@@ -1633,6 +1654,8 @@ impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
         authenticators: &[AuthenticatorSpec],
     ) -> Result<KeyMetadata, Status> {
         let _wp = self.inner.watch("IOhMySecurityLevel::importWrappedKey");
+        check_forwarded_context(ctx, "IOhMySecurityLevel::importWrappedKey")
+            .map_err(into_logged_binder)?;
         let result = self.inner.import_wrapped_key(
             ctx,
             key,
@@ -1653,22 +1676,28 @@ impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
 
     fn convertStorageKeyToEphemeral(
         &self,
+        ctx: Option<&CallerInfo>,
         storage_key: &KeyDescriptor,
     ) -> Result<EphemeralStorageKeyResponse, Status> {
         let _wp = self
             .inner
             .watch("IOhMySecurityLevel::convertStorageKeyToEphemeral");
+        check_forwarded_context(ctx, "IOhMySecurityLevel::convertStorageKeyToEphemeral")
+            .map_err(into_logged_binder)?;
         self.inner
-            .convert_storage_key_to_ephemeral(storage_key)
+            .convert_storage_key_to_ephemeral(ctx, storage_key)
             .map_err(into_logged_binder)
     }
 
-    fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
+    fn deleteKey(&self, ctx: Option<&CallerInfo>, key: &KeyDescriptor) -> Result<(), Status> {
         let _wp = self.inner.watch("IOhMySecurityLevel::deleteKey");
-        let result = self.inner.delete_key(key);
+        check_forwarded_context(ctx, "IOhMySecurityLevel::deleteKey")
+            .map_err(into_logged_binder)?;
+        let result = self.inner.delete_key(ctx, key);
         debug!(
             "deleteKey: calling uid: {}, result: {:?}",
-            CallingContext::default().uid,
+            ctx.map(|ctx| ctx.callingUid)
+                .unwrap_or(CallingContext::default().uid.into()),
             result
         );
         result.map_err(into_logged_binder)

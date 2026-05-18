@@ -1046,6 +1046,13 @@ pub fn check_forwarded_caller_provenance(label: &str) -> Result<()> {
     ))
 }
 
+pub fn check_forwarded_context(ctx: Option<&CallerInfo>, label: &str) -> Result<()> {
+    if ctx.is_some() {
+        check_forwarded_caller_provenance(label)?;
+    }
+    Ok(())
+}
+
 pub fn check_device_attestation_permissions(caller: Option<&CallerInfo>) -> Result<()> {
     let caller = CallerCtx::from_caller_info(caller);
     check_android_permission_for_uid(
