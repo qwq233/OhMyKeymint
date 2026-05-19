@@ -13,7 +13,7 @@ use crate::android::system::keystore2::{
 use crate::err;
 use crate::global::{DB, SUPER_KEY};
 use crate::keymaster::db::KeyType;
-use crate::keymaster::error::{into_logged_binder, map_binder_status, KsError};
+use crate::keymaster::error::{into_logged_binder, map_km_error, KsError};
 use crate::keymaster::keymint_device::{get_keymint_wrapper, KeyMintWrapper};
 use crate::keymaster::permission::{
     check_forwarded_context, check_key_permission, check_keystore_permission,
@@ -243,11 +243,11 @@ where
 {
     let tee = get_keymint_wrapper(SecurityLevel::TRUSTED_ENVIRONMENT)
         .context(err!("opening mandatory TEE KeyMint for {label}"))?;
-    map_binder_status(call(&tee)).context(err!("calling TEE KeyMint {label}"))?;
+    map_km_error(call(&tee)).context(err!("calling TEE KeyMint {label}"))?;
 
     match get_keymint_wrapper(SecurityLevel::STRONGBOX) {
         Ok(strongbox) => {
-            map_binder_status(call(&strongbox))
+            map_km_error(call(&strongbox))
                 .context(err!("calling optional StrongBox KeyMint {label}"))?;
         }
         Err(error) if keymint_unavailable(&error) => {

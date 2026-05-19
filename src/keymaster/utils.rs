@@ -7,7 +7,7 @@ use crate::{
     },
     consts, err,
     keymaster::{
-        error::{map_ks_error, KsError as Error},
+        error::{map_km_error, map_ks_error, KsError as Error},
         key_parameter::KeyParameter,
         keymint_device::{get_keymint_wrapper, KeyMintDevice},
     },
@@ -86,7 +86,7 @@ where
         let _wp = watchdog::watch(
             "utils::upgrade_keyblob_and_perform_op: calling IKeyMintDevice::upgradeKey.",
         );
-        km_dev.upgradeKey(key_blob, upgrade_params)
+        map_km_error(km_dev.upgradeKey(key_blob, upgrade_params))
     }
     .context(err!("Upgrade failed."))?;
 

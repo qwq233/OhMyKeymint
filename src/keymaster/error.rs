@@ -42,6 +42,27 @@ pub fn map_binder_status<T>(r: rsbinder::status::Result<T>) -> Result<T, KsError
         Err(e) => Err(match e.exception_code() {
             ExceptionCode::ServiceSpecific => {
                 let se = e.service_specific_error();
+                KsError::Binder(ExceptionCode::ServiceSpecific, se)
+            }
+            ExceptionCode::TransactionFailed => {
+                let e = e.transaction_error();
+                KsError::BinderTransaction(e)
+            }
+            e_code => KsError::Binder(e_code, 0),
+        }),
+    }
+}
+
+/// Helper function to map the binder status we get from calls into KeyMint
+/// to a Keystore error. We don't create an anyhow error here to make it easier
+/// to evaluate KeyMint errors, such as authentication requirements or operation
+/// slot exhaustion.
+pub fn map_km_error<T>(r: rsbinder::status::Result<T>) -> Result<T, KsError> {
+    match r {
+        Ok(t) => Ok(t),
+        Err(e) => Err(match e.exception_code() {
+            ExceptionCode::ServiceSpecific => {
+                let se = e.service_specific_error();
                 if se < 0 {
                     KsError::Km(ErrorCode(se))
                 } else {
@@ -64,12 +85,8 @@ pub fn is_dead_object_status(status: &Status) -> bool {
 
 pub fn map_ks_error(r: KsError) -> Status {
     match r {
-        KsError::Rc(rc) => {
-            Status::new_service_specific_error(rc.0, format!("KeystoreError: {:?}", rc).into())
-        }
-        KsError::Km(ec) => {
-            Status::new_service_specific_error(ec.0, format!("KeymintError: {:?}", ec).into())
-        }
+        KsError::Rc(rc) => Status::new_service_specific_error(rc.0, format!("{:?}", rc).into()),
+        KsError::Km(ec) => Status::new_service_specific_error(ec.0, format!("{:?}", ec).into()),
         KsError::Binder(ExceptionCode::ServiceSpecific, se) => {
             Status::new_service_specific_error(se, None)
         }
@@ -131,7 +148,6 @@ pub fn error_to_serialized_error(e: &KsError) -> SerializedError {
     match e {
         KsError::Rc(rcode) => SerializedError(rcode.0),
         KsError::Km(ec) => SerializedError(ec.0),
-        KsError::Binder(ExceptionCode::ServiceSpecific, se) => SerializedError(*se),
         // Binder errors are reported as system error.
         KsError::Binder(_, _) | KsError::BinderTransaction(_) => {
             SerializedError(ResponseCode::SYSTEM_ERROR.0)
@@ -159,27 +175,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn binder_service_specific_status_keeps_original_code() {
-        let status = map_ks_error(KsError::Binder(ExceptionCode::ServiceSpecific, -38));
-        assert_eq!(status.exception_code(), ExceptionCode::ServiceSpecific);
-        assert_eq!(status.service_specific_error(), -38);
+    fn map_ks_error_keeps_code_without_omk_specific_prefixes() {
+        let km_status = map_ks_error(KsError::Km(ErrorCode::TOO_MANY_OPERATIONS));
+        assert_eq!(km_status.exception_code(), ExceptionCode::ServiceSpecific);
+        assert_eq!(
+            km_status.service_specific_error(),
+            ErrorCode::TOO_MANY_OPERATIONS.0
+        );
+        let km_message = format!("{:?}", km_status);
+        assert!(!km_message.contains("KeymintError:"));
+
+        let rc_status = map_ks_error(KsError::Rc(ResponseCode::KEY_NOT_FOUND));
+        assert_eq!(rc_status.exception_code(), ExceptionCode::ServiceSpecific);
+        assert_eq!(
+            rc_status.service_specific_error(),
+            ResponseCode::KEY_NOT_FOUND.0
+        );
+        let rc_message = format!("{:?}", rc_status);
+        assert!(!rc_message.contains("KeystoreError:"));
     }
 
     #[test]
-    fn binder_service_specific_serialized_error_keeps_original_code() {
+    fn binder_service_specific_serialized_error_maps_to_system_error() {
+        for code in [
+            ResponseCode::KEY_NOT_FOUND.0,
+            ErrorCode::TOO_MANY_OPERATIONS.0,
+        ] {
+            let serialized =
+                error_to_serialized_error(&KsError::Binder(ExceptionCode::ServiceSpecific, code));
+            assert_eq!(serialized.0, ResponseCode::SYSTEM_ERROR.0);
+        }
+    }
+
+    #[test]
+    fn binder_transaction_serialized_error_maps_to_system_error() {
         let serialized =
-            error_to_serialized_error(&KsError::Binder(ExceptionCode::ServiceSpecific, -28));
-        assert_eq!(serialized.0, -28);
+            error_to_serialized_error(&KsError::BinderTransaction(StatusCode::FailedTransaction));
+        assert_eq!(serialized.0, ResponseCode::SYSTEM_ERROR.0);
     }
 
     #[test]
-    fn map_binder_status_converts_negative_service_specific_to_keymint_error() {
-        let err = map_binder_status::<()>(Err(Status::new_service_specific_error(
+    fn map_km_error_converts_negative_service_specific_to_keymint_error() {
+        let err = map_km_error::<()>(Err(Status::new_service_specific_error(
             ErrorCode::TOO_MANY_OPERATIONS.0,
             None,
         )))
         .expect_err("negative service-specific should map to a KeyMint error");
         assert_eq!(err, KsError::Km(ErrorCode::TOO_MANY_OPERATIONS));
+    }
+
+    #[test]
+    fn map_binder_status_keeps_negative_service_specific_as_binder_error() {
+        let err = map_binder_status::<()>(Err(Status::new_service_specific_error(
+            ErrorCode::TOO_MANY_OPERATIONS.0,
+            None,
+        )))
+        .expect_err("non-KeyMint mapper should not interpret service-specific errors");
+        assert_eq!(
+            err,
+            KsError::Binder(
+                ExceptionCode::ServiceSpecific,
+                ErrorCode::TOO_MANY_OPERATIONS.0
+            )
+        );
     }
 
     #[test]

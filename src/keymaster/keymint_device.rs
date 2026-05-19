@@ -30,7 +30,7 @@ use crate::android::system::keystore2::{
 use crate::config::{config, CryptoConfig};
 use crate::global::{AID_KEYSTORE, DB};
 use crate::keymaster::db::Uuid;
-use crate::keymaster::error::{map_binder_status, map_ks_error, map_ks_result};
+use crate::keymaster::error::{map_km_error, map_ks_error, map_ks_result};
 use crate::keymaster::utils::{key_creation_result_to_aidl, key_params_to_aidl};
 use crate::keymint::{clock, sdd, soft};
 use crate::plat::resetprop;
@@ -156,7 +156,8 @@ impl KeyMintDevice {
     where
         F: FnOnce(&dyn IKeyMintDevice) -> Result<KeyCreationResult, rsbinder::Status>,
     {
-        let creation_result = creator(&self.km_dev).context(err!("creator failed"))?;
+        let creation_result =
+            map_km_error(creator(&self.km_dev)).context(err!("creator failed"))?;
         let key_parameters = crate::keymaster::utils::key_characteristics_to_internal(
             creation_result.keyCharacteristics,
         );
@@ -256,7 +257,7 @@ impl KeyMintDevice {
                         &key_id_guard,
                         KeyBlob::NonSensitive(key_blob_vec),
                         |key_blob| {
-                            map_binder_status({
+                            map_km_error({
                                 let _wp = wd::watch(concat!(
                                     "KeyMintDevice::lookup_or_generate_key: ",
                                     "calling IKeyMintDevice::getKeyCharacteristics."
@@ -357,7 +358,7 @@ impl KeyMintDevice {
                 > = self
                     .km_dev
                     .begin(purpose, blob, operation_parameters, auth_token);
-                map_binder_status(result)
+                map_km_error(result)
             })
             .context(err!("Failed to begin operation."))?;
         let operation: Strong<dyn IKeyMintOperation> = begin_result
@@ -365,8 +366,7 @@ impl KeyMintDevice {
             .ok_or_else(Error::sys)
             .context(err!("Operation missing"))?;
         let _wp = wd::watch("KeyMintDevice::use_key_in_one_step: calling IKeyMintDevice::finish");
-        operation
-            .finish(Some(input), None, None, None, None)
+        map_km_error(operation.finish(Some(input), None, None, None, None))
             .context(err!("Failed to finish operation."))
     }
 }

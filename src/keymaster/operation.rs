@@ -131,8 +131,8 @@ use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::keymaster::enforcements::AuthInfo;
 
 use crate::keymaster::error::{
-    error_to_serialized_error, into_binder, into_logged_binder, map_binder_status,
-    KsError as Error, SerializedError,
+    error_to_serialized_error, into_binder, into_logged_binder, map_km_error, KsError as Error,
+    SerializedError,
 };
 
 use crate::android::hardware::security::keymint::{
@@ -299,7 +299,7 @@ impl Operation {
         let _wp = wd::watch("Operation::prune: calling IKeyMintOperation::abort()");
 
         // We abort the operation. If there was an error we log it but ignore it.
-        if let Err(e) = map_binder_status(self.km_op.abort()) {
+        if let Err(e) = map_km_error(self.km_op.abort()) {
             log::warn!("In prune: KeyMint::abort failed with {:?}.", e);
         }
 
@@ -374,7 +374,7 @@ impl Operation {
 
         self.update_outcome(&mut outcome, {
             let _wp = wd::watch("Operation::update_aad: calling IKeyMintOperation::updateAad");
-            map_binder_status(self.km_op.updateAad(aad_input, hat.as_ref(), tst.as_ref()))
+            map_km_error(self.km_op.updateAad(aad_input, hat.as_ref(), tst.as_ref()))
         })
         .context(err!("Update failed."))?;
 
@@ -398,7 +398,7 @@ impl Operation {
         let output = self
             .update_outcome(&mut outcome, {
                 let _wp = wd::watch("Operation::update: calling IKeyMintOperation::update");
-                map_binder_status(self.km_op.update(input, hat.as_ref(), tst.as_ref()))
+                map_km_error(self.km_op.update(input, hat.as_ref(), tst.as_ref()))
             })
             .context(err!("Update failed."))?;
 
@@ -428,7 +428,7 @@ impl Operation {
         let output = self
             .update_outcome(&mut outcome, {
                 let _wp = wd::watch("Operation::finish: calling IKeyMintOperation::finish");
-                map_binder_status(self.km_op.finish(
+                map_km_error(self.km_op.finish(
                     input,
                     signature,
                     hat.as_ref(),
@@ -463,7 +463,7 @@ impl Operation {
 
         {
             let _wp = wd::watch("Operation::abort: calling IKeyMintOperation::abort");
-            map_binder_status(self.km_op.abort()).context(err!("KeyMint::abort failed."))
+            map_km_error(self.km_op.abort()).context(err!("KeyMint::abort failed."))
         }
     }
 }

@@ -36,7 +36,7 @@ use crate::{
             KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType, SubComponentType,
             Uuid,
         },
-        error::{into_logged_binder, map_binder_status, KsError},
+        error::{into_logged_binder, map_km_error, KsError},
         id_rotation::IdRotationState,
         keymint_device::KeyMintWrapper,
         metrics_store::log_key_creation_event_stats,
@@ -695,7 +695,7 @@ impl KeystoreSecurityLevel {
                         let result = self
                             .get_keymint_wrapper()
                             .generateKey(&params, attest_key.as_ref());
-                        map_binder_status(result)
+                        map_km_error(result)
                     },
                 )
                 .context(err!(
@@ -712,7 +712,7 @@ impl KeystoreSecurityLevel {
                     ),
                     5000, // Generate can take a little longer.
                 );
-                self.get_keymint_wrapper().generateKey(&params, None)
+                map_km_error(self.get_keymint_wrapper().generateKey(&params, None))
             }
             .context(err!(
                 "While generating without a provided \
@@ -781,7 +781,7 @@ impl KeystoreSecurityLevel {
             .context(err!())?;
 
         let km_dev = self.get_keymint_wrapper();
-        let creation_result = map_binder_status({
+        let creation_result = map_km_error({
             let _wp =
                 self.watch("KeystoreSecurityLevel::import_key: calling IKeyMintDevice::importKey.");
             km_dev.importKey(&params, format, key_data, None /* attestKey */)
@@ -931,7 +931,7 @@ impl KeystoreSecurityLevel {
                         "KeystoreSecurityLevel::import_wrapped_key: calling IKeyMintDevice::importWrappedKey.",
                     );
                     let km_dev = self.get_keymint_wrapper();
-                    let creation_result = map_binder_status(km_dev.importWrappedKey(
+                    let creation_result = map_km_error(km_dev.importWrappedKey(
                         wrapped_data,
                         wrapping_blob,
                         masking_key,
@@ -978,7 +978,7 @@ impl KeystoreSecurityLevel {
                 "IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: ",
                 "calling IKeyMintDevice::convertStorageKeyToEphemeral (1)"
             ));
-            map_binder_status(km_dev.convertStorageKeyToEphemeral(key_blob))
+            map_km_error(km_dev.convertStorageKeyToEphemeral(key_blob))
         };
         match res {
             Ok(result) => Ok(EphemeralStorageKeyResponse {
@@ -988,7 +988,7 @@ impl KeystoreSecurityLevel {
             Err(KsError::Km(ErrorCode::KEY_REQUIRES_UPGRADE)) => {
                 let upgraded_blob = {
                     let _wp = self.watch("IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: calling IKeyMintDevice::upgradeKey");
-                    map_binder_status(km_dev.upgradeKey(key_blob, &[]))
+                    map_km_error(km_dev.upgradeKey(key_blob, &[]))
                 }
                 .context(err!("Failed to upgrade key blob."))?;
                 let ephemeral_key = {
@@ -996,7 +996,7 @@ impl KeystoreSecurityLevel {
                         "IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: ",
                         "calling IKeyMintDevice::convertStorageKeyToEphemeral (2)"
                     ));
-                    map_binder_status(km_dev.convertStorageKeyToEphemeral(&upgraded_blob))
+                    map_km_error(km_dev.convertStorageKeyToEphemeral(&upgraded_blob))
                 }
                 .context(err!("Failed to retrieve ephemeral key (after upgrade)."))?;
                 Ok(EphemeralStorageKeyResponse {
@@ -1150,7 +1150,7 @@ impl KeystoreSecurityLevel {
                 blob_metadata.km_uuid().copied(),
                 operation_parameters,
                 |blob| loop {
-                    match map_binder_status({
+                    match map_km_error({
                         let _wp = self.watch(
                             "KeystoreSecurityLevel::create_operation: calling IKeyMintDevice::begin",
                         );
@@ -1255,7 +1255,7 @@ impl KeystoreSecurityLevel {
         {
             let _wp =
                 self.watch("KeystoreSecuritylevel::delete_key: calling IKeyMintDevice::deleteKey");
-            map_binder_status(km_dev.deleteKey(key_blob)).context(err!("keymint device deleteKey"))
+            map_km_error(km_dev.deleteKey(key_blob)).context(err!("keymint device deleteKey"))
         }
     }
 }
