@@ -572,7 +572,7 @@ impl BlindProbe {
         let inspection = generated
             .as_ref()
             .map_err(|status| anyhow!("generateKey failed: {}", describe_status(status)))
-            .and_then(|metadata| collect_chain_der(metadata))
+            .and_then(collect_chain_der)
             .and_then(|generated_chain| {
                 let fetched_chain = fetched
                     .as_ref()
@@ -1138,7 +1138,7 @@ impl BlindProbe {
                     .map(|_| self.create_sign_operation(&entry.metadata.key, true));
                 let compat_label = compat
                     .as_ref()
-                    .map(|result| result_label(result))
+                    .map(result_label)
                     .unwrap_or_else(|| "skipped".to_string());
                 let succeeded = minimal
                     .as_ref()
@@ -3306,8 +3306,12 @@ mod tests {
     #[test]
     fn der_sanity_rejects_missing_attestation_extension() {
         let leaf = self_signed_cert_der("No Attestation");
-        let error = inspect_der_attestation_sanity(&[leaf.clone()], Some(&[leaf]), b"challenge")
-            .unwrap_err();
+        let error = inspect_der_attestation_sanity(
+            std::slice::from_ref(&leaf),
+            Some(std::slice::from_ref(&leaf)),
+            b"challenge",
+        )
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("failed to extract attestation challenge"));
@@ -3316,9 +3320,12 @@ mod tests {
     #[test]
     fn der_sanity_reports_challenge_mismatch_without_pinning_issuer() {
         let leaf = build_leaf_with_attestation_extension(b"actual-challenge");
-        let inspection =
-            inspect_der_attestation_sanity(&[leaf.clone()], Some(&[leaf]), b"expected-challenge")
-                .unwrap();
+        let inspection = inspect_der_attestation_sanity(
+            std::slice::from_ref(&leaf),
+            Some(std::slice::from_ref(&leaf)),
+            b"expected-challenge",
+        )
+        .unwrap();
         assert!(!inspection.ok);
         assert!(inspection.detail.contains("attestationExtension=true"));
         assert!(inspection.detail.contains("challengeMatches=false"));
@@ -3327,9 +3334,12 @@ mod tests {
     #[test]
     fn der_sanity_accepts_matching_attestation_extension_and_chain_split() {
         let leaf = build_leaf_with_attestation_extension(b"expected-challenge");
-        let inspection =
-            inspect_der_attestation_sanity(&[leaf.clone()], Some(&[leaf]), b"expected-challenge")
-                .unwrap();
+        let inspection = inspect_der_attestation_sanity(
+            std::slice::from_ref(&leaf),
+            Some(std::slice::from_ref(&leaf)),
+            b"expected-challenge",
+        )
+        .unwrap();
         assert!(inspection.ok);
         assert!(inspection.detail.contains("fetchedMatches=true"));
     }

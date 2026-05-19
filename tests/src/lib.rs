@@ -614,8 +614,9 @@ pub fn test_signing_cert_parse<T: kmr_ta::device::RetrieveCertSigningInfo>(
         for algo_hint in [SigningAlgorithm::Ec, SigningAlgorithm::Rsa] {
             let info = SigningKeyType { which, algo_hint };
             let chain = certs
-                .cert_chain(info)
-                .unwrap_or_else(|_| panic!("failed to retrieve chain for {:?}", info));
+                .signing_info(info)
+                .unwrap_or_else(|_| panic!("failed to retrieve chain for {:?}", info))
+                .cert_chain;
 
             // Check that the attestation chain looks basically valid (parses as DER,
             // has subject/issuer match).

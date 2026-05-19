@@ -161,7 +161,7 @@ impl WatchdogState {
         // thread hangs, the others will soon follow suite. Thus the oldest "thread recent" watch
         // point is most likely pointing toward the culprit.
         // Thus, sort by start time first.
-        overdue_records.sort_unstable_by(|(_, r1), (_, r2)| r1.started.cmp(&r2.started));
+        overdue_records.sort_unstable_by_key(|(_, r)| r.started);
         // Then we groups all of the watch points per thread preserving the order within
         // groups.
         let groups = overdue_records.iter().fold(

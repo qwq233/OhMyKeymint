@@ -65,8 +65,8 @@ impl CallerIdentity {
 
     pub fn from_calling_context(context: &CallingContext) -> Self {
         Self {
-            uid: context.uid as u32,
-            pid: context.pid as i32,
+            uid: context.uid,
+            pid: context.pid,
             sid: context
                 .sid
                 .as_ref()
@@ -460,17 +460,16 @@ impl AospKeystoreService for KeystoreServiceBinder {
                 Err(error) => {
                     return self.fallback_to_system(ServiceMethod::Grant, error, || {
                         self.call_system(|backend| backend.r#grant(key, grantee_uid, access_vector))
-                            .map(|granted| {
+                            .inspect(|granted| {
                                 tracker::remember_key_descriptor_route(
-                                    &granted,
+                                    granted,
                                     RouteTarget::System,
                                 );
                                 tracker::remember_grant_descriptor_for_ungrant(
                                     key,
                                     grantee_uid,
-                                    &granted,
+                                    granted,
                                 );
-                                granted
                             })
                     });
                 }
@@ -478,10 +477,9 @@ impl AospKeystoreService for KeystoreServiceBinder {
         }
 
         self.call_system(|backend| backend.r#grant(key, grantee_uid, access_vector))
-            .map(|granted| {
-                tracker::remember_key_descriptor_route(&granted, RouteTarget::System);
-                tracker::remember_grant_descriptor_for_ungrant(key, grantee_uid, &granted);
-                granted
+            .inspect(|granted| {
+                tracker::remember_key_descriptor_route(granted, RouteTarget::System);
+                tracker::remember_grant_descriptor_for_ungrant(key, grantee_uid, granted);
             })
     }
 
@@ -709,9 +707,8 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
                         self.call_system(|backend| {
                             backend.r#generateKey(key, attestation_key, params, flags, entropy)
                         })
-                        .map(|metadata| {
-                            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
-                            metadata
+                        .inspect(|metadata| {
+                            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
                         })
                     });
                 }
@@ -721,9 +718,8 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
         self.call_system(|backend| {
             backend.r#generateKey(key, attestation_key, params, flags, entropy)
         })
-        .map(|metadata| {
-            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
-            metadata
+        .inspect(|metadata| {
+            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
         })
     }
 
@@ -748,9 +744,8 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
                         self.call_system(|backend| {
                             backend.r#importKey(key, attestation_key, params, flags, key_data)
                         })
-                        .map(|metadata| {
-                            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
-                            metadata
+                        .inspect(|metadata| {
+                            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
                         })
                     });
                 }
@@ -760,9 +755,8 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
         self.call_system(|backend| {
             backend.r#importKey(key, attestation_key, params, flags, key_data)
         })
-        .map(|metadata| {
-            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
-            metadata
+        .inspect(|metadata| {
+            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
         })
     }
 
@@ -800,9 +794,8 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
                                 authenticators,
                             )
                         })
-                        .map(|metadata| {
-                            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
-                            metadata
+                        .inspect(|metadata| {
+                            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
                         })
                     });
                 }
@@ -812,9 +805,8 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
         self.call_system(|backend| {
             backend.r#importWrappedKey(key, wrapping_key, masking_key, params, authenticators)
         })
-        .map(|metadata| {
-            tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
-            metadata
+        .inspect(|metadata| {
+            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
         })
     }
 
@@ -1437,7 +1429,7 @@ mod tests {
 
     fn sample_key_metadata(key: KeyDescriptor, level: SecurityLevel) -> KeyMetadata {
         KeyMetadata {
-            r#key: key,
+            key,
             r#keySecurityLevel: level,
             r#authorizations: Vec::new(),
             r#certificate: None,
@@ -1938,8 +1930,8 @@ mod tests {
         let context = CallingContext::default();
         let caller = current_calling_identity();
 
-        assert_eq!(caller.uid, context.uid as u32);
-        assert_eq!(caller.pid, context.pid as i32);
+        assert_eq!(caller.uid, context.uid);
+        assert_eq!(caller.pid, context.pid);
         assert_eq!(
             caller.sid,
             context

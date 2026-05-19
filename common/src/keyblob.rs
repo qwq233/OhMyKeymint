@@ -289,8 +289,8 @@ pub struct RootOfTrustInfo {
 /// Derive a key encryption key used for key blob encryption. The key is an AES-256 key derived
 /// from `root_key` using HKDF (RFC 5869) with HMAC-SHA256:
 /// - input keying material = a root key held in hardware. If it contains explicit key material,
-///                           perform full HKDF. If the root key is an opaque one, we assume that
-///                           the key is able to be directly used on the HKDF expand step.
+///   perform full HKDF. If the root key is an opaque one, we assume that the key is able to be
+///   directly used on the HKDF expand step.
 /// - salt = absent
 /// - info = the following three or four chunks of context data concatenated:
 ///    - content of `key_derivation_input` (which is random data)

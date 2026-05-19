@@ -84,6 +84,22 @@ use crate::{
     utils::get_current_time_in_milliseconds,
 };
 
+type BlobComponents = (
+    bool,
+    Option<(Vec<u8>, BlobMetaData)>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
+
+pub struct StoreNewKeyParams<'a> {
+    pub key_type: KeyType,
+    pub params: &'a [KeyParameter],
+    pub blob_info: &'a BlobInfo<'a>,
+    pub cert_info: &'a CertificateInfo,
+    pub metadata: &'a KeyMetaData,
+    pub km_uuid: &'a Uuid,
+}
+
 /// This trait is private to the database module. It is used to convey whether or not the garbage
 /// collector shall be invoked after a database access. All closures passed to
 /// `KeystoreDB::with_transaction` return a tuple (bool, T) where the bool indicates if the
@@ -583,13 +599,13 @@ impl KeymasterDb {
     /// to perform access control. The strategy depends on the `domain` field in the
     /// key descriptor.
     /// * Domain::SELINUX: The access tuple is complete and this function only loads
-    ///       the key_id for further processing.
+    ///   the key_id for further processing.
     /// * Domain::APP: Like Domain::SELINUX, but the tuple is completed by `caller_uid`
-    ///       which serves as the namespace.
+    ///   which serves as the namespace.
     /// * Domain::GRANT: The grant table is queried for the `key_id` and the
-    ///       `access_vector`.
+    ///   `access_vector`.
     /// * Domain::KEY_ID: The keyentry table is queried for the owning `domain` and
-    ///       `namespace`.
+    ///   `namespace`.
     ///
     /// In each case the information returned is sufficient to perform the access
     /// check and the key id can be used to load further key artifacts.
@@ -828,12 +844,7 @@ impl KeymasterDb {
         key_id: i64,
         load_bits: KeyEntryLoadBits,
         tx: &Transaction,
-    ) -> Result<(
-        bool,
-        Option<(Vec<u8>, BlobMetaData)>,
-        Option<Vec<u8>>,
-        Option<Vec<u8>>,
-    )> {
+    ) -> Result<BlobComponents> {
         let mut stmt = tx
             .prepare(
                 "SELECT MAX(id), subcomponent_type, blob FROM persistent.blobentry
@@ -1204,14 +1215,17 @@ impl KeymasterDb {
     pub fn store_new_key(
         &mut self,
         key: &KeyDescriptor,
-        key_type: KeyType,
-        params: &[KeyParameter],
-        blob_info: &BlobInfo,
-        cert_info: &CertificateInfo,
-        metadata: &KeyMetaData,
-        km_uuid: &Uuid,
+        store_params: StoreNewKeyParams<'_>,
     ) -> Result<KeyIdGuard> {
         let _wp = wd::watch("KeystoreDB::store_new_key");
+        let StoreNewKeyParams {
+            key_type,
+            params,
+            blob_info,
+            cert_info,
+            metadata,
+            km_uuid,
+        } = store_params;
 
         let (alias, domain, namespace) = match key {
             KeyDescriptor {

@@ -52,8 +52,8 @@ fn run() -> Result<()> {
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<LaunchOptions> {
     let mut options = LaunchOptions::default();
 
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
+    let args = args.into_iter();
+    for arg in args {
         match arg.as_str() {
             "--json" => options.json = true,
             "--quick" => options.quick = true,

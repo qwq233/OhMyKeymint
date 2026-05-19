@@ -280,6 +280,12 @@ impl KeyBox {
     }
 }
 
+impl Default for KeyBox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ParsedKeyEntry {
     fn from_xml_block(block: &str) -> Result<Self> {
         let private_key_pem = PRIVATE_KEY_RE

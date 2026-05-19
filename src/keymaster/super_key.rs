@@ -233,11 +233,13 @@ impl LockedKey {
         let key = ZVec::try_from(km_dev.use_key_in_one_step(
             db,
             key_id_guard,
-            &key_blob,
-            KeyPurpose::DECRYPT,
-            &key_params,
-            Some(auth_token),
-            &self.ciphertext,
+            crate::keymaster::keymint_device::OneStepKeyOperation {
+                key_blob: &key_blob,
+                purpose: KeyPurpose::DECRYPT,
+                parameters: &key_params,
+                auth_token: Some(auth_token),
+                input: &self.ciphertext,
+            },
         )?)?;
         Ok(Arc::new(SuperKey {
             algorithm: self.algorithm,

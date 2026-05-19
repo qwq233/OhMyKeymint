@@ -99,9 +99,11 @@ fn get_apex() -> anyhow::Result<rsbinder::Strong<dyn IApexService>> {
 pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
     debug!("Getting AAID for UID: {}", uid);
     let application_id = if (uid == 0) || (uid == 1000) {
-        let mut info = KeyAttestationPackageInfo::default();
-        info.packageName = "AndroidSystem".to_string();
-        info.versionCode = 1;
+        let info = KeyAttestationPackageInfo {
+            packageName: "AndroidSystem".to_string(),
+            versionCode: 1,
+            ..Default::default()
+        };
         KeyAttestationApplicationId {
             packageInfos: vec![info],
         }

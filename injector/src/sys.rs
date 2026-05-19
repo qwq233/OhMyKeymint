@@ -352,8 +352,8 @@ pub fn setup_remote_call(
         let mut sp = regs.sp as usize;
 
         // set up arguments in registers
-        for i in 0..args.len().min(ARG_REG_COUNT) {
-            regs.regs[i] = args[i] as u64;
+        for (i, arg) in args.iter().enumerate().take(ARG_REG_COUNT) {
+            regs.regs[i] = *arg as u64;
         }
         // jump to stack for additional arguments
         if args.len() > ARG_REG_COUNT {

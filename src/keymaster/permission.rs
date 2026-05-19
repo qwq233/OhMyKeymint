@@ -531,8 +531,8 @@ impl CallerCtx {
 
         let calling = CallingContext::default();
         Self {
-            uid: calling.uid as u32,
-            pid: calling.pid as i32,
+            uid: calling.uid,
+            pid: calling.pid,
             sid: calling.sid,
         }
     }

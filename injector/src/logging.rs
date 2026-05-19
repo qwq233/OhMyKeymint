@@ -37,11 +37,7 @@ impl LockedFileAppender {
             fs::create_dir_all(parent)?;
         }
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .write(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         Ok(Self {
             path,

@@ -33,8 +33,8 @@ use crate::{
         attestation_key_utils::{get_attest_key_info, AttestationKeyInfo},
         db::{
             BlobInfo, BlobMetaData, BlobMetaEntry, CertificateInfo, DateTime, KeyEntry,
-            KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType, SubComponentType,
-            Uuid,
+            KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType, StoreNewKeyParams,
+            SubComponentType, Uuid,
         },
         error::{into_logged_binder, map_km_error, KsError},
         id_rotation::IdRotationState,
@@ -96,6 +96,16 @@ pub struct KeystoreSecurityLevel {
     km_uuid: RwLock<Uuid>,
     operation_db: OperationDb,
     id_rotation_state: IdRotationState,
+}
+
+struct NewKeyDescriptorParams<'a> {
+    key: &'a KeyDescriptor,
+    key_blob: &'a [u8],
+    key_parameters: &'a [KsKeyParam],
+    flags: Option<i32>,
+    user_id: u32,
+    cert_info: &'a CertificateInfo,
+    creation_date: DateTime,
 }
 
 struct AospSecurityLevelWrapper {
@@ -510,15 +520,15 @@ impl KeystoreSecurityLevel {
                 blob: Some(key_blob.to_vec()),
                 ..Default::default()
             },
-            _ => match self.store_new_key_descriptor(
-                &key,
-                &key_blob,
-                &key_parameters,
+            _ => match self.store_new_key_descriptor(NewKeyDescriptorParams {
+                key: &key,
+                key_blob: &key_blob,
+                key_parameters: &key_parameters,
                 flags,
                 user_id,
-                &cert_info,
+                cert_info: &cert_info,
                 creation_date,
-            ) {
+            }) {
                 Ok(descriptor) => descriptor,
                 Err(error)
                     if should_retry_without_lskf_binding(
@@ -533,18 +543,18 @@ impl KeystoreSecurityLevel {
                         "User {user_id} CE storage is available, but OMK has no unlocked user super key; \
                          retrying auth-bound key storage without cryptographic LSKF binding"
                     );
-                    self.store_new_key_descriptor(
-                        &key,
-                        &key_blob,
-                        &key_parameters,
-                        Some(
+                    self.store_new_key_descriptor(NewKeyDescriptorParams {
+                        key: &key,
+                        key_blob: &key_blob,
+                        key_parameters: &key_parameters,
+                        flags: Some(
                             flags.unwrap_or_default()
                                 | KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING,
                         ),
                         user_id,
-                        &cert_info,
+                        cert_info: &cert_info,
                         creation_date,
-                    )
+                    })
                     .context(err!("retrying key storage without LSKF binding"))?
                 }
                 Err(error) => return Err(error).context(err!()),
@@ -563,14 +573,18 @@ impl KeystoreSecurityLevel {
 
     fn store_new_key_descriptor(
         &self,
-        key: &KeyDescriptor,
-        key_blob: &[u8],
-        key_parameters: &[KsKeyParam],
-        flags: Option<i32>,
-        user_id: u32,
-        cert_info: &CertificateInfo,
-        creation_date: DateTime,
+        params: NewKeyDescriptorParams<'_>,
     ) -> Result<KeyDescriptor> {
+        let NewKeyDescriptorParams {
+            key,
+            key_blob,
+            key_parameters,
+            flags,
+            user_id,
+            cert_info,
+            creation_date,
+        } = params;
+
         DB.with::<_, Result<KeyDescriptor>>(|db| {
             let mut db = db.borrow_mut();
 
@@ -595,12 +609,14 @@ impl KeystoreSecurityLevel {
             let key_id = db
                 .store_new_key(
                     key,
-                    KeyType::Client,
-                    key_parameters,
-                    &BlobInfo::new(&key_blob, &blob_metadata),
-                    cert_info,
-                    &key_metadata,
-                    &km_uuid,
+                    StoreNewKeyParams {
+                        key_type: KeyType::Client,
+                        params: key_parameters,
+                        blob_info: &BlobInfo::new(&key_blob, &blob_metadata),
+                        cert_info,
+                        metadata: &key_metadata,
+                        km_uuid: &km_uuid,
+                    },
                 )
                 .context(err!())?;
             Ok(KeyDescriptor {
@@ -1408,9 +1424,11 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         log_key_creation_event_stats(self.security_level, params, &result);
         debug!(
             "importKey: calling uid: {}, result: {:?}",
-            ctx.is_some()
-                .then(|| ctx.unwrap().callingUid)
-                .unwrap_or(CallingContext::default().uid.into()),
+            if let Some(ctx) = ctx {
+                ctx.callingUid
+            } else {
+                CallingContext::default().uid.into()
+            },
             result
         );
         result.map_err(into_logged_binder)
@@ -1432,9 +1450,11 @@ impl IOhMySecurityLevel for KeystoreSecurityLevel {
         log_key_creation_event_stats(self.security_level, params, &result);
         debug!(
             "importWrappedKey: calling uid: {}, result: {:?}",
-            ctx.is_some()
-                .then(|| ctx.unwrap().callingUid)
-                .unwrap_or(CallingContext::default().uid.into()),
+            if let Some(ctx) = ctx {
+                ctx.callingUid
+            } else {
+                CallingContext::default().uid.into()
+            },
             result
         );
         result.map_err(into_logged_binder)

@@ -74,16 +74,18 @@
 //!
 //! These macros usually have four rules:
 //!  * Two main recursive rules, of the form:
-//!    (
-//!        @<marker>
-//!        <non repeating args>,
-//!        [<out list>],
-//!        [<one element pattern> <in tail>]
-//!    ) => {
-//!        macro!{@<marker> <non repeating args>, [<out list>
-//!            <one element expansion>
-//!        ], [<in tail>]}
-//!    };
+//! ```text
+//! (
+//!     @<marker>
+//!     <non repeating args>,
+//!     [<out list>],
+//!     [<one element pattern> <in tail>]
+//! ) => {
+//!     macro!{@<marker> <non repeating args>, [<out list>
+//!         <one element expansion>
+//!     ], [<in tail>]}
+//! };
+//! ```
 //!    They pop one element off the <in list> and add one expansion to the out list.
 //!    The element expansion is kept on a separate line (or lines) for better readability.
 //!    The two variants differ in whether or not $vtype is expected.
@@ -780,22 +782,6 @@ macro_rules! implement_key_parameter_value {
             implement_new_from_sql!($enum_name; $($vname$(($vtype))? $tag_name),*);
             implement_get_tag!($enum_name; $($vname$(($vtype))? $tag_name),*);
             implement_from_tag_primitive_pair!($enum_name; $($vname$(($vtype))? $tag_name),*);
-
-            #[cfg(test)]
-            fn make_field_matches_tag_type_test_vector() -> Vec<KmKeyParameter> {
-                vec![$(KmKeyParameter{
-                    tag: Tag::$tag_name,
-                    value: KmKeyParameterValue::$field_name(Default::default())}
-                ),*]
-            }
-
-            #[cfg(test)]
-            fn make_key_parameter_defaults_vector() -> Vec<KeyParameter> {
-                vec![$(KeyParameter{
-                    value: KeyParameterValue::$vname$((<$vtype as Default>::default()))?,
-                    security_level: SecurityLevel(100),
-                }),*]
-            }
         }
 
         implement_try_from_to_km_parameter!(

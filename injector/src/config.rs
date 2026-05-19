@@ -485,11 +485,7 @@ fn rewrite_scoop_header(line: &str, line_no: usize) -> Result<String, String> {
         .ok_or_else(|| format!("line {line_no}: invalid scoop header"))?;
     let package = decode_scoop_package_header(package_fragment.trim(), line_no)?;
 
-    Ok(format!(
-        "{leading}[scoop_details.{}]{}",
-        format!("{package:?}"),
-        trailer
-    ))
+    Ok(format!("{leading}[scoop_details.{package:?}]{trailer}"))
 }
 
 fn decode_scoop_package_header(fragment: &str, line_no: usize) -> Result<String, String> {
@@ -574,7 +570,6 @@ fn watch_loop(path: PathBuf) {
             );
             watch_loop_polling(path);
         }
-        return;
     }
 
     #[cfg(not(target_os = "android"))]
@@ -956,8 +951,10 @@ allow_packages = ["com.legacy.app"]
 
     #[test]
     fn rendered_config_uses_new_scoop_format() {
-        let mut config = InjectorConfig::default();
-        config.scoop = vec!["com.example.app".to_string()];
+        let mut config = InjectorConfig {
+            scoop: vec!["com.example.app".to_string()],
+            ..Default::default()
+        };
         let mut table = toml::Table::new();
         table.insert("enabled".to_string(), toml::Value::Boolean(true));
         config

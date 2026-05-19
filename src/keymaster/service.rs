@@ -539,7 +539,7 @@ impl KeystoreService {
         match tag {
             Tag::MODULE_HASH => crate::global::module_info_bundle()
                 .map(|bundle| bundle.encoded_der.clone())
-                .ok_or_else(|| Error::Rc(ResponseCode::INFO_NOT_AVAILABLE))
+                .ok_or(Error::Rc(ResponseCode::INFO_NOT_AVAILABLE))
                 .context(err!("MODULE_HASH supplementary info is unavailable")),
             _ => Err(Error::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!(
                 "Tag {tag:?} not supported for getSupplementaryAttestationInfo."
@@ -797,9 +797,11 @@ impl IOhMyKsService for KeystoreService {
         debug!(
             "deleteKey: key={:?}, uid={}",
             key,
-            ctx.is_some()
-                .then(|| ctx.unwrap().callingUid)
-                .unwrap_or(CallingContext::default().uid.into())
+            if let Some(ctx) = ctx {
+                ctx.callingUid
+            } else {
+                CallingContext::default().uid.into()
+            }
         );
         result.map_err(into_logged_binder)
     }

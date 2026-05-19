@@ -632,17 +632,12 @@ impl Default for RawTrustConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TrustValueSpec {
+    #[default]
     Auto,
     Random,
     Hex([u8; 32]),
-}
-
-impl Default for TrustValueSpec {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl Serialize for TrustValueSpec {
@@ -816,8 +811,10 @@ mod tests {
 
     #[test]
     fn trust_record_original_security_patch_is_not_empty() {
-        let mut record = TrustRecord::default();
-        record.original_security_patch = Some("2025-12-01".to_string());
+        let record = TrustRecord {
+            original_security_patch: Some("2025-12-01".to_string()),
+            ..Default::default()
+        };
         assert!(!record.is_empty());
     }
 

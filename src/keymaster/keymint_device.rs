@@ -41,7 +41,7 @@ use crate::{
         db::{
             BlobInfo, BlobMetaData, BlobMetaEntry, CertificateInfo, DateTime, KeyEntry,
             KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType,
-            KeymasterDb as KeystoreDB, SubComponentType,
+            KeymasterDb as KeystoreDB, StoreNewKeyParams, SubComponentType,
         },
         error::KsError as Error,
         super_key::KeyBlob,
@@ -171,12 +171,14 @@ impl KeyMintDevice {
 
         db.store_new_key(
             key_desc,
-            key_type,
-            &key_parameters,
-            &BlobInfo::new(&creation_result.keyBlob, &blob_metadata),
-            &CertificateInfo::new(None, None),
-            &key_metadata,
-            &self.km_uuid.read().unwrap(),
+            StoreNewKeyParams {
+                key_type,
+                params: &key_parameters,
+                blob_info: &BlobInfo::new(&creation_result.keyBlob, &blob_metadata),
+                cert_info: &CertificateInfo::new(None, None),
+                metadata: &key_metadata,
+                km_uuid: &self.km_uuid.read().unwrap(),
+            },
         )
         .context(err!("store_new_key failed"))?;
         Ok(())
@@ -340,13 +342,9 @@ impl KeyMintDevice {
         &self,
         db: &mut KeystoreDB,
         key_id_guard: &KeyIdGuard,
-        key_blob: &[u8],
-        purpose: KeyPurpose,
-        operation_parameters: &[KeyParameter],
-        auth_token: Option<&HardwareAuthToken>,
-        input: &[u8],
+        one_step: OneStepKeyOperation<'_>,
     ) -> Result<Vec<u8>> {
-        let key_blob = KeyBlob::Ref(key_blob);
+        let key_blob = KeyBlob::Ref(one_step.key_blob);
 
         let (begin_result, _) = self
             .upgrade_keyblob_if_required_with(db, key_id_guard, key_blob, |blob| {
@@ -355,9 +353,12 @@ impl KeyMintDevice {
                 let result: std::result::Result<
                     crate::android::hardware::security::keymint::BeginResult::BeginResult,
                     Status,
-                > = self
-                    .km_dev
-                    .begin(purpose, blob, operation_parameters, auth_token);
+                > = self.km_dev.begin(
+                    one_step.purpose,
+                    blob,
+                    one_step.parameters,
+                    one_step.auth_token,
+                );
                 map_km_error(result)
             })
             .context(err!("Failed to begin operation."))?;
@@ -366,9 +367,17 @@ impl KeyMintDevice {
             .ok_or_else(Error::sys)
             .context(err!("Operation missing"))?;
         let _wp = wd::watch("KeyMintDevice::use_key_in_one_step: calling IKeyMintDevice::finish");
-        map_km_error(operation.finish(Some(input), None, None, None, None))
+        map_km_error(operation.finish(Some(one_step.input), None, None, None, None))
             .context(err!("Failed to finish operation."))
     }
+}
+
+pub struct OneStepKeyOperation<'a> {
+    pub key_blob: &'a [u8],
+    pub purpose: KeyPurpose,
+    pub parameters: &'a [KeyParameter],
+    pub auth_token: Option<&'a HardwareAuthToken>,
+    pub input: &'a [u8],
 }
 static KM_WRAPPER_STRONGBOX: OnceLock<Arc<KeyMintWrapperInner>> = OnceLock::new();
 
@@ -1145,7 +1154,7 @@ struct ResolvedHardwareProfile {
 
 fn resolve_hardware_profile(security_level: SecurityLevel) -> ResolvedHardwareProfile {
     let version_number = probe_keymint_version_from_vintf(security_level)
-        .unwrap_or_else(|| fallback_keymint_version_from_android());
+        .unwrap_or_else(fallback_keymint_version_from_android);
     let line = version_number / 100;
     let sec_label = match security_level {
         SecurityLevel::TRUSTED_ENVIRONMENT => "TEE",

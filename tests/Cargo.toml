@@ -8,6 +8,9 @@ authors = ["David Drysdale <drysdale@google.com>"]
 edition = "2021"
 license = "Apache-2.0"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(soong)'] }
+
 [dependencies]
 ciborium = { version = "0.2.2", default-features = false }
 env_logger = "0.11.10"

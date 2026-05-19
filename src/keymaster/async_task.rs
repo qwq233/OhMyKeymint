@@ -92,13 +92,16 @@ impl Shelf {
     }
 }
 
+type QueuedFn = Box<dyn FnOnce(&mut Shelf) + Send>;
+type IdleFn = Arc<dyn Fn(&mut Shelf) + Send + Sync>;
+
 struct AsyncTaskState {
     state: State,
     thread: Option<thread::JoinHandle<()>>,
     timeout: Duration,
-    hi_prio_req: VecDeque<Box<dyn FnOnce(&mut Shelf) + Send>>,
-    lo_prio_req: VecDeque<Box<dyn FnOnce(&mut Shelf) + Send>>,
-    idle_fns: Vec<Arc<dyn Fn(&mut Shelf) + Send + Sync>>,
+    hi_prio_req: VecDeque<QueuedFn>,
+    lo_prio_req: VecDeque<QueuedFn>,
+    idle_fns: Vec<IdleFn>,
     /// The store allows tasks to store state across invocations. It is passed to each invocation
     /// of each task. Tasks need to cooperate on the ids they use for storing state.
     shelf: Option<Shelf>,
@@ -202,8 +205,8 @@ impl AsyncTask {
             let (ref condvar, ref state) = *cloned_state;
 
             enum Action {
-                QueuedFn(Box<dyn FnOnce(&mut Shelf) + Send>),
-                IdleFns(Vec<Arc<dyn Fn(&mut Shelf) + Send + Sync>>),
+                QueuedFn(QueuedFn),
+                IdleFns(Vec<IdleFn>),
             }
             let mut done_idle = false;
 

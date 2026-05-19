@@ -446,10 +446,7 @@ macro_rules! check_attestation_id {
                     None => return Err(km_err!(CannotAttestIds,
                                                "no attestation IDs provisioned")),
                     Some(want)  => if val != want.as_slice() {
-                        let result = modify_tag_value!($params, $variant, want.to_vec());
-                        if result.is_err() {
-                            return Err(result.unwrap_err());
-                        }
+                        modify_tag_value!($params, $variant, want.to_vec())?;
                         log::info!("attestation ID mismatch for {}, reseting to {:?}", stringify!($variant), want);
                     }
                 }
@@ -1671,15 +1668,10 @@ mod tests {
             manufacturer: vec![],
             model: vec![],
         };
-        let authz_list = AuthorizationList::new(
-            &[],
-            &[KeyParam::AttestationIdSecondImei(vec![])],
-            Some(&attestation_ids),
-            None,
-            None,
-            &[],
-        )
-        .unwrap();
+        let keygen_params = [KeyParam::AttestationIdSecondImei(vec![])];
+        let authz_list =
+            AuthorizationList::new(&[], &keygen_params, Some(&attestation_ids), None, None, &[])
+                .unwrap();
 
         assert!(!authz_list
             .keygen_params

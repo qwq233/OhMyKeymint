@@ -3,7 +3,7 @@ use std::cell::Cell;
 use log::debug;
 
 thread_local! {
-    static BYPASS_HOOK_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static BYPASS_HOOK_DEPTH: Cell<u32> = Cell::default();
 }
 
 pub fn is_bypassed() -> bool {

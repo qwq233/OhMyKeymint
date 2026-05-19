@@ -28,6 +28,12 @@ impl StdClock {
     }
 }
 
+impl Default for StdClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl crypto::MonotonicClock for StdClock {
     fn now(&self) -> crypto::MillisecondsSinceEpoch {
         let mut time = libc::timespec {

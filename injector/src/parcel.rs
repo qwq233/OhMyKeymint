@@ -304,6 +304,10 @@ impl ParsedOperationRequest {
     }
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder transaction parcel for the duration of this call.
 pub unsafe fn parse_authorization_request(
     data: *mut u8,
     data_size: usize,
@@ -364,6 +368,10 @@ pub unsafe fn parse_authorization_request(
     Ok(parsed)
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder transaction parcel for the duration of this call.
 pub unsafe fn peek_request_interface(
     data: *mut u8,
     data_size: usize,
@@ -374,6 +382,10 @@ pub unsafe fn peek_request_interface(
     read_request_interface(&mut parcel)
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder transaction parcel for the duration of this call.
 pub unsafe fn parse_maintenance_request(
     data: *mut u8,
     data_size: usize,
@@ -426,6 +438,10 @@ pub unsafe fn parse_maintenance_request(
     Ok(parsed)
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder transaction parcel for the duration of this call.
 pub unsafe fn parse_service_request(
     data: *mut u8,
     data_size: usize,
@@ -489,6 +505,10 @@ pub unsafe fn parse_service_request(
     Ok(parsed)
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder transaction parcel for the duration of this call.
 pub unsafe fn parse_security_level_request(
     data: *mut u8,
     data_size: usize,
@@ -545,6 +565,10 @@ pub unsafe fn parse_security_level_request(
     Ok(parsed)
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder transaction parcel for the duration of this call.
 pub unsafe fn parse_operation_request(
     data: *mut u8,
     data_size: usize,
@@ -578,6 +602,10 @@ pub unsafe fn parse_operation_request(
     Ok(parsed)
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder reply parcel for the duration of this call.
 pub unsafe fn parse_success_reply<T: Deserialize>(
     data: *mut u8,
     data_size: usize,
@@ -592,6 +620,10 @@ pub unsafe fn parse_success_reply<T: Deserialize>(
     parcel.read().context("failed to decode reply payload")
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder reply parcel for the duration of this call.
 pub unsafe fn parse_reply_status(
     data: *mut u8,
     data_size: usize,
@@ -617,6 +649,10 @@ pub fn parse_owned_success_reply<T: Deserialize>(reply: &mut OwnedReply) -> Resu
     }
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder reply parcel for the duration of this call.
 pub unsafe fn extract_direct_binder_reply_carrier(
     data: *mut u8,
     data_size: usize,
@@ -631,6 +667,10 @@ pub unsafe fn extract_direct_binder_reply_carrier(
     read_reply_binder_carrier(&mut parcel, data)
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder reply parcel for the duration of this call.
 pub unsafe fn extract_key_entry_reply_carrier(
     data: *mut u8,
     data_size: usize,
@@ -660,6 +700,10 @@ pub unsafe fn extract_key_entry_reply_carrier(
     carrier.ok_or_else(|| anyhow!("missing key-entry binder carrier"))
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder reply parcel for the duration of this call.
 pub unsafe fn parse_key_entry_reply_metadata(
     data: *mut u8,
     data_size: usize,
@@ -693,6 +737,10 @@ pub unsafe fn parse_key_entry_reply_metadata(
     metadata.ok_or_else(|| anyhow!("missing key-entry metadata payload"))
 }
 
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder reply parcel for the duration of this call.
 pub unsafe fn extract_create_operation_reply_carrier(
     data: *mut u8,
     data_size: usize,

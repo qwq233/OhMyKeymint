@@ -1123,7 +1123,7 @@ fn looks_like_trampoline(bytes: &[u8]) -> bool {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct MapEntry {
     start: usize,
     end: usize,
@@ -1148,22 +1148,6 @@ struct SmapsEntry {
     anonymous_kb: usize,
     swap_kb: usize,
     shared_dirty_kb: usize,
-}
-
-impl Default for MapEntry {
-    fn default() -> Self {
-        Self {
-            start: 0,
-            end: 0,
-            readable: false,
-            writable: false,
-            executable: false,
-            private_mapping: false,
-            offset: 0,
-            inode: 0,
-            path: None,
-        }
-    }
 }
 
 #[cfg(test)]

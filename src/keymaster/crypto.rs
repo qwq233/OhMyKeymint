@@ -5,6 +5,8 @@ use crate::err;
 
 pub struct ECDHPrivateKey(ECKey);
 
+pub type EncryptedMessage = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
 impl ECDHPrivateKey {
     /// Randomly generate a fresh keypair.
     pub fn generate() -> Result<ECDHPrivateKey> {
@@ -60,7 +62,7 @@ impl ECDHPrivateKey {
     pub fn encrypt_message(
         recipient_public_key: &[u8],
         message: &[u8],
-    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
+    ) -> Result<EncryptedMessage> {
         let sender_key = Self::generate().context(err!("generate failed"))?;
         let sender_public_key = sender_key.public_key().context(err!("public_key failed"))?;
         let salt = generate_salt().context(err!("generate_salt failed"))?;

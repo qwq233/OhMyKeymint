@@ -184,7 +184,7 @@ fn expect_blob_key(key: &KeyDescriptor, label: &str) -> Result<KeyDescriptor> {
     if key.domain != Domain::BLOB {
         return Err(anyhow!("{label} did not return a Domain::BLOB key"));
     }
-    if key.blob.as_ref().map_or(true, |blob| blob.is_empty()) {
+    if key.blob.as_ref().is_none_or(|blob| blob.is_empty()) {
         return Err(anyhow!("{label} returned an empty key blob"));
     }
     Ok(key.clone())

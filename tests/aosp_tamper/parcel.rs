@@ -199,7 +199,7 @@ fn service_specific_error_code_from_native_reply(
     expected_error_code: Option<i32>,
 ) -> Option<i32> {
     if let Some(expected) = expected_error_code {
-        if snapshot.trailing_ints.iter().any(|code| *code == expected) {
+        if snapshot.trailing_ints.contains(&expected) {
             return Some(expected);
         }
     }

@@ -32,6 +32,8 @@ use std::sync::{
     Arc, RwLock,
 };
 
+type InvalidateKey = Box<dyn Fn(&Uuid, &[u8]) -> Result<()> + Send + 'static>;
+
 pub struct Gc {
     async_task: Arc<AsyncTask>,
     notified: Arc<AtomicU8>,
@@ -46,12 +48,7 @@ impl Gc {
     /// Note: It is a logical error to initialize different Gc instances with the same `AsyncTask`.
     pub fn new_init_with<F>(async_task: Arc<AsyncTask>, init: F) -> Self
     where
-        F: FnOnce() -> (
-                Box<dyn Fn(&Uuid, &[u8]) -> Result<()> + Send + 'static>,
-                KeymasterDb,
-                Arc<RwLock<SuperKeyManager>>,
-            ) + Send
-            + 'static,
+        F: FnOnce() -> (InvalidateKey, KeymasterDb, Arc<RwLock<SuperKeyManager>>) + Send + 'static,
     {
         let weak_at = Arc::downgrade(&async_task);
         let notified = Arc::new(AtomicU8::new(0));
@@ -93,7 +90,7 @@ impl Gc {
 struct GcInternal {
     deleted_blob_ids: Vec<i64>,
     superseded_blobs: Vec<SupersededBlob>,
-    invalidate_key: Box<dyn Fn(&Uuid, &[u8]) -> Result<()> + Send + 'static>,
+    invalidate_key: InvalidateKey,
     db: KeymasterDb,
     async_task: std::sync::Weak<AsyncTask>,
     super_key: Arc<RwLock<SuperKeyManager>>,

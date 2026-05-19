@@ -74,7 +74,8 @@ fn main() {
         .replace("r#authenticatorType: super::Digest::Digest::NONE,", "r#authenticatorType: super::HardwareAuthenticatorType::HardwareAuthenticatorType::NONE,")
         .replace("r#authenticatorType: super::KeyPermission::KeyPermission::NONE,", "r#authenticatorType: super::HardwareAuthenticatorType::HardwareAuthenticatorType::NONE,")
         .replace("r#authenticatorType: super::PaddingMode::PaddingMode::NONE,", "r#authenticatorType: super::HardwareAuthenticatorType::HardwareAuthenticatorType::NONE,")
-        .replace("r#operation: rsbinder::Strong<dyn super::IKeyMintOperation::IKeyMintOperation>,", "r#operation: Option<rsbinder::Strong<dyn super::IKeyMintOperation::IKeyMintOperation>>,");
+        .replace("r#operation: rsbinder::Strong<dyn super::IKeyMintOperation::IKeyMintOperation>,", "r#operation: Option<rsbinder::Strong<dyn super::IKeyMintOperation::IKeyMintOperation>>,")
+        .replace("\npub mod top {", "\n#[allow(clippy::all)]\n#[allow(unused_imports)]\npub mod top {");
 
     println!("Patched AIDL content:\n{}", generated_path.display());
 

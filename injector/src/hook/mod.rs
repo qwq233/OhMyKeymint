@@ -11,6 +11,10 @@ mod rewrite;
 static OLD_IOCTL: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static HOOK_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
+/// # Safety
+///
+/// Called by the installed ioctl hook with the same ABI and pointer validity
+/// requirements as libc ioctl. `arg` must be valid for the request being made.
 pub unsafe extern "C" fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_void) -> c_int {
     intercept::new_ioctl(fd, request, arg)
 }

@@ -190,11 +190,13 @@ pub fn get_level_zero_key(db: &mut KeymasterDb) -> Result<ZVec> {
         .use_key_in_one_step(
             db,
             &key_id_guard,
-            &key_entry,
-            KeyPurpose::SIGN,
-            &params,
-            None,
-            b"Create boot level key",
+            crate::keymaster::keymint_device::OneStepKeyOperation {
+                key_blob: &key_entry,
+                purpose: KeyPurpose::SIGN,
+                parameters: &params,
+                auth_token: None,
+                input: b"Create boot level key",
+            },
         )
         .context(err!("use_key_in_one_step failed"))?;
     // TODO: this is rather unsatisfactory, we need a better way to handle

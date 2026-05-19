@@ -43,6 +43,13 @@ use std::{
     time::SystemTime,
 };
 
+type ConfirmationTokenReceiver = Arc<Mutex<Option<Receiver<Vec<u8>>>>>;
+type FinishAuthTokens = (
+    Option<HardwareAuthToken>,
+    Option<TimeStampToken>,
+    Option<Vec<u8>>,
+);
+
 #[derive(Debug)]
 enum AuthRequestState {
     /// An outstanding per operation authorization request.
@@ -140,7 +147,7 @@ pub struct AuthInfo {
     state: DeferredAuthState,
     /// An optional key id required to update the usage count if the key usage is limited.
     key_usage_limited: Option<i64>,
-    confirmation_token_receiver: Option<Arc<Mutex<Option<Receiver<Vec<u8>>>>>>,
+    confirmation_token_receiver: Option<ConfirmationTokenReceiver>,
 }
 
 struct TokenReceiverMap {
@@ -270,13 +277,7 @@ impl AuthInfo {
     /// This function is the authorization hook called before operation finish.
     /// It returns the auth tokens required by the operation to commence finish.
     /// The third token is a confirmation token.
-    pub fn before_finish(
-        &mut self,
-    ) -> Result<(
-        Option<HardwareAuthToken>,
-        Option<TimeStampToken>,
-        Option<Vec<u8>>,
-    )> {
+    pub fn before_finish(&mut self) -> Result<FinishAuthTokens> {
         let mut confirmation_token: Option<Vec<u8>> = None;
         if let Some(ref confirmation_token_receiver) = self.confirmation_token_receiver {
             let locked_receiver = confirmation_token_receiver.lock().unwrap();
@@ -371,7 +372,7 @@ pub struct Enforcements {
     op_auth_map: TokenReceiverMap,
     /// The enforcement module will try to get a confirmation token from this channel whenever
     /// an operation that requires confirmation finishes.
-    confirmation_token_receiver: Arc<Mutex<Option<Receiver<Vec<u8>>>>>,
+    confirmation_token_receiver: ConfirmationTokenReceiver,
 }
 
 impl Enforcements {
@@ -471,7 +472,7 @@ impl Enforcements {
         let mut key_time_out: Option<i64> = None;
         let mut unlocked_device_required = false;
         let mut key_usage_limited: Option<i64> = None;
-        let mut confirmation_token_receiver: Option<Arc<Mutex<Option<Receiver<Vec<u8>>>>>> = None;
+        let mut confirmation_token_receiver: Option<ConfirmationTokenReceiver> = None;
         let mut max_boot_level: Option<i32> = None;
 
         // iterate through key parameters, recording information we need for authorization
@@ -502,25 +503,23 @@ impl Enforcements {
                 KeyParameterValue::CallerNonce => {
                     caller_nonce_allowed = true;
                 }
-                KeyParameterValue::ActiveDateTime(a) => {
-                    if !Enforcements::is_given_time_passed(*a, true) {
-                        return Err(Error::Km(Ec::KEY_NOT_YET_VALID))
-                            .context(err!("key is not yet active."));
-                    }
+                KeyParameterValue::ActiveDateTime(a)
+                    if !Enforcements::is_given_time_passed(*a, true) =>
+                {
+                    return Err(Error::Km(Ec::KEY_NOT_YET_VALID))
+                        .context(err!("key is not yet active."));
                 }
-                KeyParameterValue::OriginationExpireDateTime(o) => {
+                KeyParameterValue::OriginationExpireDateTime(o)
                     if (purpose == KeyPurpose::ENCRYPT || purpose == KeyPurpose::SIGN)
-                        && Enforcements::is_given_time_passed(*o, false)
-                    {
-                        return Err(Error::Km(Ec::KEY_EXPIRED)).context(err!("key is expired."));
-                    }
+                        && Enforcements::is_given_time_passed(*o, false) =>
+                {
+                    return Err(Error::Km(Ec::KEY_EXPIRED)).context(err!("key is expired."));
                 }
-                KeyParameterValue::UsageExpireDateTime(u) => {
+                KeyParameterValue::UsageExpireDateTime(u)
                     if (purpose == KeyPurpose::DECRYPT || purpose == KeyPurpose::VERIFY)
-                        && Enforcements::is_given_time_passed(*u, false)
-                    {
-                        return Err(Error::Km(Ec::KEY_EXPIRED)).context(err!("key is expired."));
-                    }
+                        && Enforcements::is_given_time_passed(*u, false) =>
+                {
+                    return Err(Error::Km(Ec::KEY_EXPIRED)).context(err!("key is expired."));
                 }
                 KeyParameterValue::UserSecureID(s) => {
                     user_secure_ids.push(*s);

@@ -260,7 +260,7 @@ fn current_year_month() -> Result<(i32, u32)> {
         if libc::localtime_r(&now, &mut local).is_null() {
             bail!("libc::localtime_r failed");
         }
-        return Ok((local.tm_year + 1900, (local.tm_mon + 1) as u32));
+        Ok((local.tm_year + 1900, (local.tm_mon + 1) as u32))
     }
 
     #[cfg(not(unix))]

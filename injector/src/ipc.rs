@@ -18,16 +18,16 @@ const OMK_AUTHORIZATION_SERVICE: &str = "omk_authorization";
 const OMK_MAINTENANCE_SERVICE: &str = "omk_maintenance";
 
 thread_local! {
-    static OMK: RefCell<Option<Strong<dyn IOhMyKsService>>> = RefCell::new(None);
-    static OMK_AUTHORIZATION: RefCell<Option<Strong<dyn IOhMyAuthorizationService>>> = RefCell::new(None);
-    static OMK_MAINTENANCE: RefCell<Option<Strong<dyn IOhMyMaintenanceService>>> = RefCell::new(None);
-    static PM: RefCell<Option<Strong<dyn IKeyAttestationApplicationIdProvider>>> = RefCell::new(None);
-    static SYSTEM_KEYSTORE: RefCell<Option<Strong<dyn IKeystoreService>>> = RefCell::new(None);
-    static OMK_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = RefCell::new(None);
-    static OMK_AUTHORIZATION_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = RefCell::new(None);
-    static OMK_MAINTENANCE_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = RefCell::new(None);
-    static PM_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = RefCell::new(None);
-    static SYSTEM_KEYSTORE_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = RefCell::new(None);
+    static OMK: RefCell<Option<Strong<dyn IOhMyKsService>>> = const { RefCell::new(None) };
+    static OMK_AUTHORIZATION: RefCell<Option<Strong<dyn IOhMyAuthorizationService>>> = const { RefCell::new(None) };
+    static OMK_MAINTENANCE: RefCell<Option<Strong<dyn IOhMyMaintenanceService>>> = const { RefCell::new(None) };
+    static PM: RefCell<Option<Strong<dyn IKeyAttestationApplicationIdProvider>>> = const { RefCell::new(None) };
+    static SYSTEM_KEYSTORE: RefCell<Option<Strong<dyn IKeystoreService>>> = const { RefCell::new(None) };
+    static OMK_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
+    static OMK_AUTHORIZATION_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
+    static OMK_MAINTENANCE_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
+    static PM_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
+    static SYSTEM_KEYSTORE_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
 }
 
 static PROCESS_STATE_INIT: Once = Once::new();

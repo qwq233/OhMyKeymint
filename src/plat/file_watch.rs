@@ -68,7 +68,6 @@ where
             );
             watch_loop_polling(&path, callback.as_ref());
         }
-        return;
     }
 
     #[cfg(not(target_os = "android"))]

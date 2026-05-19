@@ -28,6 +28,9 @@ pub const HMAC_SHA256_LEN: usize = 32;
 /// Length of the GCM tag in bytes.
 pub const GCM_TAG_LENGTH: usize = 128 / 8;
 
+/// AES-GCM encryption result: `(ciphertext, iv, tag)`.
+pub type AesGcmEncryption = (Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// Older versions of keystore produced IVs with four extra
 /// ignored zero bytes at the end; recognise and trim those.
 pub const LEGACY_IV_LENGTH: usize = 16;
@@ -191,7 +194,7 @@ fn AES_gcm_decrypt(input: &[u8], output: &mut [u8], key: &[u8], iv: &[u8], tag: 
 /// This function accepts 128 and 256-bit keys and uses AES128 and AES256 respectively based on
 /// the key length. The function generates an initialization vector. The return value is a tuple
 /// of `(ciphertext, iv, tag)`.
-pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), Error> {
+pub fn aes_gcm_encrypt(plaintext: &[u8], key: &[u8]) -> Result<AesGcmEncryption, Error> {
     let mut iv = vec![0; GCM_IV_LENGTH];
     // Safety: iv is GCM_IV_LENGTH bytes long.
     if !randomBytes(iv.as_mut_ptr(), GCM_IV_LENGTH) {

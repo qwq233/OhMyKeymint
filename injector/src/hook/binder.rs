@@ -152,7 +152,7 @@ pub(crate) unsafe fn log_write_transaction(command_name: &str, tr: &binder_trans
 }
 
 pub(crate) unsafe fn preview_transaction_parcel(tr: &binder_transaction_data) -> String {
-    let data_size = tr.data_size as usize;
+    let data_size = tr.data_size;
     if data_size == 0 {
         return "<empty>".to_string();
     }
@@ -188,7 +188,7 @@ pub(crate) unsafe fn preview_transaction_parcel(tr: &binder_transaction_data) ->
 }
 
 pub(crate) unsafe fn describe_transaction_objects(tr: &binder_transaction_data) -> String {
-    let offsets_size = tr.offsets_size as usize;
+    let offsets_size = tr.offsets_size;
     if offsets_size == 0 {
         return "[]".to_string();
     }
@@ -203,7 +203,7 @@ pub(crate) unsafe fn describe_transaction_objects(tr: &binder_transaction_data) 
         return "[]".to_string();
     }
 
-    let data_size = tr.data_size as usize;
+    let data_size = tr.data_size;
     let offsets = std::slice::from_raw_parts(offsets_ptr, count);
     let bytes = match transaction_data_bytes(tr) {
         Some(bytes) => bytes,
@@ -270,7 +270,7 @@ pub(crate) unsafe fn format_target(tr: &binder_transaction_data) -> String {
 }
 
 pub(crate) unsafe fn transaction_data_bytes<'a>(tr: &binder_transaction_data) -> Option<&'a [u8]> {
-    let data_size = tr.data_size as usize;
+    let data_size = tr.data_size;
     if data_size == 0 {
         return Some(&[]);
     }
