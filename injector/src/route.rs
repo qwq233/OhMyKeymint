@@ -87,9 +87,10 @@ pub type OmkServiceBinder = Strong<dyn IOhMyKsService>;
 pub type OmkSecurityLevelBinder = Strong<dyn IOhMySecurityLevel>;
 
 fn sid_features() -> BinderFeatures {
-    BinderFeatures {
-        set_requesting_sid: true,
-    }
+    let mut features = BinderFeatures::default();
+    features.set_requesting_sid = true;
+    
+    features
 }
 
 pub fn new_service_binder(

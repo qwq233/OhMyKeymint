@@ -117,9 +117,10 @@ struct OmkSecurityLevelWrapper {
 }
 
 fn sid_features() -> BinderFeatures {
-    BinderFeatures {
-        set_requesting_sid: true,
-    }
+    let mut features = BinderFeatures::default();
+    features.set_requesting_sid = true;
+    
+    features
 }
 
 fn should_retry_without_lskf_binding(

@@ -839,13 +839,14 @@ impl KeystoreOperation {
     pub fn new_native_binder(
         operation: Arc<Operation>,
     ) -> rsbinder::Strong<dyn IKeystoreOperation> {
+        let mut features = BinderFeatures::default();
+        features.set_requesting_sid = true;
+
         BnKeystoreOperation::new_binder_with_features(
             Self {
                 operation: Mutex::new(Some(operation)),
             },
-            BinderFeatures {
-                set_requesting_sid: true,
-            },
+            features,
         )
     }
 

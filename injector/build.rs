@@ -64,38 +64,10 @@ fn main() {
 
     let generated_path = PathBuf::from(format!("{}/aidl.rs", std::env::var("OUT_DIR").unwrap()));
     let content = fs::read_to_string(&generated_path).unwrap();
-    let patched_content = content
-        .replace("SecurityLevel.", "super::super::super::hardware::security::keymint::SecurityLevel::SecurityLevel::")
-        .replace("HardwareAuthenticatorType.", "super::super::super::hardware::security::keymint::HardwareAuthenticatorType::HardwareAuthenticatorType::")
-        .replace("r#authenticatorType: super::Digest::Digest::NONE,", "r#authenticatorType: super::HardwareAuthenticatorType::HardwareAuthenticatorType::NONE,")
-        .replace("r#authenticatorType: super::KeyPermission::KeyPermission::NONE,", "r#authenticatorType: super::HardwareAuthenticatorType::HardwareAuthenticatorType::NONE,")
-        .replace("r#authenticatorType: super::PaddingMode::PaddingMode::NONE,", "r#authenticatorType: super::HardwareAuthenticatorType::HardwareAuthenticatorType::NONE,")
-        .replace("r#operation: rsbinder::Strong<dyn super::IKeyMintOperation::IKeyMintOperation>,", "r#operation: Option<rsbinder::Strong<dyn super::IKeyMintOperation::IKeyMintOperation>>,")
-        .replace("\npub mod top {", "\n#[allow(clippy::all)]\n#[allow(unused_imports)]\npub mod top {");
+    let patched_content = content.replace(
+        "\npub mod top {",
+        "\n#[allow(clippy::all)]\n#[allow(unused_imports)]\npub mod top {",
+    );
 
     fs::write(&generated_path, &patched_content).unwrap();
-
-    // Verify patches were applied. If any assertion fails, rsbinder-aidl codegen has changed
-    // and the string replacements above need to be updated.
-    let verify = fs::read_to_string(&generated_path).unwrap();
-    assert!(
-        verify.contains("super::super::super::hardware::security::keymint::SecurityLevel::SecurityLevel"),
-        "BUG: SecurityLevel enum path patch was NOT applied. rsbinder-aidl codegen may have changed."
-    );
-    assert!(
-        verify.contains("super::super::super::hardware::security::keymint::HardwareAuthenticatorType::HardwareAuthenticatorType"),
-        "BUG: HardwareAuthenticatorType enum path patch was NOT applied."
-    );
-    assert!(
-        !verify.contains("r#authenticatorType: super::Digest::Digest::NONE,"),
-        "BUG: Digest::NONE still present -- authenticatorType patch was not applied."
-    );
-    assert!(
-        !verify.contains("r#authenticatorType: super::KeyPermission::KeyPermission::NONE,"),
-        "BUG: KeyPermission::NONE still present -- patch not applied."
-    );
-    assert!(
-        !verify.contains("r#authenticatorType: super::PaddingMode::PaddingMode::NONE,"),
-        "BUG: PaddingMode::NONE still present -- patch not applied."
-    );
 }

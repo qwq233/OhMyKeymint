@@ -34,9 +34,10 @@ include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
 // include!( "./aidl.rs"); // for development only
 
 fn sid_features() -> BinderFeatures {
-    BinderFeatures {
-        set_requesting_sid: true,
-    }
+    let mut features = BinderFeatures::default();
+    features.set_requesting_sid = true;
+    
+    features
 }
 
 const KEYSTORE_UID: libc::uid_t = 1017;
