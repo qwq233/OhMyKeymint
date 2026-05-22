@@ -44,7 +44,7 @@ fn run() -> Result<()> {
         bail!("usage: keybox_rotation_probe <new-ec-sec1-der> <new-ec-cert-der>");
     }
 
-    rsbinder::ProcessState::init_default();
+    let _ = rsbinder::ProcessState::init_default();
 
     let service: Strong<dyn IOhMyKsService> =
         hub::get_interface(OMK_SERVICE).context("failed to connect to omk service")?;

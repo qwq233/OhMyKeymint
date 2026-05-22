@@ -23,7 +23,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    rsbinder::ProcessState::init_default();
+    let _ = rsbinder::ProcessState::init_default();
 
     let service: Strong<dyn IKeystoreService> = hub::get_interface(KEYSTORE_SERVICE)
         .context("failed to connect to android.system.keystore2.IKeystoreService/default")?;

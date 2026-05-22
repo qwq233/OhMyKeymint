@@ -9,7 +9,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-der = { version = "^0.7.8", features = ["alloc", "derive"] }
+der = { version = "0.8.0", features = ["alloc", "derive"] }
 libfuzzer-sys = "0.4"
 
 [dependencies.kmr-ta]

@@ -1,15 +1,14 @@
-use std::{marker::PhantomData, vec};
+use std::vec;
 
 use crate::{error::Error, zvec::ZVec};
-use ffi::{EC_KEY_free, EC_KEY, EC_POINT, EVP_MAX_MD_SIZE};
-use foreign_types::ForeignType;
+use ffi::EVP_MAX_MD_SIZE;
 use kmr_common::crypto::Rng;
 use openssl::{
-    ec::{EcGroup, EcKey, EcPoint},
+    ec::{EcGroup, EcKey, EcPoint, EcPointRef},
     hash::MessageDigest,
     nid::Nid,
     pkcs5::pbkdf2_hmac,
-    pkey::Private,
+    pkey::{PKey, Private},
     symm::{Cipher, Crypter, Mode},
 };
 
@@ -72,45 +71,8 @@ fn randomBytes(buf: *mut u8, len: usize) -> bool {
 
 /// Perform HMAC-SHA256.
 pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut tag = vec![0; HMAC_SHA256_LEN];
-    // Safety: The first two pairs of arguments must point to const buffers with
-    // size given by the second arg of the pair.  The final pair of arguments
-    // must point to an output buffer with size given by the second arg of the
-    // pair.
-    let digest = unsafe { ffi::EVP_sha256() };
-    let mut out_len = tag.len() as u32;
-
-    #[cfg(not(target_os = "android"))]
-    let result = unsafe {
-        ffi::HMAC(
-            digest,
-            key.as_ptr() as *const std::ffi::c_void,
-            key.len() as i32,
-            msg.as_ptr(),
-            msg.len(),
-            tag.as_mut_ptr(),
-            &mut out_len,
-        )
-    };
-
-    #[cfg(target_os = "android")]
-    let result = unsafe {
-        ffi::HMAC(
-            digest,
-            key.as_ptr() as *const std::ffi::c_void,
-            key.len(),
-            msg.as_ptr(),
-            msg.len(),
-            tag.as_mut_ptr(),
-            &mut out_len,
-        )
-    };
-
-    if !result.is_null() {
-        Ok(tag)
-    } else {
-        Err(Error::HmacSha256Failed)
-    }
+    kmr_common::crypto::hmac_sha256(&crate::hmac::BoringHmac, key, msg)
+        .map_err(|_| Error::HmacSha256Failed)
 }
 
 /// Uses AES GCM to decipher a message given an initialization vector, aead tag, and key.
@@ -376,79 +338,37 @@ fn hkdf_expand_rs(out_key: &mut [u8], prk: &[u8], info: &[u8]) -> bool {
     openssl::pkcs5::pbkdf2_hmac(prk, info, 1, digest, out_key).is_ok()
 }
 
-/// A wrapper around the boringssl EC_KEY type that frees it on drop.
-/// TODO: replace with openssl::ec::EcKey when ForeignType is implemented for it.
-/// I don't replace it for now because it just works for now.
-pub struct ECKey(*mut EC_KEY);
-
-impl Drop for ECKey {
-    fn drop(&mut self) {
-        // Safety: We only create ECKey objects for valid EC_KEYs
-        // and they are the sole owners of those keys.
-        unsafe { EC_KEY_free(self.0) };
-    }
-}
-
-// Wrappers around the boringssl EC_POINT type.
-// The EC_POINT can either be owned (and therefore mutable) or a pointer to an
-// EC_POINT owned by someone else (and thus immutable).  The former are freed
-// on drop.
+/// P-521 ECDH private key used by legacy KeyMaster message encryption.
+pub struct ECKey(EcKey<Private>);
 
 /// An owned EC_POINT object.
-pub struct OwnedECPoint(*mut EC_POINT);
-
-/// A pointer to an EC_POINT object.
-pub struct BorrowedECPoint<'a> {
-    data: *const EC_POINT,
-    phantom: PhantomData<&'a EC_POINT>,
-}
+pub struct OwnedECPoint(EcPoint);
 
 impl OwnedECPoint {
     /// Get the wrapped EC_POINT object.
-    pub fn get_point(&self) -> &EC_POINT {
-        // Safety: We only create OwnedECPoint objects for valid EC_POINTs.
-        unsafe { self.0.as_ref().unwrap() }
+    pub fn get_point(&self) -> &EcPointRef {
+        &self.0
     }
 }
-
-impl BorrowedECPoint<'_> {
-    /// Get the wrapped EC_POINT object.
-    pub fn get_point(&self) -> &EC_POINT {
-        // Safety: We only create BorrowedECPoint objects for valid EC_POINTs.
-        unsafe { self.data.as_ref().unwrap() }
-    }
-}
-
-impl Drop for OwnedECPoint {
-    fn drop(&mut self) {
-        // Safety: We only create OwnedECPoint objects for valid
-        // EC_POINTs and they are the sole owners of those points.
-        unsafe { ffi::EC_POINT_free(self.0) };
-    }
-}
-
-const EC_MAX_BYTES: usize = 133; // 1 + 2 * field_elem_size for P-256
 
 /// Calls the boringssl ECDH_compute_key function.
-pub fn ecdh_compute_key(pub_key: &EC_POINT, priv_key: &ECKey) -> Result<ZVec, Error> {
-    let mut buf = ZVec::new(EC_MAX_BYTES)?;
-    let result =
-    // Safety: Our ECDHComputeKey wrapper passes EC_MAX_BYES to ECDH_compute_key, which
-    // writes at most that many bytes to the output.
-    // The two keys are valid objects.
-        unsafe { ffi::ECDH_compute_key(buf.as_mut_ptr() as *mut std::ffi::c_void, EC_MAX_BYTES, pub_key, priv_key.0, None) };
-    if result == -1 {
-        return Err(Error::ECDHComputeKeyFailed);
-    }
-    let out_len = result.try_into().unwrap();
-    // According to the boringssl API, this should never happen.
-    if out_len > buf.len() {
-        return Err(Error::ECDHComputeKeyFailed);
-    }
-    // ECDH_compute_key may write fewer than the maximum number of bytes, so we
-    // truncate the buffer.
-    buf.reduce_len(out_len);
-    Ok(buf)
+pub fn ecdh_compute_key(pub_key: &EcPointRef, priv_key: &ECKey) -> Result<ZVec, Error> {
+    let group =
+        EcGroup::from_curve_name(Nid::SECP521R1).map_err(|_| Error::ECDHComputeKeyFailed)?;
+    let peer_key =
+        EcKey::from_public_key(&group, pub_key).map_err(|_| Error::ECDHComputeKeyFailed)?;
+    let peer_pkey = PKey::from_ec_key(peer_key).map_err(|_| Error::ECDHComputeKeyFailed)?;
+    let private_pkey =
+        PKey::from_ec_key(priv_key.0.clone()).map_err(|_| Error::ECDHComputeKeyFailed)?;
+    let mut deriver =
+        openssl::derive::Deriver::new(&private_pkey).map_err(|_| Error::ECDHComputeKeyFailed)?;
+    deriver
+        .set_peer(&peer_pkey)
+        .map_err(|_| Error::ECDHComputeKeyFailed)?;
+    let secret = deriver
+        .derive_to_vec()
+        .map_err(|_| Error::ECDHComputeKeyFailed)?;
+    Ok(ZVec::try_from(secret.as_slice())?)
 }
 
 /// Calls the boringssl EC_KEY_generate_key function.
@@ -458,7 +378,7 @@ pub fn ec_key_generate_key() -> Result<ECKey, Error> {
     let ec_key: EcKey<openssl::pkey::Private> =
         EcKey::generate(&group).map_err(|_| Error::ECKEYGenerateKeyFailed)?;
 
-    Ok(ECKey(ec_key.as_ptr()))
+    Ok(ECKey(ec_key))
 }
 
 /// Calls the boringssl EC_KEY_marshal_private_key function.
@@ -468,8 +388,8 @@ pub fn ec_key_marshal_private_key(key: &ECKey) -> Result<ZVec, Error> {
     // Safety: the key is valid.
     // This will not write past the specified length of the buffer; if the
     // len above is too short, it returns 0.
-    let priv_key: EcKey<Private> = unsafe { EcKey::from_ptr(key.0) };
-    let der = priv_key
+    let der = key
+        .0
         .private_key_to_der()
         .map_err(|_| Error::ECKEYMarshalPrivateKeyFailed)?;
 
@@ -493,21 +413,15 @@ pub fn ec_key_parse_private_key(buf: &[u8]) -> Result<ECKey, Error> {
         return Err(Error::ECKEYParsePrivateKeyFailed);
     }
 
-    Ok(ECKey(priv_key.as_ptr()))
+    Ok(ECKey(priv_key))
 }
 
 /// Calls the boringssl EC_KEY_get0_public_key function.
-pub fn ec_key_get0_public_key(key: &ECKey) -> BorrowedECPoint<'_> {
-    // Safety: The key is valid.
-    // This returns a pointer to a key, so we create an immutable variant.
-    BorrowedECPoint {
-        data: unsafe { ffi::EC_KEY_get0_public_key(key.0) },
-        phantom: PhantomData,
-    }
+pub fn ec_key_get0_public_key(key: &ECKey) -> &EcPointRef {
+    key.0.public_key()
 }
 
-pub fn ec_point_point_to_oct(point: &EC_POINT) -> Result<Vec<u8>, Error> {
-    let ec_point = unsafe { EcPoint::from_ptr(point as *const EC_POINT as *mut EC_POINT) };
+pub fn ec_point_point_to_oct(point: &EcPointRef) -> Result<Vec<u8>, Error> {
     let group = EcGroup::from_curve_name(Nid::SECP521R1).map_err(|_| Error::ECPoint2OctFailed)?;
 
     // We fix the length to 133 (1 + 2 * field_elem_size), as we get an error if it's too small.
@@ -515,7 +429,7 @@ pub fn ec_point_point_to_oct(point: &EC_POINT) -> Result<Vec<u8>, Error> {
     let mut buf = vec![0; len];
 
     let mut ctx = openssl::bn::BigNumContext::new().map_err(|_| Error::ECPoint2OctFailed)?;
-    let bytes = ec_point
+    let bytes = point
         .to_bytes(
             &group,
             openssl::ec::PointConversionForm::UNCOMPRESSED,
@@ -538,5 +452,5 @@ pub fn ec_point_oct_to_point(buf: &[u8]) -> Result<OwnedECPoint, Error> {
     let ec_point =
         EcPoint::from_bytes(&group, buf, &mut ctx).map_err(|_| Error::ECPoint2OctFailed)?;
 
-    Ok(OwnedECPoint(ec_point.as_ptr()))
+    Ok(OwnedECPoint(ec_point))
 }

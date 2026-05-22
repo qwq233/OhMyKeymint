@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use der::{Decode, Encode};
+use der::Encode;
 use kmr_common::{
     crypto::{ec, rsa, KeyMaterial, Sha256},
     Error,
@@ -22,6 +22,7 @@ use kmr_ta::device::{
 use kmr_wire::keymint;
 use log::{debug, error, info, warn};
 use regex::Regex;
+use x509_cert::der as x509_der;
 use x509_cert::Certificate;
 
 #[cfg(target_os = "android")]
@@ -353,8 +354,8 @@ fn validate_chain_matches_key(
     let first_cert = chain
         .first()
         .context("certificate chain must contain a leaf certificate")?;
-    let certificate =
-        Certificate::from_der(&first_cert.encoded_certificate).with_context(|| {
+    let certificate = <Certificate as x509_der::Decode>::from_der(&first_cert.encoded_certificate)
+        .with_context(|| {
             format!(
                 "failed to parse {} leaf certificate from keybox chain",
                 algorithm_name(algorithm)
@@ -377,16 +378,14 @@ fn validate_chain_matches_key(
                 algorithm_name(algorithm)
             )
         })?;
-    let certificate_spki = certificate
-        .tbs_certificate
-        .subject_public_key_info
-        .to_der()
-        .with_context(|| {
-            format!(
-                "failed to encode {} public key info from certificate chain",
-                algorithm_name(algorithm)
-            )
-        })?;
+    let certificate_spki =
+        x509_der::Encode::to_der(&certificate.tbs_certificate.subject_public_key_info)
+            .with_context(|| {
+                format!(
+                    "failed to encode {} public key info from certificate chain",
+                    algorithm_name(algorithm)
+                )
+            })?;
     if derived_spki != certificate_spki {
         bail!(
             "{} certificate chain does not match the supplied private key",

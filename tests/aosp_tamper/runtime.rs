@@ -3,11 +3,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use der::{Decode, Encode, Reader, SliceReader};
 use hex::encode as hex_encode;
 use ring::rand::SystemRandom;
 use ring::signature::{self, EcdsaKeyPair, UnparsedPublicKey, VerificationAlgorithm};
 use rsbinder::{hub, ExceptionCode, Status, StatusCode, Strong};
+use x509_cert::der::{Decode, Encode, Length, Reader, SliceReader};
 use x509_cert::Certificate;
 
 use crate::android::hardware::security::keymint::{
@@ -72,7 +72,7 @@ const RAW_ERROR_UPDATE_CERT_DER_B64: &str = concat!(
 const IMPORT_MARKER_SUBJECT: &str = "EltavineMarker-Keybox";
 
 pub fn run_probe(quick: bool) -> Result<ProbeOutput> {
-    rsbinder::ProcessState::init_default();
+    let _ = rsbinder::ProcessState::init_default();
 
     let service: Strong<dyn IKeystoreService> = hub::get_interface(KEYSTORE_SERVICE)
         .context("failed to connect to android.system.keystore2.IKeystoreService/default")?;
@@ -2576,7 +2576,7 @@ fn inspect_der_attestation_sanity(
             .with_context(|| format!("failed to create DER reader for cert {index}"))?;
         let _ = Certificate::decode(&mut reader)
             .with_context(|| format!("failed to decode DER certificate {index}"))?;
-        if reader.remaining_len() != der::Length::ZERO {
+        if reader.remaining_len() != Length::ZERO {
             bail!("certificate {index} had trailing DER bytes");
         }
     }

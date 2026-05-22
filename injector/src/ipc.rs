@@ -46,7 +46,7 @@ impl DeathRecipient for CachedBinderDeath {
 
 pub fn ensure_process_state() {
     PROCESS_STATE_INIT.call_once(|| {
-        rsbinder::ProcessState::init_default();
+        let _ = rsbinder::ProcessState::init_default();
         debug!("[Injector][IPC] rsbinder process state initialized");
     });
 }

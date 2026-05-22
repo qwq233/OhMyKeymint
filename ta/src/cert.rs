@@ -16,12 +16,8 @@
 
 use crate::keys::SigningInfo;
 use core::time::Duration;
-use der::asn1::{BitString, OctetString, OctetStringRef, SetOfVec};
-use der::{
-    asn1::{GeneralizedTime, Null, UtcTime},
-    oid::AssociatedOid,
-    Enumerated, Sequence,
-};
+use der::asn1::{ObjectIdentifier, OctetStringRef, SetOfVec};
+use der::{asn1::Null, oid::AssociatedOid, Enumerated, Sequence};
 use der::{Decode, Encode, EncodeValue, ErrorKind, Length};
 use flagset::FlagSet;
 use kmr_common::crypto::KeyMaterial;
@@ -37,39 +33,58 @@ use kmr_wire::{
     },
     KeySizeInBits, RsaExponent,
 };
-use spki::{AlgorithmIdentifier, ObjectIdentifier, SubjectPublicKeyInfoOwned};
 use std::borrow::Cow;
+use x509_cert::der as x509_der;
+use x509_cert::der::asn1::{
+    BitString as X509BitString, GeneralizedTime as X509GeneralizedTime,
+    OctetString as X509OctetString, UtcTime as X509UtcTime,
+};
 use x509_cert::serial_number::SerialNumber;
+use x509_cert::spki::{
+    AlgorithmIdentifierOwned as X509AlgorithmIdentifierOwned,
+    ObjectIdentifier as X509ObjectIdentifier,
+    SubjectPublicKeyInfoOwned as X509SubjectPublicKeyInfoOwned,
+};
 use x509_cert::{
     certificate::{Certificate, TbsCertificate, Version},
     ext::pkix::{constraints::BasicConstraints, KeyUsage, KeyUsages},
     ext::Extension,
     name::RdnSequence,
-    time::Time,
+    time::{Time, Validity},
 };
 
 /// OID value for the Android Attestation extension.
 pub const ATTESTATION_EXTENSION_OID: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.1.17");
+const X509_KEY_USAGE_OID: X509ObjectIdentifier = X509ObjectIdentifier::new_unwrap("2.5.29.15");
+const X509_BASIC_CONSTRAINTS_OID: X509ObjectIdentifier =
+    X509ObjectIdentifier::new_unwrap("2.5.29.19");
+const X509_ATTESTATION_EXTENSION_OID: X509ObjectIdentifier =
+    X509ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.1.17");
 
 /// Empty value to use in the `RootOfTrust.verifiedBootKey` field in attestations
 /// if an empty value was passed to the bootloader.
 const EMPTY_BOOT_KEY: [u8; 32] = [0u8; 32];
+
+pub(crate) fn x509_der_error(err: x509_der::Error, context: core::fmt::Arguments<'_>) -> Error {
+    log::warn!("{}: {:?} at {:?}", context, err, err.position());
+    Error::Der(ErrorKind::Failed)
+}
 
 /// Build an ASN.1 DER-encodable `Certificate`.
 pub(crate) fn certificate(tbs_cert: TbsCertificate, sig_val: &[u8]) -> Result<Certificate, Error> {
     Ok(Certificate {
         signature_algorithm: tbs_cert.signature.clone(),
         tbs_certificate: tbs_cert,
-        signature: BitString::new(0, sig_val)
-            .map_err(|e| der_err!(e, "failed to build BitString"))?,
+        signature: X509BitString::new(0, sig_val)
+            .map_err(|e| x509_der_error(e, format_args!("failed to build BitString")))?,
     })
 }
 
 /// Build an ASN.1 DER-encodable `tbsCertificate`.
 pub(crate) fn tbs_certificate<'a>(
     info: &'a Option<SigningInfo>,
-    spki: SubjectPublicKeyInfoOwned,
+    spki_der: &[u8],
     key_usage_ext_bits: &'a [u8],
     basic_constraint_ext_val: Option<&'a [u8]>,
     attestation_ext: Option<&'a [u8]>,
@@ -111,6 +126,9 @@ pub(crate) fn tbs_certificate<'a>(
             }
         }
     };
+    let sig_alg_oid = x509_oid(sig_alg_oid)?;
+    let spki = <X509SubjectPublicKeyInfoOwned as x509_der::Decode>::from_der(spki_der)
+        .map_err(|e| x509_der_error(e, format_args!("failed to parse SubjectPublicKeyInfo")))?;
     let cert_issuer = match &info {
         Some(info) => &info.issuer_subject,
         None => cert_subject,
@@ -118,10 +136,10 @@ pub(crate) fn tbs_certificate<'a>(
 
     // Build certificate extensions
     let key_usage_extension = Extension {
-        extn_id: KeyUsage::OID,
+        extn_id: X509_KEY_USAGE_OID,
         critical: true,
-        extn_value: OctetString::new(key_usage_ext_bits)
-            .map_err(|e| der_err!(e, "failed to build OctetString"))?,
+        extn_value: X509OctetString::new(key_usage_ext_bits)
+            .map_err(|e| x509_der_error(e, format_args!("failed to build OctetString")))?,
     };
 
     let mut cert_extensions = vec_try_with_capacity!(3)?;
@@ -129,40 +147,44 @@ pub(crate) fn tbs_certificate<'a>(
 
     if let Some(basic_constraint_ext_val) = basic_constraint_ext_val {
         let basic_constraint_ext = Extension {
-            extn_id: BasicConstraints::OID,
+            extn_id: X509_BASIC_CONSTRAINTS_OID,
             critical: true,
-            extn_value: OctetString::new(basic_constraint_ext_val)
-                .map_err(|e| der_err!(e, "failed to build OctetString"))?,
+            extn_value: X509OctetString::new(basic_constraint_ext_val)
+                .map_err(|e| x509_der_error(e, format_args!("failed to build OctetString")))?,
         };
         cert_extensions.push(basic_constraint_ext); // capacity enough
     }
 
     if let Some(attest_extn_val) = attestation_ext {
         let attest_ext = Extension {
-            extn_id: AttestationExtension::OID,
+            extn_id: X509_ATTESTATION_EXTENSION_OID,
             critical: false,
-            extn_value: OctetString::new(attest_extn_val)
-                .map_err(|e| der_err!(e, "failed to build OctetString"))?,
+            extn_value: X509OctetString::new(attest_extn_val)
+                .map_err(|e| x509_der_error(e, format_args!("failed to build OctetString")))?,
         };
         cert_extensions.push(attest_ext) // capacity enough
     }
 
     Ok(TbsCertificate {
         version: Version::V3,
-        serial_number: SerialNumber::new(cert_serial)
-            .map_err(|e| der_err!(e, "failed to build serial number for {:?}", cert_serial))?,
-        signature: AlgorithmIdentifier {
+        serial_number: SerialNumber::new(cert_serial).map_err(|e| {
+            x509_der_error(
+                e,
+                format_args!("failed to build serial number for {:?}", cert_serial),
+            )
+        })?,
+        signature: X509AlgorithmIdentifierOwned {
             oid: sig_alg_oid,
             parameters: None,
         },
-        issuer: RdnSequence::from_der(cert_issuer)
-            .map_err(|e| der_err!(e, "failed to build issuer"))?,
-        validity: x509_cert::time::Validity {
+        issuer: <RdnSequence as x509_der::Decode>::from_der(cert_issuer)
+            .map_err(|e| x509_der_error(e, format_args!("failed to build issuer")))?,
+        validity: Validity {
             not_before: validity_time_from_datetime(not_before)?,
             not_after: validity_time_from_datetime(not_after)?,
         },
-        subject: RdnSequence::from_der(cert_subject)
-            .map_err(|e| der_err!(e, "failed to build subject"))?,
+        subject: <RdnSequence as x509_der::Decode>::from_der(cert_subject)
+            .map_err(|e| x509_der_error(e, format_args!("failed to build subject")))?,
         subject_public_key_info: spki,
         issuer_unique_id: None,
         subject_unique_id: None,
@@ -172,14 +194,16 @@ pub(crate) fn tbs_certificate<'a>(
 
 /// Extract the Subject field from a `keymint::Certificate` as DER-encoded data.
 pub(crate) fn extract_subject(cert: &keymint::Certificate) -> Result<Vec<u8>, Error> {
-    let cert = x509_cert::Certificate::from_der(&cert.encoded_certificate)
+    let cert = <x509_cert::Certificate as x509_der::Decode>::from_der(&cert.encoded_certificate)
         .map_err(|e| km_err!(EncodingError, "failed to parse certificate: {:?}", e))?;
-    let subject_data = cert
-        .tbs_certificate
-        .subject
-        .to_der()
+    let subject_data = x509_der::Encode::to_der(&cert.tbs_certificate.subject)
         .map_err(|e| km_err!(EncodingError, "failed to DER-encode subject: {:?}", e))?;
     Ok(subject_data)
+}
+
+fn x509_oid(oid: ObjectIdentifier) -> Result<X509ObjectIdentifier, Error> {
+    X509ObjectIdentifier::from_bytes(oid.as_bytes())
+        .map_err(|_| Error::Der(ErrorKind::OidMalformed))
 }
 
 /// Construct x.509-cert::time::Time from `DateTime`.
@@ -195,20 +219,29 @@ fn validity_time_from_datetime(when: DateTime) -> Result<Time, Error> {
         let duration = Duration::from_secs(u64::try_from(secs_since_epoch).map_err(dt_err)?);
         if duration >= MAX_UTC_TIME {
             Ok(Time::GeneralTime(
-                GeneralizedTime::from_unix_duration(duration)
-                    .map_err(|e| der_err!(e, "failed to build GeneralTime for {:?}", when))?,
+                X509GeneralizedTime::from_unix_duration(duration).map_err(|e| {
+                    x509_der_error(
+                        e,
+                        format_args!("failed to build GeneralTime for {:?}", when),
+                    )
+                })?,
             ))
         } else {
             Ok(Time::UtcTime(
-                UtcTime::from_unix_duration(duration)
-                    .map_err(|e| der_err!(e, "failed to build UtcTime for {:?}", when))?,
+                X509UtcTime::from_unix_duration(duration).map_err(|e| {
+                    x509_der_error(e, format_args!("failed to build UtcTime for {:?}", when))
+                })?,
             ))
         }
     } else {
         // TODO: cope with negative offsets from Unix Epoch.
         Ok(Time::GeneralTime(
-            GeneralizedTime::from_unix_duration(Duration::from_secs(0))
-                .map_err(|e| der_err!(e, "failed to build GeneralizedTime(0) for {:?}", when))?,
+            X509GeneralizedTime::from_unix_duration(Duration::from_secs(0)).map_err(|e| {
+                x509_der_error(
+                    e,
+                    format_args!("failed to build GeneralizedTime(0) for {:?}", when),
+                )
+            })?,
         ))
     }
 }
@@ -216,6 +249,12 @@ fn validity_time_from_datetime(when: DateTime) -> Result<Time, Error> {
 pub(crate) fn asn1_der_encode<T: Encode>(obj: &T) -> Result<Vec<u8>, der::Error> {
     let mut encoded_data = Vec::<u8>::new();
     obj.encode_to_vec(&mut encoded_data)?;
+    Ok(encoded_data)
+}
+
+pub(crate) fn x509_der_encode<T: x509_der::Encode>(obj: &T) -> Result<Vec<u8>, x509_der::Error> {
+    let mut encoded_data = Vec::<u8>::new();
+    x509_der::Encode::encode_to_vec(obj, &mut encoded_data)?;
     Ok(encoded_data)
 }
 
@@ -647,12 +686,14 @@ macro_rules! process_authz_list_tags {
 
 /// Implementation of [`der::DecodeValue`] which constructs an AuthorizationList from bytes.
 impl<'a> der::DecodeValue<'a> for AuthorizationList<'a> {
+    type Error = der::Error;
+
     fn decode_value<R: der::Reader<'a>>(decoder: &mut R, header: der::Header) -> der::Result<Self> {
         // TODO: define a MAX_SIZE for AuthorizationList and check whether the actual length from
         // the length field of header is less than the MAX_SIZE
 
         // Check for an empty sequence
-        if header.length.is_zero() {
+        if header.length().is_zero() {
             return Ok(AuthorizationList {
                 auths: Vec::new().into(),
                 keygen_params: Vec::new().into(),
@@ -661,9 +702,9 @@ impl<'a> der::DecodeValue<'a> for AuthorizationList<'a> {
                 additional_attestation_info: Vec::new().into(),
             });
         }
-        if decoder.remaining_len() < header.length {
+        if decoder.remaining_len() < header.length() {
             return Err(der::ErrorKind::Incomplete {
-                expected_len: header.length,
+                expected_len: header.length(),
                 actual_len: decoder.remaining_len(),
             })?;
         }
@@ -778,7 +819,7 @@ macro_rules! key_param_from_asn1_integer_datetime {
 
 macro_rules! key_param_from_asn1_octet_string {
     {$variant:ident, $tlv_bytes:expr, $key_params:expr} => {
-        let val = OctetStringRef::from_der($tlv_bytes)?;
+        let val = <&OctetStringRef>::from_der($tlv_bytes)?;
         $key_params.try_push(KeyParam::$variant(try_to_vec(val.as_bytes())
                                                 .map_err(der_alloc_err)?)).map_err(der_alloc_err)?;
     };

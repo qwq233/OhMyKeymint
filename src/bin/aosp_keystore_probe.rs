@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use der::{Decode, Reader, SliceReader};
 use hex::encode as hex_encode;
 use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::sha256::BoringSha256;
 use rsbinder::{hub, SIBinder, Status, StatusCode, Strong};
+use x509_cert::der::{Decode, Reader, SliceReader};
 use x509_cert::Certificate;
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
@@ -33,7 +33,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    rsbinder::ProcessState::init_default();
+    let _ = rsbinder::ProcessState::init_default();
 
     let service: Strong<dyn IKeystoreService> = hub::get_interface(KEYSTORE_SERVICE)
         .context("failed to connect to android.system.keystore2.IKeystoreService/default")?;

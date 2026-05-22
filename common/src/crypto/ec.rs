@@ -398,19 +398,21 @@ pub fn import_sec1_private_key(data: &[u8]) -> Result<KeyMaterial, Error> {
         oid: X509_NIST_OID,
         parameters: Some(AnyRef::from(&parameters_oid)),
     };
-    let pkcs8_key = pkcs8::PrivateKeyInfo::new(algorithm, data);
+    let private_key = der::asn1::OctetStringRef::new(data)
+        .map_err(|e| der_err!(e, "failed to wrap ECPrivateKey as PKCS#8 private key"))?;
+    let pkcs8_key = pkcs8::PrivateKeyInfo::new(algorithm, private_key);
     import_pkcs8_key_impl(&pkcs8_key)
 }
 
 /// Import an EC key in PKCS#8 format.
 pub fn import_pkcs8_key(data: &[u8]) -> Result<KeyMaterial, Error> {
-    let key_info = pkcs8::PrivateKeyInfo::try_from(data)
+    let key_info = pkcs8::PrivateKeyInfoRef::try_from(data)
         .map_err(|_| km_err!(InvalidArgument, "failed to parse PKCS#8 EC key"))?;
     import_pkcs8_key_impl(&key_info)
 }
 
 /// Import a `pkcs8::PrivateKeyInfo` EC key.
-fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfo) -> Result<KeyMaterial, Error> {
+fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfoRef<'_>) -> Result<KeyMaterial, Error> {
     let algo_params = key_info.algorithm.parameters;
     match key_info.algorithm.oid {
         X509_NIST_OID => {
@@ -427,19 +429,19 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfo) -> Result<KeyMaterial
             let (curve, key) = match curve_oid {
                 ALGO_PARAM_P224_OID => (
                     EcCurve::P224,
-                    Key::P224(NistKey(try_to_vec(key_info.private_key)?)),
+                    Key::P224(NistKey(try_to_vec(key_info.private_key.as_bytes())?)),
                 ),
                 ALGO_PARAM_P256_OID => (
                     EcCurve::P256,
-                    Key::P256(NistKey(try_to_vec(key_info.private_key)?)),
+                    Key::P256(NistKey(try_to_vec(key_info.private_key.as_bytes())?)),
                 ),
                 ALGO_PARAM_P384_OID => (
                     EcCurve::P384,
-                    Key::P384(NistKey(try_to_vec(key_info.private_key)?)),
+                    Key::P384(NistKey(try_to_vec(key_info.private_key.as_bytes())?)),
                 ),
                 ALGO_PARAM_P521_OID => (
                     EcCurve::P521,
-                    Key::P521(NistKey(try_to_vec(key_info.private_key)?)),
+                    Key::P521(NistKey(try_to_vec(key_info.private_key.as_bytes())?)),
                 ),
                 oid => {
                     return Err(km_err!(
@@ -461,16 +463,17 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfo) -> Result<KeyMaterial
                 // For Ed25519 the PKCS#8 `privateKey` field holds a `CurvePrivateKey`
                 // (RFC 8410 s7) that is an OCTET STRING holding the raw key.  As this is DER,
                 // this is just a 2 byte prefix (0x04 = OCTET STRING, 0x20 = length of raw key).
-                if key_info.private_key.len() != 2 + CURVE25519_PRIV_KEY_LEN
-                    || key_info.private_key[0] != 0x04
-                    || key_info.private_key[1] != 0x20
+                let private_key = key_info.private_key.as_bytes();
+                if private_key.len() != 2 + CURVE25519_PRIV_KEY_LEN
+                    || private_key[0] != 0x04
+                    || private_key[1] != 0x20
                 {
                     return Err(km_err!(
                         InvalidArgument,
                         "unexpected CurvePrivateKey contents"
                     ));
                 }
-                import_raw_ed25519_key(&key_info.private_key[2..])
+                import_raw_ed25519_key(&private_key[2..])
             }
         }
         X509_X25519_OID => {
@@ -483,16 +486,17 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfo) -> Result<KeyMaterial
                 // For X25519 the PKCS#8 `privateKey` field holds a `CurvePrivateKey`
                 // (RFC 8410 s7) that is an OCTET STRING holding the raw key.  As this is DER,
                 // this is just a 2 byte prefix (0x04 = OCTET STRING, 0x20 = length of raw key).
-                if key_info.private_key.len() != 2 + CURVE25519_PRIV_KEY_LEN
-                    || key_info.private_key[0] != 0x04
-                    || key_info.private_key[1] != 0x20
+                let private_key = key_info.private_key.as_bytes();
+                if private_key.len() != 2 + CURVE25519_PRIV_KEY_LEN
+                    || private_key[0] != 0x04
+                    || private_key[1] != 0x20
                 {
                     return Err(km_err!(
                         InvalidArgument,
                         "unexpected CurvePrivateKey contents"
                     ));
                 }
-                import_raw_x25519_key(&key_info.private_key[2..])
+                import_raw_x25519_key(&private_key[2..])
             }
         }
         _ => Err(km_err!(

@@ -16,7 +16,7 @@
 
 use crate::{cert, device, AttestationChainInfo};
 use core::{borrow::Borrow, cmp::Ordering, convert::TryFrom};
-use der::{referenced::RefToOwned, Decode, Sequence};
+use der::{Decode, Sequence};
 use kmr_common::{
     crypto::{self, aes, rsa, KeyMaterial, OpaqueOr},
     der_err, get_bool_tag_value, get_opt_tag_value, get_tag_value, keyblob, km_err, tag,
@@ -31,7 +31,6 @@ use kmr_wire::{
     *,
 };
 use log::{debug, error, warn};
-use spki::SubjectPublicKeyInfoOwned;
 use std::collections::btree_map::Entry;
 use x509_cert::ext::pkix::KeyUsages;
 use Vec;
@@ -179,14 +178,18 @@ impl crate::KeyMintTa {
     pub(crate) fn generate_cert(
         &self,
         info: Option<SigningInfo>,
-        spki: SubjectPublicKeyInfoOwned,
+        spki_der: &[u8],
         params: &[KeyParam],
         chars: &[KeyCharacteristics],
     ) -> Result<keymint::Certificate, Error> {
         // Build and encode key usage extension value
         let key_usage_ext_bits = cert::key_usage_extension_bits(params);
-        let key_usage_ext_val = cert::asn1_der_encode(&key_usage_ext_bits)
-            .map_err(|e| der_err!(e, "failed to encode KeyUsage {:?}", key_usage_ext_bits))?;
+        let key_usage_ext_val = cert::x509_der_encode(&key_usage_ext_bits).map_err(|e| {
+            cert::x509_der_error(
+                e,
+                format_args!("failed to encode KeyUsage {:?}", key_usage_ext_bits),
+            )
+        })?;
 
         // Build and encode basic constraints extension value, based on the key usage extension
         // value
@@ -196,11 +199,10 @@ impl crate::KeyMintTa {
             != 0
         {
             let basic_constraints = cert::basic_constraints_ext_value(true);
-            Some(cert::asn1_der_encode(&basic_constraints).map_err(|e| {
-                der_err!(
+            Some(cert::x509_der_encode(&basic_constraints).map_err(|e| {
+                cert::x509_der_error(
                     e,
-                    "failed to encode basic constraints {:?}",
-                    basic_constraints
+                    format_args!("failed to encode basic constraints {:?}", basic_constraints),
                 )
             })?)
         } else {
@@ -240,15 +242,15 @@ impl crate::KeyMintTa {
 
         let tbs_cert = cert::tbs_certificate(
             &info,
-            spki,
+            spki_der,
             &key_usage_ext_val,
             basic_constraints_ext_val.as_deref(),
             attest_ext_val.as_deref(),
             tag::characteristics_at(chars, self.hw_info.security_level)?,
             params,
         )?;
-        let tbs_data = cert::asn1_der_encode(&tbs_cert)
-            .map_err(|e| der_err!(e, "failed to encode tbsCert"))?;
+        let tbs_data = cert::x509_der_encode(&tbs_cert)
+            .map_err(|e| cert::x509_der_error(e, format_args!("failed to encode tbsCert")))?;
         // If key does not have ATTEST_KEY or SIGN purpose, the certificate has empty signature
         let sig_data = match info.as_ref() {
             Some(info) => self.sign_cert_data(info.signing_key.clone(), tbs_data.as_slice())?,
@@ -256,8 +258,8 @@ impl crate::KeyMintTa {
         };
 
         let cert = cert::certificate(tbs_cert, &sig_data)?;
-        let cert_data = cert::asn1_der_encode(&cert)
-            .map_err(|e| der_err!(e, "failed to encode certificate"))?;
+        let cert_data = cert::x509_der_encode(&cert)
+            .map_err(|e| cert::x509_der_error(e, format_args!("failed to encode certificate")))?;
         Ok(keymint::Certificate {
             encoded_certificate: cert_data,
         })
@@ -559,8 +561,9 @@ impl crate::KeyMintTa {
             };
 
             // Build the X.509 leaf certificate.
-            let leaf_cert =
-                self.generate_cert(signing_info.clone(), spki.ref_to_owned(), params, &chars)?;
+            let spki_der = cert::asn1_der_encode(&spki)
+                .map_err(|e| der_err!(e, "failed to encode SubjectPublicKeyInfo"))?;
+            let leaf_cert = self.generate_cert(signing_info.clone(), &spki_der, params, &chars)?;
             certificate_chain.try_push(leaf_cert)?;
 
             // Append the rest of the chain.

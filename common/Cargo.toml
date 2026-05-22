@@ -13,16 +13,16 @@ cddl-cat = { version = "^0.7.0", optional = true }
 ciborium = { version = "0.2.2", default-features = false }
 ciborium-io = "^0.2.0"
 coset = "0.4.2"
-der = { version = "^0.7.2", features = ["alloc", "derive"] }
+der = { version = "0.8.0", features = ["alloc", "derive"] }
 enumn = "0.1.4"
 kmr-derive = { path = "../derive", version = "0.1.0" }
 kmr-wire = { path = "../wire", version = "0.1.0" }
 log = "^0.4"
-pkcs1 = { version = "^0.7.5", features = ["alloc"] }
-pkcs8 = "^0.10.2"
-rand = "0.10.0"
-sec1 = { version = "0.7.3", features = ["alloc", "der", "pkcs8"] }
-spki = { version = "0.7.3"}
+pkcs1 = { version = "0.7.5", features = ["alloc"] }
+pkcs8 = "0.11.0"
+rand = "0.10.1"
+sec1 = { version = "0.8.1", features = ["alloc", "der"] }
+spki = { version = "0.8.0"}
 zeroize = { version = "^1.5.6", features = ["alloc", "zeroize_derive"] }
 
 [dev-dependencies]

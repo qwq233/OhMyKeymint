@@ -20,6 +20,7 @@ use crate::{malloc_err, openssl_last_err};
 use ffi;
 use kmr_common::{crypto, crypto::OpaqueOr, explicit, km_err, vec_try, Error};
 use log::error;
+use openssl::symm::Cipher;
 use Box;
 use Vec;
 
@@ -32,13 +33,10 @@ impl crypto::AesCmac for BoringAesCmac {
         key: OpaqueOr<crypto::aes::Key>,
     ) -> Result<Box<dyn crypto::AccumulatingOperation>, Error> {
         let key = explicit!(key)?;
-        // Safety: all of the `ffi::EVP_aes_<N>_cbc` functions return a non-null valid pointer.
-        let (cipher, k) = unsafe {
-            match &key {
-                crypto::aes::Key::Aes128(k) => (ffi::EVP_aes_128_cbc(), &k[..]),
-                crypto::aes::Key::Aes192(k) => (ffi::EVP_aes_192_cbc(), &k[..]),
-                crypto::aes::Key::Aes256(k) => (ffi::EVP_aes_256_cbc(), &k[..]),
-            }
+        let (cipher, k) = match &key {
+            crypto::aes::Key::Aes128(k) => (Cipher::aes_128_cbc(), &k[..]),
+            crypto::aes::Key::Aes192(k) => (Cipher::aes_192_cbc(), &k[..]),
+            crypto::aes::Key::Aes256(k) => (Cipher::aes_256_cbc(), &k[..]),
         };
 
         let op = BoringAesCmacOperation {
@@ -57,7 +55,7 @@ impl crypto::AesCmac for BoringAesCmac {
                 op.ctx.0,
                 k.as_ptr() as *const libc::c_void,
                 k.len(),
-                cipher,
+                cipher.as_ptr(),
                 core::ptr::null_mut(),
             )
         };

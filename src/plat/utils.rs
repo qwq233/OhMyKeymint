@@ -204,7 +204,7 @@ fn encode_application_id(
         if estimated_encoded_size > KEY_ATTESTATION_APPLICATION_ID_MAX_SIZE {
             break;
         }
-        signature_digest_records.push(x509_cert::der::asn1::OctetString::new(sig_digest)?);
+        signature_digest_records.push(der::asn1::OctetString::new(sig_digest)?);
     }
     let signature_digests = SetOfVec::from_iter(signature_digest_records).map_err(|e| {
         anyhow::anyhow!(err!(

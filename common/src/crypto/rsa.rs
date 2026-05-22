@@ -15,9 +15,10 @@
 //! Functionality related to RSA.
 
 use super::{KeyMaterial, KeySizeInBits, OpaqueOr, RsaExponent};
-use crate::{der_err, km_err, tag, try_to_vec, Error, FallibleAllocExt};
-use der::{asn1::BitStringRef, Decode, Encode};
+use crate::{km_err, tag, try_to_vec, Error, FallibleAllocExt};
+use der::asn1::BitStringRef;
 use kmr_wire::keymint::{Digest, KeyParam, PaddingMode};
+use pkcs1::der::{Decode as Pkcs1Decode, Encode as Pkcs1Encode};
 use pkcs1::RsaPrivateKey;
 use spki::{AlgorithmIdentifier, SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use zeroize::ZeroizeOnDrop;
@@ -33,6 +34,11 @@ pub const X509_OID: pkcs8::ObjectIdentifier =
 /// OID value for PKCS#1 signature with SHA-256 and RSA, see RFC 4055 s5.
 pub const SHA256_PKCS1_SIGNATURE_OID: pkcs8::ObjectIdentifier =
     pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11");
+
+fn pkcs1_der_error(err: pkcs1::der::Error, context: core::fmt::Arguments<'_>) -> Error {
+    log::warn!("{}: {:?} at {:?}", context, err, err.position());
+    Error::Der(der::ErrorKind::Failed)
+}
 
 /// An RSA key, in the form of an ASN.1 DER encoding of an PKCS#1 `RSAPrivateKey` structure,
 /// as specified by RFC 3447 sections A.1.2 and 3.2:
@@ -72,13 +78,13 @@ impl Key {
     ///     ```
     pub fn subject_public_key(&self) -> Result<Vec<u8>, Error> {
         let rsa_pvt_key = RsaPrivateKey::from_der(self.0.as_slice())
-            .map_err(|e| der_err!(e, "failed to parse RsaPrivateKey"))?;
+            .map_err(|e| pkcs1_der_error(e, format_args!("failed to parse RsaPrivateKey")))?;
 
         let rsa_pub_key = rsa_pvt_key.public_key();
         let mut encoded_data = Vec::<u8>::new();
         rsa_pub_key
             .encode_to_vec(&mut encoded_data)
-            .map_err(|e| der_err!(e, "failed to encode RSA PublicKey"))?;
+            .map_err(|e| pkcs1_der_error(e, format_args!("failed to encode RSA PublicKey")))?;
         Ok(encoded_data)
     }
 
@@ -214,7 +220,7 @@ impl SignMode {
 
 /// Import an RSA key in PKCS#8 format, also returning the key size in bits and public exponent.
 pub fn import_pkcs8_key(data: &[u8]) -> Result<(KeyMaterial, KeySizeInBits, RsaExponent), Error> {
-    let key_info = pkcs8::PrivateKeyInfo::try_from(data)
+    let key_info = pkcs8::PrivateKeyInfoRef::try_from(data)
         .map_err(|_| km_err!(InvalidArgument, "failed to parse PKCS#8 RSA key"))?;
     if key_info.algorithm.oid != X509_OID {
         return Err(km_err!(
@@ -224,7 +230,7 @@ pub fn import_pkcs8_key(data: &[u8]) -> Result<(KeyMaterial, KeySizeInBits, RsaE
         ));
     }
     // For RSA, the inner private key is an ASN.1 `RSAPrivateKey`, as per PKCS#1 (RFC 3447 A.1.2).
-    import_pkcs1_key(key_info.private_key)
+    import_pkcs1_key(key_info.private_key.as_bytes())
 }
 
 /// Import an RSA key in PKCS#1 format, also returning the key size in bits and public exponent.

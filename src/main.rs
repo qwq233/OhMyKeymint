@@ -123,7 +123,7 @@ fn run() -> Result<()> {
     info!("Hello, OhMyKeymint!");
 
     info!("Initial process state");
-    rsbinder::ProcessState::init_default();
+    let _ = rsbinder::ProcessState::init_default();
 
     prepare_android_storage();
     plat::resetprop::bootstrap_privileged_helper()

@@ -65,7 +65,7 @@ pub fn maybe_run_telephony_probe_command() -> Result<bool> {
         return Ok(false);
     }
 
-    rsbinder::ProcessState::init_default();
+    let _ = rsbinder::ProcessState::init_default();
 
     for slot in [0_i32, 1_i32] {
         emit_telephony_probe_result("imei", slot, GET_IMEI_FOR_SLOT_TRANSACTION);

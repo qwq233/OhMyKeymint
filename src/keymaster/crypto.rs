@@ -30,7 +30,7 @@ impl ECDHPrivateKey {
     /// Generate the serialization of the corresponding public key
     pub fn public_key(&self) -> Result<Vec<u8>> {
         let point = ec_key_get0_public_key(&self.0);
-        ec_point_point_to_oct(point.get_point()).context(err!("marshalling failed"))
+        ec_point_point_to_oct(point).context(err!("marshalling failed"))
     }
 
     /// Use ECDH to agree an AES key with another party whose public key we have.

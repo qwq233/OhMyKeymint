@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
-use der::{oid::ObjectIdentifier, Decode};
+use x509_cert::der::{asn1::ObjectIdentifier, Decode};
 use x509_cert::Certificate;
 
 pub const ANDROID_ATTESTATION_OID: ObjectIdentifier =

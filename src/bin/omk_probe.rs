@@ -29,7 +29,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    rsbinder::ProcessState::init_default();
+    let _ = rsbinder::ProcessState::init_default();
 
     let service: Strong<dyn IOhMyKsService> =
         hub::get_interface(OMK_SERVICE).context("failed to connect to omk service")?;

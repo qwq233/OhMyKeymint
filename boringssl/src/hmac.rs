@@ -14,7 +14,7 @@
 
 //! BoringSSL-based implementation of HMAC.
 use crate::types::HmacCtx;
-use crate::{malloc_err, openssl_last_err};
+use crate::{digest_into_openssl, malloc_err, openssl_last_err};
 use anyhow::Result;
 #[cfg(soong)]
 use bssl_sys as ffi;
@@ -130,20 +130,11 @@ impl crypto::AccumulatingOperation for BoringHmacOperation {
     }
 }
 
-/// Translate a [`keymint::Digest`] into a raw [`ffi::EVD_MD`].
+/// Translate a [`keymint::Digest`] into a raw [`ffi::EVP_MD`].
 fn digest_into_openssl_ffi(digest: Digest) -> Result<*const ffi::EVP_MD, Error> {
-    // Safety: all of the `EVP_<digest>` functions return a non-null valid pointer.
-    unsafe {
-        match digest {
-            Digest::Md5 => Ok(ffi::EVP_md5()),
-            Digest::Sha1 => Ok(ffi::EVP_sha1()),
-            Digest::Sha224 => Ok(ffi::EVP_sha224()),
-            Digest::Sha256 => Ok(ffi::EVP_sha256()),
-            Digest::Sha384 => Ok(ffi::EVP_sha384()),
-            Digest::Sha512 => Ok(ffi::EVP_sha512()),
-            d => Err(km_err!(UnsupportedDigest, "unknown digest {:?}", d)),
-        }
-    }
+    digest_into_openssl(digest)
+        .map(|digest| digest.as_ptr())
+        .ok_or_else(|| km_err!(UnsupportedDigest, "unknown digest {:?}", digest))
 }
 
 pub fn hkdf_expand(out_len: usize, key: &[u8], info: &[u8]) -> Result<Vec<u8>> {
