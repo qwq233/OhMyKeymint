@@ -12,6 +12,7 @@ use super::binder::{
     binder_transaction_data, binder_transaction_data_target, describe_transaction_objects,
     format_target, parse_local_binder_target_from_parcel_bytes, LocalBinderTarget,
 };
+use crate::android::system::keystore2::Domain::Domain;
 use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::config;
 use crate::filter::{self, FilterReason};
@@ -253,6 +254,22 @@ fn evaluate_caller(
         );
     }
     decision
+}
+
+fn should_allow_tracked_grant_readback(
+    request: &ParsedServiceRequest,
+    decision: &crate::filter::FilterDecision,
+) -> bool {
+    if decision.allowed || decision.reason != FilterReason::RejectedUnknownPackage {
+        return false;
+    }
+
+    matches!(
+        request,
+        ParsedServiceRequest::GetKeyEntry { key }
+            if key.domain == Domain::GRANT
+                && tracker::lookup_omk_descriptor_for_key(key).is_some()
+    )
 }
 
 fn target_from_transaction(tr: &binder_transaction_data) -> Option<LocalBinderTarget> {
@@ -684,7 +701,8 @@ pub(super) unsafe fn handle_br_transaction(
         };
 
         let method = request.method();
-        if !decision.allowed {
+        let allow_tracked_grant_readback = should_allow_tracked_grant_readback(&request, &decision);
+        if !decision.allowed && !allow_tracked_grant_readback {
             info!(
                 "[Injector][Decision] command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?}; leaving original request untouched",
                 command_name,
@@ -697,6 +715,19 @@ pub(super) unsafe fn handle_br_transaction(
                 decision.reason,
             );
             return false;
+        }
+        if allow_tracked_grant_readback {
+            info!(
+                "[Injector][Decision] command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=true reason={:?} grant_bridge=true",
+                command_name,
+                method,
+                tr.code,
+                caller.uid,
+                caller.pid,
+                caller.sid,
+                decision.packages,
+                decision.reason,
+            );
         }
 
         let route = route_for_service_request(&request, &cfg.intercept);
@@ -3039,6 +3070,90 @@ mod tests {
             ),
             RouteTarget::System
         );
+    }
+
+    #[test]
+    fn tracked_grant_readback_bypasses_package_rejection() {
+        tracker::clear_state_for_tests();
+        let surfaced = KeyDescriptor {
+            domain: Domain::GRANT,
+            nspace: 123,
+            alias: None,
+            blob: None,
+        };
+        let omk = KeyDescriptor {
+            domain: Domain::GRANT,
+            nspace: 456,
+            alias: None,
+            blob: None,
+        };
+        tracker::remember_key_descriptor_bridge(&surfaced, &surfaced, &omk);
+        let decision = crate::filter::FilterDecision {
+            allowed: false,
+            reason: crate::filter::FilterReason::RejectedUnknownPackage,
+            packages: vec![],
+        };
+
+        assert!(should_allow_tracked_grant_readback(
+            &ParsedServiceRequest::GetKeyEntry { key: surfaced },
+            &decision
+        ));
+    }
+
+    #[test]
+    fn untracked_grant_readback_stays_rejected() {
+        tracker::clear_state_for_tests();
+        let decision = crate::filter::FilterDecision {
+            allowed: false,
+            reason: crate::filter::FilterReason::RejectedUnknownPackage,
+            packages: vec![],
+        };
+
+        assert!(!should_allow_tracked_grant_readback(
+            &ParsedServiceRequest::GetKeyEntry {
+                key: KeyDescriptor {
+                    domain: Domain::GRANT,
+                    nspace: 123,
+                    alias: None,
+                    blob: None,
+                },
+            },
+            &decision
+        ));
+        assert!(!should_allow_tracked_grant_readback(
+            &ParsedServiceRequest::GetKeyEntry {
+                key: sample_key_descriptor(),
+            },
+            &decision
+        ));
+    }
+
+    #[test]
+    fn tracked_grant_readback_respects_non_unknown_package_rejection() {
+        tracker::clear_state_for_tests();
+        let surfaced = KeyDescriptor {
+            domain: Domain::GRANT,
+            nspace: 123,
+            alias: None,
+            blob: None,
+        };
+        let omk = KeyDescriptor {
+            domain: Domain::GRANT,
+            nspace: 456,
+            alias: None,
+            blob: None,
+        };
+        tracker::remember_key_descriptor_bridge(&surfaced, &surfaced, &omk);
+        let decision = crate::filter::FilterDecision {
+            allowed: false,
+            reason: crate::filter::FilterReason::RejectedByDenylist,
+            packages: vec!["com.blocked".to_string()],
+        };
+
+        assert!(!should_allow_tracked_grant_readback(
+            &ParsedServiceRequest::GetKeyEntry { key: surfaced },
+            &decision
+        ));
     }
 
     #[test]
