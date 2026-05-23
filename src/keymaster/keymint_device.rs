@@ -14,7 +14,6 @@
 
 //! Provide the [`KeyMintDevice`] wrapper for operating directly on a KeyMint device.
 
-use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::android::hardware::security::keymint::IKeyMintOperation::BnKeyMintOperation;
@@ -33,7 +32,6 @@ use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_km_error, map_ks_error, map_ks_result};
 use crate::keymaster::utils::{key_creation_result_to_aidl, key_params_to_aidl};
 use crate::keymint::{clock, sdd, soft};
-use crate::plat::resetprop;
 use crate::{
     android::hardware::security::keymint::ErrorCode::ErrorCode,
     err,
@@ -1147,6 +1145,7 @@ pub fn get_keymaster_security_level(
     }
 }
 
+#[derive(Clone, Copy)]
 struct ResolvedHardwareProfile {
     version_number: i32,
     impl_name: &'static str,
@@ -1155,95 +1154,27 @@ struct ResolvedHardwareProfile {
 }
 
 fn resolve_hardware_profile(security_level: SecurityLevel) -> ResolvedHardwareProfile {
-    let version_number = probe_keymint_version_from_vintf(security_level)
-        .unwrap_or_else(fallback_keymint_version_from_android);
-    let line = version_number / 100;
-    let sec_label = match security_level {
-        SecurityLevel::TRUSTED_ENVIRONMENT => "TEE",
-        SecurityLevel::STRONGBOX => "StrongBox",
-        SecurityLevel::SOFTWARE => "Software",
-        _ => "Unknown",
-    };
-    let impl_name = leak_string(format!("Android {sec_label} KeyMint {line}"));
-    let author_name = leak_string("The Android Open Source Project".to_string());
-    let unique_id = leak_string(format!("android-{sec_label}-keymint-{line}"));
+    static TEE_PROFILE: OnceLock<ResolvedHardwareProfile> = OnceLock::new();
+    static STRONGBOX_PROFILE: OnceLock<ResolvedHardwareProfile> = OnceLock::new();
 
-    ResolvedHardwareProfile {
-        version_number,
-        impl_name,
-        author_name,
-        unique_id,
-    }
-}
-
-fn probe_keymint_version_from_vintf(security_level: SecurityLevel) -> Option<i32> {
-    let instance = match security_level {
-        SecurityLevel::TRUSTED_ENVIRONMENT => "default",
-        SecurityLevel::STRONGBOX => "strongbox",
-        _ => return None,
-    };
-    let pattern = regex::Regex::new(&format!(
-        r#"(?s)<hal\s+format="aidl">.*?<name>\s*android\.hardware\.security\.keymint\s*</name>.*?<version>\s*(\d+)\s*</version>.*?<fqname>\s*IKeyMintDevice/{}\s*</fqname>.*?</hal>"#,
-        regex::escape(instance)
-    ))
-    .expect("VINTF regex must compile");
-
-    let manifest_dir = Path::new("/vendor/etc/vintf/manifest");
-    let entries = std::fs::read_dir(manifest_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.starts_with("android.hardware.security.keymint-service") || !name.ends_with(".xml")
-        {
-            continue;
+    match security_level {
+        SecurityLevel::TRUSTED_ENVIRONMENT => {
+            *TEE_PROFILE.get_or_init(|| build_resolved_hardware_profile(security_level))
         }
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Some(captures) = pattern.captures(&contents) else {
-            continue;
-        };
-        let version = captures.get(1)?.as_str().parse::<i32>().ok()?;
-        return Some(normalize_keymint_version(version));
-    }
-    None
-}
-
-fn fallback_keymint_version_from_android() -> i32 {
-    match detect_android_major_version() {
-        Some(version) if version >= 16 => KeyMintDevice::KEY_MINT_V4, // TODO: we still use V4 for now cuz V5 hasn't been implement yet upstream
-        Some(14 | 15) => KeyMintDevice::KEY_MINT_V3,
-        Some(13) => KeyMintDevice::KEY_MINT_V2,
-        Some(12) => KeyMintDevice::KEY_MINT_V1,
-        _ => KeyMintDevice::KEY_MINT_V4,
+        SecurityLevel::STRONGBOX => {
+            *STRONGBOX_PROFILE.get_or_init(|| build_resolved_hardware_profile(security_level))
+        }
+        _ => build_resolved_hardware_profile(security_level),
     }
 }
 
-fn detect_android_major_version() -> Option<i32> {
-    resetprop::read_string_property("ro.build.version.release_or_codename")
-        .or_else(|| resetprop::read_string_property("ro.build.version.release"))
-        .and_then(|value| value.parse::<i32>().ok())
-        .or_else(|| {
-            resetprop::read_string_property("ro.build.version.sdk")
-                .and_then(|sdk| sdk.parse::<i32>().ok())
-                .map(|sdk| match sdk {
-                    31 | 32 => 12,
-                    33 => 13,
-                    34 => 14,
-                    35 => 15,
-                    value if value >= 36 => 16,
-                    _ => 16,
-                })
-        })
-}
-
-fn normalize_keymint_version(version: i32) -> i32 {
-    if (1..10).contains(&version) {
-        version * 100
-    } else {
-        version
+fn build_resolved_hardware_profile(security_level: SecurityLevel) -> ResolvedHardwareProfile {
+    let profile = crate::plat::keymint_profile::resolve_hardware_profile(security_level);
+    ResolvedHardwareProfile {
+        version_number: profile.version_number,
+        impl_name: leak_string(profile.impl_name),
+        author_name: leak_string(profile.author_name),
+        unique_id: leak_string(profile.unique_id),
     }
 }
 

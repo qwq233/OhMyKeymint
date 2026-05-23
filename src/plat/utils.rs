@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Ok;
 use der::asn1::SetOfVec;
@@ -12,7 +12,9 @@ use crate::android::apex::IApexService::IApexService;
 use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
 use crate::android::security::keystore::KeyAttestationApplicationId::KeyAttestationApplicationId;
 use crate::android::security::keystore::KeyAttestationPackageInfo::KeyAttestationPackageInfo;
-use crate::android::system::keystore2::ResponseCode::ResponseCode;
+use crate::android::system::keystore2::{
+    IKeystoreService::IKeystoreService, ResponseCode::ResponseCode,
+};
 use crate::err;
 use crate::keymaster::apex::ApexModuleInfo;
 use crate::keymaster::error::KsError;
@@ -20,6 +22,33 @@ use crate::keymaster::error::KsError;
 thread_local! {
     static PM: Mutex<Option<rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider>>> = Mutex::new(None);
     static APEX: Mutex<Option<rsbinder::Strong<dyn IApexService>>> = Mutex::new(None);
+}
+
+const KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/default";
+
+static KEYSTORE_CACHE: OnceLock<Mutex<KeystoreServiceCache>> = OnceLock::new();
+static KEYSTORE_INIT: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct KeystoreServiceCache {
+    service: Option<rsbinder::Strong<dyn IKeystoreService>>,
+    death_recipient: Option<Arc<dyn DeathRecipient>>,
+}
+
+fn keystore_cache() -> &'static Mutex<KeystoreServiceCache> {
+    KEYSTORE_CACHE.get_or_init(|| {
+        Mutex::new(KeystoreServiceCache {
+            service: None,
+            death_recipient: None,
+        })
+    })
+}
+
+fn keystore_init_lock() -> &'static Mutex<()> {
+    KEYSTORE_INIT.get_or_init(|| Mutex::new(()))
+}
+
+fn keystore_service_is_alive(service: &rsbinder::Strong<dyn IKeystoreService>) -> bool {
+    service.as_binder().ping_binder().is_ok()
 }
 
 struct PmDeathRecipient;
@@ -41,6 +70,17 @@ impl rsbinder::DeathRecipient for ApexDeathRecipient {
             *p.lock().unwrap() = None;
         });
         debug!("ApexService died, cleared APEX instance");
+    }
+}
+
+struct KeystoreDeathRecipient;
+
+impl rsbinder::DeathRecipient for KeystoreDeathRecipient {
+    fn binder_died(&self, _who: &rsbinder::WIBinder) {
+        let mut guard = keystore_cache().lock().unwrap();
+        guard.service = None;
+        guard.death_recipient = None;
+        debug!("System Keystore died, cleared KEYSTORE instance");
     }
 }
 
@@ -75,6 +115,38 @@ fn reset_pm() {
         *p.lock().unwrap() = None;
     });
     debug!("Reset PM instance to None");
+}
+
+pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreService>> {
+    let _init_guard = keystore_init_lock().lock().unwrap();
+    let mut guard = keystore_cache().lock().unwrap();
+    if let Some(service) = guard.service.as_ref() {
+        if keystore_service_is_alive(service) {
+            return Ok(service.clone());
+        }
+
+        guard.service = None;
+        guard.death_recipient = None;
+    }
+
+    let service: rsbinder::Strong<dyn IKeystoreService> = hub::get_interface(KEYSTORE_SERVICE)
+        .map_err(|error| anyhow::anyhow!("failed to connect to {KEYSTORE_SERVICE}: {error:?}"))?;
+    let recipient: Arc<dyn DeathRecipient> = Arc::new(KeystoreDeathRecipient {});
+    service
+        .as_binder()
+        .link_to_death(Arc::downgrade(&recipient))?;
+    if !keystore_service_is_alive(&service) {
+        guard.service = None;
+        guard.death_recipient = None;
+        return Err(anyhow::anyhow!(
+            "connected to {KEYSTORE_SERVICE} but binder died during initialization"
+        ));
+    }
+
+    guard.death_recipient = Some(recipient);
+    guard.service = Some(service.clone());
+
+    Ok(service)
 }
 
 #[allow(non_snake_case)]

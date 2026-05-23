@@ -9,7 +9,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use kmr_common::crypto::{Rng, Sha256};
 use kmr_crypto_boring::{rng::BoringRng, sha256::BoringSha256};
-use rsbinder::{hub, Strong};
+use rsbinder::Strong;
 
 use crate::{
     android::{
@@ -20,15 +20,13 @@ use crate::{
         },
         system::keystore2::{
             Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
-            IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor,
-            KeyMetadata::KeyMetadata,
+            KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata,
         },
     },
     config::{ConfigFile, ResolvedTrust, TrustRecord, TrustValueSource, TrustValueSpec},
-    plat::{attestation, resetprop},
+    plat::{attestation, resetprop, utils::get_keystore_service},
 };
 
-const KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/default";
 const SECURITY_PATCH_PROP: &str = "ro.build.version.security_patch";
 const VBMETA_KEY_PROP: &str = "ro.boot.vbmeta.public_key_digest";
 const VBMETA_HASH_PROP: &str = "ro.boot.vbmeta.digest";
@@ -485,8 +483,7 @@ fn probe_original_verified_boot_hash_with_timeout(timeout: Duration) -> Result<[
 }
 
 fn probe_original_verified_boot_hash_inner() -> Result<[u8; 32]> {
-    let service: Strong<dyn IKeystoreService> =
-        hub::get_interface(KEYSTORE_SERVICE).context("failed to connect to system keystore")?;
+    let service = get_keystore_service().context("failed to connect to system keystore")?;
     let tee = service
         .getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT)
         .context("failed to get system TEE security level")?;
