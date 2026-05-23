@@ -9,7 +9,9 @@ edition = "2021"
 license = "Apache-2.0"
 
 [features]
-default = ["hal_v2", "hal_v3", "hal_v4"]
+default = ["hal_v2", "hal_v3", "hal_v4", "hal_v5"]
+# Include support for types added in v5 of the KeyMint HAL.
+hal_v5 = ["hal_v2", "hal_v3", "hal_v4"]
 # Include support for types added in v4 of the KeyMint HAL.
 hal_v4 = ["hal_v3", "hal_v2"]
 # Include support for types added in v3 of the KeyMint HAL.

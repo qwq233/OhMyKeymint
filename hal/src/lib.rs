@@ -269,7 +269,9 @@ pub fn send_hal_info<T: SerializedChannel>(channel: &mut T) -> binder::Result<()
     info!("HAL->TA: environment info is {:?}", req);
     let _rsp: kmr_wire::SetHalInfoResponse = channel_execute(channel, req)?;
 
-    let aidl_version = if cfg!(feature = "hal_v4") {
+    let aidl_version = if cfg!(feature = "hal_v5") {
+        500
+    } else if cfg!(feature = "hal_v4") {
         400
     } else if cfg!(feature = "hal_v3") {
         300

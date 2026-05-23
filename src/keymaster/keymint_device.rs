@@ -90,6 +90,8 @@ impl KeyMintDevice {
     pub const KEY_MINT_V3: i32 = 300;
     /// Version number of KeyMintDevice@V4
     pub const KEY_MINT_V4: i32 = 400;
+    /// Version number of KeyMintDevice@V5
+    pub const KEY_MINT_V5: i32 = 500;
 
     /// Get a [`KeyMintDevice`] for the given [`SecurityLevel`]
     pub fn get(security_level: SecurityLevel) -> Result<KeyMintDevice> {
@@ -1211,7 +1213,7 @@ fn probe_keymint_version_from_vintf(security_level: SecurityLevel) -> Option<i32
 
 fn fallback_keymint_version_from_android() -> i32 {
     match detect_android_major_version() {
-        Some(version) if version >= 16 => KeyMintDevice::KEY_MINT_V4,
+        Some(version) if version >= 16 => KeyMintDevice::KEY_MINT_V4, // TODO: we still use V4 for now cuz V5 hasn't been implement yet upstream
         Some(14 | 15) => KeyMintDevice::KEY_MINT_V3,
         Some(13) => KeyMintDevice::KEY_MINT_V2,
         Some(12) => KeyMintDevice::KEY_MINT_V1,
@@ -1399,6 +1401,14 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
     let resp = ta.process_req(req);
     if resp.error_code != 0 {
         return Err(Error::Km(ErrorCode::UNKNOWN_ERROR)).context(err!("Failed to set HAL info"));
+    }
+
+    let req = PerformOpReq::SetHalVersion(kmr_wire::SetHalVersionRequest {
+        aidl_version: profile.version_number as u32,
+    });
+    let resp = ta.process_req(req);
+    if resp.error_code != 0 {
+        return Err(Error::Km(ErrorCode::UNKNOWN_ERROR)).context(err!("Failed to set HAL version"));
     }
 
     if let Some(bundle) = crate::global::module_info_bundle() {

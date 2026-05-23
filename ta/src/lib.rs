@@ -58,6 +58,8 @@ mod tests;
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyMintHalVersion {
+    /// V5 removes support for destroying attestation IDs.
+    V5 = 500,
     /// V4 adds support for attestation of module information.
     V4 = 400,
     /// V3 adds support for attestation of second IMEI value.
@@ -628,6 +630,7 @@ impl KeyMintTa {
             200 => KeyMintHalVersion::V2,
             300 => KeyMintHalVersion::V3,
             400 => KeyMintHalVersion::V4,
+            500 => KeyMintHalVersion::V5,
             _ => {
                 return Err(km_err!(
                     InvalidArgument,
@@ -1072,11 +1075,12 @@ impl KeyMintTa {
         Ok(())
     }
 
-    fn destroy_attestation_ids(&mut self) -> Result<(), Error> {
+    /// Destroy attestation IDs for the device, and clear any cached copies.
+    pub fn destroy_attestation_ids(&mut self) -> Result<(), Error> {
+        // Drop any cached copies too.
+        *self.attestation_id_info.borrow_mut() = None;
         match self.dev.attest_ids.as_mut() {
             Some(attest_ids) => {
-                // Drop any cached copies too.
-                *self.attestation_id_info.borrow_mut() = None;
                 error!("destroying all device attestation IDs!");
                 attest_ids.destroy_all()
             }
