@@ -65,6 +65,18 @@ fn test_km_hmac_sha256() {
     );
 }
 
+#[test]
+fn test_km_ec_private_key_round_trip() {
+    let key = km::ec_key_generate_key().unwrap();
+    let private_key = km::ec_key_marshal_private_key(&key).unwrap();
+    assert_eq!(private_key.len(), 73);
+
+    let parsed = km::ec_key_parse_private_key(&private_key).unwrap();
+    let original_public = km::ec_point_point_to_oct(km::ec_key_get0_public_key(&key)).unwrap();
+    let parsed_public = km::ec_point_point_to_oct(km::ec_key_get0_public_key(&parsed)).unwrap();
+    assert_eq!(original_public, parsed_public);
+}
+
 #[cfg(soong)]
 #[test]
 fn test_aes_cmac() {

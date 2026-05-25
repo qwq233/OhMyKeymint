@@ -2,6 +2,7 @@ use std::vec;
 
 use crate::{error::Error, zvec::ZVec};
 use ffi::EVP_MAX_MD_SIZE;
+use foreign_types::ForeignType;
 use kmr_common::crypto::Rng;
 use openssl::{
     ec::{EcGroup, EcKey, EcPoint, EcPointRef},
@@ -381,39 +382,73 @@ pub fn ec_key_generate_key() -> Result<ECKey, Error> {
     Ok(ECKey(ec_key))
 }
 
+#[allow(non_snake_case)]
+unsafe fn ECKEYMarshalPrivateKey(key: *const ffi::EC_KEY, buf: *mut u8, len: usize) -> usize {
+    let mut cbb = std::mem::MaybeUninit::<ffi::CBB>::uninit();
+    if ffi::CBB_init_fixed(cbb.as_mut_ptr(), buf, len) != 1 {
+        return 0;
+    }
+    let mut cbb = cbb.assume_init();
+    let flags = (ffi::EC_PKEY_NO_PARAMETERS | ffi::EC_PKEY_NO_PUBKEY) as u32;
+    if ffi::EC_KEY_marshal_private_key(&mut cbb, key, flags) != 1 {
+        return 0;
+    }
+    let mut written_len = 0usize;
+    if ffi::CBB_finish(&mut cbb, std::ptr::null_mut(), &mut written_len) != 1 {
+        return 0;
+    }
+    written_len
+}
+
+#[allow(non_snake_case)]
+unsafe fn ECKEYParsePrivateKey(buf: *const u8, len: usize) -> *mut ffi::EC_KEY {
+    let group = ffi::EC_GROUP_new_by_curve_name(ffi::NID_secp521r1);
+    if group.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let mut cbs = std::mem::MaybeUninit::<ffi::CBS>::uninit();
+    ffi::CBS_init(cbs.as_mut_ptr(), buf, len);
+    let mut cbs = cbs.assume_init();
+    let key = ffi::EC_KEY_parse_private_key(&mut cbs, group);
+    ffi::EC_GROUP_free(group);
+
+    if key.is_null() || ffi::CBS_len(&cbs) != 0 {
+        if !key.is_null() {
+            ffi::EC_KEY_free(key);
+        }
+        return std::ptr::null_mut();
+    }
+
+    key
+}
+
 /// Calls the boringssl EC_KEY_marshal_private_key function.
 pub fn ec_key_marshal_private_key(key: &ECKey) -> Result<ZVec, Error> {
-    let len = 73; // Empirically observed length of private key
-    let mut buf = vec![0; len];
+    let len = 73; // Empirically observed length of private key.
+    let mut buf = ZVec::new(len)?;
     // Safety: the key is valid.
     // This will not write past the specified length of the buffer; if the
     // len above is too short, it returns 0.
-    let der = key
-        .0
-        .private_key_to_der()
-        .map_err(|_| Error::ECKEYMarshalPrivateKeyFailed)?;
-
-    if buf.len() < der.len() {
+    let written_len =
+        unsafe { ECKEYMarshalPrivateKey(key.0.as_ptr(), buf.as_mut_ptr(), buf.len()) } as usize;
+    if written_len != len {
         return Err(Error::ECKEYMarshalPrivateKeyFailed);
     }
-    buf.as_mut_slice()[..der.len()].copy_from_slice(&der);
-    Ok(ZVec::try_from(buf.as_slice())?)
+    Ok(buf)
 }
 
 /// Calls the boringssl EC_KEY_parse_private_key function.
 pub fn ec_key_parse_private_key(buf: &[u8]) -> Result<ECKey, Error> {
     // Safety: this will not read past the specified length of the buffer.
     // It fails if less than the whole buffer is consumed.
-    let group =
-        EcGroup::from_curve_name(Nid::SECP521R1).map_err(|_| Error::ECKEYParsePrivateKeyFailed)?;
-    let priv_key =
-        EcKey::private_key_from_der(buf).map_err(|_| Error::ECKEYParsePrivateKeyFailed)?;
-
-    if priv_key.group().curve_name() != group.curve_name() {
-        return Err(Error::ECKEYParsePrivateKeyFailed);
+    let priv_key = unsafe { ECKEYParsePrivateKey(buf.as_ptr(), buf.len()) };
+    if priv_key.is_null() {
+        Err(Error::ECKEYParsePrivateKeyFailed)
+    } else {
+        // Safety: `priv_key` is a valid EC_KEY returned by BoringSSL.
+        Ok(ECKey(unsafe { EcKey::from_ptr(priv_key) }))
     }
-
-    Ok(ECKey(priv_key))
 }
 
 /// Calls the boringssl EC_KEY_get0_public_key function.

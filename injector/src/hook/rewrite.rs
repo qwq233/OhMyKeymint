@@ -312,15 +312,7 @@ fn route_for_service_request(
         | ParsedServiceRequest::ListEntriesBatched { .. }
         | ParsedServiceRequest::GetSupplementaryAttestationInfo { .. } => fallback,
     };
-    if route == RouteTarget::Omk && mirror_state_dirty() {
-        debug!(
-            "[Injector][Route] forcing service_method={:?} to System because OMK mirror state is dirty",
-            request.method()
-        );
-        RouteTarget::System
-    } else {
-        route
-    }
+    route
 }
 
 fn route_for_security_level_request(
@@ -335,15 +327,7 @@ fn route_for_security_level_request(
         }
         _ => carrier_route,
     };
-    if route == RouteTarget::Omk && mirror_state_dirty() {
-        debug!(
-            "[Injector][Route] forcing security_level_method={:?} to System because OMK mirror state is dirty",
-            request.method()
-        );
-        RouteTarget::System
-    } else {
-        route
-    }
+    route
 }
 
 fn mirror_state_dirty() -> bool {
@@ -371,6 +355,22 @@ fn mark_mirror_state_dirty(kind: &str, method: impl std::fmt::Debug, caller: &Ca
         caller.pid,
         if was_dirty { " (already dirty)" } else { "" }
     );
+}
+
+fn should_skip_dirty_mirror(
+    kind: &str,
+    method: impl std::fmt::Debug,
+    caller: &CallerIdentity,
+) -> bool {
+    if !mirror_state_dirty() {
+        return false;
+    }
+
+    warn!(
+        "[Injector][Mirror] OMK mirror state is dirty; skipping {} {:?} mirror for uid={} pid={}",
+        kind, method, caller.uid, caller.pid
+    );
+    true
 }
 
 fn operation_targets() -> &'static Mutex<HashMap<LocalBinderTarget, OperationTargetInfo>> {
@@ -1255,6 +1255,9 @@ unsafe fn build_authorization_reply_mirror(
         );
         return Ok(None);
     }
+    if should_skip_dirty_mirror("authorization", call.method, &call.caller) {
+        return Ok(None);
+    }
 
     let caller = call.caller.to_caller_info();
     let result = match &call.request {
@@ -1335,6 +1338,9 @@ unsafe fn build_maintenance_reply_mirror(
             "[Injector][Maintenance] system {:?} failed with {}; skipping OMK mirror",
             call.method, status
         );
+        return Ok(None);
+    }
+    if should_skip_dirty_mirror("maintenance", call.method, &call.caller) {
         return Ok(None);
     }
 

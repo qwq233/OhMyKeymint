@@ -12,7 +12,6 @@ use crate::android::security::authorization::{
     IKeystoreAuthorization::{BnKeystoreAuthorization, IKeystoreAuthorization},
     ResponseCode::ResponseCode as AuthResponseCode,
 };
-use crate::config::config;
 use crate::err;
 use crate::global::{DB, ENFORCEMENTS, SUPER_KEY};
 use crate::keymaster::error::{anyhow_error_to_string, is_dead_object_status, KsError};
@@ -64,9 +63,9 @@ impl AuthorizationManager {
         check_authorization_permission(KeystorePerm::AddAuth, ctx, "addAuthToken")
             .context(err!("caller missing add_auth permission"))?;
         validate_auth_token_shape(auth_token)?;
-        if should_skip_system_biometric_hat_verification(ctx, auth_token) {
-            log::warn!(
-                "system auth token MAC verification skipped by config for mirrored biometric authType={:#x} challengeTag={:04x}",
+        if should_skip_mirrored_auth_token_verification(ctx) {
+            log::debug!(
+                "system auth token MAC verification skipped for mirrored system-successful authType={:#x} challengeTag={:04x}",
                 auth_token.authenticatorType.0,
                 challenge_tag(auth_token.challenge),
             );
@@ -278,24 +277,8 @@ fn validate_auth_token_shape(auth_token: &HardwareAuthToken) -> Result<()> {
     Ok(())
 }
 
-fn should_skip_system_biometric_hat_verification(
-    ctx: Option<&CallerInfo>,
-    auth_token: &HardwareAuthToken,
-) -> bool {
+fn should_skip_mirrored_auth_token_verification(ctx: Option<&CallerInfo>) -> bool {
     ctx.is_some()
-        && force_skip_system_biometric_hat_verification()
-        && is_biometric_auth_token(auth_token)
-}
-
-fn force_skip_system_biometric_hat_verification() -> bool {
-    config()
-        .read()
-        .map(|config| config.main.force_skip_system_biometric_hat_verification)
-        .unwrap_or(false)
-}
-
-fn is_biometric_auth_token(auth_token: &HardwareAuthToken) -> bool {
-    (auth_token.authenticatorType.0 & HardwareAuthenticatorType::FINGERPRINT.0) != 0
 }
 
 thread_local! {
