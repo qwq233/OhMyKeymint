@@ -1,16 +1,16 @@
 ## What's changed
 
-This release makes the standalone Keystore path more complete by implementing the Keystore authorization and maintenance services. OMK can now handle user lock/unlock state, auth token localization, shared-secret based auth-token HMAC key setup, and maintenance events such as user and namespace lifecycle.
+This release is a stability update for the standalone Keystore path introduced in v1.1.0.
 
-The injector has also been strengthened. Authorization and maintenance calls are mirrored to OMK after the system service accepts them, routing now falls back to the system service if the mirrored state becomes dirty, and tracked grant readbacks are bridged for isolated callers. This should make auth-bound keys, grants, and operation routing behave much closer to stock AOSP.
+A dirty authorization or maintenance mirror state no longer forces normal keystore traffic back to the system service. Mirror failures are now kept local to the mirror path: later authorization and maintenance mirrors are skipped with a warning, while regular service and security-level routing continue to use the configured OMK/system targets. Mirrored auth tokens also now match the system-success flow more closely by skipping the extra local system KeyMint MAC verification after the platform authorization service has already accepted the token.
 
-KeyMint hardware information is now resolved dynamically from VINTF, device properties, or the system KeyMint service, which should reduce generic AOSP-looking hardware profiles. This release also retires stale attest-key entries when the active keybox changes and fixes AAID encoding for callers with multiple package records.
+Logging and runtime helpers have been cleaned up and shared between keymint and injector. File logging now uses locked rotating appenders, rotates existing logs on startup, removes legacy `.lock` sidecar files, and refreshes ownership/permissions for OMK config, keybox, and log files. Config reload recovery was also deduplicated so replace-save races are retried consistently without treating parse errors as transient.
 
-Additionally, logging and blind KeyMint probes were expanded, the hot-update deployment script was added, dependencies were updated, and the local rsbinder fork was removed because the required patches are now upstream.
+Legacy P-521 EC private-key serialization now uses the BoringSSL Keymaster-compatible marshal/parse APIs and has round-trip coverage, fixing incompatibilities caused by generic DER encoding.
 
-Older configs are still accepted, but OMK may add `shared_secret_seed` and `shared_secret_nonce` when rewriting `config.toml`. Keep generated `[crypto]` values stable across updates.
+No config migration is required for this update. Existing `config.toml`, `injector.toml`, and `keybox.xml` files remain compatible, but `keymint.log` and `injector.log` may be rotated to `.1` during startup.
 
 ## Attestation 
-- https://github.com/qwq233/OhMyKeymint/attestations/28506616
+- https://github.com/qwq233/OhMyKeymint/attestations/28625994
 
-**Full Changelog**: https://github.com/qwq233/OhMyKeymint/compare/v1.0.0-e9fecf0...v1.1.0-424f7b9
+**Full Changelog**: https://github.com/qwq233/OhMyKeymint/compare/v1.1.0-424f7b9...v1.1.1-ef38a44
