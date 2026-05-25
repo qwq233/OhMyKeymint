@@ -95,10 +95,6 @@ pub extern "C" fn entry(handle: *const c_void) -> bool {
     }
     logging::update_runtime_level(config.main.log_level_filter());
     log_runtime_identity("Payload");
-    println!(
-        "[inject::entry] injected library entry called, handle={:?}",
-        handle
-    );
     log::info!(
         "Injected library entry called! Handle: {:?}, build_id={}, build_target={}, runtime_arch={}, current_exe={}",
         handle,

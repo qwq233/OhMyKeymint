@@ -1,12 +1,18 @@
 use std::{
     fs, io,
-    io::Write,
     path::{Path, PathBuf},
     sync::{OnceLock, RwLock},
 };
 
 use anyhow::{anyhow, Context, Result};
-use kmr_common::crypto::Rng;
+use kmr_common::{
+    crypto::Rng,
+    runtime::{
+        file_watch::{self, WatchTrigger},
+        fs::backup_file_with_reason,
+        retry::{retry_read_race, ReadRaceErrorKind},
+    },
+};
 use kmr_crypto_boring::rng::BoringRng;
 use serde::{ser::SerializeStruct, Deserialize, Serialize};
 
@@ -57,6 +63,15 @@ enum ConfigLoadError {
     Missing(io::Error),
     Read(io::Error),
     Parse(String),
+}
+
+impl std::fmt::Display for ConfigLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing(error) | Self::Read(error) => write!(f, "{error}"),
+            Self::Parse(error) => write!(f, "{error}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -142,57 +157,40 @@ fn load_config_file_once() -> Result<LoadedConfigFile, ConfigLoadError> {
     }
 }
 
-fn load_config_file_with_retry(
-    trigger: crate::plat::file_watch::WatchTrigger,
-) -> Result<LoadedConfigFile, ConfigLoadError> {
-    if !matches!(
-        trigger,
-        crate::plat::file_watch::WatchTrigger::ReplaceSave
-            | crate::plat::file_watch::WatchTrigger::Polling
-    ) {
+fn config_load_error_kind(error: &ConfigLoadError) -> ReadRaceErrorKind {
+    match error {
+        ConfigLoadError::Missing(_) | ConfigLoadError::Read(_) => ReadRaceErrorKind::Retryable,
+        ConfigLoadError::Parse(_) => ReadRaceErrorKind::Fatal,
+    }
+}
+
+fn load_config_file_with_retry(trigger: WatchTrigger) -> Result<LoadedConfigFile, ConfigLoadError> {
+    if !trigger.should_retry_reads() {
         return load_config_file_once();
     }
 
-    let mut retries = 0usize;
-    loop {
-        match load_config_file_once() {
-            Ok(mut loaded) => {
-                loaded.retries = retries;
-                return Ok(loaded);
-            }
-            Err(ConfigLoadError::Parse(error)) => return Err(ConfigLoadError::Parse(error)),
-            Err(ConfigLoadError::Missing(error)) => {
-                if retries >= REPLACE_SAVE_RETRY_LIMIT {
-                    return Err(ConfigLoadError::Missing(error));
-                }
-                retries += 1;
-                log::warn!(
-                    "Config reload via {} hit read-side race on retry {}/{}: {}; waiting {} ms",
-                    trigger.label(),
-                    retries,
-                    REPLACE_SAVE_RETRY_LIMIT,
-                    error,
-                    REPLACE_SAVE_RETRY_INTERVAL.as_millis()
-                );
-                std::thread::sleep(REPLACE_SAVE_RETRY_INTERVAL);
-            }
-            Err(ConfigLoadError::Read(error)) => {
-                if retries >= REPLACE_SAVE_RETRY_LIMIT {
-                    return Err(ConfigLoadError::Read(error));
-                }
-                retries += 1;
-                log::warn!(
-                    "Config reload via {} hit read-side race on retry {}/{}: {}; waiting {} ms",
-                    trigger.label(),
-                    retries,
-                    REPLACE_SAVE_RETRY_LIMIT,
-                    error,
-                    REPLACE_SAVE_RETRY_INTERVAL.as_millis()
-                );
-                std::thread::sleep(REPLACE_SAVE_RETRY_INTERVAL);
-            }
-        }
-    }
+    retry_read_race(
+        load_config_file_once,
+        config_load_error_kind,
+        REPLACE_SAVE_RETRY_LIMIT,
+        REPLACE_SAVE_RETRY_INTERVAL,
+        std::thread::sleep,
+        |retries, error, interval| {
+            log::warn!(
+                "Config reload via {} hit read-side race on retry {}/{}: {}; waiting {} ms",
+                trigger.label(),
+                retries,
+                REPLACE_SAVE_RETRY_LIMIT,
+                error,
+                interval.as_millis()
+            );
+        },
+    )
+    .map(|outcome| {
+        let mut loaded = outcome.value;
+        loaded.retries = outcome.retries;
+        loaded
+    })
 }
 
 fn current_config_file_snapshot() -> ConfigFile {
@@ -226,51 +224,16 @@ fn parse_config_file(contents: &str) -> Result<ConfigFile> {
 }
 
 fn rewrite_invalid_config(replacement: &ConfigFile, reason: &str) -> Result<()> {
-    backup_existing_config(reason)?;
+    backup_config_with_reason(reason)?;
     persist_config_file(replacement)?;
     Ok(())
 }
 
-fn backup_existing_config(reason: &str) -> Result<()> {
+fn backup_config_with_reason(reason: &str) -> Result<()> {
     let path = Path::new(CONFIG_PATH);
-    if !path.exists() {
-        return Ok(());
-    }
-
     let backup_path = format!("{CONFIG_PATH}.bak");
     let backup = Path::new(&backup_path);
-    if backup.exists() {
-        fs::remove_file(backup)
-            .with_context(|| format!("failed to remove stale backup {}", backup.display()))?;
-    }
-
-    fs::rename(path, backup)
-        .or_else(|rename_error| {
-            fs::copy(path, backup)
-                .with_context(|| {
-                    format!(
-                        "failed to copy invalid config to backup {} after rename error {rename_error}",
-                        backup.display()
-                    )
-                })
-                .and_then(|_| {
-                    fs::remove_file(path).with_context(|| {
-                        format!("failed to remove original config {}", path.display())
-                    })
-                })
-        })
-        .with_context(|| format!("failed to move invalid config to {}", backup.display()))?;
-
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(backup)
-        .with_context(|| format!("failed to open backup {}", backup.display()))?;
-    writeln!(file)?;
-    writeln!(file, "# OMK config recovery reason:")?;
-    for line in reason.lines() {
-        writeln!(file, "# {line}")?;
-    }
-    Ok(())
+    backup_file_with_reason(path, backup, "OMK config recovery reason", reason, true)
 }
 
 fn start_config_watcher() -> Result<()> {
@@ -278,14 +241,14 @@ fn start_config_watcher() -> Result<()> {
         return Ok(());
     }
 
-    crate::plat::file_watch::spawn_path_watcher(
+    file_watch::spawn_path_watcher(
         "omk-config-watch",
         PathBuf::from(CONFIG_PATH),
         reload_runtime_config,
     )
 }
 
-fn reload_runtime_config(trigger: crate::plat::file_watch::WatchTrigger) {
+fn reload_runtime_config(trigger: WatchTrigger) {
     let new_config_file = match load_config_file_with_retry(trigger) {
         Ok(loaded) => {
             if loaded.retries > 0 {

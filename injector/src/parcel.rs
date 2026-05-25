@@ -2,7 +2,8 @@ use std::mem::size_of;
 
 use anyhow::{anyhow, bail, Context, Result};
 use rsbinder::{
-    Deserialize, Parcel, Serialize, Status, StatusCode, Strong, NON_NULL_PARCELABLE_FLAG,
+    Deserialize, FromIBinder, Parcel, Serialize, SerializeOption, Status, StatusCode, Strong,
+    NON_NULL_PARCELABLE_FLAG,
 };
 
 use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
@@ -315,14 +316,16 @@ pub unsafe fn parse_authorization_request(
     offsets_size: usize,
     code: u32,
 ) -> Result<ParsedAuthorizationRequest> {
-    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    let interface = read_request_interface(&mut parcel)?;
-    if interface != KEYSTORE_AUTHORIZATION_INTERFACE {
-        bail!("unexpected interface token: {}", interface);
-    }
-
-    let method = authorization_method_from_code(code)
-        .ok_or_else(|| anyhow!("unknown IKeystoreAuthorization transaction code {}", code))?;
+    let (mut parcel, method) = parse_typed_request(
+        data,
+        data_size,
+        offsets,
+        offsets_size,
+        code,
+        KEYSTORE_AUTHORIZATION_INTERFACE,
+        "IKeystoreAuthorization",
+        authorization_method_from_code,
+    )?;
 
     let parsed = match method {
         AuthorizationMethod::AddAuthToken => ParsedAuthorizationRequest::AddAuthToken {
@@ -393,14 +396,16 @@ pub unsafe fn parse_maintenance_request(
     offsets_size: usize,
     code: u32,
 ) -> Result<ParsedMaintenanceRequest> {
-    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    let interface = read_request_interface(&mut parcel)?;
-    if interface != KEYSTORE_MAINTENANCE_INTERFACE {
-        bail!("unexpected interface token: {}", interface);
-    }
-
-    let method = maintenance_method_from_code(code)
-        .ok_or_else(|| anyhow!("unknown IKeystoreMaintenance transaction code {}", code))?;
+    let (mut parcel, method) = parse_typed_request(
+        data,
+        data_size,
+        offsets,
+        offsets_size,
+        code,
+        KEYSTORE_MAINTENANCE_INTERFACE,
+        "IKeystoreMaintenance",
+        maintenance_method_from_code,
+    )?;
 
     let parsed = match method {
         MaintenanceMethod::OnUserAdded => ParsedMaintenanceRequest::OnUserAdded {
@@ -449,14 +454,16 @@ pub unsafe fn parse_service_request(
     offsets_size: usize,
     code: u32,
 ) -> Result<ParsedServiceRequest> {
-    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    let interface = read_request_interface(&mut parcel)?;
-    if interface != KEYSTORE_SERVICE_INTERFACE {
-        bail!("unexpected interface token: {}", interface);
-    }
-
-    let method = service_method_from_code(code)
-        .ok_or_else(|| anyhow!("unknown IKeystoreService transaction code {}", code))?;
+    let (mut parcel, method) = parse_typed_request(
+        data,
+        data_size,
+        offsets,
+        offsets_size,
+        code,
+        KEYSTORE_SERVICE_INTERFACE,
+        "IKeystoreService",
+        service_method_from_code,
+    )?;
 
     let parsed = match method {
         ServiceMethod::GetSecurityLevel => ParsedServiceRequest::GetSecurityLevel {
@@ -516,14 +523,16 @@ pub unsafe fn parse_security_level_request(
     offsets_size: usize,
     code: u32,
 ) -> Result<ParsedSecurityLevelRequest> {
-    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    let interface = read_request_interface(&mut parcel)?;
-    if interface != KEYSTORE_SECURITY_LEVEL_INTERFACE {
-        bail!("unexpected interface token: {}", interface);
-    }
-
-    let method = security_level_method_from_code(code)
-        .ok_or_else(|| anyhow!("unknown IKeystoreSecurityLevel transaction code {}", code))?;
+    let (mut parcel, method) = parse_typed_request(
+        data,
+        data_size,
+        offsets,
+        offsets_size,
+        code,
+        KEYSTORE_SECURITY_LEVEL_INTERFACE,
+        "IKeystoreSecurityLevel",
+        security_level_method_from_code,
+    )?;
 
     let parsed = match method {
         SecurityLevelMethod::CreateOperation => ParsedSecurityLevelRequest::CreateOperation {
@@ -576,14 +585,16 @@ pub unsafe fn parse_operation_request(
     offsets_size: usize,
     code: u32,
 ) -> Result<ParsedOperationRequest> {
-    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    let interface = read_request_interface(&mut parcel)?;
-    if interface != KEYSTORE_OPERATION_INTERFACE {
-        bail!("unexpected interface token: {}", interface);
-    }
-
-    let method = operation_method_from_code(code)
-        .ok_or_else(|| anyhow!("unknown IKeystoreOperation transaction code {}", code))?;
+    let (mut parcel, method) = parse_typed_request(
+        data,
+        data_size,
+        offsets,
+        offsets_size,
+        code,
+        KEYSTORE_OPERATION_INTERFACE,
+        "IKeystoreOperation",
+        operation_method_from_code,
+    )?;
 
     let parsed = match method {
         OperationMethod::UpdateAad => ParsedOperationRequest::UpdateAad {
@@ -613,10 +624,7 @@ pub unsafe fn parse_success_reply<T: Deserialize>(
     offsets_size: usize,
 ) -> Result<T> {
     let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    let status: Status = parcel.read().context("failed to decode binder status")?;
-    if !status.is_ok() {
-        bail!("binder status was not OK: {}", status);
-    }
+    read_ok_status(&mut parcel)?;
     parcel.read().context("failed to decode reply payload")
 }
 
@@ -660,10 +668,7 @@ pub unsafe fn extract_direct_binder_reply_carrier(
     offsets_size: usize,
 ) -> Result<ReplyBinderCarrier> {
     let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    let status: Status = parcel.read().context("failed to decode binder status")?;
-    if !status.is_ok() {
-        bail!("binder status was not OK: {}", status);
-    }
+    read_ok_status(&mut parcel)?;
     read_reply_binder_carrier(&mut parcel, data)
 }
 
@@ -678,26 +683,11 @@ pub unsafe fn extract_key_entry_reply_carrier(
     offsets_size: usize,
 ) -> Result<ReplyBinderCarrier> {
     let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    let status: Status = parcel.read().context("failed to decode binder status")?;
-    if !status.is_ok() {
-        bail!("binder status was not OK: {}", status);
-    }
+    read_ok_status(&mut parcel)?;
     read_non_null_parcelable_flag(&mut parcel, "key-entry")?;
-
-    let mut carrier = None;
-    let mut read_error = None;
-    parcel.sized_read(|sub_parcel| {
-        match read_reply_binder_carrier(sub_parcel, data) {
-            Ok(value) => carrier = Some(value),
-            Err(error) => read_error = Some(error),
-        }
-        Ok(())
-    })?;
-    if let Some(error) = read_error {
-        return Err(error);
-    }
-
-    carrier.ok_or_else(|| anyhow!("missing key-entry binder carrier"))
+    read_sized_reply_payload(&mut parcel, "key-entry binder carrier", |sub_parcel| {
+        read_reply_binder_carrier(sub_parcel, data)
+    })
 }
 
 /// # Safety
@@ -711,30 +701,15 @@ pub unsafe fn parse_key_entry_reply_metadata(
     offsets_size: usize,
 ) -> Result<crate::android::system::keystore2::KeyMetadata::KeyMetadata> {
     let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    let status: Status = parcel.read().context("failed to decode binder status")?;
-    if !status.is_ok() {
-        bail!("binder status was not OK: {}", status);
-    }
+    read_ok_status(&mut parcel)?;
     read_non_null_parcelable_flag(&mut parcel, "key-entry")?;
-
-    let mut metadata = None;
-    let mut read_error = None;
-    parcel.sized_read(|sub_parcel| {
-        match read_reply_binder_carrier(sub_parcel, data).and_then(|_| {
+    read_sized_reply_payload(&mut parcel, "key-entry metadata payload", |sub_parcel| {
+        read_reply_binder_carrier(sub_parcel, data).and_then(|_| {
             sub_parcel
                 .read()
                 .context("failed to decode key-entry metadata payload")
-        }) {
-            Ok(value) => metadata = Some(value),
-            Err(error) => read_error = Some(error),
-        }
-        Ok(())
-    })?;
-    if let Some(error) = read_error {
-        return Err(error);
-    }
-
-    metadata.ok_or_else(|| anyhow!("missing key-entry metadata payload"))
+        })
+    })
 }
 
 /// # Safety
@@ -748,26 +723,13 @@ pub unsafe fn extract_create_operation_reply_carrier(
     offsets_size: usize,
 ) -> Result<ReplyBinderCarrier> {
     let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    let status: Status = parcel.read().context("failed to decode binder status")?;
-    if !status.is_ok() {
-        bail!("binder status was not OK: {}", status);
-    }
+    read_ok_status(&mut parcel)?;
     read_non_null_parcelable_flag(&mut parcel, "create-operation")?;
-
-    let mut carrier = None;
-    let mut read_error = None;
-    parcel.sized_read(|sub_parcel| {
-        match read_reply_binder_carrier(sub_parcel, data) {
-            Ok(value) => carrier = Some(value),
-            Err(error) => read_error = Some(error),
-        }
-        Ok(())
-    })?;
-    if let Some(error) = read_error {
-        return Err(error);
-    }
-
-    carrier.ok_or_else(|| anyhow!("missing create-operation binder carrier"))
+    read_sized_reply_payload(
+        &mut parcel,
+        "create-operation binder carrier",
+        |sub_parcel| read_reply_binder_carrier(sub_parcel, data),
+    )
 }
 
 pub fn build_get_security_level_reply(
@@ -780,19 +742,27 @@ pub fn build_get_security_level_reply(
     Ok(owned_reply_from_parcel(parcel, [binder_offset]))
 }
 
+fn build_sized_parcelable_reply<F>(write_payload: F) -> Result<OwnedReply>
+where
+    F: FnOnce(&mut Parcel, &mut Option<usize>) -> std::result::Result<(), StatusCode>,
+{
+    let mut parcel = Parcel::new();
+    parcel.write(&Status::from(StatusCode::Ok))?;
+    parcel.write(&NON_NULL_PARCELABLE_FLAG)?;
+    let mut binder_offset = None;
+    parcel.sized_write(|sub_parcel| write_payload(sub_parcel, &mut binder_offset))?;
+    Ok(owned_reply_from_parcel(parcel, binder_offset))
+}
+
 pub fn build_key_entry_reply(reply: KeyEntryResponse) -> Result<OwnedReply> {
     let KeyEntryResponse {
         r#iSecurityLevel,
         r#metadata,
     } = reply;
-    let mut parcel = Parcel::new();
-    parcel.write(&Status::from(StatusCode::Ok))?;
-    parcel.write(&NON_NULL_PARCELABLE_FLAG)?;
-    let mut binder_offset = None;
-    parcel.sized_write(|sub_parcel| {
+    build_sized_parcelable_reply(|sub_parcel, binder_offset| {
         match r#iSecurityLevel.as_ref() {
             Some(binder) => {
-                binder_offset = Some(sub_parcel.data_position());
+                *binder_offset = Some(sub_parcel.data_position());
                 sub_parcel.write(&Some(binder.clone()))?;
             }
             None => {
@@ -802,8 +772,7 @@ pub fn build_key_entry_reply(reply: KeyEntryResponse) -> Result<OwnedReply> {
         }
         sub_parcel.write(&r#metadata)?;
         Ok(())
-    })?;
-    Ok(owned_reply_from_parcel(parcel, binder_offset))
+    })
 }
 
 pub fn build_key_entry_reply_with_carrier_bytes(
@@ -811,43 +780,16 @@ pub fn build_key_entry_reply_with_carrier_bytes(
     carrier_bytes: &[u8],
     carrier_is_object: bool,
 ) -> Result<OwnedReply> {
-    let mut parcel = Parcel::new();
-    parcel.write(&Status::from(StatusCode::Ok))?;
-    parcel.write(&NON_NULL_PARCELABLE_FLAG)?;
-    let mut binder_offset = None;
-    let mut binder_len = 0usize;
-    parcel.sized_write(|sub_parcel| {
-        let none: Option<Strong<dyn IKeystoreSecurityLevel>> = None;
-        let start = sub_parcel.data_position();
-        sub_parcel.write(&none)?;
-        let end = sub_parcel.data_position();
-        binder_offset = Some(start);
-        binder_len = end - start;
-        sub_parcel.write(&metadata)?;
-        Ok(())
-    })?;
-    if carrier_bytes.len() != binder_len {
-        bail!(
-            "key-entry carrier binder size mismatch: expected {}, got {}",
-            binder_len,
-            carrier_bytes.len()
-        );
-    }
-    let mut reply = owned_reply_from_parcel(
-        parcel,
-        carrier_is_object.then_some(
-            binder_offset.expect("binder offset should be recorded for key-entry carrier"),
-        ),
-    );
-    let start = binder_offset.expect("binder offset should be recorded for key-entry carrier");
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            carrier_bytes.as_ptr(),
-            reply.data_mut_ptr().add(start),
-            carrier_bytes.len(),
-        );
-    }
-    Ok(reply)
+    build_parcelable_reply_with_carrier_bytes(
+        "key-entry",
+        carrier_bytes,
+        carrier_is_object,
+        |sub_parcel| {
+            let span = write_none_binder_placeholder::<dyn IKeystoreSecurityLevel>(sub_parcel)?;
+            sub_parcel.write(&metadata)?;
+            Ok(span)
+        },
+    )
 }
 
 pub fn build_create_operation_reply(reply: CreateOperationResponse) -> Result<OwnedReply> {
@@ -857,14 +799,10 @@ pub fn build_create_operation_reply(reply: CreateOperationResponse) -> Result<Ow
         r#parameters,
         r#upgradedBlob,
     } = reply;
-    let mut parcel = Parcel::new();
-    parcel.write(&Status::from(StatusCode::Ok))?;
-    parcel.write(&NON_NULL_PARCELABLE_FLAG)?;
-    let mut binder_offset = None;
-    parcel.sized_write(|sub_parcel| {
+    build_sized_parcelable_reply(|sub_parcel, binder_offset| {
         match r#iOperation.as_ref() {
             Some(binder) => {
-                binder_offset = Some(sub_parcel.data_position());
+                *binder_offset = Some(sub_parcel.data_position());
                 sub_parcel.write(&Some(binder.clone()))?;
             }
             None => {
@@ -876,8 +814,7 @@ pub fn build_create_operation_reply(reply: CreateOperationResponse) -> Result<Ow
         sub_parcel.write(&r#parameters)?;
         sub_parcel.write(&r#upgradedBlob)?;
         Ok(())
-    })?;
-    Ok(owned_reply_from_parcel(parcel, binder_offset))
+    })
 }
 
 pub fn build_create_operation_reply_with_carrier_bytes(
@@ -887,46 +824,18 @@ pub fn build_create_operation_reply_with_carrier_bytes(
     carrier_bytes: &[u8],
     carrier_is_object: bool,
 ) -> Result<OwnedReply> {
-    let mut parcel = Parcel::new();
-    parcel.write(&Status::from(StatusCode::Ok))?;
-    parcel.write(&NON_NULL_PARCELABLE_FLAG)?;
-    let mut binder_offset = None;
-    let mut binder_len = 0usize;
-    parcel.sized_write(|sub_parcel| {
-        let none: Option<Strong<dyn IKeystoreOperation>> = None;
-        let start = sub_parcel.data_position();
-        sub_parcel.write(&none)?;
-        let end = sub_parcel.data_position();
-        binder_offset = Some(start);
-        binder_len = end - start;
-        sub_parcel.write(&operation_challenge)?;
-        sub_parcel.write(&parameters)?;
-        sub_parcel.write(&upgraded_blob)?;
-        Ok(())
-    })?;
-    if carrier_bytes.len() != binder_len {
-        bail!(
-            "create-operation carrier binder size mismatch: expected {}, got {}",
-            binder_len,
-            carrier_bytes.len()
-        );
-    }
-    let mut reply = owned_reply_from_parcel(
-        parcel,
-        carrier_is_object.then_some(
-            binder_offset.expect("binder offset should be recorded for create-operation carrier"),
-        ),
-    );
-    let start =
-        binder_offset.expect("binder offset should be recorded for create-operation carrier");
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            carrier_bytes.as_ptr(),
-            reply.data_mut_ptr().add(start),
-            carrier_bytes.len(),
-        );
-    }
-    Ok(reply)
+    build_parcelable_reply_with_carrier_bytes(
+        "create-operation",
+        carrier_bytes,
+        carrier_is_object,
+        |sub_parcel| {
+            let span = write_none_binder_placeholder::<dyn IKeystoreOperation>(sub_parcel)?;
+            sub_parcel.write(&operation_challenge)?;
+            sub_parcel.write(&parameters)?;
+            sub_parcel.write(&upgraded_blob)?;
+            Ok(span)
+        },
+    )
 }
 
 pub fn build_plain_reply<T: Serialize>(value: &T) -> Result<OwnedReply> {
@@ -991,6 +900,35 @@ fn read_request_interface(parcel: &mut Parcel) -> Result<String> {
     parcel.read().context("missing interface token")
 }
 
+unsafe fn parse_typed_request<M>(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+    code: u32,
+    expected_interface: &str,
+    interface_name: &str,
+    method_from_code: fn(u32) -> Option<M>,
+) -> Result<(Parcel, M)> {
+    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
+    let interface = read_request_interface(&mut parcel)?;
+    if interface != expected_interface {
+        bail!("unexpected interface token: {}", interface);
+    }
+
+    let method = method_from_code(code)
+        .ok_or_else(|| anyhow!("unknown {interface_name} transaction code {code}"))?;
+    Ok((parcel, method))
+}
+
+fn read_ok_status(parcel: &mut Parcel) -> Result<()> {
+    let status: Status = parcel.read().context("failed to decode binder status")?;
+    if !status.is_ok() {
+        bail!("binder status was not OK: {}", status);
+    }
+    Ok(())
+}
+
 fn read_non_null_parcelable_flag(parcel: &mut Parcel, label: &str) -> Result<()> {
     let flag: i32 = parcel
         .read()
@@ -999,6 +937,27 @@ fn read_non_null_parcelable_flag(parcel: &mut Parcel, label: &str) -> Result<()>
         bail!("unexpected {label} parcelable flag: {flag}");
     }
     Ok(())
+}
+
+fn read_sized_reply_payload<T>(
+    parcel: &mut Parcel,
+    label: &str,
+    mut read_payload: impl FnMut(&mut Parcel) -> Result<T>,
+) -> Result<T> {
+    let mut value = None;
+    let mut read_error = None;
+    parcel.sized_read(|sub_parcel| {
+        match read_payload(sub_parcel) {
+            Ok(payload) => value = Some(payload),
+            Err(error) => read_error = Some(error),
+        }
+        Ok(())
+    })?;
+    if let Some(error) = read_error {
+        return Err(error);
+    }
+
+    value.ok_or_else(|| anyhow!("missing {label}"))
 }
 
 fn read_reply_binder_carrier(parcel: &mut Parcel, base: *mut u8) -> Result<ReplyBinderCarrier> {
@@ -1033,6 +992,55 @@ fn binder_carrier_is_object(flat: &flat_binder_object) -> bool {
         BINDER_TYPE_HANDLE | BINDER_TYPE_WEAK_HANDLE => unsafe { flat.handle_or_ptr.handle != 0 },
         _ => false,
     }
+}
+
+fn build_parcelable_reply_with_carrier_bytes(
+    label: &str,
+    carrier_bytes: &[u8],
+    carrier_is_object: bool,
+    write_body: impl FnOnce(&mut Parcel) -> rsbinder::Result<(usize, usize)>,
+) -> Result<OwnedReply> {
+    let mut parcel = Parcel::new();
+    parcel.write(&Status::from(StatusCode::Ok))?;
+    parcel.write(&NON_NULL_PARCELABLE_FLAG)?;
+    let mut binder_offset = None;
+    let mut binder_len = 0usize;
+    parcel.sized_write(|sub_parcel| {
+        let (start, end) = write_body(sub_parcel)?;
+        binder_offset = Some(start);
+        binder_len = end - start;
+        Ok(())
+    })?;
+    if carrier_bytes.len() != binder_len {
+        bail!(
+            "{label} carrier binder size mismatch: expected {}, got {}",
+            binder_len,
+            carrier_bytes.len()
+        );
+    }
+
+    let start =
+        binder_offset.ok_or_else(|| anyhow!("{label} carrier binder offset was not recorded"))?;
+    let mut reply = owned_reply_from_parcel(parcel, carrier_is_object.then_some(start));
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            carrier_bytes.as_ptr(),
+            reply.data_mut_ptr().add(start),
+            carrier_bytes.len(),
+        );
+    }
+    Ok(reply)
+}
+
+fn write_none_binder_placeholder<T>(parcel: &mut Parcel) -> rsbinder::Result<(usize, usize)>
+where
+    T: FromIBinder + SerializeOption + ?Sized,
+{
+    let none: Option<Strong<T>> = None;
+    let start = parcel.data_position();
+    parcel.write(&none)?;
+    let end = parcel.data_position();
+    Ok((start, end))
 }
 
 unsafe fn parcel_from_ipc_parts(

@@ -22,6 +22,7 @@ pub use kmr_wire as wire;
 
 pub mod crypto;
 pub mod keyblob;
+pub mod runtime;
 pub mod tag;
 
 /// General error type.

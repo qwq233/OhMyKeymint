@@ -9,6 +9,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
+anyhow = "1.0.102"
 cddl-cat = { version = "^0.7.0", optional = true }
 ciborium = { version = "0.2.2", default-features = false }
 ciborium-io = "^0.2.0"
@@ -17,7 +18,9 @@ der = { version = "0.8.0", features = ["alloc", "derive"] }
 enumn = "0.1.4"
 kmr-derive = { path = "../derive", version = "0.1.0" }
 kmr-wire = { path = "../wire", version = "0.1.0" }
+libc = "0.2.186"
 log = "^0.4"
+log4rs = "1.4.0"
 pkcs1 = { version = "0.7.5", features = ["alloc"] }
 pkcs8 = "0.11.0"
 rand = "0.10.1"

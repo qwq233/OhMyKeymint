@@ -63,7 +63,7 @@ use crate::watchdog as wd;
 use anyhow::{anyhow, Context, Result};
 use kmr_wire::keymint::KeyMintHardwareInfo;
 use log::{debug, warn};
-use rsbinder::{thread_state::CallingContext, BinderFeatures, Interface, Status, Strong};
+use rsbinder::{thread_state::CallingContext, Interface, Status, Strong};
 
 // Blob of 32 zeroes used as empty masking key.
 static ZERO_BLOB_32: &[u8] = &[0; 32];
@@ -114,13 +114,6 @@ struct AospSecurityLevelWrapper {
 
 struct OmkSecurityLevelWrapper {
     inner: Arc<KeystoreSecurityLevel>,
-}
-
-fn sid_features() -> BinderFeatures {
-    let mut features = BinderFeatures::default();
-    features.set_requesting_sid = true;
-    
-    features
 }
 
 fn should_retry_without_lskf_binding(
@@ -201,11 +194,11 @@ impl KeystoreSecurityLevel {
             AospSecurityLevelWrapper {
                 inner: shared.clone(),
             },
-            sid_features(),
+            crate::sid_features(),
         );
         let omk = BnOhMySecurityLevel::new_binder_with_features(
             OmkSecurityLevelWrapper { inner: shared },
-            sid_features(),
+            crate::sid_features(),
         );
         Ok((aosp, omk))
     }

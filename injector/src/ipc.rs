@@ -1,10 +1,13 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::Once;
+use std::thread::LocalKey;
 
 use anyhow::{Context, Result};
 use log::{debug, warn};
-use rsbinder::{hub, DeathRecipient, ExceptionCode, Status, StatusCode, Strong, WIBinder};
+use rsbinder::{
+    hub, DeathRecipient, ExceptionCode, FromIBinder, Status, StatusCode, Strong, WIBinder,
+};
 
 use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
 use crate::android::system::keystore2::IKeystoreService::IKeystoreService;
@@ -51,132 +54,126 @@ pub fn ensure_process_state() {
     });
 }
 
-pub fn get_omk() -> Result<Strong<dyn IOhMyKsService>> {
+fn get_cached_binder<T>(
+    service_name: &'static str,
+    connect_context: &'static str,
+    death_context: &'static str,
+    tag: &'static str,
+    slot: &'static LocalKey<RefCell<Option<Strong<T>>>>,
+    death_slot: &'static LocalKey<RefCell<Option<Arc<dyn DeathRecipient>>>>,
+    clear: fn(),
+) -> Result<Strong<T>>
+where
+    T: FromIBinder + ?Sized + 'static,
+{
     ensure_process_state();
-    OMK.with(|slot| {
+    slot.with(|slot| {
         if let Some(client) = slot.borrow().as_ref() {
             return Ok(client.clone());
         }
 
-        let client: Strong<dyn IOhMyKsService> =
-            hub::get_interface("omk").context("failed to connect to omk service")?;
-        let recipient: Arc<dyn DeathRecipient> = Arc::new(CachedBinderDeath {
-            tag: "omk",
-            clear: clear_omk_cache,
-        });
+        let client: Strong<T> = hub::get_interface(service_name).context(connect_context)?;
+        let recipient: Arc<dyn DeathRecipient> = Arc::new(CachedBinderDeath { tag, clear });
         client
             .as_binder()
             .link_to_death(Arc::downgrade(&recipient))
-            .context("failed to watch omk death")?;
-        OMK_DEATH.with(|death| *death.borrow_mut() = Some(recipient));
+            .context(death_context)?;
+        death_slot.with(|death| *death.borrow_mut() = Some(recipient));
         *slot.borrow_mut() = Some(client.clone());
         Ok(client)
     })
+}
+
+fn with_dead_object_retry<T, B, Get, Clear, F>(
+    tag: &'static str,
+    mut get: Get,
+    mut clear: Clear,
+    mut f: F,
+) -> Result<T>
+where
+    B: FromIBinder + ?Sized,
+    Get: FnMut() -> Result<Strong<B>>,
+    Clear: FnMut(),
+    F: FnMut(&Strong<B>) -> Result<T>,
+{
+    let client = get()?;
+    match f(&client) {
+        Ok(value) => Ok(value),
+        Err(error) if is_dead_object_error(&error) => {
+            warn!("[Injector][IPC] {tag} transaction hit DeadObject; clearing cache and retrying once");
+            clear();
+            let client = get()?;
+            f(&client)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn get_omk() -> Result<Strong<dyn IOhMyKsService>> {
+    get_cached_binder(
+        "omk",
+        "failed to connect to omk service",
+        "failed to watch omk death",
+        "omk",
+        &OMK,
+        &OMK_DEATH,
+        clear_omk_cache,
+    )
 }
 
 pub fn with_omk_retry<T, F>(mut f: F) -> Result<T>
 where
     F: FnMut(&Strong<dyn IOhMyKsService>) -> Result<T>,
 {
-    let client = get_omk()?;
-    match f(&client) {
-        Ok(value) => Ok(value),
-        Err(error) if is_dead_object_error(&error) => {
-            warn!(
-                "[Injector][IPC] omk transaction hit DeadObject; clearing cache and retrying once"
-            );
-            clear_omk_cache();
-            let client = get_omk()?;
-            f(&client)
-        }
-        Err(error) => Err(error),
-    }
+    with_dead_object_retry("omk", get_omk, clear_omk_cache, &mut f)
 }
 
 pub fn get_omk_authorization() -> Result<Strong<dyn IOhMyAuthorizationService>> {
-    ensure_process_state();
-    OMK_AUTHORIZATION.with(|slot| {
-        if let Some(client) = slot.borrow().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let client: Strong<dyn IOhMyAuthorizationService> =
-            hub::get_interface(OMK_AUTHORIZATION_SERVICE)
-                .context("failed to connect to omk_authorization service")?;
-        let recipient: Arc<dyn DeathRecipient> = Arc::new(CachedBinderDeath {
-            tag: OMK_AUTHORIZATION_SERVICE,
-            clear: clear_omk_authorization_cache,
-        });
-        client
-            .as_binder()
-            .link_to_death(Arc::downgrade(&recipient))
-            .context("failed to watch omk_authorization death")?;
-        OMK_AUTHORIZATION_DEATH.with(|death| *death.borrow_mut() = Some(recipient));
-        *slot.borrow_mut() = Some(client.clone());
-        Ok(client)
-    })
+    get_cached_binder(
+        OMK_AUTHORIZATION_SERVICE,
+        "failed to connect to omk_authorization service",
+        "failed to watch omk_authorization death",
+        OMK_AUTHORIZATION_SERVICE,
+        &OMK_AUTHORIZATION,
+        &OMK_AUTHORIZATION_DEATH,
+        clear_omk_authorization_cache,
+    )
 }
 
 pub fn with_omk_authorization_retry<T, F>(mut f: F) -> Result<T>
 where
     F: FnMut(&Strong<dyn IOhMyAuthorizationService>) -> Result<T>,
 {
-    let client = get_omk_authorization()?;
-    match f(&client) {
-        Ok(value) => Ok(value),
-        Err(error) if is_dead_object_error(&error) => {
-            warn!(
-                "[Injector][IPC] omk_authorization transaction hit DeadObject; clearing cache and retrying once"
-            );
-            clear_omk_authorization_cache();
-            let client = get_omk_authorization()?;
-            f(&client)
-        }
-        Err(error) => Err(error),
-    }
+    with_dead_object_retry(
+        OMK_AUTHORIZATION_SERVICE,
+        get_omk_authorization,
+        clear_omk_authorization_cache,
+        &mut f,
+    )
 }
 
 pub fn get_omk_maintenance() -> Result<Strong<dyn IOhMyMaintenanceService>> {
-    ensure_process_state();
-    OMK_MAINTENANCE.with(|slot| {
-        if let Some(client) = slot.borrow().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let client: Strong<dyn IOhMyMaintenanceService> =
-            hub::get_interface(OMK_MAINTENANCE_SERVICE)
-                .context("failed to connect to omk_maintenance service")?;
-        let recipient: Arc<dyn DeathRecipient> = Arc::new(CachedBinderDeath {
-            tag: OMK_MAINTENANCE_SERVICE,
-            clear: clear_omk_maintenance_cache,
-        });
-        client
-            .as_binder()
-            .link_to_death(Arc::downgrade(&recipient))
-            .context("failed to watch omk_maintenance death")?;
-        OMK_MAINTENANCE_DEATH.with(|death| *death.borrow_mut() = Some(recipient));
-        *slot.borrow_mut() = Some(client.clone());
-        Ok(client)
-    })
+    get_cached_binder(
+        OMK_MAINTENANCE_SERVICE,
+        "failed to connect to omk_maintenance service",
+        "failed to watch omk_maintenance death",
+        OMK_MAINTENANCE_SERVICE,
+        &OMK_MAINTENANCE,
+        &OMK_MAINTENANCE_DEATH,
+        clear_omk_maintenance_cache,
+    )
 }
 
 pub fn with_omk_maintenance_retry<T, F>(mut f: F) -> Result<T>
 where
     F: FnMut(&Strong<dyn IOhMyMaintenanceService>) -> Result<T>,
 {
-    let client = get_omk_maintenance()?;
-    match f(&client) {
-        Ok(value) => Ok(value),
-        Err(error) if is_dead_object_error(&error) => {
-            warn!(
-                "[Injector][IPC] omk_maintenance transaction hit DeadObject; clearing cache and retrying once"
-            );
-            clear_omk_maintenance_cache();
-            let client = get_omk_maintenance()?;
-            f(&client)
-        }
-        Err(error) => Err(error),
-    }
+    with_dead_object_retry(
+        OMK_MAINTENANCE_SERVICE,
+        get_omk_maintenance,
+        clear_omk_maintenance_cache,
+        &mut f,
+    )
 }
 
 pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
@@ -210,87 +207,51 @@ pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
 }
 
 pub fn get_system_keystore_service() -> Result<Strong<dyn IKeystoreService>> {
-    ensure_process_state();
-    SYSTEM_KEYSTORE.with(|slot| {
-        if let Some(client) = slot.borrow().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let client: Strong<dyn IKeystoreService> = hub::get_interface(SYSTEM_KEYSTORE_SERVICE)
-            .with_context(|| format!("failed to connect to {SYSTEM_KEYSTORE_SERVICE}"))?;
-        let recipient: Arc<dyn DeathRecipient> = Arc::new(CachedBinderDeath {
-            tag: SYSTEM_KEYSTORE_SERVICE,
-            clear: clear_system_keystore_cache,
-        });
-        client
-            .as_binder()
-            .link_to_death(Arc::downgrade(&recipient))
-            .context("failed to watch system keystore death")?;
-        SYSTEM_KEYSTORE_DEATH.with(|death| *death.borrow_mut() = Some(recipient));
-        *slot.borrow_mut() = Some(client.clone());
-        Ok(client)
-    })
+    get_cached_binder(
+        SYSTEM_KEYSTORE_SERVICE,
+        "failed to connect to android.system.keystore2.IKeystoreService/default",
+        "failed to watch system keystore death",
+        SYSTEM_KEYSTORE_SERVICE,
+        &SYSTEM_KEYSTORE,
+        &SYSTEM_KEYSTORE_DEATH,
+        clear_system_keystore_cache,
+    )
 }
 
 pub fn with_system_keystore_retry<T, F>(mut f: F) -> Result<T>
 where
     F: FnMut(&Strong<dyn IKeystoreService>) -> Result<T>,
 {
-    let client = get_system_keystore_service()?;
-    match f(&client) {
-        Ok(value) => Ok(value),
-        Err(error) if is_dead_object_error(&error) => {
-            warn!(
-                "[Injector][IPC] system keystore transaction hit DeadObject; clearing cache and retrying once"
-            );
-            clear_system_keystore_cache();
-            let client = get_system_keystore_service()?;
-            f(&client)
-        }
-        Err(error) => Err(error),
-    }
+    with_dead_object_retry(
+        "system keystore",
+        get_system_keystore_service,
+        clear_system_keystore_cache,
+        &mut f,
+    )
 }
 
 fn get_pm() -> Result<Strong<dyn IKeyAttestationApplicationIdProvider>> {
-    PM.with(|slot| {
-        if let Some(client) = slot.borrow().as_ref() {
-            return Ok(client.clone());
-        }
-
-        let client: Strong<dyn IKeyAttestationApplicationIdProvider> =
-            hub::get_interface("sec_key_att_app_id_provider")
-                .context("failed to connect to sec_key_att_app_id_provider")?;
-        let recipient: Arc<dyn DeathRecipient> = Arc::new(CachedBinderDeath {
-            tag: "sec_key_att_app_id_provider",
-            clear: clear_pm_cache,
-        });
-        client
-            .as_binder()
-            .link_to_death(Arc::downgrade(&recipient))
-            .context("failed to watch sec_key_att_app_id_provider death")?;
-        PM_DEATH.with(|death| *death.borrow_mut() = Some(recipient));
-        *slot.borrow_mut() = Some(client.clone());
-        Ok(client)
-    })
+    get_cached_binder(
+        "sec_key_att_app_id_provider",
+        "failed to connect to sec_key_att_app_id_provider",
+        "failed to watch sec_key_att_app_id_provider death",
+        "sec_key_att_app_id_provider",
+        &PM,
+        &PM_DEATH,
+        clear_pm_cache,
+    )
 }
 
 fn with_pm_retry<T, F>(mut f: F) -> Result<T>
 where
     F: FnMut(&Strong<dyn IKeyAttestationApplicationIdProvider>) -> Result<T>,
 {
-    let client = get_pm()?;
-    match f(&client) {
-        Ok(value) => Ok(value),
-        Err(error) if is_dead_object_error(&error) => {
-            warn!(
-                "[Injector][IPC] sec_key_att_app_id_provider transaction hit DeadObject; clearing cache and retrying once"
-            );
-            clear_pm_cache();
-            let client = get_pm()?;
-            f(&client)
-        }
-        Err(error) => Err(error),
-    }
+    with_dead_object_retry(
+        "sec_key_att_app_id_provider",
+        get_pm,
+        clear_pm_cache,
+        &mut f,
+    )
 }
 
 fn is_dead_object_error(error: &anyhow::Error) -> bool {

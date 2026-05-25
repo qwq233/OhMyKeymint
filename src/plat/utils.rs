@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::LocalKey;
 
 use anyhow::Ok;
 use der::asn1::SetOfVec;
@@ -6,7 +7,7 @@ use der::Encode;
 use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::sha256::BoringSha256;
 use log::{debug, error};
-use rsbinder::{hub, DeathRecipient};
+use rsbinder::{hub, DeathRecipient, FromIBinder, Strong};
 
 use crate::android::apex::IApexService::IApexService;
 use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
@@ -86,22 +87,7 @@ impl rsbinder::DeathRecipient for KeystoreDeathRecipient {
 
 #[allow(non_snake_case)]
 fn get_pm() -> anyhow::Result<rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider>> {
-    PM.with(|p| {
-        let mut guard = p.lock().unwrap();
-        if let Some(iPm) = guard.as_ref() {
-            Ok(iPm.clone())
-        } else {
-            let pm: rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider> =
-                hub::get_interface("sec_key_att_app_id_provider")?;
-            let recipient = Arc::new(PmDeathRecipient {});
-
-            pm.as_binder()
-                .link_to_death(Arc::downgrade(&(recipient as Arc<dyn DeathRecipient>)))?;
-
-            *guard = Some(pm.clone());
-            Ok(pm)
-        }
-    })
+    get_thread_local_binder(&PM, "sec_key_att_app_id_provider", || PmDeathRecipient {})
 }
 
 const ERROR_GET_ATTESTATION_APPLICATION_ID_FAILED: i32 = 1;
@@ -151,20 +137,31 @@ pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreSe
 
 #[allow(non_snake_case)]
 fn get_apex() -> anyhow::Result<rsbinder::Strong<dyn IApexService>> {
-    APEX.with(|p| {
-        let mut guard = p.lock().unwrap();
-        if let Some(iApex) = guard.as_ref() {
-            Ok(iApex.clone())
-        } else {
-            let apex: rsbinder::Strong<dyn IApexService> = hub::get_interface("apexservice")?;
-            let recipient = Arc::new(ApexDeathRecipient {});
+    get_thread_local_binder(&APEX, "apexservice", || ApexDeathRecipient {})
+}
 
-            apex.as_binder()
-                .link_to_death(Arc::downgrade(&(recipient as Arc<dyn DeathRecipient>)))?;
-
-            *guard = Some(apex.clone());
-            Ok(apex)
+fn get_thread_local_binder<T, R>(
+    slot: &'static LocalKey<Mutex<Option<Strong<T>>>>,
+    service_name: &'static str,
+    make_recipient: impl FnOnce() -> R,
+) -> anyhow::Result<Strong<T>>
+where
+    T: FromIBinder + ?Sized + 'static,
+    R: DeathRecipient + 'static,
+{
+    slot.with(|slot| {
+        let mut guard = slot.lock().unwrap();
+        if let Some(client) = guard.as_ref() {
+            return Ok(client.clone());
         }
+
+        let client: Strong<T> = hub::get_interface(service_name)?;
+        let recipient: Arc<dyn DeathRecipient> = Arc::new(make_recipient());
+        client
+            .as_binder()
+            .link_to_death(Arc::downgrade(&recipient))?;
+        *guard = Some(client.clone());
+        Ok(client)
     })
 }
 

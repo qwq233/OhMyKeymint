@@ -36,7 +36,7 @@ include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
 fn sid_features() -> BinderFeatures {
     let mut features = BinderFeatures::default();
     features.set_requesting_sid = true;
-    
+
     features
 }
 
@@ -46,6 +46,20 @@ const OMK_ROOT_DIR: &str = "/data/misc/keystore/omk";
 const OMK_DATA_DIR: &str = "/data/misc/keystore/omk/data";
 const OMK_CONFIG_PATH: &str = "/data/misc/keystore/omk/config.toml";
 const OMK_KEYBOX_PATH: &str = "/data/misc/keystore/omk/keybox.xml";
+const OMK_KEYMINT_LOG_PATH: &str = "/data/misc/keystore/omk/keymint.log";
+const OMK_KEYMINT_LOG_ROTATED_PATH: &str = "/data/misc/keystore/omk/keymint.log.1";
+const OMK_INJECTOR_LOG_PATH: &str = "/data/misc/keystore/omk/injector.log";
+const OMK_INJECTOR_LOG_ROTATED_PATH: &str = "/data/misc/keystore/omk/injector.log.1";
+const OMK_KEYMINT_LEGACY_LOCK_PATH: &str = "/data/misc/keystore/omk/keymint.log.lock";
+const OMK_INJECTOR_LEGACY_LOCK_PATH: &str = "/data/misc/keystore/omk/injector.log.lock";
+
+fn storage_warn(message: String) {
+    if log::log_enabled!(log::Level::Warn) {
+        warn!("{message}");
+    } else {
+        eprintln!("[Keymint][Storage] {message}");
+    }
+}
 
 fn chown_path(path: &str, uid: libc::uid_t, gid: libc::gid_t) -> std::io::Result<()> {
     let c_path = CString::new(path).expect("path must not contain interior NUL bytes");
@@ -60,27 +74,43 @@ fn chown_path(path: &str, uid: libc::uid_t, gid: libc::gid_t) -> std::io::Result
 fn prepare_android_storage() {
     for dir in [OMK_ROOT_DIR, OMK_DATA_DIR] {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            warn!("Failed to create OMK directory {}: {:?}", dir, e);
+            storage_warn(format!("Failed to create OMK directory {dir}: {e:?}"));
             continue;
         }
 
         if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o770)) {
-            warn!("Failed to chmod OMK directory {}: {:?}", dir, e);
+            storage_warn(format!("Failed to chmod OMK directory {dir}: {e:?}"));
         }
 
         if let Err(e) = chown_path(dir, KEYSTORE_UID, KEYSTORE_GID) {
-            warn!("Failed to chown OMK directory {}: {:?}", dir, e);
+            storage_warn(format!("Failed to chown OMK directory {dir}: {e:?}"));
         }
     }
 
     if let Err(e) = crate::keybox::ensure_keybox_file(OMK_KEYBOX_PATH) {
-        warn!("Failed to seed OMK keybox {}: {:?}", OMK_KEYBOX_PATH, e);
+        storage_warn(format!(
+            "Failed to seed OMK keybox {OMK_KEYBOX_PATH}: {e:?}"
+        ));
+    }
+
+    for file in [OMK_KEYMINT_LEGACY_LOCK_PATH, OMK_INJECTOR_LEGACY_LOCK_PATH] {
+        match std::fs::remove_file(file) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => storage_warn(format!(
+                "Failed to remove legacy OMK lock file {file}: {e:?}"
+            )),
+        }
     }
 
     for file in [
         OMK_CONFIG_PATH,
         "/data/misc/keystore/omk/config.toml.bak",
         OMK_KEYBOX_PATH,
+        OMK_KEYMINT_LOG_PATH,
+        OMK_KEYMINT_LOG_ROTATED_PATH,
+        OMK_INJECTOR_LOG_PATH,
+        OMK_INJECTOR_LOG_ROTATED_PATH,
     ] {
         if !Path::new(file).exists() {
             continue;
@@ -89,11 +119,11 @@ fn prepare_android_storage() {
         let mode = if file.ends_with(".xml") { 0o600 } else { 0o660 };
 
         if let Err(e) = std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode)) {
-            warn!("Failed to chmod OMK file {}: {:?}", file, e);
+            storage_warn(format!("Failed to chmod OMK file {file}: {e:?}"));
         }
 
         if let Err(e) = chown_path(file, KEYSTORE_UID, KEYSTORE_GID) {
-            warn!("Failed to chown OMK file {}: {:?}", file, e);
+            storage_warn(format!("Failed to chown OMK file {file}: {e:?}"));
         }
     }
 }
@@ -108,6 +138,7 @@ fn main() {
         }
     }
 
+    prepare_android_storage();
     logging::init_logger();
     panic::set_hook(Box::new(|panic_info| {
         error!("{}", panic_info);

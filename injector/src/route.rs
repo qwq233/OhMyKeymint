@@ -89,7 +89,7 @@ pub type OmkSecurityLevelBinder = Strong<dyn IOhMySecurityLevel>;
 fn sid_features() -> BinderFeatures {
     let mut features = BinderFeatures::default();
     features.set_requesting_sid = true;
-    
+
     features
 }
 
@@ -658,6 +658,39 @@ impl KeystoreSecurityLevelBinder {
         );
         system_call()
     }
+
+    fn route_key_metadata<Om, Sys>(
+        &self,
+        omk_call: Om,
+        system_call: Sys,
+    ) -> rsbinder::status::Result<KeyMetadata>
+    where
+        Om: FnOnce(
+            &dyn IOhMySecurityLevel,
+            Option<&CallerInfo>,
+        ) -> rsbinder::status::Result<KeyMetadata>,
+        Sys: FnOnce(&dyn AospKeystoreSecurityLevel) -> rsbinder::status::Result<KeyMetadata>,
+    {
+        if self.prefer_omk() {
+            match self.call_omk(omk_call) {
+                Ok(metadata) => {
+                    tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
+                    return Ok(metadata);
+                }
+                Err(error) => {
+                    return self.fallback_to_system(error, || {
+                        self.call_system(system_call).inspect(|metadata| {
+                            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
+                        })
+                    });
+                }
+            }
+        }
+
+        self.call_system(system_call).inspect(|metadata| {
+            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
+        })
+    }
 }
 
 impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
@@ -695,33 +728,12 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
         flags: i32,
         entropy: &[u8],
     ) -> rsbinder::status::Result<KeyMetadata> {
-        if self.prefer_omk() {
-            match self.call_omk(|backend, caller| {
+        self.route_key_metadata(
+            |backend, caller| {
                 backend.r#generateKey(caller, key, attestation_key, params, flags, entropy)
-            }) {
-                Ok(metadata) => {
-                    tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
-                    return Ok(metadata);
-                }
-                Err(error) => {
-                    return self.fallback_to_system(error, || {
-                        self.call_system(|backend| {
-                            backend.r#generateKey(key, attestation_key, params, flags, entropy)
-                        })
-                        .inspect(|metadata| {
-                            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
-                        })
-                    });
-                }
-            }
-        }
-
-        self.call_system(|backend| {
-            backend.r#generateKey(key, attestation_key, params, flags, entropy)
-        })
-        .inspect(|metadata| {
-            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
-        })
+            },
+            |backend| backend.r#generateKey(key, attestation_key, params, flags, entropy),
+        )
     }
 
     fn r#importKey(
@@ -732,33 +744,12 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
         flags: i32,
         key_data: &[u8],
     ) -> rsbinder::status::Result<KeyMetadata> {
-        if self.prefer_omk() {
-            match self.call_omk(|backend, caller| {
+        self.route_key_metadata(
+            |backend, caller| {
                 backend.r#importKey(caller, key, attestation_key, params, flags, key_data)
-            }) {
-                Ok(metadata) => {
-                    tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
-                    return Ok(metadata);
-                }
-                Err(error) => {
-                    return self.fallback_to_system(error, || {
-                        self.call_system(|backend| {
-                            backend.r#importKey(key, attestation_key, params, flags, key_data)
-                        })
-                        .inspect(|metadata| {
-                            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
-                        })
-                    });
-                }
-            }
-        }
-
-        self.call_system(|backend| {
-            backend.r#importKey(key, attestation_key, params, flags, key_data)
-        })
-        .inspect(|metadata| {
-            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
-        })
+            },
+            |backend| backend.r#importKey(key, attestation_key, params, flags, key_data),
+        )
     }
 
     fn r#importWrappedKey(
@@ -769,8 +760,8 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
         params: &[KeyParameter],
         authenticators: &[AuthenticatorSpec],
     ) -> rsbinder::status::Result<KeyMetadata> {
-        if self.prefer_omk() {
-            match self.call_omk(|backend, caller| {
+        self.route_key_metadata(
+            |backend, caller| {
                 backend.r#importWrappedKey(
                     caller,
                     key,
@@ -779,36 +770,11 @@ impl AospKeystoreSecurityLevel for KeystoreSecurityLevelBinder {
                     params,
                     authenticators,
                 )
-            }) {
-                Ok(metadata) => {
-                    tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
-                    return Ok(metadata);
-                }
-                Err(error) => {
-                    return self.fallback_to_system(error, || {
-                        self.call_system(|backend| {
-                            backend.r#importWrappedKey(
-                                key,
-                                wrapping_key,
-                                masking_key,
-                                params,
-                                authenticators,
-                            )
-                        })
-                        .inspect(|metadata| {
-                            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
-                        })
-                    });
-                }
-            }
-        }
-
-        self.call_system(|backend| {
-            backend.r#importWrappedKey(key, wrapping_key, masking_key, params, authenticators)
-        })
-        .inspect(|metadata| {
-            tracker::remember_key_metadata_route(metadata, RouteTarget::System);
-        })
+            },
+            |backend| {
+                backend.r#importWrappedKey(key, wrapping_key, masking_key, params, authenticators)
+            },
+        )
     }
 
     fn r#convertStorageKeyToEphemeral(
@@ -859,8 +825,12 @@ pub struct KeystoreOperationBinder {
 
 impl Interface for KeystoreOperationBinder {}
 
-impl AospKeystoreOperation for KeystoreOperationBinder {
-    fn r#updateAad(&self, aad_input: &[u8]) -> rsbinder::status::Result<()> {
+impl KeystoreOperationBinder {
+    fn forward_operation<T>(
+        &self,
+        method: &'static str,
+        call: impl FnOnce(&dyn AospKeystoreOperation) -> rsbinder::status::Result<T>,
+    ) -> rsbinder::status::Result<T> {
         // OMK operations go to another process where the hook isn't installed,
         // so bypass guard is only needed for local system operations.
         let _guard = if self.route == RouteTarget::System {
@@ -868,30 +838,24 @@ impl AospKeystoreOperation for KeystoreOperationBinder {
         } else {
             None
         };
-        let result = self.backend.r#updateAad(aad_input);
-        if let Err(ref e) = result {
+        let result = call(self.backend.as_ref());
+        if let Err(ref error) = result {
             debug!(
-                "[Injector][Route] KeystoreOperationBinder::updateAad failed: {}",
-                e
+                "[Injector][Route] KeystoreOperationBinder::{} failed: {}",
+                method, error
             );
         }
         result
     }
+}
+
+impl AospKeystoreOperation for KeystoreOperationBinder {
+    fn r#updateAad(&self, aad_input: &[u8]) -> rsbinder::status::Result<()> {
+        self.forward_operation("updateAad", |backend| backend.r#updateAad(aad_input))
+    }
 
     fn r#update(&self, input: &[u8]) -> rsbinder::status::Result<Option<Vec<u8>>> {
-        let _guard = if self.route == RouteTarget::System {
-            Some(BypassGuard::enter())
-        } else {
-            None
-        };
-        let result = self.backend.r#update(input);
-        if let Err(ref e) = result {
-            debug!(
-                "[Injector][Route] KeystoreOperationBinder::update failed: {}",
-                e
-            );
-        }
-        result
+        self.forward_operation("update", |backend| backend.r#update(input))
     }
 
     fn r#finish(
@@ -899,35 +863,11 @@ impl AospKeystoreOperation for KeystoreOperationBinder {
         input: Option<&[u8]>,
         signature: Option<&[u8]>,
     ) -> rsbinder::status::Result<Option<Vec<u8>>> {
-        let _guard = if self.route == RouteTarget::System {
-            Some(BypassGuard::enter())
-        } else {
-            None
-        };
-        let result = self.backend.r#finish(input, signature);
-        if let Err(ref e) = result {
-            debug!(
-                "[Injector][Route] KeystoreOperationBinder::finish failed: {}",
-                e
-            );
-        }
-        result
+        self.forward_operation("finish", |backend| backend.r#finish(input, signature))
     }
 
     fn r#abort(&self) -> rsbinder::status::Result<()> {
-        let _guard = if self.route == RouteTarget::System {
-            Some(BypassGuard::enter())
-        } else {
-            None
-        };
-        let result = self.backend.r#abort();
-        if let Err(ref e) = result {
-            debug!(
-                "[Injector][Route] KeystoreOperationBinder::abort failed: {}",
-                e
-            );
-        }
-        result
+        self.forward_operation("abort", |backend| backend.r#abort())
     }
 }
 

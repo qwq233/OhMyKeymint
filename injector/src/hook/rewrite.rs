@@ -504,17 +504,27 @@ fn fallback_create_operation_carrier(
     None
 }
 
+unsafe fn transaction_parts(tr: &binder_transaction_data) -> (*mut u8, usize, *mut usize, usize) {
+    (
+        tr.data.ptr.buffer as *mut u8,
+        tr.data_size,
+        tr.data.ptr.offsets as *mut usize,
+        tr.offsets_size,
+    )
+}
+
 unsafe fn register_operation_target_from_reply(
     tr: &binder_transaction_data,
     route: RouteTarget,
     backend: Option<route::AospOperationBinder>,
     aad_allowed: bool,
 ) -> anyhow::Result<()> {
+    let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
     let carrier = match parcel::extract_create_operation_reply_carrier(
-        tr.data.ptr.buffer as *mut u8,
-        tr.data_size,
-        tr.data.ptr.offsets as *mut usize,
-        tr.offsets_size,
+        data,
+        data_size,
+        offsets,
+        offsets_size,
     ) {
         Ok(carrier) => carrier,
         Err(_) => return Ok(()),
@@ -576,13 +586,14 @@ pub(super) unsafe fn handle_br_transaction(
         return false;
     };
 
+    let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
     let caller = CallerIdentity::new(tr.sender_euid.max(0) as u32, tr.sender_pid)
         .with_sid(caller_sid.unwrap_or_default());
     let request_interface = match parcel::peek_request_interface(
-        tr.data.ptr.buffer as *mut u8,
-        tr.data_size,
-        tr.data.ptr.offsets as *mut usize,
-        tr.offsets_size,
+        data,
+        data_size,
+        offsets,
+        offsets_size,
     ) {
         Ok(interface) => interface,
         Err(error) => {
@@ -601,10 +612,10 @@ pub(super) unsafe fn handle_br_transaction(
     // after the system service accepts it; scoop still gates app key traffic.
     if request_interface == identify::KEYSTORE_AUTHORIZATION_INTERFACE {
         let request = match parcel::parse_authorization_request(
-            tr.data.ptr.buffer as *mut u8,
-            tr.data_size,
-            tr.data.ptr.offsets as *mut usize,
-            tr.offsets_size,
+            data,
+            data_size,
+            offsets,
+            offsets_size,
             tr.code,
         ) {
             Ok(request) => request,
@@ -643,10 +654,10 @@ pub(super) unsafe fn handle_br_transaction(
     // gating them by scoop package routing.
     if request_interface == identify::KEYSTORE_MAINTENANCE_INTERFACE {
         let request = match parcel::parse_maintenance_request(
-            tr.data.ptr.buffer as *mut u8,
-            tr.data_size,
-            tr.data.ptr.offsets as *mut usize,
-            tr.offsets_size,
+            data,
+            data_size,
+            offsets,
+            offsets_size,
             tr.code,
         ) {
             Ok(request) => request,
@@ -684,10 +695,10 @@ pub(super) unsafe fn handle_br_transaction(
 
     if request_interface == identify::KEYSTORE_SERVICE_INTERFACE {
         let request = match parcel::parse_service_request(
-            tr.data.ptr.buffer as *mut u8,
-            tr.data_size,
-            tr.data.ptr.offsets as *mut usize,
-            tr.offsets_size,
+            data,
+            data_size,
+            offsets,
+            offsets_size,
             tr.code,
         ) {
             Ok(request) => request,
@@ -806,10 +817,10 @@ pub(super) unsafe fn handle_br_transaction(
         };
 
         let request = match parcel::parse_security_level_request(
-            tr.data.ptr.buffer as *mut u8,
-            tr.data_size,
-            tr.data.ptr.offsets as *mut usize,
-            tr.offsets_size,
+            data,
+            data_size,
+            offsets,
+            offsets_size,
             tr.code,
         ) {
             Ok(request) => request,
@@ -887,10 +898,10 @@ pub(super) unsafe fn handle_br_transaction(
         };
 
         let request = match parcel::parse_operation_request(
-            tr.data.ptr.buffer as *mut u8,
-            tr.data_size,
-            tr.data.ptr.offsets as *mut usize,
-            tr.offsets_size,
+            data,
+            data_size,
+            offsets,
+            offsets_size,
             tr.code,
         ) {
             Ok(request) => request,
@@ -1184,13 +1195,14 @@ unsafe fn observe_system_service_reply(
     tr: &binder_transaction_data,
     pending: &PendingServiceCall,
 ) -> anyhow::Result<()> {
+    let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
     match &pending.request {
         ParsedServiceRequest::GetSecurityLevel { security_level } if !pending.redirect_applied => {
             let carrier = parcel::extract_direct_binder_reply_carrier(
-                tr.data.ptr.buffer as *mut u8,
-                tr.data_size,
-                tr.data.ptr.offsets as *mut usize,
-                tr.offsets_size,
+                data,
+                data_size,
+                offsets,
+                offsets_size,
             )?;
             register_security_level_carrier(
                 &carrier,
@@ -1201,21 +1213,13 @@ unsafe fn observe_system_service_reply(
         }
         ParsedServiceRequest::GetKeyEntry { .. } if !pending.redirect_applied => {
             let metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata =
-                match parcel::parse_key_entry_reply_metadata(
-                    tr.data.ptr.buffer as *mut u8,
-                    tr.data_size,
-                    tr.data.ptr.offsets as *mut usize,
-                    tr.offsets_size,
-                ) {
+                match parcel::parse_key_entry_reply_metadata(data, data_size, offsets, offsets_size)
+                {
                     Ok(response) => response,
                     Err(_) => return Ok(()),
                 };
-            let carrier = parcel::extract_key_entry_reply_carrier(
-                tr.data.ptr.buffer as *mut u8,
-                tr.data_size,
-                tr.data.ptr.offsets as *mut usize,
-                tr.offsets_size,
-            )?;
+            let carrier =
+                parcel::extract_key_entry_reply_carrier(data, data_size, offsets, offsets_size)?;
             register_security_level_carrier(
                 &carrier,
                 metadata.r#keySecurityLevel,
@@ -1225,12 +1229,7 @@ unsafe fn observe_system_service_reply(
             tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
         }
         ParsedServiceRequest::DeleteKey { key } => {
-            let status = match parcel::parse_reply_status(
-                tr.data.ptr.buffer as *mut u8,
-                tr.data_size,
-                tr.data.ptr.offsets as *mut usize,
-                tr.offsets_size,
-            ) {
+            let status = match parcel::parse_reply_status(data, data_size, offsets, offsets_size) {
                 Ok(status) => status,
                 Err(_) => return Ok(()),
             };
@@ -1247,12 +1246,8 @@ unsafe fn build_authorization_reply_mirror(
     tr: &binder_transaction_data,
     call: &PendingAuthorizationCall,
 ) -> anyhow::Result<Option<parcel::OwnedReply>> {
-    let status = parcel::parse_reply_status(
-        tr.data.ptr.buffer as *mut u8,
-        tr.data_size,
-        tr.data.ptr.offsets as *mut usize,
-        tr.offsets_size,
-    )?;
+    let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
+    let status = parcel::parse_reply_status(data, data_size, offsets, offsets_size)?;
     if !status.is_ok() {
         debug!(
             "[Injector][Authorization] system {:?} failed with {}; skipping OMK mirror",
@@ -1333,12 +1328,8 @@ unsafe fn build_maintenance_reply_mirror(
     tr: &binder_transaction_data,
     call: &PendingMaintenanceCall,
 ) -> anyhow::Result<Option<parcel::OwnedReply>> {
-    let status = parcel::parse_reply_status(
-        tr.data.ptr.buffer as *mut u8,
-        tr.data_size,
-        tr.data.ptr.offsets as *mut usize,
-        tr.offsets_size,
-    )?;
+    let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
+    let status = parcel::parse_reply_status(data, data_size, offsets, offsets_size)?;
     if !status.is_ok() {
         debug!(
             "[Injector][Maintenance] system {:?} failed with {}; skipping OMK mirror",
@@ -1441,14 +1432,15 @@ unsafe fn build_service_reply_rewrite(
 
     let caller = pending.caller.to_caller_info();
     let _guard = BypassGuard::enter();
+    let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
 
     match &pending.request {
         ParsedServiceRequest::GetSecurityLevel { security_level } => {
             let carrier = match parcel::extract_direct_binder_reply_carrier(
-                tr.data.ptr.buffer as *mut u8,
-                tr.data_size,
-                tr.data.ptr.offsets as *mut usize,
-                tr.offsets_size,
+                data,
+                data_size,
+                offsets,
+                offsets_size,
             ) {
                 Ok(carrier) => carrier,
                 Err(error) => {
@@ -1494,12 +1486,8 @@ unsafe fn build_service_reply_rewrite(
                 }
             };
             let system_metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata =
-                match parcel::parse_key_entry_reply_metadata(
-                    tr.data.ptr.buffer as *mut u8,
-                    tr.data_size,
-                    tr.data.ptr.offsets as *mut usize,
-                    tr.offsets_size,
-                ) {
+                match parcel::parse_key_entry_reply_metadata(data, data_size, offsets, offsets_size)
+                {
                     Ok(response) => response,
                     Err(error) => {
                         warn!(
@@ -1529,10 +1517,10 @@ unsafe fn build_service_reply_rewrite(
             let surfaced_metadata =
                 surface_omk_metadata_with_system_descriptor(&system_metadata, entry.r#metadata);
             let carrier = match parcel::extract_key_entry_reply_carrier(
-                tr.data.ptr.buffer as *mut u8,
-                tr.data_size,
-                tr.data.ptr.offsets as *mut usize,
-                tr.offsets_size,
+                data,
+                data_size,
+                offsets,
+                offsets_size,
             ) {
                 Ok(carrier) => carrier,
                 Err(error) => {
@@ -1580,13 +1568,8 @@ unsafe fn build_service_reply_rewrite(
             public_cert,
             certificate_chain,
         } => {
-            let system_status = parcel::parse_reply_status(
-                tr.data.ptr.buffer as *mut u8,
-                tr.data_size,
-                tr.data.ptr.offsets as *mut usize,
-                tr.offsets_size,
-            )
-            .ok();
+            let system_status =
+                parcel::parse_reply_status(data, data_size, offsets, offsets_size).ok();
             if !matches!(system_status, Some(ref status) if status.is_ok()) {
                 return Ok(None);
             }
@@ -1639,12 +1622,7 @@ unsafe fn build_service_reply_rewrite(
             access_vector,
         } => {
             let system_grant: crate::android::system::keystore2::KeyDescriptor::KeyDescriptor =
-                match parcel::parse_success_reply(
-                    tr.data.ptr.buffer as *mut u8,
-                    tr.data_size,
-                    tr.data.ptr.offsets as *mut usize,
-                    tr.offsets_size,
-                ) {
+                match parcel::parse_success_reply(data, data_size, offsets, offsets_size) {
                     Ok(grant) => grant,
                     Err(error) => {
                         warn!(
@@ -1780,13 +1758,8 @@ unsafe fn build_service_reply_rewrite(
             }
         }
         ParsedServiceRequest::DeleteKey { key } => {
-            let system_status = parcel::parse_reply_status(
-                tr.data.ptr.buffer as *mut u8,
-                tr.data_size,
-                tr.data.ptr.offsets as *mut usize,
-                tr.offsets_size,
-            )
-            .ok();
+            let system_status =
+                parcel::parse_reply_status(data, data_size, offsets, offsets_size).ok();
             let omk_key = omk_descriptor_for_app_key(key);
 
             match ipc::with_omk_retry(|omk| Ok(omk.r#deleteKey(Some(&caller), &omk_key)?)) {
@@ -1813,13 +1786,9 @@ unsafe fn build_service_reply_rewrite(
 }
 
 unsafe fn system_reply_succeeded(tr: &binder_transaction_data) -> bool {
+    let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
     matches!(
-        parcel::parse_reply_status(
-            tr.data.ptr.buffer as *mut u8,
-            tr.data_size,
-            tr.data.ptr.offsets as *mut usize,
-            tr.offsets_size,
-        ),
+        parcel::parse_reply_status(data, data_size, offsets, offsets_size),
         Ok(status) if status.is_ok()
     )
 }
@@ -1875,29 +1844,20 @@ unsafe fn observe_system_security_level_reply(
     tr: &binder_transaction_data,
     pending: &PendingSecurityLevelCall,
 ) -> anyhow::Result<()> {
+    let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
     match &pending.request {
         ParsedSecurityLevelRequest::GenerateKey { .. }
         | ParsedSecurityLevelRequest::ImportKey { .. }
         | ParsedSecurityLevelRequest::ImportWrappedKey { .. } => {
             let metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata =
-                match parcel::parse_success_reply(
-                    tr.data.ptr.buffer as *mut u8,
-                    tr.data_size,
-                    tr.data.ptr.offsets as *mut usize,
-                    tr.offsets_size,
-                ) {
+                match parcel::parse_success_reply(data, data_size, offsets, offsets_size) {
                     Ok(metadata) => metadata,
                     Err(_) => return Ok(()),
                 };
             tracker::remember_key_metadata_route(&metadata, RouteTarget::System);
         }
         ParsedSecurityLevelRequest::DeleteKey { key } => {
-            let status = match parcel::parse_reply_status(
-                tr.data.ptr.buffer as *mut u8,
-                tr.data_size,
-                tr.data.ptr.offsets as *mut usize,
-                tr.offsets_size,
-            ) {
+            let status = match parcel::parse_reply_status(data, data_size, offsets, offsets_size) {
                 Ok(status) => status,
                 Err(_) => return Ok(()),
             };
@@ -1932,6 +1892,7 @@ unsafe fn build_security_level_reply_rewrite(
 
     let caller = pending.caller.to_caller_info();
     let _guard = BypassGuard::enter();
+    let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
     let omk_level = match ipc::with_omk_retry(|omk| {
         Ok(omk.r#getOhMySecurityLevel(pending.security_level)?)
     }) {
@@ -1975,10 +1936,10 @@ unsafe fn build_security_level_reply_rewrite(
                 }
             };
             let carrier = match parcel::extract_create_operation_reply_carrier(
-                tr.data.ptr.buffer as *mut u8,
-                tr.data_size,
-                tr.data.ptr.offsets as *mut usize,
-                tr.offsets_size,
+                data,
+                data_size,
+                offsets,
+                offsets_size,
             ) {
                 Ok(carrier) => carrier,
                 Err(error) => {
@@ -2031,10 +1992,10 @@ unsafe fn build_security_level_reply_rewrite(
                 Ok(metadata) => {
                     let system_metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata =
                     match parcel::parse_success_reply(
-                        tr.data.ptr.buffer as *mut u8,
-                        tr.data_size,
-                        tr.data.ptr.offsets as *mut usize,
-                        tr.offsets_size,
+                        data,
+                        data_size,
+                        offsets,
+                        offsets_size,
                     ) {
                         Ok(metadata) => metadata,
                         Err(error) => {
@@ -2091,10 +2052,10 @@ unsafe fn build_security_level_reply_rewrite(
                 Ok(metadata) => {
                     let system_metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata =
                     match parcel::parse_success_reply(
-                        tr.data.ptr.buffer as *mut u8,
-                        tr.data_size,
-                        tr.data.ptr.offsets as *mut usize,
-                        tr.offsets_size,
+                        data,
+                        data_size,
+                        offsets,
+                        offsets_size,
                     ) {
                         Ok(metadata) => metadata,
                         Err(error) => {
@@ -2150,10 +2111,10 @@ unsafe fn build_security_level_reply_rewrite(
                 Ok(metadata) => {
                     let system_metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata =
                     match parcel::parse_success_reply(
-                        tr.data.ptr.buffer as *mut u8,
-                        tr.data_size,
-                        tr.data.ptr.offsets as *mut usize,
-                        tr.offsets_size,
+                        data,
+                        data_size,
+                        offsets,
+                        offsets_size,
                     ) {
                         Ok(metadata) => metadata,
                         Err(error) => {

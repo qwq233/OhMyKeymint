@@ -1,4 +1,19 @@
+// Copyright 2026, The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::fs;
+#[cfg(target_os = "android")]
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,6 +40,33 @@ impl WatchTrigger {
             Self::Polling => "polling",
             Self::Overflow => "overflow",
         }
+    }
+
+    pub fn should_retry_reads(self) -> bool {
+        matches!(self, Self::ReplaceSave | Self::Polling)
+    }
+
+    pub fn priority(self) -> u8 {
+        match self {
+            Self::CloseWrite => 0,
+            Self::Overflow => 1,
+            Self::ReplaceSave => 2,
+            Self::Polling => 3,
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn from_inotify_mask(mask: u32) -> Option<Self> {
+        if (mask & libc::IN_Q_OVERFLOW) != 0 {
+            return Some(Self::Overflow);
+        }
+        if (mask & (libc::IN_CREATE | libc::IN_MOVED_TO)) != 0 {
+            return Some(Self::ReplaceSave);
+        }
+        if (mask & libc::IN_CLOSE_WRITE) != 0 {
+            return Some(Self::CloseWrite);
+        }
+        None
     }
 }
 
@@ -163,22 +205,9 @@ where
                 .unwrap_or_default();
 
             if (event.mask & libc::IN_Q_OVERFLOW) != 0 || name == watched_name.as_slice() {
-                let candidate = if (event.mask & libc::IN_Q_OVERFLOW) != 0 {
-                    Some(WatchTrigger::Overflow)
-                } else if (event.mask & (libc::IN_CREATE | libc::IN_MOVED_TO)) != 0 {
-                    Some(WatchTrigger::ReplaceSave)
-                } else if (event.mask & libc::IN_CLOSE_WRITE) != 0 {
-                    Some(WatchTrigger::CloseWrite)
-                } else {
-                    None
-                };
-
-                if let Some(candidate) = candidate {
+                if let Some(candidate) = WatchTrigger::from_inotify_mask(event.mask) {
                     reload_trigger = match reload_trigger {
-                        Some(current)
-                            if watch_trigger_priority(current)
-                                <= watch_trigger_priority(candidate) =>
-                        {
+                        Some(current) if current.priority() <= candidate.priority() => {
                             Some(current)
                         }
                         _ => Some(candidate),
@@ -195,15 +224,6 @@ where
     }
 }
 
-fn watch_trigger_priority(trigger: WatchTrigger) -> u8 {
-    match trigger {
-        WatchTrigger::CloseWrite => 0,
-        WatchTrigger::Overflow => 1,
-        WatchTrigger::ReplaceSave => 2,
-        WatchTrigger::Polling => 3,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,10 +231,7 @@ mod tests {
     #[test]
     fn higher_priority_trigger_is_retained() {
         let selected = match Some(WatchTrigger::CloseWrite) {
-            Some(current)
-                if watch_trigger_priority(current)
-                    <= watch_trigger_priority(WatchTrigger::ReplaceSave) =>
-            {
+            Some(current) if current.priority() <= WatchTrigger::ReplaceSave.priority() => {
                 Some(current)
             }
             _ => Some(WatchTrigger::ReplaceSave),

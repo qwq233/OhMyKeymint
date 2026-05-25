@@ -203,14 +203,7 @@ impl KeyBox {
         key_der: Vec<u8>,
         chain: Vec<keymint::Certificate>,
     ) -> Result<()> {
-        self.rsa_info = Self::build_rsa_info(ParsedKeyEntry {
-            key_der,
-            chain: chain
-                .into_iter()
-                .map(|certificate| certificate.encoded_certificate)
-                .collect(),
-        })?;
-        self.refresh_identity_digest()
+        self.update_keybox(KeyAlgorithm::Rsa, key_der, chain)
     }
 
     pub fn update_ec_keybox(
@@ -218,13 +211,26 @@ impl KeyBox {
         key_der: Vec<u8>,
         chain: Vec<keymint::Certificate>,
     ) -> Result<()> {
-        self.ec_info = Self::build_ec_info(ParsedKeyEntry {
+        self.update_keybox(KeyAlgorithm::Ec, key_der, chain)
+    }
+
+    fn update_keybox(
+        &mut self,
+        algorithm: KeyAlgorithm,
+        key_der: Vec<u8>,
+        chain: Vec<keymint::Certificate>,
+    ) -> Result<()> {
+        let entry = ParsedKeyEntry {
             key_der,
             chain: chain
                 .into_iter()
                 .map(|certificate| certificate.encoded_certificate)
                 .collect(),
-        })?;
+        };
+        match algorithm {
+            KeyAlgorithm::Ec => self.ec_info = Self::build_ec_info(entry)?,
+            KeyAlgorithm::Rsa => self.rsa_info = Self::build_rsa_info(entry)?,
+        }
         self.refresh_identity_digest()
     }
 
@@ -619,7 +625,7 @@ pub fn initialize() -> Result<()> {
     ensure_keybox_file(KEYBOX_PATH)?;
     reload_from_disk_inner(false)?;
     KEYBOX_WATCHER.get_or_init(|| {
-        if let Err(error) = crate::plat::file_watch::spawn_path_watcher(
+        if let Err(error) = kmr_common::runtime::file_watch::spawn_path_watcher(
             "omk-keybox-watch",
             PathBuf::from(KEYBOX_PATH),
             |_trigger| {
@@ -635,17 +641,21 @@ pub fn initialize() -> Result<()> {
 }
 
 pub fn update_rsa_keybox(key_der: Vec<u8>, chain: Vec<keymint::Certificate>) -> Result<bool> {
-    let _io_guard = KEYBOX_IO_LOCK.lock().unwrap();
-    let mut keybox = KEYBOX.read().unwrap().clone();
-    keybox.update_rsa_keybox(key_der, chain)?;
-    write_keybox_xml(KEYBOX_PATH, &keybox.to_xml_string())?;
-    Ok(install_keybox(keybox, true, true))
+    update_keybox_file(KeyAlgorithm::Rsa, key_der, chain)
 }
 
 pub fn update_ec_keybox(key_der: Vec<u8>, chain: Vec<keymint::Certificate>) -> Result<bool> {
+    update_keybox_file(KeyAlgorithm::Ec, key_der, chain)
+}
+
+fn update_keybox_file(
+    algorithm: KeyAlgorithm,
+    key_der: Vec<u8>,
+    chain: Vec<keymint::Certificate>,
+) -> Result<bool> {
     let _io_guard = KEYBOX_IO_LOCK.lock().unwrap();
     let mut keybox = KEYBOX.read().unwrap().clone();
-    keybox.update_ec_keybox(key_der, chain)?;
+    keybox.update_keybox(algorithm, key_der, chain)?;
     write_keybox_xml(KEYBOX_PATH, &keybox.to_xml_string())?;
     Ok(install_keybox(keybox, true, true))
 }

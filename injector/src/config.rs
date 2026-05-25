@@ -1,16 +1,18 @@
+use kmr_common::runtime::{
+    file_watch::{self, WatchTrigger},
+    fs::backup_file_with_reason,
+    retry::{retry_read_race, ReadRaceErrorKind},
+};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
-use std::ffi::CString;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
-use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/data/misc/keystore/omk/injector.toml";
-const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const REPLACE_SAVE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const REPLACE_SAVE_RETRY_LIMIT: usize = 10;
 
@@ -144,12 +146,6 @@ impl Default for InterceptConfig {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct ConfigStamp {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
 #[derive(Debug)]
 enum LoadError {
     Missing(io::Error),
@@ -157,18 +153,19 @@ enum LoadError {
     Parse(String),
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum LoadContext {
-    Startup,
-    Reload(ReloadTrigger),
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing(error) | Self::Read(error) => write!(f, "{error}"),
+            Self::Parse(error) => write!(f, "{error}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum ReloadTrigger {
-    CloseWrite,
-    ReplaceSave,
-    Polling,
-    Overflow,
+enum LoadContext {
+    Startup,
+    Reload(WatchTrigger),
 }
 
 #[derive(Debug)]
@@ -199,43 +196,6 @@ impl LoadContext {
             Self::Startup => "startup",
             Self::Reload(trigger) => trigger.label(),
         }
-    }
-}
-
-impl ReloadTrigger {
-    fn label(self) -> &'static str {
-        match self {
-            Self::CloseWrite => "close-write",
-            Self::ReplaceSave => "replace-save",
-            Self::Polling => "polling",
-            Self::Overflow => "overflow",
-        }
-    }
-
-    fn should_retry_reads(self) -> bool {
-        matches!(self, Self::ReplaceSave | Self::Polling)
-    }
-
-    fn priority(self) -> u8 {
-        match self {
-            Self::CloseWrite => 0,
-            Self::Overflow => 1,
-            Self::ReplaceSave => 2,
-            Self::Polling => 3,
-        }
-    }
-
-    fn from_inotify_mask(mask: u32) -> Option<Self> {
-        if (mask & libc::IN_Q_OVERFLOW) != 0 {
-            return Some(Self::Overflow);
-        }
-        if (mask & (libc::IN_CREATE | libc::IN_MOVED_TO)) != 0 {
-            return Some(Self::ReplaceSave);
-        }
-        if (mask & libc::IN_CLOSE_WRITE) != 0 {
-            return Some(Self::CloseWrite);
-        }
-        None
     }
 }
 
@@ -272,7 +232,7 @@ fn load_from_path(path: &Path) -> Result<InjectorConfig, LoadError> {
 fn load_with_context(path: &Path, context: LoadContext) -> Result<LoadedConfig, LoadError> {
     match context {
         LoadContext::Reload(trigger) if trigger.should_retry_reads() => {
-            retry_read_load(path, context, load_from_path, thread::sleep)
+            load_with_read_race_retry(path, context, load_from_path, std::thread::sleep)
         }
         _ => load_from_path(path).map(|config| LoadedConfig { config, retries: 0 }),
     }
@@ -334,12 +294,23 @@ fn load_or_seed(path: &Path, context: LoadContext) -> InjectorConfig {
 
 fn recover_broken_config(path: &Path, reason: &str) -> InjectorConfig {
     if path.exists() {
-        if let Err(backup_error) = backup_invalid_config(path, reason) {
-            log::error!(
+        let backup_path = PathBuf::from(format!("{}.bak", path.display()));
+        match backup_file_with_reason(
+            path,
+            &backup_path,
+            "injector config recovery reason",
+            reason,
+            false,
+        ) {
+            Ok(()) => log::info!(
+                "[Injector][Config] moved invalid config to {}",
+                backup_path.display()
+            ),
+            Err(backup_error) => log::error!(
                 "[Injector][Config] failed to preserve broken config {}: {}",
                 path.display(),
                 backup_error
-            );
+            ),
         }
     }
 
@@ -411,29 +382,6 @@ fn render_config(config: &InjectorConfig) -> io::Result<String> {
     }
 
     Ok(contents)
-}
-
-fn backup_invalid_config(path: &Path, reason: &str) -> io::Result<()> {
-    let backup_path = PathBuf::from(format!("{}.bak", path.display()));
-    if backup_path.exists() {
-        fs::remove_file(&backup_path)?;
-    }
-    fs::rename(path, &backup_path)?;
-
-    let mut backup = OpenOptions::new().append(true).open(&backup_path)?;
-    if backup_path.metadata()?.len() > 0 {
-        backup.write_all(b"\n")?;
-    }
-    backup.write_all(b"\n# injector config recovery reason:\n")?;
-    for line in reason.lines() {
-        backup.write_all(format!("# {line}\n").as_bytes())?;
-    }
-
-    log::info!(
-        "[Injector][Config] moved invalid config to {}",
-        backup_path.display()
-    );
-    Ok(())
 }
 
 fn parse_config(contents: &str) -> Result<InjectorConfig, String> {
@@ -538,19 +486,12 @@ fn normalize_scoop_details(
     normalized
 }
 
-fn inspect_path(path: &Path) -> Option<ConfigStamp> {
-    let metadata = fs::metadata(path).ok()?;
-    Some(ConfigStamp {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
-}
-
 fn start_watcher(path: PathBuf) {
-    let thread_name = "injector-config-watch".to_string();
-    if let Err(error) = thread::Builder::new()
-        .name(thread_name)
-        .spawn(move || watch_loop(path))
+    let reload_path = path.clone();
+    if let Err(error) =
+        file_watch::spawn_path_watcher("injector-config-watch", path, move |trigger| {
+            reload_runtime_config(&reload_path, trigger);
+        })
     {
         log::error!(
             "[Injector][Config] failed to start config watcher thread: {}",
@@ -559,130 +500,7 @@ fn start_watcher(path: PathBuf) {
     }
 }
 
-fn watch_loop(path: PathBuf) {
-    #[cfg(target_os = "android")]
-    {
-        if let Err(error) = watch_loop_inotify(&path) {
-            log::error!(
-                "[Injector][Config] inotify watcher failed for {}: {}; falling back to polling",
-                path.display(),
-                error
-            );
-            watch_loop_polling(path);
-        }
-    }
-
-    #[cfg(not(target_os = "android"))]
-    watch_loop_polling(path);
-}
-
-fn watch_loop_polling(path: PathBuf) {
-    let mut last_seen = inspect_path(&path);
-    loop {
-        thread::sleep(WATCH_INTERVAL);
-
-        let current = inspect_path(&path);
-        if current == last_seen {
-            continue;
-        }
-        last_seen = current;
-
-        reload_runtime_config(&path, ReloadTrigger::Polling);
-    }
-}
-
-#[cfg(target_os = "android")]
-fn watch_loop_inotify(path: &Path) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("config path has no parent: {}", path.display()),
-        )
-    })?;
-    let file_name = path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("config path has no filename: {}", path.display()),
-        )
-    })?;
-    let parent_cstr = CString::new(parent.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("config path contains NUL byte: {}", parent.display()),
-        )
-    })?;
-    // Pure metadata-only churn should not trigger a live reload. Content-bearing
-    // events already cover both in-place writes and temp-file rename saves.
-    let watch_mask =
-        libc::IN_CLOSE_WRITE | libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_Q_OVERFLOW;
-
-    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    let watch = unsafe { libc::inotify_add_watch(fd, parent_cstr.as_ptr(), watch_mask) };
-    if watch < 0 {
-        let error = io::Error::last_os_error();
-        unsafe {
-            libc::close(fd);
-        }
-        return Err(error);
-    }
-
-    let watched_name = file_name.as_bytes().to_vec();
-    let mut buffer = vec![0u8; 4096];
-    loop {
-        let read =
-            unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
-        if read < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            unsafe {
-                libc::close(fd);
-            }
-            return Err(error);
-        }
-
-        let mut reload_trigger: Option<ReloadTrigger> = None;
-        let mut offset = 0usize;
-        while offset < read as usize {
-            let event = unsafe { &*(buffer[offset..].as_ptr() as *const libc::inotify_event) };
-            let name_start = offset + std::mem::size_of::<libc::inotify_event>();
-            let name_end = name_start + event.len as usize;
-            let name_bytes = &buffer[name_start..name_end.min(read as usize)];
-            let name = name_bytes
-                .split(|byte| *byte == 0)
-                .next()
-                .unwrap_or_default();
-
-            let matches_name =
-                (event.mask & libc::IN_Q_OVERFLOW) != 0 || name == watched_name.as_slice();
-            if matches_name {
-                if let Some(candidate) = ReloadTrigger::from_inotify_mask(event.mask) {
-                    reload_trigger = match reload_trigger {
-                        Some(current) if current.priority() <= candidate.priority() => {
-                            Some(current)
-                        }
-                        _ => Some(candidate),
-                    };
-                }
-            }
-
-            offset += std::mem::size_of::<libc::inotify_event>() + event.len as usize;
-        }
-
-        if let Some(trigger) = reload_trigger {
-            reload_runtime_config(path, trigger);
-        }
-    }
-}
-
-fn reload_runtime_config(path: &Path, trigger: ReloadTrigger) {
+fn reload_runtime_config(path: &Path, trigger: WatchTrigger) {
     let config = load_or_seed(path, LoadContext::Reload(trigger));
     if let Some(lock) = CONFIG.get() {
         match lock.write() {
@@ -706,58 +524,41 @@ fn reload_runtime_config(path: &Path, trigger: ReloadTrigger) {
     }
 }
 
-fn retry_read_load<F, S>(
+fn load_with_read_race_retry<F, S>(
     path: &Path,
     context: LoadContext,
     mut loader: F,
-    mut sleeper: S,
+    sleeper: S,
 ) -> Result<LoadedConfig, LoadError>
 where
     F: FnMut(&Path) -> Result<InjectorConfig, LoadError>,
     S: FnMut(Duration),
 {
-    let mut retries = 0usize;
-
-    loop {
-        match loader(path) {
-            Ok(config) => {
-                return Ok(LoadedConfig { config, retries });
-            }
-            Err(LoadError::Parse(error)) => return Err(LoadError::Parse(error)),
-            Err(LoadError::Missing(error)) => {
-                if retries >= REPLACE_SAVE_RETRY_LIMIT {
-                    return Err(LoadError::Missing(error));
-                }
-                retries += 1;
-                log::warn!(
-                    "[Injector][Config] {} load from {} hit read-side race on retry {}/{}: {}; waiting {} ms",
-                    context.label(),
-                    path.display(),
-                    retries,
-                    REPLACE_SAVE_RETRY_LIMIT,
-                    error,
-                    REPLACE_SAVE_RETRY_INTERVAL.as_millis()
-                );
-                sleeper(REPLACE_SAVE_RETRY_INTERVAL);
-            }
-            Err(LoadError::Read(error)) => {
-                if retries >= REPLACE_SAVE_RETRY_LIMIT {
-                    return Err(LoadError::Read(error));
-                }
-                retries += 1;
-                log::warn!(
-                    "[Injector][Config] {} load from {} hit read-side race on retry {}/{}: {}; waiting {} ms",
-                    context.label(),
-                    path.display(),
-                    retries,
-                    REPLACE_SAVE_RETRY_LIMIT,
-                    error,
-                    REPLACE_SAVE_RETRY_INTERVAL.as_millis()
-                );
-                sleeper(REPLACE_SAVE_RETRY_INTERVAL);
-            }
-        }
-    }
+    retry_read_race(
+        || loader(path),
+        |error| match error {
+            LoadError::Missing(_) | LoadError::Read(_) => ReadRaceErrorKind::Retryable,
+            LoadError::Parse(_) => ReadRaceErrorKind::Fatal,
+        },
+        REPLACE_SAVE_RETRY_LIMIT,
+        REPLACE_SAVE_RETRY_INTERVAL,
+        sleeper,
+        |retries, error, interval| {
+            log::warn!(
+                "[Injector][Config] {} load from {} hit read-side race on retry {}/{}: {}; waiting {} ms",
+                context.label(),
+                path.display(),
+                retries,
+                REPLACE_SAVE_RETRY_LIMIT,
+                error,
+                interval.as_millis()
+            );
+        },
+    )
+    .map(|outcome| LoadedConfig {
+        config: outcome.value,
+        retries: outcome.retries,
+    })
 }
 
 pub fn parse_level_filter(value: &str) -> Option<LevelFilter> {
@@ -1035,9 +836,9 @@ allow_packages = ["com.legacy.app"]
         let mut attempts = 0usize;
         let mut sleeps = Vec::new();
 
-        let loaded = retry_read_load(
+        let loaded = load_with_read_race_retry(
             &path,
-            LoadContext::Reload(ReloadTrigger::ReplaceSave),
+            LoadContext::Reload(WatchTrigger::ReplaceSave),
             |_path| {
                 attempts += 1;
                 match attempts {
@@ -1062,9 +863,9 @@ allow_packages = ["com.legacy.app"]
         let path = temp_config_path("replace-save-parse");
         let mut sleeps = Vec::new();
 
-        let error = retry_read_load(
+        let error = load_with_read_race_retry(
             &path,
-            LoadContext::Reload(ReloadTrigger::ReplaceSave),
+            LoadContext::Reload(WatchTrigger::ReplaceSave),
             |_path| Err(LoadError::Parse("broken".to_string())),
             |duration| sleeps.push(duration),
         )
@@ -1076,12 +877,12 @@ allow_packages = ["com.legacy.app"]
 
     #[test]
     fn reload_trigger_priority_prefers_close_write_over_replace_save() {
-        let mut selected = Some(ReloadTrigger::CloseWrite);
-        let candidate = ReloadTrigger::ReplaceSave;
+        let mut selected = Some(WatchTrigger::CloseWrite);
+        let candidate = WatchTrigger::ReplaceSave;
         selected = match selected {
             Some(current) if current.priority() <= candidate.priority() => Some(current),
             _ => Some(candidate),
         };
-        assert_eq!(selected, Some(ReloadTrigger::CloseWrite));
+        assert_eq!(selected, Some(WatchTrigger::CloseWrite));
     }
 }
