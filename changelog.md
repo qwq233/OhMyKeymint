@@ -10,7 +10,7 @@ Legacy P-521 EC private-key serialization now uses the BoringSSL Keymaster-compa
 
 No config migration is required for this update. Existing `config.toml`, `injector.toml`, and `keybox.xml` files remain compatible, but `keymint.log` and `injector.log` may be rotated to `.1` during startup.
 
-## Attestation 
+## Attestation
 - https://github.com/qwq233/OhMyKeymint/attestations/28625994
 
 **Full Changelog**: https://github.com/qwq233/OhMyKeymint/compare/v1.1.0-424f7b9...v1.1.1-ef38a44
