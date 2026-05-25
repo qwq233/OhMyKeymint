@@ -80,7 +80,6 @@ impl LockedRotatingFileAppender {
         }
     }
 
-    #[cfg(unix)]
     fn apply_parent_metadata(path: &Path, file: &File) {
         let fd = file.as_raw_fd();
         if let Ok(parent_metadata) = fs::metadata(Self::parent_dir(path)) {
@@ -88,9 +87,6 @@ impl LockedRotatingFileAppender {
         }
         let _ = unsafe { libc::fchmod(fd, 0o660) };
     }
-
-    #[cfg(not(unix))]
-    fn apply_parent_metadata(_path: &Path, _file: &File) {}
 
     fn rotate_if_needed(&self, next_write_len: usize) -> io::Result<()> {
         let current_len = match fs::metadata(&self.path) {
@@ -105,21 +101,31 @@ impl LockedRotatingFileAppender {
             return Ok(());
         }
 
-        let rotated_path = suffixed_path(&self.path, ".1");
-        match fs::remove_file(&rotated_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-
-        match fs::rename(&self.path, &rotated_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-
-        Ok(())
+        rotate_existing_log_file(&self.path)
     }
+}
+
+fn rotate_existing_log_file(path: &Path) -> io::Result<()> {
+    match fs::metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+
+    let rotated_path = suffixed_path(path, ".1");
+    match fs::remove_file(&rotated_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    match fs::rename(path, &rotated_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    Ok(())
 }
 
 impl Append for LockedRotatingFileAppender {
@@ -205,6 +211,16 @@ pub fn build_console_file_config<P: AsRef<Path>>(
         Config::builder().appender(Appender::builder().build("stdout", Box::new(stdout)));
     let mut root = Root::builder().appender("stdout");
     let path = file_path.as_ref();
+
+    match FileLockGuard::lock_path(path).and_then(|_guard| rotate_existing_log_file(path)) {
+        Ok(()) => {}
+        Err(error) => eprintln!(
+            "{} startup log refresh skipped for {}: {}",
+            error_prefix,
+            path.display(),
+            error
+        ),
+    }
 
     let file_logging_ready =
         match LockedRotatingFileAppender::new(path, Box::new(PatternEncoder::new(pattern))) {
