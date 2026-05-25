@@ -1,6 +1,6 @@
 [package]
 name = "OhMyKeymint"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
@@ -25,7 +25,7 @@ prost = "0.14.3"
 prost-types = "0.14.3"
 hex = "0.4.3"
 log4rs = "1.4.0"
-log = "0.4.29"
+log = "0.4.30"
 rsbinder = { version = "0.8.0", features = ["android_12_plus"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 anyhow = "1.0.102"
