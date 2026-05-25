@@ -1,6 +1,10 @@
-use crate::config::{ConfigFile, DeviceProperty};
+use crate::{
+    config::{ConfigFile, DeviceProperty},
+    plat::resetprop::read_string_property,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
+use log::{debug, error};
 use rsbinder::{hub, Status};
 use std::fs;
 use std::process::Command;
@@ -80,9 +84,9 @@ pub fn maybe_run_telephony_probe_command() -> Result<bool> {
 
 fn emit_telephony_probe_result(kind: &str, slot: i32, transaction: u32) {
     match probe_phone_identifier_via_binder(slot, transaction, CALLING_PACKAGE) {
-        Ok(Some(value)) => println!("{kind}\t{slot}\t{}", value.trim()),
-        Ok(None) => eprintln!("Telephony probe returned no {kind} for slot {slot}"),
-        Err(error) => eprintln!("Telephony probe skipped {kind} for slot {slot}: {error:#}"),
+        Ok(Some(value)) => debug!("{kind}\t{slot}\t{}", value.trim()),
+        Ok(None) => debug!("Telephony probe returned no {kind} for slot {slot}"),
+        Err(error) => error!("Telephony probe skipped {kind} for slot {slot}: {error:#}"),
     }
 }
 
@@ -406,38 +410,15 @@ fn probe_device_id_candidates() -> Vec<IdentifierCandidate> {
 }
 
 fn probe_device_id_slot(slot: i32) -> Result<Option<String>> {
-    let binder = hub::get_service(PHONE_SUB_INFO_SERVICE)
-        .ok_or_else(|| anyhow!("service {PHONE_SUB_INFO_SERVICE} unavailable"))?;
-    let proxy = binder
-        .as_proxy()
-        .context("iphonesubinfo binder was unexpectedly local")?;
-    let mut data = proxy
-        .prepare_transact(true)
-        .context("failed to prepare iphonesubinfo transaction")?;
-    data.write(&slot)
-        .context("failed to write phoneId for iphonesubinfo")?;
-    data.write(&CALLING_PACKAGE.to_string())
-        .context("failed to write calling package for iphonesubinfo")?;
-    data.write(&CALLING_FEATURE.to_string())
-        .context("failed to write calling feature for iphonesubinfo")?;
-
-    let mut reply = proxy
-        .submit_transact(GET_DEVICE_ID_FOR_PHONE_TRANSACTION, &data, 0)
-        .context("iphonesubinfo transact failed")?
-        .context("iphonesubinfo returned no reply")?;
-    reply.set_data_position(0);
-
-    let status: Status = reply
-        .read()
-        .context("failed to decode iphonesubinfo reply status")?;
-    if !status.is_ok() {
-        bail!("iphonesubinfo returned non-ok status: {status}");
-    }
-
-    let value: Option<String> = reply
-        .read()
-        .context("failed to decode iphonesubinfo device id string")?;
-    Ok(value)
+    probe_phone_string_via_binder(
+        PHONE_SUB_INFO_SERVICE,
+        GET_DEVICE_ID_FOR_PHONE_TRANSACTION,
+        slot,
+        CALLING_PACKAGE,
+        "iphonesubinfo",
+        "phoneId",
+        "device id",
+    )
 }
 
 fn probe_phone_identifier_via_binder(
@@ -445,37 +426,57 @@ fn probe_phone_identifier_via_binder(
     transaction: u32,
     calling_package: &str,
 ) -> Result<Option<String>> {
-    let binder = hub::get_service(PHONE_SERVICE)
-        .ok_or_else(|| anyhow!("service {PHONE_SERVICE} unavailable"))?;
+    probe_phone_string_via_binder(
+        PHONE_SERVICE,
+        transaction,
+        slot,
+        calling_package,
+        "phone",
+        "slot",
+        "identifier",
+    )
+}
+
+fn probe_phone_string_via_binder(
+    service: &str,
+    transaction: u32,
+    slot: i32,
+    calling_package: &str,
+    label: &str,
+    slot_label: &str,
+    value_label: &str,
+) -> Result<Option<String>> {
+    let binder =
+        hub::get_service(service).ok_or_else(|| anyhow!("service {service} unavailable"))?;
     let proxy = binder
         .as_proxy()
-        .context("phone binder was unexpectedly local")?;
+        .with_context(|| format!("{label} binder was unexpectedly local"))?;
     let mut data = proxy
         .prepare_transact(true)
-        .context("failed to prepare phone transaction")?;
+        .with_context(|| format!("failed to prepare {label} transaction"))?;
     data.write(&slot)
-        .context("failed to write slot for phone transaction")?;
+        .with_context(|| format!("failed to write {slot_label} for {label}"))?;
     data.write(&calling_package.to_string())
-        .context("failed to write calling package for phone transaction")?;
+        .with_context(|| format!("failed to write calling package for {label}"))?;
     data.write(&CALLING_FEATURE.to_string())
-        .context("failed to write calling feature for phone transaction")?;
+        .with_context(|| format!("failed to write calling feature for {label}"))?;
 
     let mut reply = proxy
         .submit_transact(transaction, &data, 0)
-        .context("phone transact failed")?
-        .context("phone returned no reply")?;
+        .with_context(|| format!("{label} transact failed"))?
+        .with_context(|| format!("{label} returned no reply"))?;
     reply.set_data_position(0);
 
     let status: Status = reply
         .read()
-        .context("failed to decode phone reply status")?;
+        .with_context(|| format!("failed to decode {label} reply status"))?;
     if !status.is_ok() {
-        bail!("phone returned non-ok status: {status}");
+        bail!("{label} returned non-ok status: {status}");
     }
 
     let value: Option<String> = reply
         .read()
-        .context("failed to decode phone identifier string")?;
+        .with_context(|| format!("failed to decode {label} {value_label} string"))?;
     Ok(value)
 }
 
@@ -583,13 +584,6 @@ fn parse_shell_telephony_probe_output(output: &str) -> Vec<IdentifierCandidate> 
     }
 
     candidates
-}
-
-fn read_string_property(name: &str) -> Option<String> {
-    rsproperties::get::<String>(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn normalize_imei_candidate(raw: &str, source: String) -> Option<IdentifierCandidate> {
