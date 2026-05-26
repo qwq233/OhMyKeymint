@@ -39,7 +39,7 @@ x509-cert = "0.2.5"
 watchdog_rs = { path = "watchdog", version = "0.1.0" }
 nix = { version = "0.31.3", features = ["mman"] }
 rsproperties = { version = "0.3.0", features = ["builder"] }
-libsqlite3-sys = "0.37.0"
+libsqlite3-sys = "0.38.0"
 rand = "0.10.1"
 der = "0.8.0"
 toml = "1.1.0"
