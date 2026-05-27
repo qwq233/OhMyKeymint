@@ -6,13 +6,15 @@ use std::sync::{
 };
 
 use log::{debug, info, warn};
-use rsbinder::{ExceptionCode, Parcel, Status};
+use rsbinder::{ExceptionCode, Parcel, Status, StatusCode};
 
 use super::binder::{
     binder_transaction_data, binder_transaction_data_target, describe_transaction_objects,
     format_target, parse_local_binder_target_from_parcel_bytes, LocalBinderTarget,
 };
 use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
+use crate::android::system::keystore2::KeyMetadata::KeyMetadata;
 use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::config;
 use crate::filter::{self, FilterReason};
@@ -477,28 +479,12 @@ fn operation_allows_aad(
     })
 }
 
-fn abort_omk_operation_response(
-    response: &crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse,
-    reason: &str,
-) {
-    if let Some(operation) = response.r#iOperation.as_ref() {
-        let _guard = BypassGuard::enter();
-        match operation.r#abort() {
-            Ok(()) => debug!("[Injector][Route] aborted unused OMK operation: {reason}"),
-            Err(status) => debug!(
-                "[Injector][Route] unused OMK operation abort failed after {reason}: {}",
-                status
-            ),
-        }
-    }
-}
-
 fn fallback_create_operation_carrier(
     security_level: crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel,
     pending: &PendingSecurityLevelCall,
 ) -> Option<parcel::ReplyBinderCarrier> {
     warn!(
-        "[Injector][Reply] refusing to reuse cached security-level carrier for createOperation uid={} pid={} security_level={:?}; preserving native reply",
+        "[Injector][Reply] refusing to reuse cached security-level carrier for createOperation uid={} pid={} security_level={:?}; direct OMK reply will be used if available",
         pending.caller.uid, pending.caller.pid, security_level
     );
     None
@@ -1191,6 +1177,112 @@ fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<parcel::OwnedR
     }
 }
 
+fn omk_unavailable_status(status: &Status) -> bool {
+    status.exception_code() == ExceptionCode::TransactionFailed
+        && status.transaction_error() == StatusCode::DeadObject
+}
+
+fn omk_unavailable_error(error: &anyhow::Error) -> bool {
+    let mut saw_status = false;
+    for status in error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<Status>())
+    {
+        saw_status = true;
+        if omk_unavailable_status(status) {
+            return true;
+        }
+    }
+
+    !saw_status
+}
+
+fn build_omk_error_reply_or_preserve_system(
+    error: &anyhow::Error,
+) -> anyhow::Result<Option<parcel::OwnedReply>> {
+    if omk_unavailable_error(error) {
+        Ok(None)
+    } else {
+        build_omk_error_reply(error).map(Some)
+    }
+}
+
+fn build_omk_status_reply_or_preserve_system(
+    status: &Status,
+) -> anyhow::Result<Option<parcel::OwnedReply>> {
+    if omk_unavailable_status(status) {
+        Ok(None)
+    } else {
+        build_omk_status_reply(status).map(Some)
+    }
+}
+
+fn omk_error_reply_for_method(
+    method: &str,
+    caller: &CallerIdentity,
+    error: &anyhow::Error,
+) -> anyhow::Result<Option<parcel::OwnedReply>> {
+    match build_omk_error_reply_or_preserve_system(error)? {
+        Some(reply) => {
+            warn!(
+                "[Injector][Reply] OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
+                method, caller.uid, caller.pid, error
+            );
+            Ok(Some(reply))
+        }
+        None => {
+            warn!(
+                "[Injector][Reply] OMK {} unavailable for uid={} pid={}: {:#}; preserving original system reply",
+                method, caller.uid, caller.pid, error
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn omk_status_reply_for_method(
+    method: &str,
+    caller: &CallerIdentity,
+    status: &Status,
+) -> anyhow::Result<Option<parcel::OwnedReply>> {
+    match build_omk_status_reply_or_preserve_system(status)? {
+        Some(reply) => {
+            warn!(
+                "[Injector][Reply] OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
+                method, caller.uid, caller.pid, status
+            );
+            Ok(Some(reply))
+        }
+        None => {
+            warn!(
+                "[Injector][Reply] OMK {} unavailable for uid={} pid={}: {:#}; preserving original system reply",
+                method, caller.uid, caller.pid, status
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn build_direct_omk_key_entry_reply(entry: KeyEntryResponse) -> anyhow::Result<parcel::OwnedReply> {
+    tracker::remember_key_metadata_route(&entry.r#metadata, RouteTarget::Omk);
+    parcel::build_key_entry_reply(entry)
+}
+
+fn build_direct_omk_metadata_reply(metadata: KeyMetadata) -> anyhow::Result<parcel::OwnedReply> {
+    tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
+    parcel::build_plain_reply(&metadata)
+}
+
+fn build_direct_omk_security_level_reply(
+    security_level: crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel,
+    pending: &PendingServiceCall,
+) -> anyhow::Result<Option<parcel::OwnedReply>> {
+    match ipc::with_omk_retry(|omk| Ok(omk.r#getSecurityLevel(security_level)?)) {
+        Ok(level) => Ok(Some(parcel::build_get_security_level_reply(level)?)),
+        Err(error) => omk_error_reply_for_method("getSecurityLevel", &pending.caller, &error),
+    }
+}
+
 unsafe fn observe_system_service_reply(
     tr: &binder_transaction_data,
     pending: &PendingServiceCall,
@@ -1451,12 +1543,12 @@ unsafe fn build_service_reply_rewrite(
                 Ok(carrier) => carrier,
                 Err(error) => {
                     warn!(
-                        "[Injector][Reply] could not observe system getSecurityLevel carrier for uid={} pid={}: {:#}; preserving original reply without OMK carrier mapping",
+                        "[Injector][Reply] could not observe system getSecurityLevel carrier for uid={} pid={}: {:#}; returning direct OMK security-level binder",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    return Ok(None);
+                    return build_direct_omk_security_level_reply(*security_level, pending);
                 }
             };
             if let Err(error) = register_security_level_carrier(
@@ -1466,31 +1558,24 @@ unsafe fn build_service_reply_rewrite(
                 ServiceMethod::GetSecurityLevel,
             ) {
                 warn!(
-                    "[Injector][Reply] could not register OMK-preferred system getSecurityLevel carrier for uid={} pid={}: {:#}; preserving original reply without OMK carrier mapping",
+                    "[Injector][Reply] could not register OMK-preferred system getSecurityLevel carrier for uid={} pid={}: {:#}; returning direct OMK security-level binder",
                     pending.caller.uid,
                     pending.caller.pid,
                     error
                 );
+                return build_direct_omk_security_level_reply(*security_level, pending);
             }
             Ok(None)
         }
         ParsedServiceRequest::GetKeyEntry { key } => {
             let omk_key = omk_descriptor_for_app_key(key);
-            let entry = match ipc::with_omk_retry(|omk| {
-                Ok(omk.r#getKeyEntry(Some(&caller), &omk_key)?)
-            }) {
-                Ok(entry) => entry,
-                Err(error) => {
-                    let reply = build_omk_error_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK getKeyEntry failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    return Ok(Some(reply));
-                }
-            };
+            let entry =
+                match ipc::with_omk_retry(|omk| Ok(omk.r#getKeyEntry(Some(&caller), &omk_key)?)) {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        return omk_error_reply_for_method("getKeyEntry", &pending.caller, &error);
+                    }
+                };
             let system_metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata =
                 match parcel::parse_key_entry_reply_metadata(data, data_size, offsets, offsets_size)
                 {
@@ -1502,26 +1587,18 @@ unsafe fn build_service_reply_rewrite(
                             pending.caller.pid,
                             error
                         );
-                        match build_omk_key_entry_reply_with_fetched_carrier(
-                            entry.r#metadata,
-                            pending,
-                        )? {
-                            Some(reply) => return Ok(Some(reply)),
-                            None => {
-                                warn!(
-                                    "[Injector][Reply] OMK getKeyEntry could not find a reusable security-level carrier for uid={} pid={}; preserving original system reply",
-                                    pending.caller.uid,
-                                    pending.caller.pid
-                                );
-                                observe_system_service_reply(tr, pending)?;
-                            }
-                        }
-                        return Ok(None);
+                        return Ok(Some(build_omk_key_entry_reply_with_carrier_or_direct(
+                            entry, pending,
+                        )?));
                     }
                 };
-            let omk_descriptor = entry.r#metadata.r#key.clone();
+            let KeyEntryResponse {
+                r#iSecurityLevel: omk_security_level,
+                r#metadata: omk_metadata,
+            } = entry;
+            let omk_descriptor = omk_metadata.r#key.clone();
             let surfaced_metadata =
-                surface_omk_metadata_with_system_descriptor(&system_metadata, entry.r#metadata);
+                surface_omk_metadata_with_system_descriptor(&system_metadata, omk_metadata);
             let carrier = match parcel::extract_key_entry_reply_carrier(
                 data,
                 data_size,
@@ -1536,10 +1613,18 @@ unsafe fn build_service_reply_rewrite(
                         pending.caller.pid,
                         error
                     );
-                    return build_omk_key_entry_reply_with_fetched_carrier(
-                        surfaced_metadata,
-                        pending,
+                    tracker::remember_key_descriptor_bridge(
+                        &surfaced_metadata.r#key,
+                        &system_metadata.r#key,
+                        &omk_descriptor,
                     );
+                    return Ok(Some(build_omk_key_entry_reply_with_carrier_or_direct(
+                        KeyEntryResponse {
+                            r#iSecurityLevel: omk_security_level,
+                            r#metadata: surfaced_metadata,
+                        },
+                        pending,
+                    )?));
                 }
             };
             if let Err(error) = register_security_level_carrier(
@@ -1549,13 +1634,20 @@ unsafe fn build_service_reply_rewrite(
                 ServiceMethod::GetKeyEntry,
             ) {
                 warn!(
-                    "[Injector][Reply] OMK getKeyEntry could not register the rewritten carrier for uid={} pid={}: {:#}; preserving original system reply",
+                    "[Injector][Reply] OMK getKeyEntry could not register the rewritten carrier for uid={} pid={}: {:#}; returning direct OMK key entry",
                     pending.caller.uid,
                     pending.caller.pid,
                     error
                 );
-                observe_system_service_reply(tr, pending)?;
-                return Ok(None);
+                tracker::remember_key_descriptor_bridge(
+                    &surfaced_metadata.r#key,
+                    &system_metadata.r#key,
+                    &omk_descriptor,
+                );
+                return Ok(Some(build_direct_omk_key_entry_reply(KeyEntryResponse {
+                    r#iSecurityLevel: omk_security_level,
+                    r#metadata: surfaced_metadata,
+                })?));
             }
             tracker::remember_key_descriptor_bridge(
                 &surfaced_metadata.r#key,
@@ -1574,12 +1666,6 @@ unsafe fn build_service_reply_rewrite(
             public_cert,
             certificate_chain,
         } => {
-            let system_status =
-                parcel::parse_reply_status(data, data_size, offsets, offsets_size).ok();
-            if !matches!(system_status, Some(ref status) if status.is_ok()) {
-                return Ok(None);
-            }
-
             let omk_key = omk_descriptor_for_app_key(key);
             match ipc::with_omk_retry(|omk| {
                 Ok(omk.r#updateSubcomponent(
@@ -1591,35 +1677,16 @@ unsafe fn build_service_reply_rewrite(
             }) {
                 Ok(()) => Ok(None),
                 Err(error) => {
-                    let reply = build_omk_error_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK updateSubcomponent failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
+                    omk_error_reply_for_method("updateSubcomponent", &pending.caller, &error)
                 }
             }
         }
         ParsedServiceRequest::ListEntries { domain, nspace } => {
-            if !system_reply_succeeded(tr) {
-                return Ok(None);
-            }
             match ipc::with_omk_retry(|omk| {
                 Ok(omk.r#listEntries(Some(&caller), *domain, *nspace)?)
             }) {
                 Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?)),
-                Err(error) => {
-                    let reply = build_omk_error_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK listEntries failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
-                }
+                Err(error) => omk_error_reply_for_method("listEntries", &pending.caller, &error),
             }
         }
         ParsedServiceRequest::Grant {
@@ -1627,25 +1694,18 @@ unsafe fn build_service_reply_rewrite(
             grantee_uid,
             access_vector,
         } => {
-            let system_grant: crate::android::system::keystore2::KeyDescriptor::KeyDescriptor =
-                match parcel::parse_success_reply(data, data_size, offsets, offsets_size) {
-                    Ok(grant) => grant,
-                    Err(error) => {
-                        warn!(
-                            "[Injector][Reply] could not parse system grant reply for uid={} pid={}: {:#}; preserving original system reply",
-                            pending.caller.uid,
-                            pending.caller.pid,
-                            error
-                        );
-                        return Ok(None);
-                    }
-                };
-
             let omk_key = omk_descriptor_for_app_key(key);
-            match ipc::with_omk_retry(|omk| {
+            let omk_grant = match ipc::with_omk_retry(|omk| {
                 Ok(omk.r#grant(Some(&caller), &omk_key, *grantee_uid, *access_vector)?)
             }) {
-                Ok(omk_grant) => {
+                Ok(omk_grant) => omk_grant,
+                Err(error) => {
+                    return omk_error_reply_for_method("grant", &pending.caller, &error);
+                }
+            };
+
+            match parcel::parse_success_reply(data, data_size, offsets, offsets_size) {
+                Ok(system_grant) => {
                     tracker::remember_key_descriptor_bridge(
                         &system_grant,
                         &system_grant,
@@ -1660,22 +1720,19 @@ unsafe fn build_service_reply_rewrite(
                     Ok(None)
                 }
                 Err(error) => {
-                    let reply = build_omk_error_reply(&error)?;
                     warn!(
-                        "[Injector][Reply] OMK grant failed for uid={} pid={}: {:#}; returning OMK error",
+                        "[Injector][Reply] could not parse system grant reply for uid={} pid={}: {:#}; returning OMK grant",
                         pending.caller.uid,
                         pending.caller.pid,
                         error
                     );
-                    Ok(Some(reply))
+                    tracker::remember_key_descriptor_route(&omk_grant, RouteTarget::Omk);
+                    tracker::remember_grant_descriptor_for_ungrant(key, *grantee_uid, &omk_grant);
+                    Ok(Some(parcel::build_plain_reply(&omk_grant)?))
                 }
             }
         }
         ParsedServiceRequest::Ungrant { key, grantee_uid } => {
-            if !system_reply_succeeded(tr) {
-                return Ok(None);
-            }
-
             let omk_key = omk_descriptor_for_app_key(key);
             match ipc::with_omk_retry(|omk| {
                 Ok(omk.r#ungrant(Some(&caller), &omk_key, *grantee_uid)?)
@@ -1684,35 +1741,16 @@ unsafe fn build_service_reply_rewrite(
                     tracker::retire_grant_descriptor_after_ungrant(key, *grantee_uid);
                     Ok(None)
                 }
-                Err(error) => {
-                    let reply = build_omk_error_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK ungrant failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
-                }
+                Err(error) => omk_error_reply_for_method("ungrant", &pending.caller, &error),
             }
         }
         ParsedServiceRequest::GetNumberOfEntries { domain, nspace } => {
-            if !system_reply_succeeded(tr) {
-                return Ok(None);
-            }
             match ipc::with_omk_retry(|omk| {
                 Ok(omk.r#getNumberOfEntries(Some(&caller), *domain, *nspace)?)
             }) {
                 Ok(count) => Ok(Some(parcel::build_plain_reply(&count)?)),
                 Err(error) => {
-                    let reply = build_omk_error_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK getNumberOfEntries failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
+                    omk_error_reply_for_method("getNumberOfEntries", &pending.caller, &error)
                 }
             }
         }
@@ -1721,9 +1759,6 @@ unsafe fn build_service_reply_rewrite(
             nspace,
             starting_past_alias,
         } => {
-            if !system_reply_succeeded(tr) {
-                return Ok(None);
-            }
             match ipc::with_omk_retry(|omk| {
                 Ok(omk.r#listEntriesBatched(
                     Some(&caller),
@@ -1734,33 +1769,18 @@ unsafe fn build_service_reply_rewrite(
             }) {
                 Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?)),
                 Err(error) => {
-                    let reply = build_omk_error_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK listEntriesBatched failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
+                    omk_error_reply_for_method("listEntriesBatched", &pending.caller, &error)
                 }
             }
         }
         ParsedServiceRequest::GetSupplementaryAttestationInfo { tag } => {
-            if !system_reply_succeeded(tr) {
-                return Ok(None);
-            }
             match ipc::with_omk_retry(|omk| Ok(omk.r#getSupplementaryAttestationInfo(*tag)?)) {
                 Ok(info) => Ok(Some(parcel::build_plain_reply(&info)?)),
-                Err(error) => {
-                    let reply = build_omk_error_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK getSupplementaryAttestationInfo failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
-                }
+                Err(error) => omk_error_reply_for_method(
+                    "getSupplementaryAttestationInfo",
+                    &pending.caller,
+                    &error,
+                ),
             }
         }
         ParsedServiceRequest::DeleteKey { key } => {
@@ -1776,33 +1796,20 @@ unsafe fn build_service_reply_rewrite(
                     }
                     Ok(Some(parcel::build_void_reply()?))
                 }
-                Err(error) => {
-                    let reply = build_omk_error_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK deleteKey failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
-                }
+                Err(error) => omk_error_reply_for_method("deleteKey", &pending.caller, &error),
             }
         }
     }
 }
 
-unsafe fn system_reply_succeeded(tr: &binder_transaction_data) -> bool {
-    let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
-    matches!(
-        parcel::parse_reply_status(data, data_size, offsets, offsets_size),
-        Ok(status) if status.is_ok()
-    )
-}
-
-fn build_omk_key_entry_reply_with_fetched_carrier(
-    metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata,
+fn build_omk_key_entry_reply_with_carrier_or_direct(
+    entry: KeyEntryResponse,
     pending: &PendingServiceCall,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<parcel::OwnedReply> {
+    let KeyEntryResponse {
+        r#iSecurityLevel,
+        metadata,
+    } = entry;
     let security_level = metadata.r#keySecurityLevel;
     let carrier = tracker::lookup_security_level_carrier(security_level, RouteTarget::Omk)
         .or_else(|| {
@@ -1818,7 +1825,15 @@ fn build_omk_key_entry_reply_with_fetched_carrier(
             carrier
         });
     let Some(carrier) = carrier else {
-        return Ok(None);
+        warn!(
+            "[Injector][Reply] OMK getKeyEntry could not find a reusable security-level carrier for uid={} pid={}; returning direct OMK key entry",
+            pending.caller.uid,
+            pending.caller.pid
+        );
+        return build_direct_omk_key_entry_reply(KeyEntryResponse {
+            r#iSecurityLevel,
+            r#metadata: metadata,
+        });
     };
     if !carrier.is_object {
         warn!(
@@ -1827,9 +1842,12 @@ fn build_omk_key_entry_reply_with_fetched_carrier(
             pending.caller.pid,
             security_level
         );
-        return Ok(None);
+        return build_direct_omk_key_entry_reply(KeyEntryResponse {
+            r#iSecurityLevel,
+            r#metadata: metadata,
+        });
     }
-    register_security_level_carrier(
+    if let Err(error) = register_security_level_carrier(
         &parcel::ReplyBinderCarrier {
             bytes: carrier.bytes.clone(),
             is_object: carrier.is_object,
@@ -1837,13 +1855,21 @@ fn build_omk_key_entry_reply_with_fetched_carrier(
         security_level,
         RouteTarget::Omk,
         ServiceMethod::GetKeyEntry,
-    )?;
+    ) {
+        warn!(
+            "[Injector][Reply] cached security-level carrier for OMK getKeyEntry could not be registered uid={} pid={} security_level={:?}: {:#}; returning direct OMK key entry",
+            pending.caller.uid,
+            pending.caller.pid,
+            security_level,
+            error
+        );
+        return build_direct_omk_key_entry_reply(KeyEntryResponse {
+            r#iSecurityLevel,
+            r#metadata: metadata,
+        });
+    }
     tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
-    Ok(Some(parcel::build_key_entry_reply_with_carrier_bytes(
-        metadata,
-        &carrier.bytes,
-        carrier.is_object,
-    )?))
+    parcel::build_key_entry_reply_with_carrier_bytes(metadata, &carrier.bytes, carrier.is_object)
 }
 
 unsafe fn observe_system_security_level_reply(
@@ -1899,22 +1925,14 @@ unsafe fn build_security_level_reply_rewrite(
     let caller = pending.caller.to_caller_info();
     let _guard = BypassGuard::enter();
     let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
-    let omk_level = match ipc::with_omk_retry(|omk| {
-        Ok(omk.r#getOhMySecurityLevel(pending.security_level)?)
-    }) {
-        Ok(level) => level,
-        Err(error) => {
-            let reply = build_omk_error_reply(&error)?;
-            warn!(
-                "[Injector][Reply] OMK security-level lookup failed for {:?} uid={} pid={}: {:#}; returning OMK error",
-                pending.security_level,
-                pending.caller.uid,
-                pending.caller.pid,
-                error
-            );
-            return Ok(Some(reply));
-        }
-    };
+    let omk_level =
+        match ipc::with_omk_retry(|omk| Ok(omk.r#getOhMySecurityLevel(pending.security_level)?)) {
+            Ok(level) => level,
+            Err(error) => {
+                let method = format!("security-level lookup {:?}", pending.security_level);
+                return omk_error_reply_for_method(&method, &pending.caller, &error);
+            }
+        };
 
     match &pending.request {
         ParsedSecurityLevelRequest::CreateOperation {
@@ -1931,14 +1949,7 @@ unsafe fn build_security_level_reply_rewrite(
             ) {
                 Ok(response) => response,
                 Err(error) => {
-                    let reply = build_omk_status_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK createOperation failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    return Ok(Some(reply));
+                    return omk_status_reply_for_method("createOperation", &pending.caller, &error);
                 }
             };
             let carrier = match parcel::extract_create_operation_reply_carrier(
@@ -1958,17 +1969,12 @@ unsafe fn build_security_level_reply_rewrite(
                     let Some(carrier) =
                         fallback_create_operation_carrier(pending.security_level, pending)
                     else {
-                        abort_omk_operation_response(
-                            &omk_response,
-                            "createOperation had no reusable native carrier",
-                        );
                         warn!(
-                            "[Injector][Reply] OMK createOperation had no cached native carrier for uid={} pid={}; preserving original system reply",
+                            "[Injector][Reply] OMK createOperation had no cached native carrier for uid={} pid={}; returning direct OMK operation reply",
                             pending.caller.uid,
                             pending.caller.pid
                         );
-                        observe_system_security_level_reply(tr, pending)?;
-                        return Ok(None);
+                        return Ok(Some(parcel::build_create_operation_reply(omk_response)?));
                     };
                     carrier
                 }
@@ -2027,16 +2033,7 @@ unsafe fn build_security_level_reply_rewrite(
                     tracker::remember_key_metadata_route(&surfaced_metadata, RouteTarget::Omk);
                     Ok(Some(parcel::build_plain_reply(&surfaced_metadata)?))
                 }
-                Err(error) => {
-                    let reply = build_omk_status_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK generateKey failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
-                }
+                Err(error) => omk_status_reply_for_method("generateKey", &pending.caller, &error),
             }
         }
         ParsedSecurityLevelRequest::ImportKey {
@@ -2066,13 +2063,13 @@ unsafe fn build_security_level_reply_rewrite(
                         Ok(metadata) => metadata,
                         Err(error) => {
                             warn!(
-                                "[Injector][Reply] OMK importKey could not parse the original system metadata for uid={} pid={}: {:#}; preserving original system reply",
+                                "[Injector][Reply] OMK importKey could not parse the original system metadata for uid={} pid={}: {:#}; returning OMK metadata directly",
                                 pending.caller.uid,
                                 pending.caller.pid,
                                 error
                             );
-                            observe_system_security_level_reply(tr, pending)?;
-                            return Ok(None);
+                            tracker::remember_key_descriptor_route(key, RouteTarget::Omk);
+                            return Ok(Some(build_direct_omk_metadata_reply(metadata)?));
                         }
                     };
                     let omk_descriptor = metadata.r#key.clone();
@@ -2086,16 +2083,7 @@ unsafe fn build_security_level_reply_rewrite(
                     tracker::remember_key_metadata_route(&surfaced_metadata, RouteTarget::Omk);
                     Ok(Some(parcel::build_plain_reply(&surfaced_metadata)?))
                 }
-                Err(error) => {
-                    let reply = build_omk_status_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK importKey failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
-                }
+                Err(error) => omk_status_reply_for_method("importKey", &pending.caller, &error),
             }
         }
         ParsedSecurityLevelRequest::ImportWrappedKey {
@@ -2125,13 +2113,13 @@ unsafe fn build_security_level_reply_rewrite(
                         Ok(metadata) => metadata,
                         Err(error) => {
                             warn!(
-                                "[Injector][Reply] OMK importWrappedKey could not parse the original system metadata for uid={} pid={}: {:#}; preserving original system reply",
+                                "[Injector][Reply] OMK importWrappedKey could not parse the original system metadata for uid={} pid={}: {:#}; returning OMK metadata directly",
                                 pending.caller.uid,
                                 pending.caller.pid,
                                 error
                             );
-                            observe_system_security_level_reply(tr, pending)?;
-                            return Ok(None);
+                            tracker::remember_key_descriptor_route(key, RouteTarget::Omk);
+                            return Ok(Some(build_direct_omk_metadata_reply(metadata)?));
                         }
                     };
                     let omk_descriptor = metadata.r#key.clone();
@@ -2146,14 +2134,7 @@ unsafe fn build_security_level_reply_rewrite(
                     Ok(Some(parcel::build_plain_reply(&surfaced_metadata)?))
                 }
                 Err(error) => {
-                    let reply = build_omk_status_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK importWrappedKey failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
+                    omk_status_reply_for_method("importWrappedKey", &pending.caller, &error)
                 }
             }
         }
@@ -2161,16 +2142,11 @@ unsafe fn build_security_level_reply_rewrite(
             let omk_storage_key = omk_descriptor_for_app_key(storage_key);
             match omk_level.r#convertStorageKeyToEphemeral(Some(&caller), &omk_storage_key) {
                 Ok(response) => Ok(Some(parcel::build_plain_reply(&response)?)),
-                Err(error) => {
-                    let reply = build_omk_status_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK convertStorageKeyToEphemeral failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
-                }
+                Err(error) => omk_status_reply_for_method(
+                    "convertStorageKeyToEphemeral",
+                    &pending.caller,
+                    &error,
+                ),
             }
         }
         ParsedSecurityLevelRequest::DeleteKey { key } => {
@@ -2180,16 +2156,7 @@ unsafe fn build_security_level_reply_rewrite(
                     tracker::forget_key_descriptor_route(key);
                     Ok(Some(parcel::build_void_reply()?))
                 }
-                Err(error) => {
-                    let reply = build_omk_status_reply(&error)?;
-                    warn!(
-                        "[Injector][Reply] OMK deleteKey failed for uid={} pid={}: {:#}; returning OMK error",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    Ok(Some(reply))
-                }
+                Err(error) => omk_status_reply_for_method("deleteKey", &pending.caller, &error),
             }
         }
     }
@@ -2893,6 +2860,43 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_omk_errors_preserve_system_reply() {
+        let dead = anyhow::Error::new(Status::from(StatusCode::DeadObject));
+        assert!(
+            build_omk_error_reply_or_preserve_system(&dead)
+                .expect("DeadObject should classify cleanly")
+                .is_none(),
+            "DeadObject after retry means OMK is unavailable, not authoritative"
+        );
+
+        let connect = anyhow::anyhow!("failed to connect to omk service");
+        assert!(
+            build_omk_error_reply_or_preserve_system(&connect)
+                .expect("plain connection errors should classify cleanly")
+                .is_none(),
+            "connection errors without an OMK Status should preserve system"
+        );
+    }
+
+    #[test]
+    fn reachable_omk_status_error_becomes_authoritative_reply() {
+        let status = Status::new_service_specific_error(7, None);
+        let reply = build_omk_status_reply_or_preserve_system(&status)
+            .expect("service-specific status should build")
+            .expect("reachable OMK status should replace system");
+        let mut reply = reply;
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("status reply should parse");
+
+        assert_eq!(
+            parsed.exception_code(),
+            rsbinder::ExceptionCode::ServiceSpecific
+        );
+        assert_eq!(parsed.service_specific_error(), 7);
+    }
+
+    #[test]
     fn local_service_target_extraction_is_stable() {
         tracker::clear_state_for_tests();
         let binder = route::new_service_binder(
@@ -3204,9 +3208,14 @@ mod tests {
             _redirect_keepalive: None,
         };
 
-        let mut reply = build_omk_key_entry_reply_with_fetched_carrier(metadata, &pending)
-            .expect("fetched-carrier reply should build")
-            .expect("cached carrier should produce a key-entry reply");
+        let mut reply = build_omk_key_entry_reply_with_carrier_or_direct(
+            KeyEntryResponse {
+                r#iSecurityLevel: None,
+                r#metadata: metadata,
+            },
+            &pending,
+        )
+        .expect("cached carrier should produce a key-entry reply");
         let (reply_data, reply_data_size, reply_offsets, reply_offsets_size) =
             raw_parts(&mut reply);
         let parsed_metadata = unsafe {
@@ -3243,6 +3252,57 @@ mod tests {
             ),
             RouteTarget::Omk,
             "the surfaced key entry should pin follow-up operations to OMK"
+        );
+    }
+
+    #[test]
+    fn omk_key_entry_without_cached_carrier_can_return_direct_omk_reply() {
+        tracker::clear_state_for_tests();
+
+        let metadata = KeyMetadata {
+            key: KeyDescriptor {
+                domain: Domain::KEY_ID,
+                nspace: 0x4321,
+                alias: None,
+                blob: None,
+            },
+            keySecurityLevel: SecurityLevel::TRUSTED_ENVIRONMENT,
+            authorizations: vec![],
+            certificate: None,
+            certificateChain: None,
+            modificationTimeMs: 0,
+        };
+        let pending = PendingServiceCall {
+            request: ParsedServiceRequest::GetKeyEntry {
+                key: sample_key_descriptor(),
+            },
+            method: ServiceMethod::GetKeyEntry,
+            caller: CallerIdentity::new(1000, 2000),
+            packages: vec!["com.example".to_string()],
+            route: RouteTarget::Omk,
+            execution_mode: ServiceExecutionMode::ReplyRewrite,
+            redirect_applied: false,
+            _redirect_keepalive: None,
+        };
+
+        let mut reply = build_omk_key_entry_reply_with_carrier_or_direct(
+            KeyEntryResponse {
+                r#iSecurityLevel: None,
+                r#metadata: metadata,
+            },
+            &pending,
+        )
+        .expect("direct OMK key-entry reply should serialize");
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let parsed_metadata = unsafe {
+            parcel::parse_key_entry_reply_metadata(data, data_size, offsets, offsets_size)
+        }
+        .expect("direct OMK key-entry reply should parse");
+
+        assert_eq!(parsed_metadata.r#key.nspace, 0x4321);
+        assert_eq!(
+            tracker::lookup_key_descriptor_route(&parsed_metadata.r#key),
+            Some(RouteTarget::Omk)
         );
     }
 
@@ -3436,6 +3496,43 @@ mod tests {
                 .expect("operation target map poisoned")
                 .is_empty(),
             "refusing fallback must not register an operation mapping"
+        );
+    }
+
+    #[test]
+    fn direct_omk_create_operation_reply_does_not_register_system_operation_mapping() {
+        ensure_binder_process_state();
+        tracker::clear_state_for_tests();
+        operation_targets()
+            .lock()
+            .expect("operation target map poisoned")
+            .clear();
+
+        let omk_operation = BnKeystoreOperation::new_binder(TestOperationBackend {
+            update_output: vec![9, 9, 9],
+            aborts: Arc::new(AtomicUsize::new(0)),
+            update_aad_status: None,
+        });
+        let mut reply = parcel::build_create_operation_reply(CreateOperationResponse {
+            r#iOperation: Some(omk_operation),
+            r#operationChallenge: None,
+            r#parameters: None,
+            r#upgradedBlob: Some(vec![7, 7]),
+        })
+        .expect("direct OMK createOperation reply should serialize");
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let parsed: CreateOperationResponse =
+            unsafe { parcel::parse_success_reply(data, data_size, offsets, offsets_size) }
+                .expect("direct OMK createOperation reply should parse");
+
+        assert!(parsed.r#iOperation.is_some());
+        assert_eq!(parsed.r#upgradedBlob.as_deref(), Some(&[7, 7][..]));
+        assert!(
+            operation_targets()
+                .lock()
+                .expect("operation target map poisoned")
+                .is_empty(),
+            "direct OMK replies should not register a fake system carrier mapping"
         );
     }
 
