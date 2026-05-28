@@ -13,6 +13,8 @@ use super::binder::{
     format_target, parse_local_binder_target_from_parcel_bytes, LocalBinderTarget,
 };
 use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::IKeystoreService::transactions as service_tx;
+use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
 use crate::android::system::keystore2::KeyMetadata::KeyMetadata;
 use crate::android::system::keystore2::ResponseCode::ResponseCode;
@@ -61,6 +63,7 @@ struct PendingSecurityLevelCall {
     packages: Vec<String>,
     route: RouteTarget,
     security_level: crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel,
+    allow_unknown_omk_derived: bool,
 }
 
 struct PendingOperationCall {
@@ -94,6 +97,7 @@ struct LocalServiceRedirect {
 thread_local! {
     static PENDING_REPLY_STACK: RefCell<Vec<Option<PendingCall>>> = RefCell::default();
     static OUTBOUND_REPLY_BUFFERS: RefCell<Vec<parcel::OwnedReply>> = RefCell::default();
+    static INBOUND_REQUEST_BUFFERS: RefCell<Vec<parcel::OwnedReply>> = RefCell::default();
 }
 
 #[derive(Clone)]
@@ -102,6 +106,7 @@ struct OperationTargetInfo {
     aad_allowed: bool,
     backend: Option<route::AospOperationBinder>,
     finalized: bool,
+    allow_unknown_omk_derived: bool,
 }
 
 static OPERATION_TARGETS: OnceLock<Mutex<HashMap<LocalBinderTarget, OperationTargetInfo>>> =
@@ -258,20 +263,133 @@ fn evaluate_caller(
     decision
 }
 
-fn should_allow_tracked_grant_readback(
-    request: &ParsedServiceRequest,
-    decision: &crate::filter::FilterDecision,
+fn grant_descriptor_from_service_request(request: &ParsedServiceRequest) -> Option<&KeyDescriptor> {
+    match request {
+        ParsedServiceRequest::GetKeyEntry { key }
+        | ParsedServiceRequest::UpdateSubcomponent { key, .. }
+        | ParsedServiceRequest::DeleteKey { key }
+        | ParsedServiceRequest::Grant { key, .. }
+        | ParsedServiceRequest::Ungrant { key, .. }
+            if key.domain == Domain::GRANT =>
+        {
+            Some(key)
+        }
+        _ => None,
+    }
+}
+
+fn grant_descriptor_from_security_level_request(
+    request: &ParsedSecurityLevelRequest,
+) -> Option<&KeyDescriptor> {
+    match request {
+        ParsedSecurityLevelRequest::CreateOperation { key, .. }
+        | ParsedSecurityLevelRequest::DeleteKey { key }
+        | ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral { storage_key: key }
+            if key.domain == Domain::GRANT =>
+        {
+            Some(key)
+        }
+        _ => None,
+    }
+}
+
+fn should_allow_omk_grant_descriptor_with_probe(
+    grant: &KeyDescriptor,
+    decision: &filter::FilterDecision,
+    caller: &CallerIdentity,
+    mut probe: impl FnMut(&CallerIdentity, &KeyDescriptor) -> bool,
 ) -> bool {
     if decision.allowed || decision.reason != FilterReason::RejectedUnknownPackage {
         return false;
     }
 
-    matches!(
+    if grant.domain != Domain::GRANT {
+        return false;
+    }
+
+    if tracker::lookup_omk_descriptor_for_key(grant).is_some() {
+        tracker::remember_key_descriptor_route(grant, RouteTarget::Omk);
+        return true;
+    }
+
+    if probe(caller, grant) {
+        tracker::remember_key_descriptor_route(grant, RouteTarget::Omk);
+        return true;
+    }
+
+    false
+}
+
+fn probe_omk_grant(caller: &CallerIdentity, grant: &KeyDescriptor) -> bool {
+    let caller_info = caller.to_caller_info();
+    match ipc::with_omk_retry(|omk| Ok(omk.r#isOmkGrant(Some(&caller_info), grant)?)) {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(error) => {
+            debug!(
+                "[Injector][Decision] OMK grant probe failed for uid={} pid={} grant_nspace={}: {:#}",
+                caller.uid, caller.pid, grant.nspace, error
+            );
+            false
+        }
+    }
+}
+
+fn should_allow_omk_grant_service_request(
+    request: &ParsedServiceRequest,
+    decision: &filter::FilterDecision,
+    caller: &CallerIdentity,
+) -> bool {
+    should_allow_omk_grant_service_request_with_probe(request, decision, caller, probe_omk_grant)
+}
+
+fn should_allow_omk_grant_service_request_with_probe(
+    request: &ParsedServiceRequest,
+    decision: &filter::FilterDecision,
+    caller: &CallerIdentity,
+    mut probe: impl FnMut(&CallerIdentity, &KeyDescriptor) -> bool,
+) -> bool {
+    let Some(grant) = grant_descriptor_from_service_request(request) else {
+        return false;
+    };
+
+    should_allow_omk_grant_descriptor_with_probe(grant, decision, caller, &mut probe)
+}
+
+fn should_allow_omk_grant_security_level_request(
+    request: &ParsedSecurityLevelRequest,
+    decision: &filter::FilterDecision,
+    caller: &CallerIdentity,
+) -> bool {
+    should_allow_omk_grant_security_level_request_with_probe(
         request,
-        ParsedServiceRequest::GetKeyEntry { key }
-            if key.domain == Domain::GRANT
-                && tracker::lookup_omk_descriptor_for_key(key).is_some()
+        decision,
+        caller,
+        probe_omk_grant,
     )
+}
+
+fn should_allow_omk_grant_security_level_request_with_probe(
+    request: &ParsedSecurityLevelRequest,
+    decision: &filter::FilterDecision,
+    caller: &CallerIdentity,
+    mut probe: impl FnMut(&CallerIdentity, &KeyDescriptor) -> bool,
+) -> bool {
+    let Some(grant) = grant_descriptor_from_security_level_request(request) else {
+        return false;
+    };
+
+    should_allow_omk_grant_descriptor_with_probe(grant, decision, caller, &mut probe)
+}
+
+fn should_allow_unknown_omk_operation_route(
+    decision: &filter::FilterDecision,
+    target: &OperationTargetInfo,
+) -> bool {
+    !decision.allowed
+        && decision.reason == FilterReason::RejectedUnknownPackage
+        && target.route == RouteTarget::Omk
+        && target.allow_unknown_omk_derived
 }
 
 fn target_from_transaction(tr: &binder_transaction_data) -> Option<LocalBinderTarget> {
@@ -427,6 +545,7 @@ fn rewrite_create_operation_reply_with_native_carrier(
     omk_response: crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse,
     carrier: &parcel::ReplyBinderCarrier,
     aad_allowed: bool,
+    allow_unknown_omk_derived: bool,
 ) -> anyhow::Result<parcel::OwnedReply> {
     if !carrier.is_object {
         anyhow::bail!("system createOperation carrier was null");
@@ -452,6 +571,7 @@ fn rewrite_create_operation_reply_with_native_carrier(
             aad_allowed,
             backend: Some(backend),
             finalized: false,
+            allow_unknown_omk_derived,
         },
     );
     info!(
@@ -528,6 +648,7 @@ unsafe fn register_operation_target_from_reply(
             aad_allowed,
             backend,
             finalized: false,
+            allow_unknown_omk_derived: false,
         },
     );
     info!(
@@ -698,13 +819,14 @@ pub(super) unsafe fn handle_br_transaction(
         };
 
         let method = request.method();
-        let allow_tracked_grant_readback = should_allow_tracked_grant_readback(&request, &decision);
-        if !decision.allowed && !allow_tracked_grant_readback {
+        let original_code = tr.code;
+        let allow_omk_grant = should_allow_omk_grant_service_request(&request, &decision, &caller);
+        if !decision.allowed && !allow_omk_grant {
             info!(
                 "[Injector][Decision] command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?}; leaving original request untouched",
                 command_name,
                 method,
-                tr.code,
+                original_code,
                 caller.uid,
                 caller.pid,
                 caller.sid,
@@ -713,12 +835,12 @@ pub(super) unsafe fn handle_br_transaction(
             );
             return false;
         }
-        if allow_tracked_grant_readback {
+        if allow_omk_grant {
             info!(
-                "[Injector][Decision] command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=true reason={:?} grant_bridge=true",
+                "[Injector][Decision] command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=true reason={:?} omk_grant=true",
                 command_name,
                 method,
-                tr.code,
+                original_code,
                 caller.uid,
                 caller.pid,
                 caller.sid,
@@ -727,10 +849,15 @@ pub(super) unsafe fn handle_br_transaction(
             );
         }
 
-        let route = route_for_service_request(&request, &cfg.intercept);
+        let route = if allow_omk_grant {
+            RouteTarget::Omk
+        } else {
+            route_for_service_request(&request, &cfg.intercept)
+        };
         let execution_mode = service_execution_mode(method);
         let mut redirect_applied = false;
         let mut redirect_keepalive = None;
+        let mut placeholder_applied = false;
         if execution_mode == ServiceExecutionMode::RequestSide {
             if let Some(redirect) = maybe_build_request_side_redirect(
                 &request,
@@ -744,12 +871,30 @@ pub(super) unsafe fn handle_br_transaction(
                 redirect_keepalive = Some(redirect.keepalive);
             }
         }
+        if execution_mode == ServiceExecutionMode::ReplyRewrite
+            && route == RouteTarget::Omk
+            && matches!(method, ServiceMethod::Grant | ServiceMethod::Ungrant)
+        {
+            match install_omk_grant_placeholder_request(tr) {
+                Ok(()) => {
+                    placeholder_applied = true;
+                }
+                Err(error) => {
+                    warn!(
+                        "[Injector][Route] failed to install generated OMK grant placeholder for {:?} uid={} pid={}: {:#}; using unknown transaction to fail closed",
+                        method, caller.uid, caller.pid, error
+                    );
+                    tr.code = u32::MAX;
+                    placeholder_applied = true;
+                }
+            }
+        }
 
         info!(
             "[Injector][Decision] command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?}",
             command_name,
             method,
-            tr.code,
+            original_code,
             caller.uid,
             caller.pid,
             caller.sid,
@@ -779,7 +924,7 @@ pub(super) unsafe fn handle_br_transaction(
                 _redirect_keepalive: redirect_keepalive,
             }));
         }
-        return redirect_applied;
+        return redirect_applied || placeholder_applied;
     }
 
     let Some(target) = target_from_transaction(tr) else {
@@ -820,7 +965,14 @@ pub(super) unsafe fn handle_br_transaction(
         };
 
         let method = request.method();
-        if !decision.allowed {
+        let allow_unknown_omk_route =
+            should_allow_omk_grant_security_level_request(&request, &decision, &caller);
+        let route = if allow_unknown_omk_route {
+            RouteTarget::Omk
+        } else {
+            route_for_security_level_request(&request, target_info.preferred_route)
+        };
+        if !decision.allowed && !allow_unknown_omk_route {
             info!(
                 "[Injector][Decision] command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?}; leaving original request untouched",
                 command_name,
@@ -838,10 +990,8 @@ pub(super) unsafe fn handle_br_transaction(
             return false;
         }
 
-        let route = route_for_security_level_request(&request, target_info.preferred_route);
-
         info!(
-            "[Injector][Decision] command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} source_method={:?}",
+            "[Injector][Decision] command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} source_method={:?} omk_derived_route={}",
             command_name,
             method,
             tr.code,
@@ -855,6 +1005,7 @@ pub(super) unsafe fn handle_br_transaction(
             target.cookie,
             target_info.security_level,
             target_info.source_method,
+            allow_unknown_omk_route,
         );
         info!(
             "[Injector][Route] security_level_method={:?} uid={} pid={} route={:?} security_level={:?}",
@@ -869,6 +1020,7 @@ pub(super) unsafe fn handle_br_transaction(
                 packages: decision.packages,
                 route,
                 security_level: target_info.security_level,
+                allow_unknown_omk_derived: allow_unknown_omk_route,
             }));
         }
         return false;
@@ -901,7 +1053,9 @@ pub(super) unsafe fn handle_br_transaction(
         };
 
         let method = request.method();
-        if !decision.allowed {
+        let allow_unknown_omk_route =
+            should_allow_unknown_omk_operation_route(&decision, &operation_target);
+        if !decision.allowed && !allow_unknown_omk_route {
             info!(
                 "[Injector][Decision] command={} operation_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?} target=ptr:0x{:x}/cookie:0x{:x}; leaving original request untouched",
                 command_name,
@@ -919,7 +1073,7 @@ pub(super) unsafe fn handle_br_transaction(
         }
 
         info!(
-            "[Injector][Decision] command={} operation_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} target=ptr:0x{:x}/cookie:0x{:x}",
+            "[Injector][Decision] command={} operation_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} target=ptr:0x{:x}/cookie:0x{:x} omk_derived_route={}",
             command_name,
             method,
             tr.code,
@@ -929,6 +1083,7 @@ pub(super) unsafe fn handle_br_transaction(
             decision.packages,
             target.ptr,
             target.cookie,
+            allow_unknown_omk_route,
         );
         info!(
             "[Injector][Route] operation_method={:?} uid={} pid={} route={:?}",
@@ -1127,9 +1282,7 @@ fn register_security_level_carrier(
     Ok(())
 }
 
-fn omk_descriptor_for_app_key(
-    key: &crate::android::system::keystore2::KeyDescriptor::KeyDescriptor,
-) -> crate::android::system::keystore2::KeyDescriptor::KeyDescriptor {
+fn omk_descriptor_for_app_key(key: &KeyDescriptor) -> KeyDescriptor {
     tracker::lookup_omk_descriptor_for_key(key).unwrap_or_else(|| key.clone())
 }
 
@@ -1238,6 +1391,18 @@ fn omk_error_reply_for_method(
             Ok(None)
         }
     }
+}
+
+fn omk_error_reply_for_authoritative_method(
+    method: &str,
+    caller: &CallerIdentity,
+    error: &anyhow::Error,
+) -> anyhow::Result<Option<parcel::OwnedReply>> {
+    warn!(
+        "[Injector][Reply] OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
+        method, caller.uid, caller.pid, error
+    );
+    Ok(Some(build_omk_error_reply(error)?))
 }
 
 fn omk_status_reply_for_method(
@@ -1568,6 +1733,7 @@ unsafe fn build_service_reply_rewrite(
             Ok(None)
         }
         ParsedServiceRequest::GetKeyEntry { key } => {
+            let has_legacy_bridge = tracker::lookup_omk_descriptor_for_key(key).is_some();
             let omk_key = omk_descriptor_for_app_key(key);
             let entry =
                 match ipc::with_omk_retry(|omk| Ok(omk.r#getKeyEntry(Some(&caller), &omk_key)?)) {
@@ -1576,6 +1742,11 @@ unsafe fn build_service_reply_rewrite(
                         return omk_error_reply_for_method("getKeyEntry", &pending.caller, &error);
                     }
                 };
+            if key.domain == Domain::GRANT && !has_legacy_bridge {
+                return Ok(Some(build_omk_key_entry_reply_with_carrier_or_direct(
+                    entry, pending,
+                )?));
+            }
             let system_metadata: crate::android::system::keystore2::KeyMetadata::KeyMetadata =
                 match parcel::parse_key_entry_reply_metadata(data, data_size, offsets, offsets_size)
                 {
@@ -1700,37 +1871,17 @@ unsafe fn build_service_reply_rewrite(
             }) {
                 Ok(omk_grant) => omk_grant,
                 Err(error) => {
-                    return omk_error_reply_for_method("grant", &pending.caller, &error);
+                    return omk_error_reply_for_authoritative_method(
+                        "grant",
+                        &pending.caller,
+                        &error,
+                    );
                 }
             };
 
-            match parcel::parse_success_reply(data, data_size, offsets, offsets_size) {
-                Ok(system_grant) => {
-                    tracker::remember_key_descriptor_bridge(
-                        &system_grant,
-                        &system_grant,
-                        &omk_grant,
-                    );
-                    tracker::remember_key_descriptor_route(&system_grant, RouteTarget::Omk);
-                    tracker::remember_grant_descriptor_for_ungrant(
-                        key,
-                        *grantee_uid,
-                        &system_grant,
-                    );
-                    Ok(None)
-                }
-                Err(error) => {
-                    warn!(
-                        "[Injector][Reply] could not parse system grant reply for uid={} pid={}: {:#}; returning OMK grant",
-                        pending.caller.uid,
-                        pending.caller.pid,
-                        error
-                    );
-                    tracker::remember_key_descriptor_route(&omk_grant, RouteTarget::Omk);
-                    tracker::remember_grant_descriptor_for_ungrant(key, *grantee_uid, &omk_grant);
-                    Ok(Some(parcel::build_plain_reply(&omk_grant)?))
-                }
-            }
+            tracker::remember_key_descriptor_route(&omk_grant, RouteTarget::Omk);
+            tracker::remember_grant_descriptor_for_ungrant(key, *grantee_uid, &omk_grant);
+            Ok(Some(parcel::build_plain_reply(&omk_grant)?))
         }
         ParsedServiceRequest::Ungrant { key, grantee_uid } => {
             let omk_key = omk_descriptor_for_app_key(key);
@@ -1739,9 +1890,11 @@ unsafe fn build_service_reply_rewrite(
             }) {
                 Ok(()) => {
                     tracker::retire_grant_descriptor_after_ungrant(key, *grantee_uid);
-                    Ok(None)
+                    Ok(Some(parcel::build_void_reply()?))
                 }
-                Err(error) => omk_error_reply_for_method("ungrant", &pending.caller, &error),
+                Err(error) => {
+                    omk_error_reply_for_authoritative_method("ungrant", &pending.caller, &error)
+                }
             }
         }
         ParsedServiceRequest::GetNumberOfEntries { domain, nspace } => {
@@ -1983,6 +2136,7 @@ unsafe fn build_security_level_reply_rewrite(
                 omk_response,
                 &carrier,
                 operation_allows_aad(operation_parameters),
+                pending.allow_unknown_omk_derived,
             )?))
         }
         ParsedSecurityLevelRequest::GenerateKey {
@@ -2253,6 +2407,39 @@ unsafe fn install_outbound_reply(tr: &mut binder_transaction_data, reply: parcel
     });
 }
 
+unsafe fn install_inbound_request(
+    tr: &mut binder_transaction_data,
+    code: rsbinder::TransactionCode,
+    request: parcel::OwnedReply,
+) {
+    INBOUND_REQUEST_BUFFERS.with(|slot| {
+        let mut buffers = slot.borrow_mut();
+        buffers.push(request);
+        let request = buffers.last().expect("inbound request buffer just pushed");
+        tr.code = code;
+        tr.data_size = request.data_size();
+        tr.offsets_size = request.offsets_size();
+        tr.data.ptr.buffer = request.data_ptr() as libc::c_ulong;
+        tr.data.ptr.offsets = if request.offsets.is_empty() {
+            0
+        } else {
+            request.offsets.as_ptr() as libc::c_ulong
+        };
+    });
+}
+
+unsafe fn install_omk_grant_placeholder_request(
+    tr: &mut binder_transaction_data,
+) -> anyhow::Result<()> {
+    let system_backend = {
+        let _guard = BypassGuard::enter();
+        ipc::get_system_keystore_service()?
+    };
+    let request = parcel::build_get_number_of_entries_request(&system_backend, Domain::APP, -1)?;
+    install_inbound_request(tr, service_tx::r#getNumberOfEntries, request);
+    Ok(())
+}
+
 fn push_pending_frame() {
     PENDING_REPLY_STACK.with(|slot| slot.borrow_mut().push(None));
 }
@@ -2277,6 +2464,7 @@ fn pop_pending_frame() {
 
 pub(super) fn clear_outbound_reply_buffers() {
     OUTBOUND_REPLY_BUFFERS.with(|slot| slot.borrow_mut().clear());
+    INBOUND_REQUEST_BUFFERS.with(|slot| slot.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -2624,6 +2812,14 @@ mod tests {
             _arg_domain: Domain,
             _arg_nspace: i64,
         ) -> rsbinder::status::Result<i32> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#isOmkGrant(
+            &self,
+            _arg_ctx: Option<&CallerInfo>,
+            _arg_grant: &KeyDescriptor,
+        ) -> rsbinder::status::Result<bool> {
             Err(StatusCode::UnknownTransaction.into())
         }
 
@@ -3064,38 +3260,152 @@ mod tests {
             reason: crate::filter::FilterReason::RejectedUnknownPackage,
             packages: vec![],
         };
+        let caller = CallerIdentity::new(10002, 2000);
 
-        assert!(should_allow_tracked_grant_readback(
+        assert!(should_allow_omk_grant_service_request_with_probe(
             &ParsedServiceRequest::GetKeyEntry { key: surfaced },
-            &decision
+            &decision,
+            &caller,
+            |_, _| false,
         ));
     }
 
     #[test]
-    fn untracked_grant_readback_stays_rejected() {
+    fn unconfirmed_grant_readback_stays_rejected() {
         tracker::clear_state_for_tests();
         let decision = crate::filter::FilterDecision {
             allowed: false,
             reason: crate::filter::FilterReason::RejectedUnknownPackage,
             packages: vec![],
         };
+        let caller = CallerIdentity::new(10002, 2000);
+        let grant = KeyDescriptor {
+            domain: Domain::GRANT,
+            nspace: 123,
+            alias: None,
+            blob: None,
+        };
 
-        assert!(!should_allow_tracked_grant_readback(
-            &ParsedServiceRequest::GetKeyEntry {
-                key: KeyDescriptor {
-                    domain: Domain::GRANT,
-                    nspace: 123,
-                    alias: None,
-                    blob: None,
-                },
-            },
-            &decision
+        assert!(!should_allow_omk_grant_service_request_with_probe(
+            &ParsedServiceRequest::GetKeyEntry { key: grant.clone() },
+            &decision,
+            &caller,
+            |_, _| false,
         ));
-        assert!(!should_allow_tracked_grant_readback(
+        tracker::remember_key_descriptor_route(&grant, RouteTarget::Omk);
+        assert!(!should_allow_omk_grant_service_request_with_probe(
+            &ParsedServiceRequest::GetKeyEntry { key: grant },
+            &decision,
+            &caller,
+            |_, _| false,
+        ));
+        assert!(!should_allow_omk_grant_service_request_with_probe(
             &ParsedServiceRequest::GetKeyEntry {
                 key: sample_key_descriptor(),
             },
-            &decision
+            &decision,
+            &caller,
+            |_, _| panic!("non-GRANT descriptors must not be probed"),
+        ));
+    }
+
+    #[test]
+    fn unknown_grant_readback_uses_positive_omk_probe() {
+        tracker::clear_state_for_tests();
+        let grant = KeyDescriptor {
+            domain: Domain::GRANT,
+            nspace: 123,
+            alias: None,
+            blob: None,
+        };
+        let decision = crate::filter::FilterDecision {
+            allowed: false,
+            reason: crate::filter::FilterReason::RejectedUnknownPackage,
+            packages: vec![],
+        };
+        let caller = CallerIdentity::new(10002, 2000);
+
+        assert!(should_allow_omk_grant_service_request_with_probe(
+            &ParsedServiceRequest::GetKeyEntry { key: grant.clone() },
+            &decision,
+            &caller,
+            |probe_caller, probe_grant| {
+                assert_eq!(probe_caller.uid, caller.uid);
+                assert_eq!(probe_grant, &grant);
+                true
+            },
+        ));
+        assert_eq!(
+            tracker::lookup_key_descriptor_route(&grant),
+            Some(RouteTarget::Omk)
+        );
+    }
+
+    #[test]
+    fn unknown_grant_create_operation_uses_positive_omk_probe() {
+        tracker::clear_state_for_tests();
+        let grant = KeyDescriptor {
+            domain: Domain::GRANT,
+            nspace: 321,
+            alias: None,
+            blob: None,
+        };
+        let decision = crate::filter::FilterDecision {
+            allowed: false,
+            reason: crate::filter::FilterReason::RejectedUnknownPackage,
+            packages: vec![],
+        };
+        let caller = CallerIdentity::new(10002, 2000);
+
+        assert!(should_allow_omk_grant_security_level_request_with_probe(
+            &ParsedSecurityLevelRequest::CreateOperation {
+                key: grant.clone(),
+                operation_parameters: vec![],
+                forced: false,
+            },
+            &decision,
+            &caller,
+            |probe_caller, probe_grant| {
+                assert_eq!(probe_caller.uid, caller.uid);
+                assert_eq!(probe_grant, &grant);
+                true
+            },
+        ));
+        assert_eq!(
+            tracker::lookup_key_descriptor_route(&grant),
+            Some(RouteTarget::Omk)
+        );
+    }
+
+    #[test]
+    fn unknown_operation_bypass_requires_confirmed_grant_derivation() {
+        let decision = crate::filter::FilterDecision {
+            allowed: false,
+            reason: crate::filter::FilterReason::RejectedUnknownPackage,
+            packages: vec![],
+        };
+        let mut target = OperationTargetInfo {
+            route: RouteTarget::Omk,
+            aad_allowed: true,
+            backend: None,
+            finalized: false,
+            allow_unknown_omk_derived: false,
+        };
+
+        assert!(!should_allow_unknown_omk_operation_route(
+            &decision, &target
+        ));
+        target.allow_unknown_omk_derived = true;
+        assert!(should_allow_unknown_omk_operation_route(&decision, &target));
+
+        let denylisted = crate::filter::FilterDecision {
+            allowed: false,
+            reason: crate::filter::FilterReason::RejectedByDenylist,
+            packages: vec!["com.blocked".to_string()],
+        };
+        assert!(!should_allow_unknown_omk_operation_route(
+            &denylisted,
+            &target
         ));
     }
 
@@ -3120,10 +3430,13 @@ mod tests {
             reason: crate::filter::FilterReason::RejectedByDenylist,
             packages: vec!["com.blocked".to_string()],
         };
+        let caller = CallerIdentity::new(10002, 2000);
 
-        assert!(!should_allow_tracked_grant_readback(
+        assert!(!should_allow_omk_grant_service_request_with_probe(
             &ParsedServiceRequest::GetKeyEntry { key: surfaced },
-            &decision
+            &decision,
+            &caller,
+            |_, _| panic!("denylisted callers must not probe OMK grants"),
         ));
     }
 
@@ -3349,6 +3662,7 @@ mod tests {
             },
             &original_carrier,
             true,
+            false,
         )
         .expect("rewritten createOperation reply should serialize");
 
@@ -3485,6 +3799,7 @@ mod tests {
             packages: vec!["com.example".to_string()],
             route: RouteTarget::Omk,
             security_level,
+            allow_unknown_omk_derived: false,
         };
         assert!(
             fallback_create_operation_carrier(security_level, &pending).is_none(),
@@ -3555,6 +3870,7 @@ mod tests {
                 aad_allowed: false,
                 backend: None,
                 finalized: false,
+                allow_unknown_omk_derived: false,
             },
         );
 
@@ -3603,6 +3919,7 @@ mod tests {
                 aad_allowed: false,
                 backend: Some(backend),
                 finalized: false,
+                allow_unknown_omk_derived: false,
             },
         );
 
@@ -3657,6 +3974,7 @@ mod tests {
                 aad_allowed: true,
                 backend: Some(backend),
                 finalized: false,
+                allow_unknown_omk_derived: false,
             },
         );
 
@@ -3745,6 +4063,7 @@ mod tests {
                 aad_allowed: true,
                 backend: Some(backend),
                 finalized: false,
+                allow_unknown_omk_derived: false,
             },
         );
 

@@ -47,4 +47,6 @@ interface IOhMyKsService {
     void updateEcKeybox(in byte[] key, in List<Certificate> chain);
 
     void updateRsaKeybox(in byte[] key, in List<Certificate> chain);
+
+    boolean isOmkGrant(in @nullable CallerInfo ctx, in KeyDescriptor grant);
 }

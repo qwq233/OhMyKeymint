@@ -640,6 +640,12 @@ impl KeystoreService {
             .context(err!("KeystoreService::ungrant."))
     }
 
+    fn is_omk_grant(&self, ctx: Option<&CallerInfo>, grant: &KeyDescriptor) -> Result<bool> {
+        let caller_uid = calling_uid(ctx);
+        DB.with(|db| db.borrow_mut().is_live_grant_for_grantee(grant, caller_uid))
+            .context(err!("KeystoreService::is_omk_grant."))
+    }
+
     fn enforce_keybox_admin(&self) -> Result<()> {
         let calling_uid: i64 = CallingContext::default().uid.into();
         match calling_uid {
@@ -891,5 +897,10 @@ impl IOhMyKsService for KeystoreService {
         self.ensure_security_levels_current()
             .map_err(into_logged_binder)?;
         Ok(())
+    }
+
+    fn isOmkGrant(&self, ctx: Option<&CallerInfo>, grant: &KeyDescriptor) -> Result<bool, Status> {
+        let _wp = wd::watch("IOhMyKsService::isOmkGrant");
+        self.is_omk_grant(ctx, grant).map_err(into_logged_binder)
     }
 }

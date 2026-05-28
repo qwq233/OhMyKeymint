@@ -64,10 +64,15 @@ fn main() {
 
     let generated_path = PathBuf::from(format!("{}/aidl.rs", std::env::var("OUT_DIR").unwrap()));
     let content = fs::read_to_string(&generated_path).unwrap();
-    let patched_content = content.replace(
-        "\npub mod top {",
-        "\n#[allow(clippy::all)]\n#[allow(unused_imports)]\npub mod top {",
-    );
+    let patched_content = content
+        .replace(
+            "\npub mod top {",
+            "\n#[allow(clippy::all)]\n#[allow(unused_imports)]\npub mod top {",
+        )
+        .replace(
+            "fn build_parcel_getNumberOfEntries(&self, _arg_domain: super::Domain::Domain, _arg_nspace: i64) -> rsbinder::Result<rsbinder::Parcel>",
+            "pub(crate) fn build_parcel_getNumberOfEntries(&self, _arg_domain: super::Domain::Domain, _arg_nspace: i64) -> rsbinder::Result<rsbinder::Parcel>",
+        );
 
     fs::write(&generated_path, &patched_content).unwrap();
 }

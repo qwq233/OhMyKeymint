@@ -1979,6 +1979,28 @@ impl KeymasterDb {
         Ok(num_keys)
     }
 
+    pub fn is_live_grant_for_grantee(
+        &mut self,
+        grant: &KeyDescriptor,
+        grantee_uid: u32,
+    ) -> Result<bool> {
+        let _wp = wd::watch("KeystoreDB::is_live_grant_for_grantee");
+        if grant.domain != Domain::GRANT {
+            return Ok(false);
+        }
+
+        self.with_transaction(TransactionBehavior::Deferred, |tx| {
+            match Self::load_access_tuple(tx, grant, KeyType::Client, grantee_uid) {
+                Ok(_) => Ok(true),
+                Err(error) => match error.root_cause().downcast_ref::<KsError>() {
+                    Some(KsError::Rc(ResponseCode::KEY_NOT_FOUND)) => Ok(false),
+                    _ => Err(error).context("Failed to probe live grant."),
+                },
+            }
+            .no_gc()
+        })
+    }
+
     /// Adds a grant to the grant table.
     /// Like `load_key_entry` this function loads the access tuple before
     /// it uses the callback for a permission check. Upon success,
@@ -3258,6 +3280,61 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn live_grant_probe_requires_grant_domain_grantee_and_live_key() {
+        let mut db = make_test_db();
+        {
+            let tx = db.conn.transaction().unwrap();
+            insert_live_client_key(&tx, 1, KEYSTORE_UUID, "grant-target").unwrap();
+            tx.execute(
+                "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
+                 VALUES (?, ?, ?, ?);",
+                params![77i64, 10002i64, 1i64, 1i32],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let grant = KeyDescriptor {
+            domain: Domain::GRANT,
+            nspace: 77,
+            alias: None,
+            blob: None,
+        };
+        assert!(db.is_live_grant_for_grantee(&grant, 10002).unwrap());
+        assert!(!db.is_live_grant_for_grantee(&grant, 10003).unwrap());
+        assert!(!db
+            .is_live_grant_for_grantee(
+                &KeyDescriptor {
+                    domain: Domain::APP,
+                    nspace: TEST_NAMESPACE,
+                    alias: Some("grant-target".to_string()),
+                    blob: None,
+                },
+                10002,
+            )
+            .unwrap());
+        assert!(!db
+            .is_live_grant_for_grantee(
+                &KeyDescriptor {
+                    domain: Domain::GRANT,
+                    nspace: 78,
+                    alias: None,
+                    blob: None,
+                },
+                10002,
+            )
+            .unwrap());
+
+        db.conn
+            .execute(
+                "UPDATE persistent.keyentry SET state = ? WHERE id = ?;",
+                params![KeyLifeCycle::Unreferenced, 1i64],
+            )
+            .unwrap();
+        assert!(!db.is_live_grant_for_grantee(&grant, 10002).unwrap());
     }
 
     #[test]

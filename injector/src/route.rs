@@ -450,31 +450,14 @@ impl AospKeystoreService for KeystoreServiceBinder {
         access_vector: i32,
     ) -> rsbinder::status::Result<KeyDescriptor> {
         if self.route_for_key(ServiceMethod::Grant, key) == RouteTarget::Omk {
-            match self.call_omk(|backend, caller| {
-                backend.r#grant(caller, key, grantee_uid, access_vector)
-            }) {
-                Ok(granted) => {
-                    tracker::remember_key_descriptor_route(&granted, RouteTarget::Omk);
-                    tracker::remember_grant_descriptor_for_ungrant(key, grantee_uid, &granted);
-                    return Ok(granted);
-                }
-                Err(error) => {
-                    return self.fallback_to_system(ServiceMethod::Grant, error, || {
-                        self.call_system(|backend| backend.r#grant(key, grantee_uid, access_vector))
-                            .inspect(|granted| {
-                                tracker::remember_key_descriptor_route(
-                                    granted,
-                                    RouteTarget::System,
-                                );
-                                tracker::remember_grant_descriptor_for_ungrant(
-                                    key,
-                                    grantee_uid,
-                                    granted,
-                                );
-                            })
-                    });
-                }
-            }
+            return self
+                .call_omk(|backend, caller| {
+                    backend.r#grant(caller, key, grantee_uid, access_vector)
+                })
+                .inspect(|granted| {
+                    tracker::remember_key_descriptor_route(granted, RouteTarget::Omk);
+                    tracker::remember_grant_descriptor_for_ungrant(key, grantee_uid, granted);
+                });
         }
 
         self.call_system(|backend| backend.r#grant(key, grantee_uid, access_vector))
@@ -486,12 +469,7 @@ impl AospKeystoreService for KeystoreServiceBinder {
 
     fn r#ungrant(&self, key: &KeyDescriptor, grantee_uid: i32) -> rsbinder::status::Result<()> {
         let result = if self.route_for_key(ServiceMethod::Ungrant, key) == RouteTarget::Omk {
-            match self.call_omk(|backend, caller| backend.r#ungrant(caller, key, grantee_uid)) {
-                Ok(()) => Ok(()),
-                Err(error) => self.fallback_to_system(ServiceMethod::Ungrant, error, || {
-                    self.call_system(|backend| backend.r#ungrant(key, grantee_uid))
-                }),
-            }
+            self.call_omk(|backend, caller| backend.r#ungrant(caller, key, grantee_uid))
         } else {
             self.call_system(|backend| backend.r#ungrant(key, grantee_uid))
         };
@@ -1325,6 +1303,14 @@ mod tests {
             Err(StatusCode::UnknownTransaction.into())
         }
 
+        fn r#isOmkGrant(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _grant: &KeyDescriptor,
+        ) -> rsbinder::status::Result<bool> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
         fn r#listEntriesBatched(
             &self,
             _ctx: Option<&CallerInfo>,
@@ -1561,6 +1547,14 @@ mod tests {
             _domain: Domain,
             _nspace: i64,
         ) -> rsbinder::status::Result<i32> {
+            Err(StatusCode::UnknownTransaction.into())
+        }
+
+        fn r#isOmkGrant(
+            &self,
+            _ctx: Option<&CallerInfo>,
+            _grant: &KeyDescriptor,
+        ) -> rsbinder::status::Result<bool> {
             Err(StatusCode::UnknownTransaction.into())
         }
 

@@ -2,8 +2,8 @@ use std::mem::size_of;
 
 use anyhow::{anyhow, bail, Context, Result};
 use rsbinder::{
-    Deserialize, FromIBinder, Parcel, Serialize, SerializeOption, Status, StatusCode, Strong,
-    NON_NULL_PARCELABLE_FLAG,
+    Deserialize, FromIBinder, Parcel, Proxy, Serialize, SerializeOption, Status, StatusCode,
+    Strong, NON_NULL_PARCELABLE_FLAG,
 };
 
 use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
@@ -17,6 +17,7 @@ use crate::android::system::keystore2::CreateOperationResponse::CreateOperationR
 use crate::android::system::keystore2::Domain::Domain;
 use crate::android::system::keystore2::IKeystoreOperation::IKeystoreOperation;
 use crate::android::system::keystore2::IKeystoreSecurityLevel::IKeystoreSecurityLevel;
+use crate::android::system::keystore2::IKeystoreService::{BpKeystoreService, IKeystoreService};
 use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
 use crate::android::system::keystore2::KeyParameters::KeyParameters;
@@ -854,6 +855,21 @@ pub fn build_void_reply() -> Result<OwnedReply> {
 pub fn build_status_reply(status: &Status) -> Result<OwnedReply> {
     let mut parcel = Parcel::new();
     parcel.write(status)?;
+    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
+}
+
+pub fn build_get_number_of_entries_request(
+    service: &Strong<dyn IKeystoreService>,
+    domain: Domain,
+    nspace: i64,
+) -> Result<OwnedReply> {
+    let proxy =
+        <BpKeystoreService as Proxy>::from_binder(service.as_binder()).ok_or_else(|| {
+            anyhow!("system keystore service binder is not an IKeystoreService proxy")
+        })?;
+    let parcel = proxy
+        .build_parcel_getNumberOfEntries(domain, nspace)
+        .context("failed to build getNumberOfEntries request from generated AIDL proxy")?;
     Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
 }
 
