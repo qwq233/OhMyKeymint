@@ -131,24 +131,12 @@ the filter instead of being rejected.
 ## Restarting keymint and injector
 
 The module ships two background daemons: one for `keymint`, one for `injector`.
-The recommended way to request a restart is through the restart system properties.
-
-Restart only `keymint`:
+You can restart them by following commands.
 
 ```sh
-resetprop persist.sys.omk.restart.keymint 1
-```
-
-Restart only `injector`:
-
-```sh
-resetprop persist.sys.omk.restart.injector 1
-```
-
-Restart both together:
-
-```sh
-resetprop persist.sys.omk.restart.all 1
+touch /data/adb/omk/restart.keymint
+touch /data/adb/omk/restart.injector
+touch /data/adb/omk/restart.all
 ```
 
 If you switch `[trust].vb_key` or `[trust].vb_hash` from `"random"` back to `"auto"`,
@@ -160,12 +148,6 @@ Changing `[trust].security_patch` does not require a restart by itself. OMK hot-
 the new value and rebuilds the active KeyMint wrappers in place.
 
 The daemons also watch these marker files if you prefer the file-based path:
-
-```sh
-touch /data/adb/omk/restart.keymint
-touch /data/adb/omk/restart.injector
-touch /data/adb/omk/restart.all
-```
 
 ## License
 
