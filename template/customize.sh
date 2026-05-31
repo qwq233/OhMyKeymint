@@ -93,10 +93,9 @@ chmod 755 "$BINDIR/keymint" "$BINDIR/inject"
 
 CONFIG_DIR=/data/adb/omk
 mkdir -p "$CONFIG_DIR"
-rm -f "$CONFIG_DIR/restart.keymint" "$CONFIG_DIR/restart.injector" "$CONFIG_DIR/restart.all" \
-  "$CONFIG_DIR/restart.all.keymint" "$CONFIG_DIR/restart.all.injector"
-rm -f "$CONFIG_DIR/keymint" "$CONFIG_DIR/injector" # clean up old hot-update binaries
+rm -f "$CONFIG_DIR/restart.keymint" "$CONFIG_DIR/restart.injector" "$CONFIG_DIR/restart.all"
+rm -f "$CONFIG_DIR/keymint" "$CONFIG_DIR/inject" "$CONFIG_DIR/injector" # clean up old hot-update binaries
 
-if [ -f "$CONFIG_DIR/omkdata" ]; then
+if [ ! -f "$CONFIG_DIR/omkdata" ]; then
   ln -s /data/misc/keystore/omk "$CONFIG_DIR/omkdata"
 fi

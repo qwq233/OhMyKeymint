@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Build, deploy, and hot-restart the OMK keymint and injector binaries.
+Build, deploy, and hot-restart OMK artifacts.
 
 The script never reboots the device. It updates /data/adb/omk/keymint and
 /data/adb/omk/inject, then requests the module daemons to restart through the
-restart marker file path.
+restart marker file path. With --full, it builds the full module package through
+build.py and installs it with ksud module install.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import time
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+TARGET_ROOT = REPO_ROOT / "target"
 DEFAULT_PLATFORM = 24
 DEFAULT_ABI = "arm64-v8a"
 DEFAULT_PROFILE = "debug"
@@ -108,7 +110,7 @@ def quote(value: str) -> str:
 
 def target_dir_for(abi: str, release: bool) -> Path:
     profile = "release" if release else DEFAULT_PROFILE
-    return REPO_ROOT / "target" / ABI_TO_TARGET[abi] / profile
+    return TARGET_ROOT / ABI_TO_TARGET[abi] / profile
 
 
 def default_keymint_path(abi: str, release: bool) -> Path:
@@ -149,6 +151,24 @@ def build_binaries(abi: str, platform: int, release: bool) -> None:
         injector_cmd.append("--release")
     run(keymint_cmd)
     run(injector_cmd)
+
+
+def latest_full_package(abi: str, release: bool) -> Path:
+    build_type = "release" if release else DEFAULT_PROFILE
+    candidates = list(TARGET_ROOT.glob(f"OhMyKeymint-{build_type}-{abi}-*.zip"))
+    if not candidates:
+        raise FileNotFoundError(f"full package not found for {build_type} {abi}")
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def build_full_package(abi: str, platform: int, release: bool) -> Path:
+    cmd = [sys.executable, "build.py", "--abi", abi, "--platform", str(platform)]
+    if release:
+        cmd.append("--release")
+    run(cmd)
+    package = latest_full_package(abi, release)
+    print_status(f"Full package: {package}")
+    return package
 
 
 def require_file(path: Path, label: str) -> None:
@@ -205,6 +225,33 @@ def deploy_binaries(
     )
     adb_shell_root(serial, command)
     return local_shas
+
+
+def install_full_package(
+    serial: str | None,
+    package: Path,
+    staging_dir: str,
+    keep_staging: bool,
+) -> None:
+    require_file(package, "full package")
+    remote_package = remote_path(staging_dir, f"omk.module.{os.getpid()}.zip")
+
+    print_status(f"Local full package: {package}")
+    adb(serial, "push", os.fspath(package), remote_package)
+
+    cleanup_staging = "" if keep_staging else f"rm -f {quote(remote_package)}; "
+    command = (
+        "set -eu; "
+        "if command -v ksud >/dev/null 2>&1; then "
+        f"ksud module install {quote(remote_package)}; "
+        "elif [ -x /data/adb/ksud ]; then "
+        f"/data/adb/ksud module install {quote(remote_package)}; "
+        "else echo 'ksud not found' >&2; exit 1; fi; "
+        f"{cleanup_staging}"
+        "sync"
+    )
+    adb_shell_root(serial, command)
+    print_status("Installed full module package with ksud module install.")
 
 
 def remote_sha256s(serial: str | None) -> dict[str, str]:
@@ -343,14 +390,15 @@ def wait_for_restart(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build, deploy, and hot-restart OMK keymint and injector",
+        description="Build, deploy, hot-restart, or fully install OMK artifacts",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--serial", default=os.environ.get("ANDROID_SERIAL"), help="adb serial")
     parser.add_argument("--abi", choices=sorted(ABI_TO_TARGET), default=DEFAULT_ABI, help="cargo-ndk ABI")
     parser.add_argument("--platform", type=int, default=DEFAULT_PLATFORM, help="cargo-ndk Android platform")
     parser.add_argument("--release", action="store_true", help="build and deploy release artifacts instead of debug")
-    parser.add_argument("--skip-build", action="store_true", help="deploy existing artifacts")
+    parser.add_argument("--full", action="store_true", help="build and install the full module package with ksud")
+    parser.add_argument("--skip-build", action="store_true", help="deploy or install existing artifacts")
     parser.add_argument("--keymint", type=Path, help="local keymint path")
     parser.add_argument("--injector", type=Path, help="local inject path")
     parser.add_argument("--staging-dir", default=DEFAULT_STAGING_DIR, help="device temporary upload directory")
@@ -367,6 +415,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.full:
+        package = (
+            latest_full_package(args.abi, args.release)
+            if args.skip_build
+            else build_full_package(args.abi, args.platform, args.release)
+        )
+        install_full_package(args.serial, package, args.staging_dir, args.keep_staging)
+        return 0
+
     if not args.skip_build:
         build_binaries(args.abi, args.platform, args.release)
 
