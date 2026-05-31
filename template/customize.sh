@@ -95,6 +95,7 @@ CONFIG_DIR=/data/adb/omk
 mkdir -p "$CONFIG_DIR"
 rm -f "$CONFIG_DIR/restart.keymint" "$CONFIG_DIR/restart.injector" "$CONFIG_DIR/restart.all" \
   "$CONFIG_DIR/restart.all.keymint" "$CONFIG_DIR/restart.all.injector"
+rm -f "$CONFIG_DIR/keymint" "$CONFIG_DIR/injector" # clean up old hot-update binaries
 if command -v resetprop >/dev/null 2>&1; then
   resetprop persist.sys.omk.restart.keymint ""
   resetprop persist.sys.omk.restart.injector ""
