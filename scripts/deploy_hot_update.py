@@ -4,7 +4,7 @@ Build, deploy, and hot-restart the OMK keymint and injector binaries.
 
 The script never reboots the device. It updates /data/adb/omk/keymint and
 /data/adb/omk/inject, then requests the module daemons to restart through the
-existing restart marker/property path.
+restart marker file path.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PLATFORM = 24
 DEFAULT_ABI = "arm64-v8a"
 DEFAULT_PROFILE = "debug"
-DEFAULT_REMOTE_DIR = "/data/adb/omk"
 DEFAULT_STAGING_DIR = "/data/local/tmp"
 DEFAULT_WAIT_SECONDS = 15
 
@@ -33,10 +32,12 @@ ABI_TO_TARGET = {
 }
 
 RESTART_TARGETS = {
-    "all": ("restart.all", "persist.sys.omk.restart.all"),
-    "keymint": ("restart.keymint", "persist.sys.omk.restart.keymint"),
-    "injector": ("restart.injector", "persist.sys.omk.restart.injector"),
+    "all": "restart.all",
+    "keymint": "restart.keymint",
+    "injector": "restart.injector",
 }
+
+REMOTE_DIR = "/data/adb/omk"
 
 ANSI_WHITE = "\033[37m"
 ANSI_RESET = "\033[0m"
@@ -157,15 +158,14 @@ def require_file(path: Path, label: str) -> None:
         raise FileNotFoundError(f"{label} is not a file: {path}")
 
 
-def remote_path(remote_dir: str, name: str) -> str:
-    return f"{remote_dir.rstrip('/')}/{name}"
+def remote_path(base_dir: str, name: str) -> str:
+    return f"{base_dir.rstrip('/')}/{name}"
 
 
 def deploy_binaries(
     serial: str | None,
     keymint: Path,
     injector: Path,
-    remote_dir: str,
     staging_dir: str,
     keep_staging: bool,
 ) -> dict[str, str]:
@@ -184,14 +184,14 @@ def deploy_binaries(
     adb(serial, "push", os.fspath(keymint), remote_keymint_stage)
     adb(serial, "push", os.fspath(injector), remote_inject_stage)
 
-    remote_keymint = remote_path(remote_dir, "keymint")
-    remote_inject = remote_path(remote_dir, "inject")
-    remote_tmp_keymint = remote_path(remote_dir, ".keymint.deploy.tmp")
-    remote_tmp_inject = remote_path(remote_dir, ".inject.deploy.tmp")
+    remote_keymint = remote_path(REMOTE_DIR, "keymint")
+    remote_inject = remote_path(REMOTE_DIR, "inject")
+    remote_tmp_keymint = remote_path(REMOTE_DIR, ".keymint.deploy.tmp")
+    remote_tmp_inject = remote_path(REMOTE_DIR, ".inject.deploy.tmp")
     cleanup_staging = "" if keep_staging else f"rm -f {quote(remote_keymint_stage)} {quote(remote_inject_stage)}; "
     command = (
         "set -eu; "
-        f"mkdir -p {quote(remote_dir)}; "
+        f"mkdir -p {quote(REMOTE_DIR)}; "
         f"cp -f {quote(remote_keymint_stage)} {quote(remote_tmp_keymint)}; "
         f"cp -f {quote(remote_inject_stage)} {quote(remote_tmp_inject)}; "
         f"chmod 0755 {quote(remote_tmp_keymint)} {quote(remote_tmp_inject)}; "
@@ -207,9 +207,9 @@ def deploy_binaries(
     return local_shas
 
 
-def remote_sha256s(serial: str | None, remote_dir: str) -> dict[str, str]:
-    remote_keymint = remote_path(remote_dir, "keymint")
-    remote_inject = remote_path(remote_dir, "inject")
+def remote_sha256s(serial: str | None) -> dict[str, str]:
+    remote_keymint = remote_path(REMOTE_DIR, "keymint")
+    remote_inject = remote_path(REMOTE_DIR, "inject")
     output = adb_shell_root(
         serial,
         f"sha256sum {quote(remote_keymint)} {quote(remote_inject)}",
@@ -223,8 +223,8 @@ def remote_sha256s(serial: str | None, remote_dir: str) -> dict[str, str]:
     return result
 
 
-def verify_remote_sha(serial: str | None, remote_dir: str, local_shas: dict[str, str]) -> None:
-    remote_shas = remote_sha256s(serial, remote_dir)
+def verify_remote_sha(serial: str | None, local_shas: dict[str, str]) -> None:
+    remote_shas = remote_sha256s(serial)
     for name, local_sha in local_shas.items():
         remote_sha = remote_shas.get(name)
         if remote_sha != local_sha:
@@ -234,9 +234,9 @@ def verify_remote_sha(serial: str | None, remote_dir: str, local_shas: dict[str,
     print_status("Remote SHA-256 matches local binaries.")
 
 
-def service_state(serial: str | None, remote_dir: str) -> dict[str, tuple[str, ...]]:
-    payload = remote_path(remote_dir, "injector.payload")
-    inject = remote_path(remote_dir, "inject")
+def service_state(serial: str | None) -> dict[str, tuple[str, ...]]:
+    payload = remote_path(REMOTE_DIR, "injector.payload")
+    inject = remote_path(REMOTE_DIR, "inject")
     command = (
         "ks_pid=$(pidof keystore2 2>/dev/null | awk '{print $1}'); "
         "injected=no; "
@@ -278,20 +278,17 @@ def print_service_state(label: str, state: dict[str, tuple[str, ...]]) -> None:
     print_status(f"{label} injector payload: {payload}")
 
 
-def trigger_restart(serial: str | None, remote_dir: str, restart: str) -> None:
+def trigger_restart(serial: str | None, restart: str) -> None:
     if restart == "none":
         print_status("Restart skipped.")
         return
 
-    marker, prop = RESTART_TARGETS[restart]
-    marker_path = remote_path(remote_dir, marker)
+    marker = RESTART_TARGETS[restart]
+    marker_path = remote_path(REMOTE_DIR, marker)
     command = (
         "set -eu; "
-        f"mkdir -p {quote(remote_dir)}; "
-        f": > {quote(marker_path)}; "
-        f"if command -v resetprop >/dev/null 2>&1; then resetprop {quote(prop)} 1; "
-        f"elif command -v ksud >/dev/null 2>&1; then ksud resetprop {quote(prop)} 1; "
-        f"else setprop {quote(prop)} 1; fi"
+        f"mkdir -p {quote(REMOTE_DIR)}; "
+        f"touch {quote(marker_path)}"
     )
     adb_shell_root(serial, command)
     print_status(f"Requested OMK restart target: {restart}")
@@ -322,22 +319,21 @@ def restarted(
 
 def wait_for_restart(
     serial: str | None,
-    remote_dir: str,
     restart: str,
     before: dict[str, tuple[str, ...]],
     wait_seconds: int,
 ) -> dict[str, tuple[str, ...]]:
     if restart == "none" or wait_seconds <= 0:
-        return service_state(serial, remote_dir)
+        return service_state(serial)
 
     deadline = time.monotonic() + wait_seconds
-    last_state = service_state(serial, remote_dir)
+    last_state = service_state(serial)
     if restarted(restart, before, last_state):
         return last_state
 
     while time.monotonic() < deadline:
         time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
-        last_state = service_state(serial, remote_dir)
+        last_state = service_state(serial)
         if restarted(restart, before, last_state):
             return last_state
 
@@ -357,7 +353,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-build", action="store_true", help="deploy existing artifacts")
     parser.add_argument("--keymint", type=Path, help="local keymint path")
     parser.add_argument("--injector", type=Path, help="local inject path")
-    parser.add_argument("--remote-dir", default=DEFAULT_REMOTE_DIR, help="device OMK state directory")
     parser.add_argument("--staging-dir", default=DEFAULT_STAGING_DIR, help="device temporary upload directory")
     parser.add_argument("--keep-staging", action="store_true", help="leave pushed files in the staging directory")
     parser.add_argument(
@@ -384,16 +379,15 @@ def main() -> int:
         args.serial,
         keymint,
         injector,
-        args.remote_dir,
         args.staging_dir,
         args.keep_staging,
     )
-    verify_remote_sha(args.serial, args.remote_dir, local_shas)
+    verify_remote_sha(args.serial, local_shas)
 
-    before = service_state(args.serial, args.remote_dir)
+    before = service_state(args.serial)
     print_service_state("Before restart", before)
-    trigger_restart(args.serial, args.remote_dir, args.restart)
-    after = wait_for_restart(args.serial, args.remote_dir, args.restart, before, args.wait_seconds)
+    trigger_restart(args.serial, args.restart)
+    after = wait_for_restart(args.serial, args.restart, before, args.wait_seconds)
     print_service_state("After restart", after)
     return 0
 

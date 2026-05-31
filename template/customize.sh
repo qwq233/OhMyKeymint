@@ -96,15 +96,6 @@ mkdir -p "$CONFIG_DIR"
 rm -f "$CONFIG_DIR/restart.keymint" "$CONFIG_DIR/restart.injector" "$CONFIG_DIR/restart.all" \
   "$CONFIG_DIR/restart.all.keymint" "$CONFIG_DIR/restart.all.injector"
 rm -f "$CONFIG_DIR/keymint" "$CONFIG_DIR/injector" # clean up old hot-update binaries
-if command -v resetprop >/dev/null 2>&1; then
-  resetprop persist.sys.omk.restart.keymint ""
-  resetprop persist.sys.omk.restart.injector ""
-  resetprop persist.sys.omk.restart.all ""
-elif command -v ksud >/dev/null 2>&1; then
-  ksud resetprop persist.sys.omk.restart.keymint ""
-  ksud resetprop persist.sys.omk.restart.injector ""
-  ksud resetprop persist.sys.omk.restart.all ""
-fi
 
 if [ -f "$CONFIG_DIR/omkdata" ]; then
   ln -s /data/misc/keystore/omk "$CONFIG_DIR/omkdata"

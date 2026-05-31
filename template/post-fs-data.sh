@@ -23,19 +23,6 @@ find_module_binary() {
   return 1
 }
 
-clear_restart_props() {
-  if command -v resetprop >/dev/null 2>&1; then
-    resetprop persist.sys.omk.restart.keymint ""
-    resetprop persist.sys.omk.restart.injector ""
-    resetprop persist.sys.omk.restart.all ""
-    return
-  fi
-  if command -v ksud >/dev/null 2>&1; then
-    ksud resetprop persist.sys.omk.restart.keymint ""
-    ksud resetprop persist.sys.omk.restart.injector ""
-    ksud resetprop persist.sys.omk.restart.all ""
-  fi
-}
 
 mkdir -p "$TARGET_DIR"
 chmod 0770 "$TARGET_DIR"
@@ -45,7 +32,6 @@ mkdir -p "$STATE_DIR"
 rm -f "$STATE_DIR/keymint-daemon.pid" "$STATE_DIR/injector-daemon.pid"
 rm -f "$STATE_DIR/restart.keymint" "$STATE_DIR/restart.injector" "$STATE_DIR/restart.all" \
   "$STATE_DIR/restart.all.keymint" "$STATE_DIR/restart.all.injector"
-clear_restart_props
 
 if [ ! -f "$TARGET_KEYBOX" ] && [ -f "$MODDIR/keybox.xml" ]; then
   cp "$MODDIR/keybox.xml" "$TARGET_KEYBOX"
