@@ -127,14 +127,13 @@ def build_binary(
     abi: str,
     target: str,
     release: bool,
-    platform: int,
     package: str | None,
     bin_name: str,
 ) -> Path:
     build_type = "release" if release else "debug"
     print(f"Building {bin_name} for {abi} ({target}, {build_type})...")
 
-    cmd = ["cargo", "ndk", "-t", abi, "--platform", str(platform), "build"]
+    cmd = ["cargo", "build", "--target", target]
     if package:
         cmd.extend(["-p", package, "--bin", bin_name])
     else:
@@ -283,6 +282,8 @@ def build_package_for_abi(
 ) -> Path:
     target = ABI_TO_TARGET[abi]
     stage_dir = TARGET_ROOT / "temp" / abi
+    # Kept for compatibility with old invocations; plain Cargo uses .cargo/config.toml.
+    _ = platform
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -294,7 +295,6 @@ def build_package_for_abi(
                 abi=abi,
                 target=target,
                 release=release,
-                platform=platform,
                 package=spec["package"],
                 bin_name=spec["bin"],
             )
@@ -340,7 +340,10 @@ def main() -> None:
         "--platform",
         type=int,
         default=DEFAULT_PLATFORM,
-        help=f"Android API level to pass to cargo-ndk (default: {DEFAULT_PLATFORM})",
+        help=(
+            "Compatibility option; ordinary cargo builds use .cargo/config.toml "
+            f"for the Android API/linker (default: {DEFAULT_PLATFORM})"
+        ),
     )
     args = parser.parse_args()
 
@@ -352,7 +355,6 @@ def main() -> None:
     print(f"Building OhMyKeymint version {version} (commit {git_count}, hash {git_hash})")
     print(f"Build mode: {'Release' if args.release else 'Debug'}")
     print(f"Target ABIs: {', '.join(selected_abis)}")
-    print(f"Android platform: {args.platform}")
 
     delete_old_zips(args.release, selected_abis)
     built_packages = []

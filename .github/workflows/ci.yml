@@ -116,7 +116,6 @@ jobs:
     - name: Install Android NDK
       run: |
         echo "y" | sdkmanager --install "ndk;28.2.13676358" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
-        cargo install cargo-ndk
     - name: Install protoc
       run: |
         sudo apt-get update
@@ -128,10 +127,18 @@ jobs:
         name: boringssl.tar.gz
         path: .
 
-    - name: Adding BoringSSL to cargo crate
+    - name: Configure Cargo for Android target
       run: |
         tar xf boringssl.tar.gz
-        echo -e "\n[patch.crates-io]\nbssl-sys = { path = \"$(pwd)/boringssl/rust/bssl-sys\" }\n" >> ~/.cargo/config.toml
+        python scripts/setup_cargo_config.py \
+          --force \
+          --ndk-root "$ANDROID_SDK_ROOT/ndk/28.2.13676358" \
+          --host-tag linux-x86_64
+        cat >> .cargo/config.toml <<EOF
+
+        [patch.crates-io]
+        bssl-sys = { path = "$GITHUB_WORKSPACE/boringssl/rust/bssl-sys" }
+        EOF
 
     - name: Install Python dependencies
       run: |
@@ -140,9 +147,11 @@ jobs:
 
     - name: Build OhMyKeymint
       id: prepareArtifact
+      env:
+        BORINGSSL_BUILD_DIR: ${{ github.workspace }}/boringssl/build
       run: |
         unset RUSTFLAGS
-        RUSTFLAGS="-C link-arg=-lc++_shared -C link-arg=-lc++abi" python build.py --${{ matrix.build-type }}
+        python build.py --${{ matrix.build-type }}
         name=`ls target/OhMyKeymint-* | awk -F '(/|.zip)' '{print $2}'` && echo "releaseName=$name" >> $GITHUB_OUTPUT
         unzip target/OhMyKeymint-*.zip -d module-${{ matrix.build-type }}
 

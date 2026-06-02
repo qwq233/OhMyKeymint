@@ -122,25 +122,21 @@ def default_injector_path(abi: str, release: bool) -> Path:
 
 
 def build_binaries(abi: str, platform: int, release: bool) -> None:
+    _ = platform
+    target = ABI_TO_TARGET[abi]
     keymint_cmd = [
         "cargo",
-        "ndk",
-        "-t",
-        abi,
-        "--platform",
-        str(platform),
         "build",
+        "--target",
+        target,
         "--bin",
         "keymint",
     ]
     injector_cmd = [
         "cargo",
-        "ndk",
-        "-t",
-        abi,
-        "--platform",
-        str(platform),
         "build",
+        "--target",
+        target,
         "-p",
         "injector",
         "--bin",
@@ -394,8 +390,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--serial", default=os.environ.get("ANDROID_SERIAL"), help="adb serial")
-    parser.add_argument("--abi", choices=sorted(ABI_TO_TARGET), default=DEFAULT_ABI, help="cargo-ndk ABI")
-    parser.add_argument("--platform", type=int, default=DEFAULT_PLATFORM, help="cargo-ndk Android platform")
+    parser.add_argument("--abi", choices=sorted(ABI_TO_TARGET), default=DEFAULT_ABI, help="Android ABI")
+    parser.add_argument("--platform", type=int, default=DEFAULT_PLATFORM, help="Android API level kept for compatibility")
     parser.add_argument("--release", action="store_true", help="build and deploy release artifacts instead of debug")
     parser.add_argument("--full", action="store_true", help="build and install the full module package with ksud")
     parser.add_argument("--skip-build", action="store_true", help="deploy or install existing artifacts")
