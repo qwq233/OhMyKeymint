@@ -111,7 +111,30 @@ struct OperationTargetInfo {
 
 static OPERATION_TARGETS: OnceLock<Mutex<HashMap<LocalBinderTarget, OperationTargetInfo>>> =
     OnceLock::new();
-static MIRROR_STATE_DIRTY: AtomicBool = AtomicBool::new(false);
+static AUTHORIZATION_MIRROR_STATE_DIRTY: AtomicBool = AtomicBool::new(false);
+static MAINTENANCE_MIRROR_STATE_DIRTY: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MirrorStateKind {
+    Authorization,
+    Maintenance,
+}
+
+impl MirrorStateKind {
+    fn dirty(self) -> &'static AtomicBool {
+        match self {
+            Self::Authorization => &AUTHORIZATION_MIRROR_STATE_DIRTY,
+            Self::Maintenance => &MAINTENANCE_MIRROR_STATE_DIRTY,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Authorization => "authorization",
+            Self::Maintenance => "maintenance",
+        }
+    }
+}
 
 fn should_attempt_request_side_redirect(
     _request: &ParsedServiceRequest,
@@ -450,8 +473,8 @@ fn route_for_security_level_request(
     route
 }
 
-fn mirror_state_dirty() -> bool {
-    MIRROR_STATE_DIRTY.load(Ordering::SeqCst)
+fn mirror_state_dirty(kind: MirrorStateKind) -> bool {
+    kind.dirty().load(Ordering::SeqCst)
 }
 
 fn is_known_keystore_interface(interface: &str) -> bool {
@@ -465,11 +488,15 @@ fn is_known_keystore_interface(interface: &str) -> bool {
     )
 }
 
-fn mark_mirror_state_dirty(kind: &str, method: impl std::fmt::Debug, caller: &CallerIdentity) {
-    let was_dirty = MIRROR_STATE_DIRTY.swap(true, Ordering::SeqCst);
+fn mark_mirror_state_dirty(
+    kind: MirrorStateKind,
+    method: impl std::fmt::Debug,
+    caller: &CallerIdentity,
+) {
+    let was_dirty = kind.dirty().swap(true, Ordering::SeqCst);
     warn!(
         "[Injector][Mirror] marked OMK mirror state dirty after failed {} {:?} mirror for uid={} pid={}{}",
-        kind,
+        kind.label(),
         method,
         caller.uid,
         caller.pid,
@@ -477,20 +504,49 @@ fn mark_mirror_state_dirty(kind: &str, method: impl std::fmt::Debug, caller: &Ca
     );
 }
 
-fn should_skip_dirty_mirror(
-    kind: &str,
+fn clear_mirror_state_dirty(
+    kind: MirrorStateKind,
     method: impl std::fmt::Debug,
     caller: &CallerIdentity,
-) -> bool {
-    if !mirror_state_dirty() {
-        return false;
+) {
+    if kind.dirty().swap(false, Ordering::SeqCst) {
+        debug!(
+            "[Injector][Mirror] cleared OMK {} mirror dirty state after successful {:?} mirror for uid={} pid={}",
+            kind.label(),
+            method,
+            caller.uid,
+            caller.pid
+        );
+    }
+}
+
+fn log_dirty_mirror_retry(
+    kind: MirrorStateKind,
+    method: impl std::fmt::Debug,
+    caller: &CallerIdentity,
+) {
+    if !mirror_state_dirty(kind) {
+        return;
     }
 
     warn!(
-        "[Injector][Mirror] OMK mirror state is dirty; skipping {} {:?} mirror for uid={} pid={}",
-        kind, method, caller.uid, caller.pid
+        "[Injector][Mirror] OMK {} mirror state is dirty; retrying {:?} mirror for uid={} pid={}",
+        kind.label(),
+        method,
+        caller.uid,
+        caller.pid
     );
-    true
+}
+
+fn authorization_mirror_mutates(method: AuthorizationMethod) -> bool {
+    !matches!(
+        method,
+        AuthorizationMethod::GetAuthTokensForCredStore | AuthorizationMethod::GetLastAuthTime
+    )
+}
+
+fn maintenance_mirror_mutates(method: MaintenanceMethod) -> bool {
+    !matches!(method, MaintenanceMethod::GetAppUidsAffectedBySid)
 }
 
 fn operation_targets() -> &'static Mutex<HashMap<LocalBinderTarget, OperationTargetInfo>> {
@@ -604,7 +660,7 @@ fn fallback_create_operation_carrier(
     pending: &PendingSecurityLevelCall,
 ) -> Option<parcel::ReplyBinderCarrier> {
     warn!(
-        "[Injector][Reply] refusing to reuse cached security-level carrier for createOperation uid={} pid={} security_level={:?}; direct OMK reply will be used if available",
+        "[Injector][Reply] refusing to reuse cached security-level carrier for createOperation uid={} pid={} security_level={:?}; direct OMK reply will be used if no operation carrier is available",
         pending.caller.uid, pending.caller.pid, security_level
     );
     None
@@ -1512,11 +1568,10 @@ unsafe fn build_authorization_reply_mirror(
         );
         return Ok(None);
     }
-    if should_skip_dirty_mirror("authorization", call.method, &call.caller) {
-        return Ok(None);
-    }
+    log_dirty_mirror_retry(MirrorStateKind::Authorization, call.method, &call.caller);
 
     let caller = call.caller.to_caller_info();
+    let mutates = authorization_mirror_mutates(call.method);
     let result = match &call.request {
         ParsedAuthorizationRequest::AddAuthToken { auth_token } => {
             ipc::with_omk_authorization_retry(|auth| {
@@ -1567,17 +1622,20 @@ unsafe fn build_authorization_reply_mirror(
 
     match result {
         Ok(()) => {
-            debug!(
-                "[Injector][Authorization] mirrored {:?} to OMK for uid={} pid={}",
-                call.method, call.caller.uid, call.caller.pid
-            );
+            if mutates {
+                clear_mirror_state_dirty(MirrorStateKind::Authorization, call.method, &call.caller);
+                debug!(
+                    "[Injector][Authorization] mirrored {:?} to OMK for uid={} pid={}",
+                    call.method, call.caller.uid, call.caller.pid
+                );
+            }
         }
         Err(error) => {
             warn!(
                 "[Injector][Authorization] failed to mirror {:?} to OMK for uid={} pid={}: {:#}",
                 call.method, call.caller.uid, call.caller.pid, error
             );
-            mark_mirror_state_dirty("authorization", call.method, &call.caller);
+            mark_mirror_state_dirty(MirrorStateKind::Authorization, call.method, &call.caller);
         }
     }
 
@@ -1597,11 +1655,10 @@ unsafe fn build_maintenance_reply_mirror(
         );
         return Ok(None);
     }
-    if should_skip_dirty_mirror("maintenance", call.method, &call.caller) {
-        return Ok(None);
-    }
+    log_dirty_mirror_retry(MirrorStateKind::Maintenance, call.method, &call.caller);
 
     let caller = call.caller.to_caller_info();
+    let mutates = maintenance_mirror_mutates(call.method);
     let result = match &call.request {
         ParsedMaintenanceRequest::OnUserAdded { user_id } => {
             ipc::with_omk_maintenance_retry(|maintenance| {
@@ -1660,17 +1717,20 @@ unsafe fn build_maintenance_reply_mirror(
 
     match result {
         Ok(()) => {
-            debug!(
-                "[Injector][Maintenance] mirrored {:?} to OMK for uid={} pid={}",
-                call.method, call.caller.uid, call.caller.pid
-            );
+            if mutates {
+                clear_mirror_state_dirty(MirrorStateKind::Maintenance, call.method, &call.caller);
+                debug!(
+                    "[Injector][Maintenance] mirrored {:?} to OMK for uid={} pid={}",
+                    call.method, call.caller.uid, call.caller.pid
+                );
+            }
         }
         Err(error) => {
             warn!(
                 "[Injector][Maintenance] failed to mirror {:?} to OMK for uid={} pid={}: {:#}",
                 call.method, call.caller.uid, call.caller.pid, error
             );
-            mark_mirror_state_dirty("maintenance", call.method, &call.caller);
+            mark_mirror_state_dirty(MirrorStateKind::Maintenance, call.method, &call.caller);
         }
     }
 
@@ -2984,6 +3044,13 @@ mod tests {
         )
     }
 
+    static MIRROR_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn reset_mirror_state_for_tests() {
+        AUTHORIZATION_MIRROR_STATE_DIRTY.store(false, Ordering::SeqCst);
+        MAINTENANCE_MIRROR_STATE_DIRTY.store(false, Ordering::SeqCst);
+    }
+
     #[test]
     fn omk_service_specific_error_can_replace_system_success_reply() {
         let status = Status::new_service_specific_error(7, None);
@@ -3072,6 +3139,88 @@ mod tests {
                 .is_none(),
             "connection errors without an OMK Status should preserve system"
         );
+    }
+
+    #[test]
+    fn dirty_mirror_state_is_scoped_by_interface_kind() {
+        let _guard = MIRROR_STATE_TEST_LOCK
+            .lock()
+            .expect("mirror state test lock poisoned");
+        reset_mirror_state_for_tests();
+        let caller = CallerIdentity::new(1000, 2000);
+
+        mark_mirror_state_dirty(
+            MirrorStateKind::Authorization,
+            AuthorizationMethod::AddAuthToken,
+            &caller,
+        );
+
+        assert!(mirror_state_dirty(MirrorStateKind::Authorization));
+        assert!(!mirror_state_dirty(MirrorStateKind::Maintenance));
+
+        clear_mirror_state_dirty(
+            MirrorStateKind::Authorization,
+            AuthorizationMethod::AddAuthToken,
+            &caller,
+        );
+
+        assert!(!mirror_state_dirty(MirrorStateKind::Authorization));
+        assert!(!mirror_state_dirty(MirrorStateKind::Maintenance));
+        reset_mirror_state_for_tests();
+    }
+
+    #[test]
+    fn successful_mutating_mirror_clears_only_matching_dirty_state() {
+        let _guard = MIRROR_STATE_TEST_LOCK
+            .lock()
+            .expect("mirror state test lock poisoned");
+        reset_mirror_state_for_tests();
+        AUTHORIZATION_MIRROR_STATE_DIRTY.store(true, Ordering::SeqCst);
+        MAINTENANCE_MIRROR_STATE_DIRTY.store(true, Ordering::SeqCst);
+        let caller = CallerIdentity::new(1000, 2000);
+
+        clear_mirror_state_dirty(
+            MirrorStateKind::Authorization,
+            AuthorizationMethod::AddAuthToken,
+            &caller,
+        );
+
+        assert!(!mirror_state_dirty(MirrorStateKind::Authorization));
+        assert!(mirror_state_dirty(MirrorStateKind::Maintenance));
+
+        clear_mirror_state_dirty(
+            MirrorStateKind::Maintenance,
+            MaintenanceMethod::OnUserAdded,
+            &caller,
+        );
+
+        assert!(!mirror_state_dirty(MirrorStateKind::Authorization));
+        assert!(!mirror_state_dirty(MirrorStateKind::Maintenance));
+        reset_mirror_state_for_tests();
+    }
+
+    #[test]
+    fn read_only_mirror_methods_do_not_count_as_recovery() {
+        assert!(authorization_mirror_mutates(
+            AuthorizationMethod::AddAuthToken
+        ));
+        assert!(authorization_mirror_mutates(
+            AuthorizationMethod::OnDeviceUnlocked
+        ));
+        assert!(!authorization_mirror_mutates(
+            AuthorizationMethod::GetAuthTokensForCredStore
+        ));
+        assert!(!authorization_mirror_mutates(
+            AuthorizationMethod::GetLastAuthTime
+        ));
+
+        assert!(maintenance_mirror_mutates(MaintenanceMethod::OnUserAdded));
+        assert!(maintenance_mirror_mutates(
+            MaintenanceMethod::ClearNamespace
+        ));
+        assert!(!maintenance_mirror_mutates(
+            MaintenanceMethod::GetAppUidsAffectedBySid
+        ));
     }
 
     #[test]

@@ -19,6 +19,7 @@ use crate::keymaster::keymint_device::localize_auth_token_for_omk;
 use crate::keymaster::permission::{
     check_forwarded_context, check_keystore_permission, KeystorePerm,
 };
+use crate::keymaster::super_key::WipeKeyOption;
 use crate::keymaster::utils::key_params_to_aidl;
 use crate::top::qwq2333::ohmykeymint::{
     CallerInfo::CallerInfo,
@@ -154,7 +155,7 @@ impl AuthorizationManager {
         SUPER_KEY
             .write()
             .unwrap()
-            .wipe_plaintext_unlocked_device_required_keys(user_id);
+            .wipe_unlocked_device_required_keys(user_id, WipeKeyOption::PlaintextOnly);
         Ok(())
     }
 
@@ -169,7 +170,7 @@ impl AuthorizationManager {
         SUPER_KEY
             .write()
             .unwrap()
-            .wipe_all_unlocked_device_required_keys(user_id);
+            .wipe_unlocked_device_required_keys(user_id, WipeKeyOption::PlaintextAndBiometric);
         Ok(())
     }
 

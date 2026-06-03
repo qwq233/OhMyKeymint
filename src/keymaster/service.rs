@@ -318,7 +318,7 @@ impl KeystoreService {
         let _super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
+            .get_credential_encrypted_key_by_user_id(multiuser_get_user_id(caller_uid));
 
         let resolved = DB
             .with(|db| {
@@ -388,7 +388,7 @@ impl KeystoreService {
         let _super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
+            .get_credential_encrypted_key_by_user_id(multiuser_get_user_id(caller_uid));
         let existing_key = match DB.with(|db| {
             db.borrow_mut()
                 .resolve_key_permission(key, KeyType::Client, caller_uid)
@@ -564,7 +564,7 @@ impl KeystoreService {
         let _super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
+            .get_credential_encrypted_key_by_user_id(multiuser_get_user_id(caller_uid));
 
         let resolved = DB
             .with(|db| {
@@ -597,7 +597,7 @@ impl KeystoreService {
         let _super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
+            .get_credential_encrypted_key_by_user_id(multiuser_get_user_id(caller_uid));
 
         let resolved = DB
             .with(|db| {

@@ -17,10 +17,7 @@ use crate::{
             Domain::Domain,
             EphemeralStorageKeyResponse::EphemeralStorageKeyResponse,
             IKeystoreOperation::IKeystoreOperation,
-            IKeystoreSecurityLevel::{
-                BnKeystoreSecurityLevel, IKeystoreSecurityLevel,
-                KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING,
-            },
+            IKeystoreSecurityLevel::{BnKeystoreSecurityLevel, IKeystoreSecurityLevel},
             KeyDescriptor::KeyDescriptor,
             KeyMetadata::KeyMetadata,
             KeyParameters::KeyParameters,
@@ -48,7 +45,7 @@ use crate::{
         super_key::{KeyBlob, SuperKeyManager},
         utils::{key_characteristics_to_internal, key_parameters_to_authorizations, log_params},
     },
-    plat::{resetprop, utils::multiuser_get_user_id},
+    plat::utils::multiuser_get_user_id,
     top::qwq2333::ohmykeymint::{
         CallerInfo::CallerInfo,
         IOhMySecurityLevel::{BnOhMySecurityLevel, IOhMySecurityLevel},
@@ -62,7 +59,7 @@ use crate::watchdog as wd;
 
 use anyhow::{anyhow, Context, Result};
 use kmr_wire::keymint::KeyMintHardwareInfo;
-use log::{debug, warn};
+use log::debug;
 use rsbinder::{thread_state::CallingContext, Interface, Status, Strong};
 
 // Blob of 32 zeroes used as empty masking key.
@@ -114,48 +111,6 @@ struct AospSecurityLevelWrapper {
 
 struct OmkSecurityLevelWrapper {
     inner: Arc<KeystoreSecurityLevel>,
-}
-
-fn should_retry_without_lskf_binding(
-    domain: &Domain,
-    key_parameters: &[KsKeyParam],
-    flags: Option<i32>,
-    user_id: u32,
-    error: &anyhow::Error,
-) -> bool {
-    if *domain != Domain::APP {
-        return false;
-    }
-    if flags.unwrap_or_default() & KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING != 0 {
-        return false;
-    }
-    if !key_parameters.iter().any(|parameter| {
-        matches!(
-            parameter.key_parameter_value(),
-            KsKeyParamValue::UserSecureID(_)
-        )
-    }) {
-        return false;
-    }
-    if !error_has_response_code(error, ResponseCode::UNINITIALIZED)
-        && !error_has_response_code(error, ResponseCode::LOCKED)
-    {
-        return false;
-    }
-    // Hot updates can miss the user unlock event.  If Android reports that CE
-    // storage is available, preserve key creation while keeping KeyMint's
-    // user-authentication tags enforced at operation time.
-    resetprop::read_string_property(&format!("sys.user.{user_id}.ce_available")).as_deref()
-        == Some("true")
-}
-
-fn error_has_response_code(error: &anyhow::Error, code: ResponseCode) -> bool {
-    error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<KsError>(),
-            Some(KsError::Rc(candidate)) if *candidate == code
-        )
-    })
 }
 
 impl KeystoreSecurityLevel {
@@ -514,45 +469,17 @@ impl KeystoreSecurityLevel {
                 blob: Some(key_blob.to_vec()),
                 ..Default::default()
             },
-            _ => match self.store_new_key_descriptor(NewKeyDescriptorParams {
-                key: &key,
-                key_blob: &key_blob,
-                key_parameters: &key_parameters,
-                flags,
-                user_id,
-                cert_info: &cert_info,
-                creation_date,
-            }) {
-                Ok(descriptor) => descriptor,
-                Err(error)
-                    if should_retry_without_lskf_binding(
-                        &key.domain,
-                        &key_parameters,
-                        flags,
-                        user_id,
-                        &error,
-                    ) =>
-                {
-                    warn!(
-                        "User {user_id} CE storage is available, but OMK has no unlocked user super key; \
-                         retrying auth-bound key storage without cryptographic LSKF binding"
-                    );
-                    self.store_new_key_descriptor(NewKeyDescriptorParams {
-                        key: &key,
-                        key_blob: &key_blob,
-                        key_parameters: &key_parameters,
-                        flags: Some(
-                            flags.unwrap_or_default()
-                                | KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING,
-                        ),
-                        user_id,
-                        cert_info: &cert_info,
-                        creation_date,
-                    })
-                    .context(err!("retrying key storage without LSKF binding"))?
-                }
-                Err(error) => return Err(error).context(err!()),
-            },
+            _ => self
+                .store_new_key_descriptor(NewKeyDescriptorParams {
+                    key: &key,
+                    key_blob: &key_blob,
+                    key_parameters: &key_parameters,
+                    flags,
+                    user_id,
+                    cert_info: &cert_info,
+                    creation_date,
+                })
+                .context(err!())?,
         };
 
         Ok(KeyMetadata {
@@ -868,7 +795,7 @@ impl KeystoreSecurityLevel {
         let _super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_after_first_unlock_key_by_user_id(user_id);
+            .get_credential_encrypted_key_by_user_id(user_id);
 
         let resolved_wrapping = DB
             .with(|db| {
@@ -1062,7 +989,7 @@ impl KeystoreSecurityLevel {
                 let _super_key = SUPER_KEY
                     .read()
                     .unwrap()
-                    .get_after_first_unlock_key_by_user_id(multiuser_get_user_id(caller_uid));
+                    .get_credential_encrypted_key_by_user_id(multiuser_get_user_id(caller_uid));
                 let resolved = DB
                     .with(|db| {
                         db.borrow_mut()
