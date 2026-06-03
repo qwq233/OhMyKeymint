@@ -431,7 +431,7 @@ pub fn ec_key_marshal_private_key(key: &ECKey) -> Result<ZVec, Error> {
     // This will not write past the specified length of the buffer; if the
     // len above is too short, it returns 0.
     let written_len =
-        unsafe { ECKEYMarshalPrivateKey(key.0.as_ptr(), buf.as_mut_ptr(), buf.len()) } as usize;
+        unsafe { ECKEYMarshalPrivateKey(key.0.as_ptr(), buf.as_mut_ptr(), buf.len()) };
     if written_len != len {
         return Err(Error::ECKEYMarshalPrivateKeyFailed);
     }

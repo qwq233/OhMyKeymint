@@ -318,11 +318,13 @@ pub unsafe fn parse_authorization_request(
     code: u32,
 ) -> Result<ParsedAuthorizationRequest> {
     let (mut parcel, method) = parse_typed_request(
-        data,
-        data_size,
-        offsets,
-        offsets_size,
-        code,
+        RequestEnvelope {
+            data,
+            data_size,
+            offsets,
+            offsets_size,
+            code,
+        },
         KEYSTORE_AUTHORIZATION_INTERFACE,
         "IKeystoreAuthorization",
         authorization_method_from_code,
@@ -398,11 +400,13 @@ pub unsafe fn parse_maintenance_request(
     code: u32,
 ) -> Result<ParsedMaintenanceRequest> {
     let (mut parcel, method) = parse_typed_request(
-        data,
-        data_size,
-        offsets,
-        offsets_size,
-        code,
+        RequestEnvelope {
+            data,
+            data_size,
+            offsets,
+            offsets_size,
+            code,
+        },
         KEYSTORE_MAINTENANCE_INTERFACE,
         "IKeystoreMaintenance",
         maintenance_method_from_code,
@@ -456,11 +460,13 @@ pub unsafe fn parse_service_request(
     code: u32,
 ) -> Result<ParsedServiceRequest> {
     let (mut parcel, method) = parse_typed_request(
-        data,
-        data_size,
-        offsets,
-        offsets_size,
-        code,
+        RequestEnvelope {
+            data,
+            data_size,
+            offsets,
+            offsets_size,
+            code,
+        },
         KEYSTORE_SERVICE_INTERFACE,
         "IKeystoreService",
         service_method_from_code,
@@ -525,11 +531,13 @@ pub unsafe fn parse_security_level_request(
     code: u32,
 ) -> Result<ParsedSecurityLevelRequest> {
     let (mut parcel, method) = parse_typed_request(
-        data,
-        data_size,
-        offsets,
-        offsets_size,
-        code,
+        RequestEnvelope {
+            data,
+            data_size,
+            offsets,
+            offsets_size,
+            code,
+        },
         KEYSTORE_SECURITY_LEVEL_INTERFACE,
         "IKeystoreSecurityLevel",
         security_level_method_from_code,
@@ -587,11 +595,13 @@ pub unsafe fn parse_operation_request(
     code: u32,
 ) -> Result<ParsedOperationRequest> {
     let (mut parcel, method) = parse_typed_request(
-        data,
-        data_size,
-        offsets,
-        offsets_size,
-        code,
+        RequestEnvelope {
+            data,
+            data_size,
+            offsets,
+            offsets_size,
+            code,
+        },
         KEYSTORE_OPERATION_INTERFACE,
         "IKeystoreOperation",
         operation_method_from_code,
@@ -916,16 +926,27 @@ fn read_request_interface(parcel: &mut Parcel) -> Result<String> {
     parcel.read().context("missing interface token")
 }
 
-unsafe fn parse_typed_request<M>(
+struct RequestEnvelope {
     data: *mut u8,
     data_size: usize,
     offsets: *mut usize,
     offsets_size: usize,
     code: u32,
+}
+
+unsafe fn parse_typed_request<M>(
+    envelope: RequestEnvelope,
     expected_interface: &str,
     interface_name: &str,
     method_from_code: fn(u32) -> Option<M>,
 ) -> Result<(Parcel, M)> {
+    let RequestEnvelope {
+        data,
+        data_size,
+        offsets,
+        offsets_size,
+        code,
+    } = envelope;
     let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
     let interface = read_request_interface(&mut parcel)?;
     if interface != expected_interface {

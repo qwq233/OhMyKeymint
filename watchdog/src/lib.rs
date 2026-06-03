@@ -104,7 +104,7 @@ impl WatchdogState {
         let now = Instant::now();
         let mut next_timeout: Option<Duration> = None;
         let mut has_overdue = false;
-        for (_, r) in self.records.iter() {
+        for r in self.records.values() {
             let timeout = r.deadline.saturating_duration_since(now);
             if timeout == Duration::new(0, 0) {
                 // This timeout has passed.

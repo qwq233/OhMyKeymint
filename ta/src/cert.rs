@@ -703,7 +703,7 @@ impl<'a> der::DecodeValue<'a> for AuthorizationList<'a> {
             });
         }
         if decoder.remaining_len() < header.length() {
-            return Err(der::ErrorKind::Incomplete {
+            Err(der::ErrorKind::Incomplete {
                 expected_len: header.length(),
                 actual_len: decoder.remaining_len(),
             })?;

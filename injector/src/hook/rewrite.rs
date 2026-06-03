@@ -441,7 +441,7 @@ fn route_for_service_request(
     } else {
         RouteTarget::System
     };
-    let route = match request {
+    match request {
         ParsedServiceRequest::GetKeyEntry { key }
         | ParsedServiceRequest::UpdateSubcomponent { key, .. }
         | ParsedServiceRequest::DeleteKey { key }
@@ -454,23 +454,21 @@ fn route_for_service_request(
         | ParsedServiceRequest::GetNumberOfEntries { .. }
         | ParsedServiceRequest::ListEntriesBatched { .. }
         | ParsedServiceRequest::GetSupplementaryAttestationInfo { .. } => fallback,
-    };
-    route
+    }
 }
 
 fn route_for_security_level_request(
     request: &ParsedSecurityLevelRequest,
     carrier_route: RouteTarget,
 ) -> RouteTarget {
-    let route = match request {
+    match request {
         ParsedSecurityLevelRequest::CreateOperation { key, .. }
         | ParsedSecurityLevelRequest::DeleteKey { key }
         | ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral { storage_key: key } => {
             tracker::resolve_route_for_key_descriptor(key, carrier_route)
         }
         _ => carrier_route,
-    };
-    route
+    }
 }
 
 fn mirror_state_dirty(kind: MirrorStateKind) -> bool {
@@ -2045,7 +2043,7 @@ fn build_omk_key_entry_reply_with_carrier_or_direct(
         );
         return build_direct_omk_key_entry_reply(KeyEntryResponse {
             r#iSecurityLevel,
-            r#metadata: metadata,
+            metadata,
         });
     };
     if !carrier.is_object {
@@ -2057,7 +2055,7 @@ fn build_omk_key_entry_reply_with_carrier_or_direct(
         );
         return build_direct_omk_key_entry_reply(KeyEntryResponse {
             r#iSecurityLevel,
-            r#metadata: metadata,
+            metadata,
         });
     }
     if let Err(error) = register_security_level_carrier(
@@ -2078,7 +2076,7 @@ fn build_omk_key_entry_reply_with_carrier_or_direct(
         );
         return build_direct_omk_key_entry_reply(KeyEntryResponse {
             r#iSecurityLevel,
-            r#metadata: metadata,
+            metadata,
         });
     }
     tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
@@ -3686,7 +3684,7 @@ mod tests {
         let mut reply = build_omk_key_entry_reply_with_carrier_or_direct(
             KeyEntryResponse {
                 r#iSecurityLevel: None,
-                r#metadata: metadata,
+                metadata,
             },
             &pending,
         )
@@ -3763,7 +3761,7 @@ mod tests {
         let mut reply = build_omk_key_entry_reply_with_carrier_or_direct(
             KeyEntryResponse {
                 r#iSecurityLevel: None,
-                r#metadata: metadata,
+                metadata,
             },
             &pending,
         )
