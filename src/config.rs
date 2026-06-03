@@ -422,10 +422,31 @@ pub struct ConfigFile {
     pub device: DeviceProperty,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
     Injector,
     OMK,
+}
+
+impl Serialize for Backend {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Backend {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value
+            .parse()
+            .map_err(|()| serde::de::Error::custom(format!("unknown backend {value:?}")))
+    }
 }
 
 impl std::fmt::Display for Backend {
@@ -442,7 +463,7 @@ impl std::str::FromStr for Backend {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "ts" => Ok(Backend::Injector),
+            "injector" => Ok(Backend::Injector),
             "omk" => Ok(Backend::OMK),
             _ => Err(()),
         }
@@ -801,6 +822,22 @@ mod tests {
         assert!(validate_security_patch("2026-4-5").is_err());
         assert!(validate_security_patch("yesterday").is_err());
         assert!(validate_security_patch("").is_err());
+    }
+
+    #[test]
+    fn backend_config_accepts_only_lowercase_names() {
+        let injector: MainConfig = toml::from_str(r#"backend = "injector""#).unwrap();
+        assert_eq!(injector.backend, Backend::Injector);
+
+        let omk: MainConfig = toml::from_str(r#"backend = "omk""#).unwrap();
+        assert_eq!(omk.backend, Backend::OMK);
+
+        assert!(toml::from_str::<MainConfig>(r#"backend = "ts""#).is_err());
+        assert!(toml::from_str::<MainConfig>(r#"backend = "Injector""#).is_err());
+        assert!(toml::from_str::<MainConfig>(r#"backend = "OMK""#).is_err());
+
+        let serialized = toml::to_string(&MainConfig::default()).unwrap();
+        assert!(serialized.contains(r#"backend = "injector""#));
     }
 
     #[test]

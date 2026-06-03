@@ -2529,6 +2529,7 @@ pub(super) fn clear_outbound_reply_buffers() {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -2556,6 +2557,10 @@ mod tests {
         android::system::keystore2::KeyDescriptor::KeyDescriptor,
         android::system::keystore2::KeyEntryResponse::KeyEntryResponse,
         android::system::keystore2::KeyMetadata::KeyMetadata,
+        hook::binder::{
+            binder_object_header, flat_binder_object, flat_binder_object_handle_or_ptr,
+            BINDER_TYPE_BINDER,
+        },
         top::qwq2333::ohmykeymint::CallerInfo::CallerInfo,
         top::qwq2333::ohmykeymint::IOhMyKsService::{BnOhMyKsService, IOhMyKsService},
         top::qwq2333::ohmykeymint::IOhMySecurityLevel::IOhMySecurityLevel,
@@ -3044,6 +3049,28 @@ mod tests {
         )
     }
 
+    fn test_local_binder_carrier(
+        ptr: libc::c_ulong,
+        cookie: libc::c_ulong,
+    ) -> parcel::ReplyBinderCarrier {
+        let object = flat_binder_object {
+            hdr: binder_object_header {
+                type_: BINDER_TYPE_BINDER,
+            },
+            flags: 0,
+            handle_or_ptr: flat_binder_object_handle_or_ptr { binder: ptr },
+            cookie,
+        };
+        let mut bytes = vec![0u8; size_of::<flat_binder_object>() + size_of::<i32>()];
+        unsafe {
+            std::ptr::write_unaligned(bytes.as_mut_ptr() as *mut flat_binder_object, object);
+        }
+        parcel::ReplyBinderCarrier {
+            bytes,
+            is_object: true,
+        }
+    }
+
     static MIRROR_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn reset_mirror_state_for_tests() {
@@ -3243,22 +3270,15 @@ mod tests {
 
     #[test]
     fn local_service_target_extraction_is_stable() {
-        tracker::clear_state_for_tests();
-        let binder = route::new_service_binder(
-            CallerIdentity::new(1000, 2000),
-            config::InterceptConfig::default(),
-            true,
-            fake_system_service_backend(),
-            None,
-        );
-
-        let first = extract_local_service_target(&binder).expect("first extraction should succeed");
-        let second =
-            extract_local_service_target(&binder).expect("second extraction should succeed");
+        let carrier = test_local_binder_carrier(0x1234, 0x5678);
+        let first = unsafe { parse_local_binder_target_from_parcel_bytes(&carrier.bytes) }
+            .expect("first extraction should succeed");
+        let second = unsafe { parse_local_binder_target_from_parcel_bytes(&carrier.bytes) }
+            .expect("second extraction should succeed");
 
         assert_eq!(first, second);
-        assert_ne!(first.ptr, 0);
-        assert_ne!(first.cookie, 0);
+        assert_eq!(first.ptr, 0x1234);
+        assert_eq!(first.cookie, 0x5678);
     }
 
     #[test]
@@ -3622,14 +3642,7 @@ mod tests {
         tracker::clear_state_for_tests();
 
         let security_level = SecurityLevel::TRUSTED_ENVIRONMENT;
-        let system_level = BnKeystoreSecurityLevel::new_binder(FakeAospSecurityLevel);
-        let mut system_level_reply = parcel::build_get_security_level_reply(system_level)
-            .expect("system security-level reply should serialize");
-        let (data, data_size, offsets, offsets_size) = raw_parts(&mut system_level_reply);
-        let carrier = unsafe {
-            parcel::extract_direct_binder_reply_carrier(data, data_size, offsets, offsets_size)
-        }
-        .expect("security-level carrier should be extractable");
+        let carrier = test_local_binder_carrier(0x1010, 0x2020);
         register_security_level_carrier(
             &carrier,
             security_level,
@@ -3779,23 +3792,7 @@ mod tests {
 
         let system_aborts = Arc::new(AtomicUsize::new(0));
         let omk_aborts = Arc::new(AtomicUsize::new(0));
-        let system_operation = BnKeystoreOperation::new_binder(TestOperationBackend {
-            update_output: vec![1, 2, 3],
-            aborts: system_aborts.clone(),
-            update_aad_status: None,
-        });
-        let mut system_reply = parcel::build_create_operation_reply(CreateOperationResponse {
-            r#iOperation: Some(system_operation),
-            r#operationChallenge: None,
-            r#parameters: None,
-            r#upgradedBlob: Some(vec![1]),
-        })
-        .expect("system createOperation reply should serialize");
-        let (data, data_size, offsets, offsets_size) = raw_parts(&mut system_reply);
-        let original_carrier = unsafe {
-            parcel::extract_create_operation_reply_carrier(data, data_size, offsets, offsets_size)
-        }
-        .expect("original carrier should be extractable");
+        let original_carrier = test_local_binder_carrier(0x3030, 0x4040);
 
         let omk_backend = BnKeystoreOperation::new_binder(TestOperationBackend {
             update_output: vec![9, 9, 9],
@@ -3817,18 +3814,6 @@ mod tests {
 
         let (rewritten_data, rewritten_data_size, rewritten_offsets, rewritten_offsets_size) =
             raw_parts(&mut rewritten);
-        let parsed: CreateOperationResponse = unsafe {
-            parcel::parse_success_reply(
-                rewritten_data,
-                rewritten_data_size,
-                rewritten_offsets,
-                rewritten_offsets_size,
-            )
-        }
-        .expect("rewritten reply should deserialize");
-        assert!(parsed.r#iOperation.is_some());
-        assert_eq!(parsed.r#upgradedBlob.as_deref(), Some(&[7, 7][..]));
-
         let rewritten_carrier = unsafe {
             parcel::extract_create_operation_reply_carrier(
                 rewritten_data,

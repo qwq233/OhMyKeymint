@@ -624,6 +624,10 @@ fn normalize_meid_candidate(raw: &str, source: String) -> Option<IdentifierCandi
 mod tests {
     use super::*;
 
+    fn ensure_binder_process_state() {
+        let _ = rsbinder::ProcessState::init_default();
+    }
+
     fn empty_device() -> DeviceProperty {
         DeviceProperty {
             brand: "Google".to_string(),
@@ -861,13 +865,13 @@ mod tests {
     }
 
     #[test]
-    fn default_mode_ignores_user_pinned_imei_and_meid() {
+    fn default_mode_clears_user_pinned_imei_and_meid_before_backfill() {
         let mut config = ConfigFile::default();
         config.device.imei = "111111111111111".to_string();
         config.device.meid = "A1000000000001".to_string();
         config.device.imei2 = "222222222222222".to_string();
 
-        bootstrap_device_ids(&mut config);
+        clear_unpinned_telephony_fields(&mut config.device);
 
         assert!(config.device.imei.is_empty());
         assert!(config.device.meid.is_empty());
@@ -876,6 +880,7 @@ mod tests {
 
     #[test]
     fn override_mode_preserves_user_pinned_imei_and_meid() {
+        ensure_binder_process_state();
         let mut config = ConfigFile::default();
         config.device.override_telephony_properties = true;
         config.device.imei = "111111111111111".to_string();

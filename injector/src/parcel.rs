@@ -1128,6 +1128,13 @@ mod tests {
         )
     }
 
+    fn null_operation_carrier_bytes() -> Vec<u8> {
+        let mut parcel = Parcel::new();
+        let (start, end) =
+            write_none_binder_placeholder::<dyn IKeystoreOperation>(&mut parcel).unwrap();
+        unsafe { std::slice::from_raw_parts(parcel.as_ptr().add(start), end - start).to_vec() }
+    }
+
     fn build_request(interface: &str, payload_token: Option<&str>) -> OwnedReply {
         let mut parcel = Parcel::new();
         parcel.write(&0i32).unwrap();
@@ -1256,7 +1263,7 @@ mod tests {
 
     #[test]
     fn create_operation_carrier_reply_preserves_operation_challenge() {
-        let carrier = vec![0u8; size_of::<flat_binder_object>() + size_of::<i32>()];
+        let carrier = null_operation_carrier_bytes();
         let mut reply = build_create_operation_reply_with_carrier_bytes(
             Some(OperationChallenge { challenge: 0x5678 }),
             None,

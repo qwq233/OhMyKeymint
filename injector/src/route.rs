@@ -1386,6 +1386,19 @@ mod tests {
         let _ = rsbinder::ProcessState::init_default();
     }
 
+    fn build_omk_security_level(
+        operation_aborts: Arc<AtomicUsize>,
+        should_fail_create: bool,
+    ) -> OmkSecurityLevelBinder {
+        ensure_binder_process_state();
+        crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::BnOhMySecurityLevel::new_binder(
+            CountingOmkSecurityLevel {
+                operation_aborts,
+                should_fail_create,
+            },
+        )
+    }
+
     struct SupplementarySystemService;
 
     impl Interface for SupplementarySystemService {}
@@ -1664,11 +1677,7 @@ mod tests {
             system_service,
             Some(rsbinder::Strong::new(
                 Box::new(OmkOnlySecurityLevelService {
-                    omk_backend: rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
-                        operation_aborts: Arc::new(AtomicUsize::new(0)),
-                        should_fail_create: false,
-                    })
-                        as Box<dyn IOhMySecurityLevel>),
+                    omk_backend: build_omk_security_level(Arc::new(AtomicUsize::new(0)), false),
                     fail_get_ohmy_security_level: false,
                 }) as Box<dyn IOhMyKsService>,
             )),
@@ -1684,10 +1693,7 @@ mod tests {
     #[test]
     fn get_security_level_omk_route_survives_missing_system_backend() {
         tracker::clear_state_for_tests();
-        let omk_backend = rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
-            operation_aborts: Arc::new(AtomicUsize::new(0)),
-            should_fail_create: false,
-        }) as Box<dyn IOhMySecurityLevel>);
+        let omk_backend = build_omk_security_level(Arc::new(AtomicUsize::new(0)), false);
         let wrapper = new_service_binder(
             CallerIdentity::new(1000, 2000),
             InterceptConfig::default(),
@@ -1720,10 +1726,7 @@ mod tests {
             delete_calls: Arc::new(AtomicUsize::new(0)),
             operation_aborts: counters.system_abort.clone(),
         });
-        let omk_backend = rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
-            operation_aborts: counters.omk_abort.clone(),
-            should_fail_create: false,
-        }) as Box<dyn IOhMySecurityLevel>);
+        let omk_backend = build_omk_security_level(counters.omk_abort.clone(), false);
 
         let system_wrapper = new_security_level_binder(
             SecurityLevel::SOFTWARE,
@@ -1790,10 +1793,7 @@ mod tests {
             delete_calls: Arc::new(AtomicUsize::new(0)),
             operation_aborts: counters.system_abort.clone(),
         });
-        let omk_backend = rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
-            operation_aborts: counters.omk_abort.clone(),
-            should_fail_create: true,
-        }) as Box<dyn IOhMySecurityLevel>);
+        let omk_backend = build_omk_security_level(counters.omk_abort.clone(), true);
 
         let wrapper = new_security_level_binder(
             SecurityLevel::TRUSTED_ENVIRONMENT,
@@ -1821,11 +1821,7 @@ mod tests {
             BnKeystoreService::new_binder(NoSecurityLevelSystemService),
             Some(rsbinder::Strong::new(
                 Box::new(OmkOnlySecurityLevelService {
-                    omk_backend: rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
-                        operation_aborts: Arc::new(AtomicUsize::new(0)),
-                        should_fail_create: false,
-                    })
-                        as Box<dyn IOhMySecurityLevel>),
+                    omk_backend: build_omk_security_level(Arc::new(AtomicUsize::new(0)), false),
                     fail_get_ohmy_security_level: true,
                 }) as Box<dyn IOhMyKsService>,
             )),
@@ -1846,11 +1842,10 @@ mod tests {
             SecurityLevel::TRUSTED_ENVIRONMENT,
             RouteTarget::Omk,
             None,
-            Some(rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
-                operation_aborts: Arc::new(AtomicUsize::new(0)),
-                should_fail_create: true,
-            })
-                as Box<dyn IOhMySecurityLevel>)),
+            Some(build_omk_security_level(
+                Arc::new(AtomicUsize::new(0)),
+                true,
+            )),
         );
 
         let status = wrapper
@@ -1888,10 +1883,7 @@ mod tests {
             delete_calls: Arc::new(AtomicUsize::new(0)),
             operation_aborts: counters.system_abort.clone(),
         });
-        let omk_backend = rsbinder::Strong::new(Box::new(CountingOmkSecurityLevel {
-            operation_aborts: counters.omk_abort.clone(),
-            should_fail_create: false,
-        }) as Box<dyn IOhMySecurityLevel>);
+        let omk_backend = build_omk_security_level(counters.omk_abort.clone(), false);
         let wrapper = new_security_level_binder(
             SecurityLevel::TRUSTED_ENVIRONMENT,
             RouteTarget::Omk,
