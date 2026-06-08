@@ -177,35 +177,43 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
             packageInfos: vec![info],
         }
     } else {
-        let _wd = crate::watchdog::watch("get_aaid: Retrieving AAID by calling service");
-        let mut tried = 0;
-        loop {
-            let pm = get_pm()?;
-            let result = {
-                let current_uid = unsafe { libc::getuid() };
-                let current_euid = unsafe { libc::geteuid() };
-                debug!("Current UID: {}, EUID: {}", current_uid, current_euid);
-                // unsafe {
-                //     libc::seteuid(1017); // KEYSTORE_UID
-                // }
+        get_application_id_from_provider(uid)?
+    };
 
-                // unsafe {
-                //     libc::seteuid(current_euid);
-                // }
-                pm.getKeyAttestationApplicationId(uid as i32)
-            };
-            if let Result::Ok(application_id) = result {
-                break application_id;
-            } else {
-                let e = result.unwrap_err();
-                if e.exception_code() == rsbinder::ExceptionCode::TransactionFailed && tried < 2 {
-                    error!("Transaction failed when calling getKeyAttestationApplicationId for UID {}: {:?}", uid, e);
+    debug!("Application ID: {:?}", application_id);
+
+    encode_application_id(application_id)
+}
+
+fn get_application_id_from_provider(uid: u32) -> anyhow::Result<KeyAttestationApplicationId> {
+    let _wd = crate::watchdog::watch("get_aaid: Retrieving AAID by calling service");
+    let use_legacy = super::legacy::should_use_aaid_provider();
+    let mut tried = 0;
+    loop {
+        let result = if use_legacy {
+            super::legacy::get_application_id(uid)
+        } else {
+            let pm = get_pm()?;
+            let current_uid = unsafe { libc::getuid() };
+            let current_euid = unsafe { libc::geteuid() };
+            debug!("Current UID: {}, EUID: {}", current_uid, current_euid);
+            pm.getKeyAttestationApplicationId(uid as i32)
+                .map_err(anyhow::Error::new)
+        };
+
+        match result {
+            Result::Ok(application_id) => return Ok(application_id),
+            Err(error) => {
+                if is_transaction_failed_error(&error) && tried < 2 {
+                    error!("Transaction failed when calling getKeyAttestationApplicationId for UID {}: {:?}", uid, error);
                     error!("Trying to reset the PM instance to None");
-                    reset_pm();
+                    if use_legacy {
+                        super::legacy::clear_provider_cache();
+                    } else {
+                        reset_pm();
+                    }
                     tried += 1;
-                } else if e.exception_code() == rsbinder::ExceptionCode::ServiceSpecific
-                    && e.service_specific_error() == ERROR_GET_ATTESTATION_APPLICATION_ID_FAILED
-                {
+                } else if is_get_attestation_application_id_failed(&error) {
                     return Err(anyhow::anyhow!(KsError::Rc(
                         ResponseCode::GET_ATTESTATION_APPLICATION_ID_FAILED
                     )));
@@ -213,16 +221,37 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
                     return Err(anyhow::anyhow!(
                         "Failed to get KeyAttestationApplicationId for UID {}, Error: {:?}",
                         uid,
-                        e
+                        error
                     ));
                 }
             }
         }
-    };
+    }
+}
 
-    debug!("Application ID: {:?}", application_id);
+fn is_transaction_failed_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rsbinder::Status>()
+            .is_some_and(|status| {
+                status.exception_code() == rsbinder::ExceptionCode::TransactionFailed
+            })
+            || cause
+                .downcast_ref::<rsbinder::StatusCode>()
+                .is_some_and(|status| *status == rsbinder::StatusCode::DeadObject)
+    })
+}
 
-    encode_application_id(application_id)
+fn is_get_attestation_application_id_failed(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rsbinder::Status>()
+            .is_some_and(|status| {
+                status.exception_code() == rsbinder::ExceptionCode::ServiceSpecific
+                    && status.service_specific_error()
+                        == ERROR_GET_ATTESTATION_APPLICATION_ID_FAILED
+            })
+    })
 }
 
 fn encode_application_id(

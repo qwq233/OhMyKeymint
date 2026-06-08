@@ -25,9 +25,9 @@ prost = "0.14.3"
 prost-types = "0.14.3"
 hex = "0.4.3"
 log4rs = "1.4.0"
-log = "0.4.30"
+log = "0.4.32"
 rsbinder = { version = "0.8.0", features = ["android_12_plus"] }
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+rusqlite = { version = "0.40.0", features = ["bundled"] }
 anyhow = "1.0.102"
 async-trait = "0.1.89"
 tokio = { version = "1.52.3", features = ["macros", "libc"] }
@@ -38,8 +38,8 @@ serde_json = "1.0.150"
 x509-cert = "0.2.5"
 watchdog_rs = { path = "watchdog", version = "0.1.0" }
 nix = { version = "0.31.3", features = ["mman"] }
-rsproperties = { version = "0.3.0", features = ["builder"] }
-libsqlite3-sys = "0.37.0"
+rsproperties = { version = "0.4.0", features = ["builder"] }
+libsqlite3-sys = "0.38.0"
 rand = "0.10.1"
 der = "0.8.0"
 toml = "1.1.0"
@@ -47,7 +47,7 @@ regex = "1.12.3"
 hotwatch = "0.5.0"
 base64 = "0.22.1"
 quick-xml = { version = "0.40.1", features = ["serialize"] }
-goblin = "0.10.3"
+goblin = "0.10.7"
 ring = "0.17.14"
 
 [target.'cfg(target_os = "android")'.dependencies]

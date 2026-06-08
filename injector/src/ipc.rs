@@ -178,17 +178,8 @@ where
 
 pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
     ensure_process_state();
-    match with_pm_retry(|pm| {
-        pm.getKeyAttestationApplicationId(uid as i32)
-            .context("getKeyAttestationApplicationId failed")
-    }) {
-        Ok(app_id) => {
-            let packages: Vec<String> = app_id
-                .packageInfos
-                .into_iter()
-                .map(|pkg| pkg.packageName)
-                .filter(|pkg| !pkg.is_empty())
-                .collect();
+    match resolve_package_names_for_uid(uid) {
+        Ok(packages) => {
             if packages.is_empty() {
                 PackageResolution::Unknown
             } else {
@@ -200,10 +191,30 @@ pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
                 "[Injector][IPC] failed to resolve packages for uid {}: {:#}",
                 uid, error
             );
-            clear_pm_cache();
             PackageResolution::Unknown
         }
     }
+}
+
+fn resolve_package_names_for_uid(uid: u32) -> Result<Vec<String>> {
+    if crate::legacy::should_use_aaid_provider() {
+        crate::legacy::resolve_package_names_for_uid(uid)
+    } else {
+        resolve_package_names_for_uid_once(uid)
+    }
+}
+
+fn resolve_package_names_for_uid_once(uid: u32) -> Result<Vec<String>> {
+    let app_id = with_pm_retry(|pm| {
+        pm.getKeyAttestationApplicationId(uid as i32)
+            .context("getKeyAttestationApplicationId failed")
+    })?;
+    Ok(app_id
+        .packageInfos
+        .into_iter()
+        .map(|pkg| pkg.packageName)
+        .filter(|pkg| !pkg.is_empty())
+        .collect())
 }
 
 pub fn get_system_keystore_service() -> Result<Strong<dyn IKeystoreService>> {
@@ -254,11 +265,15 @@ where
     )
 }
 
-fn is_dead_object_error(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .filter_map(|cause| cause.downcast_ref::<Status>())
-        .any(is_dead_object_status)
+pub(crate) fn is_dead_object_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<Status>()
+            .is_some_and(is_dead_object_status)
+            || cause
+                .downcast_ref::<StatusCode>()
+                .is_some_and(|status| *status == StatusCode::DeadObject)
+    })
 }
 
 fn is_dead_object_status(status: &Status) -> bool {

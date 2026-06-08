@@ -343,27 +343,14 @@ fn fallback_keymint_version_from_android() -> i32 {
 }
 
 fn detect_android_major_version() -> Option<i32> {
-    detect_android_major_version_with(resetprop::read_string_property)
+    kmr_common::android_version::android_major_version()
 }
 
+#[cfg(test)]
 fn detect_android_major_version_with(
     read_property: impl Fn(&str) -> Option<String>,
 ) -> Option<i32> {
-    read_property("ro.build.version.release_or_codename")
-        .or_else(|| read_property("ro.build.version.release"))
-        .and_then(|value| value.parse::<i32>().ok())
-        .or_else(|| {
-            read_property("ro.build.version.sdk")
-                .and_then(|sdk| sdk.parse::<i32>().ok())
-                .map(|sdk| match sdk {
-                    31 | 32 => 12,
-                    33 => 13,
-                    34 => 14,
-                    35 => 15,
-                    value if value >= 36 => 16,
-                    _ => 16,
-                })
-        })
+    kmr_common::android_version::android_major_version_with(read_property)
 }
 
 fn normalize_keymint_version(version: i32) -> Option<i32> {

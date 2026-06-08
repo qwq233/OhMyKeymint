@@ -20,6 +20,7 @@ use kmr_wire::{cbor, keymint::ErrorCode, rpc, CborError};
 
 pub use kmr_wire as wire;
 
+pub mod android_version;
 pub mod crypto;
 pub mod keyblob;
 pub mod runtime;

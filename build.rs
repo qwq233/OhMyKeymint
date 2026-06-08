@@ -39,7 +39,6 @@ fn main() {
         .output(PathBuf::from("aidl.rs"));
 
     let dirs = vec![
-        "aidl/android/content/pm",
         "aidl/android/system/keystore2",
         "aidl/android/hardware/security/keymint",
         "aidl/android/hardware/security/secureclock",

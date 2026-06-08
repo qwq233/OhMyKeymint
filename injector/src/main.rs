@@ -11,6 +11,7 @@ pub mod hook;
 pub mod identify;
 pub mod inject;
 pub mod ipc;
+pub mod legacy;
 pub mod logging;
 pub mod parcel;
 pub mod route;
