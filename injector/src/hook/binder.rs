@@ -9,10 +9,19 @@ const B_TYPE_LARGE: u32 = 0x85;
 pub(crate) const BINDER_WRITE_READ: u32 = 0xc0306201;
 pub(crate) const BC_TRANSACTION_NR: u32 = 0;
 pub(crate) const BC_REPLY_NR: u32 = 1;
+pub(crate) const BC_FREE_BUFFER_NR: u32 = 3;
+pub(crate) const BC_INCREFS_DONE_NR: u32 = 8;
+pub(crate) const BC_ACQUIRE_DONE_NR: u32 = 9;
 pub(crate) const BC_TRANSACTION_SG_NR: u32 = 17;
 pub(crate) const BC_REPLY_SG_NR: u32 = 18;
 pub(crate) const BR_TRANSACTION_NR: u32 = 2;
 pub(crate) const BR_REPLY_NR: u32 = 3;
+pub(crate) const BR_TRANSACTION_COMPLETE_NR: u32 = 6;
+pub(crate) const BR_INCREFS_NR: u32 = 7;
+pub(crate) const BR_ACQUIRE_NR: u32 = 8;
+pub(crate) const BR_RELEASE_NR: u32 = 9;
+pub(crate) const BR_DECREFS_NR: u32 = 10;
+pub(crate) const BR_NOOP_NR: u32 = 12;
 pub(crate) const TF_ONE_WAY: u32 = 0x01;
 pub(crate) const TF_STATUS_CODE: u32 = 0x08;
 pub(crate) const BINDER_TYPE_BINDER: u32 = b_pack_chars(b's', b'b', b'*', B_TYPE_LARGE as u8);
@@ -22,6 +31,25 @@ pub(crate) const BINDER_TYPE_WEAK_HANDLE: u32 = b_pack_chars(b'w', b'h', b'*', B
 
 const fn b_pack_chars(c1: u8, c2: u8, c3: u8, c4: u8) -> u32 {
     ((c1 as u32) << 24) | ((c2 as u32) << 16) | ((c3 as u32) << 8) | (c4 as u32)
+}
+
+const IOC_NRBITS: u32 = 8;
+const IOC_TYPEBITS: u32 = 8;
+const IOC_SIZEBITS: u32 = 14;
+
+const IOC_NRSHIFT: u32 = 0;
+const IOC_TYPESHIFT: u32 = IOC_NRSHIFT + IOC_NRBITS;
+const IOC_SIZESHIFT: u32 = IOC_TYPESHIFT + IOC_TYPEBITS;
+const IOC_DIRSHIFT: u32 = IOC_SIZESHIFT + IOC_SIZEBITS;
+
+const IOC_NONE: u32 = 0;
+const IOC_WRITE: u32 = 1;
+
+const fn ioc(dir: u32, type_: u32, nr: u32, size: usize) -> u32 {
+    (dir << IOC_DIRSHIFT)
+        | (type_ << IOC_TYPESHIFT)
+        | (nr << IOC_NRSHIFT)
+        | ((size as u32) << IOC_SIZESHIFT)
 }
 
 #[repr(C)]
@@ -45,6 +73,41 @@ pub(crate) struct flat_binder_object {
     pub handle_or_ptr: flat_binder_object_handle_or_ptr,
     pub cookie: libc::c_ulong,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct binder_ptr_cookie {
+    pub ptr: libc::c_ulong,
+    pub cookie: libc::c_ulong,
+}
+
+pub(crate) const BR_NOOP_CMD: u32 = ioc(IOC_NONE, b'r' as u32, BR_NOOP_NR, 0);
+pub(crate) const BR_TRANSACTION_COMPLETE_CMD: u32 =
+    ioc(IOC_NONE, b'r' as u32, BR_TRANSACTION_COMPLETE_NR, 0);
+pub(crate) const BC_FREE_BUFFER_CMD: u32 = ioc(
+    IOC_WRITE,
+    b'c' as u32,
+    BC_FREE_BUFFER_NR,
+    size_of::<libc::c_ulong>(),
+);
+pub(crate) const BC_REPLY_CMD: u32 = ioc(
+    IOC_WRITE,
+    b'c' as u32,
+    BC_REPLY_NR,
+    size_of::<binder_transaction_data>(),
+);
+pub(crate) const BC_INCREFS_DONE_CMD: u32 = ioc(
+    IOC_WRITE,
+    b'c' as u32,
+    BC_INCREFS_DONE_NR,
+    size_of::<binder_ptr_cookie>(),
+);
+pub(crate) const BC_ACQUIRE_DONE_CMD: u32 = ioc(
+    IOC_WRITE,
+    b'c' as u32,
+    BC_ACQUIRE_DONE_NR,
+    size_of::<binder_ptr_cookie>(),
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct LocalBinderTarget {

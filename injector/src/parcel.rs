@@ -23,8 +23,8 @@ use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
 use crate::android::system::keystore2::KeyParameters::KeyParameters;
 use crate::android::system::keystore2::OperationChallenge::OperationChallenge;
 use crate::hook::binder::{
-    flat_binder_object, BINDER_TYPE_BINDER, BINDER_TYPE_HANDLE, BINDER_TYPE_WEAK_BINDER,
-    BINDER_TYPE_WEAK_HANDLE,
+    binder_object_header, flat_binder_object, flat_binder_object_handle_or_ptr, BINDER_TYPE_BINDER,
+    BINDER_TYPE_HANDLE, BINDER_TYPE_WEAK_BINDER, BINDER_TYPE_WEAK_HANDLE,
 };
 use crate::identify::{
     authorization_method_from_code, maintenance_method_from_code, operation_method_from_code,
@@ -753,6 +753,67 @@ pub fn build_get_security_level_reply(
     Ok(owned_reply_from_parcel(parcel, [binder_offset]))
 }
 
+pub fn build_get_security_level_reply_with_carrier_bytes(
+    carrier_bytes: &[u8],
+    carrier_is_object: bool,
+) -> Result<OwnedReply> {
+    let mut parcel = Parcel::new();
+    parcel.write(&Status::from(StatusCode::Ok))?;
+    let start = parcel.data_position();
+    let (placeholder_start, placeholder_end) =
+        write_none_binder_placeholder::<dyn IKeystoreSecurityLevel>(&mut parcel)?;
+    debug_assert_eq!(start, placeholder_start);
+    let binder_len = placeholder_end - placeholder_start;
+    if carrier_bytes.len() != binder_len {
+        bail!(
+            "get-security-level carrier binder size mismatch: expected {}, got {}",
+            binder_len,
+            carrier_bytes.len()
+        );
+    }
+
+    let mut reply = owned_reply_from_parcel(parcel, carrier_is_object.then_some(start));
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            carrier_bytes.as_ptr(),
+            reply.data_mut_ptr().add(start),
+            carrier_bytes.len(),
+        );
+    }
+    Ok(reply)
+}
+
+pub fn build_interface_descriptor_reply(descriptor: &str) -> Result<OwnedReply> {
+    let mut parcel = Parcel::new();
+    parcel.write(&descriptor.to_string())?;
+    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
+}
+
+pub fn build_local_binder_carrier_bytes(
+    ptr: libc::c_ulong,
+    cookie: libc::c_ulong,
+    flags: u32,
+    stability: i32,
+) -> Vec<u8> {
+    let object = flat_binder_object {
+        hdr: binder_object_header {
+            type_: BINDER_TYPE_BINDER,
+        },
+        flags,
+        handle_or_ptr: flat_binder_object_handle_or_ptr { binder: ptr },
+        cookie,
+    };
+    let mut bytes = vec![0u8; size_of::<flat_binder_object>() + size_of::<i32>()];
+    unsafe {
+        std::ptr::write_unaligned(bytes.as_mut_ptr() as *mut flat_binder_object, object);
+        std::ptr::write_unaligned(
+            bytes.as_mut_ptr().add(size_of::<flat_binder_object>()) as *mut i32,
+            stability,
+        );
+    }
+    bytes
+}
+
 fn build_sized_parcelable_reply<F>(write_payload: F) -> Result<OwnedReply>
 where
     F: FnOnce(&mut Parcel, &mut Option<usize>) -> std::result::Result<(), StatusCode>,
@@ -1129,11 +1190,15 @@ fn contains_utf16_token(parcel: &[u8], token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+    use crate::android::hardware::security::keymint::{
+        KeyParameter::KeyParameter, KeyParameterValue::KeyParameterValue,
+        SecurityLevel::SecurityLevel, Tag::Tag,
+    };
     use crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse;
     use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
     use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
     use crate::android::system::keystore2::KeyMetadata::KeyMetadata;
+    use crate::android::system::keystore2::KeyParameters::KeyParameters;
     use crate::android::system::keystore2::OperationChallenge::OperationChallenge;
 
     fn raw_parts(reply: &mut OwnedReply) -> (*mut u8, usize, *mut usize, usize) {
@@ -1285,9 +1350,15 @@ mod tests {
     #[test]
     fn create_operation_carrier_reply_preserves_operation_challenge() {
         let carrier = null_operation_carrier_bytes();
+        let nonce = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let mut reply = build_create_operation_reply_with_carrier_bytes(
             Some(OperationChallenge { challenge: 0x5678 }),
-            None,
+            Some(KeyParameters {
+                keyParameter: vec![KeyParameter {
+                    tag: Tag::NONCE,
+                    value: KeyParameterValue::Blob(nonce.clone()),
+                }],
+            }),
             Some(vec![1, 2, 3]),
             &carrier,
             false,
@@ -1303,6 +1374,19 @@ mod tests {
                 .map(|challenge| challenge.challenge),
             Some(0x5678)
         );
+        let parsed_nonce = parsed.r#parameters.as_ref().and_then(|parameters| {
+            parameters.keyParameter.iter().find_map(|parameter| {
+                if parameter.tag == Tag::NONCE {
+                    match &parameter.value {
+                        KeyParameterValue::Blob(value) => Some(value.as_slice()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+        });
+        assert_eq!(parsed_nonce, Some(nonce.as_slice()));
         assert_eq!(parsed.r#upgradedBlob.as_deref(), Some(&[1, 2, 3][..]));
     }
 }

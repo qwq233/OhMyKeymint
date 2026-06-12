@@ -14,4 +14,4 @@
 - Keep it as pure Rust lang project unless you get approval.
 - Things in `refs` folder are just references. They will not be complied or sth. Don't take it too serious.
 - Any chaneges to the `config` should be reflected to the READMD.md and template
-- Run unit test on the real Android device after finishing your tasks.
+- You must run unit test on the real Android device after finishing your tasks unless device unavailable.

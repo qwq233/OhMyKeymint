@@ -21,8 +21,8 @@ kmr-crypto-boring = { path = "boringssl" }
 kmr-ta = { path = "ta" }
 kmr-wire = { path = "wire" }
 libc = "0.2.186"
-prost = "0.14.3"
-prost-types = "0.14.3"
+prost = "0.14.4"
+prost-types = "0.14.4"
 hex = "0.4.3"
 log4rs = "1.4.0"
 log = "0.4.32"
@@ -43,7 +43,7 @@ libsqlite3-sys = "0.38.0"
 rand = "0.10.1"
 der = "0.8.0"
 toml = "1.1.0"
-regex = "1.12.3"
+regex = "1.12.4"
 hotwatch = "0.5.0"
 base64 = "0.22.1"
 quick-xml = { version = "0.40.1", features = ["serialize"] }
@@ -89,7 +89,7 @@ watchdog_rs = { path = "watchdog" }
 injector = { path = "injector" }
 
 [build-dependencies]
-prost-build = "0.14.3"
+prost-build = "0.14.4"
 rsbinder-aidl = "0.8.0"
 
 [dev-dependencies]

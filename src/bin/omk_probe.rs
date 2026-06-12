@@ -11,8 +11,8 @@ use android::hardware::security::keymint::{
     SecurityLevel::SecurityLevel, Tag::Tag,
 };
 use android::system::keystore2::{
-    AuthenticatorSpec::AuthenticatorSpec, Domain::Domain,
-    EphemeralStorageKeyResponse::EphemeralStorageKeyResponse,
+    AuthenticatorSpec::AuthenticatorSpec, CreateOperationResponse::CreateOperationResponse,
+    Domain::Domain, EphemeralStorageKeyResponse::EphemeralStorageKeyResponse,
     IKeystoreOperation::IKeystoreOperation, KeyDescriptor::KeyDescriptor,
     ResponseCode::ResponseCode,
 };
@@ -98,13 +98,8 @@ fn run() -> Result<()> {
     };
     let generated_key = expect_blob_key(&generated.key, "generated AES-GCM key")?;
 
-    let create_response = level
-        .createOperation(None, &generated_key, &create_operation_params(), false)
-        .context("createOperation(AES-GCM) failed")?;
-    let operation = create_response
-        .iOperation
-        .context("createOperation returned no IKeystoreOperation")?;
-    exercise_operation(&operation).context("operation lifecycle smoke failed")?;
+    exercise_aes_gcm_round_trip(&level, &generated_key)
+        .context("AES-GCM round-trip smoke failed")?;
 
     let abort_response = level
         .createOperation(None, &generated_key, &create_operation_params(), false)
@@ -203,6 +198,10 @@ fn generate_aes_gcm_params() -> Vec<KeyParameter> {
             KeyParameterValue::KeyPurpose(KeyPurpose::ENCRYPT),
         ),
         kp(
+            Tag::PURPOSE,
+            KeyParameterValue::KeyPurpose(KeyPurpose::DECRYPT),
+        ),
+        kp(
             Tag::BLOCK_MODE,
             KeyParameterValue::BlockMode(BlockMode::GCM),
         ),
@@ -210,6 +209,7 @@ fn generate_aes_gcm_params() -> Vec<KeyParameter> {
             Tag::PADDING,
             KeyParameterValue::PaddingMode(PaddingMode::NONE),
         ),
+        kp(Tag::NO_AUTH_REQUIRED, KeyParameterValue::BoolValue(true)),
         kp(Tag::MIN_MAC_LENGTH, KeyParameterValue::Integer(128)),
     ]
 }
@@ -232,6 +232,25 @@ fn create_operation_params() -> Vec<KeyParameter> {
     ]
 }
 
+fn create_decrypt_operation_params(nonce: &[u8]) -> Vec<KeyParameter> {
+    vec![
+        kp(
+            Tag::PURPOSE,
+            KeyParameterValue::KeyPurpose(KeyPurpose::DECRYPT),
+        ),
+        kp(
+            Tag::BLOCK_MODE,
+            KeyParameterValue::BlockMode(BlockMode::GCM),
+        ),
+        kp(
+            Tag::PADDING,
+            KeyParameterValue::PaddingMode(PaddingMode::NONE),
+        ),
+        kp(Tag::MAC_LENGTH, KeyParameterValue::Integer(128)),
+        kp(Tag::NONCE, KeyParameterValue::Blob(nonce.to_vec())),
+    ]
+}
+
 fn import_storage_key_params() -> Vec<KeyParameter> {
     vec![
         kp(Tag::ALGORITHM, KeyParameterValue::Algorithm(Algorithm::AES)),
@@ -240,23 +259,73 @@ fn import_storage_key_params() -> Vec<KeyParameter> {
     ]
 }
 
-fn exercise_operation(operation: &Strong<dyn IKeystoreOperation>) -> Result<()> {
-    operation
-        .updateAad(b"a")
-        .context("updateAad() failed on probe operation")?;
-    let first_chunk = operation
-        .update(b"hello")
-        .context("update() failed on probe operation")?;
+fn expect_operation(response: CreateOperationResponse) -> Result<Strong<dyn IKeystoreOperation>> {
+    response
+        .iOperation
+        .context("createOperation returned no IKeystoreOperation")
+}
+
+fn extract_nonce(response: &CreateOperationResponse) -> Result<Vec<u8>> {
+    response
+        .parameters
+        .as_ref()
+        .and_then(|parameters| {
+            parameters.keyParameter.iter().find_map(|parameter| {
+                if parameter.tag == Tag::NONCE {
+                    match &parameter.value {
+                        KeyParameterValue::Blob(nonce) => Some(nonce.clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+        })
+        .context("encrypt createOperation response did not return a NONCE")
+}
+
+fn finish_with_input(operation: &Strong<dyn IKeystoreOperation>, input: &[u8]) -> Result<Vec<u8>> {
+    Ok(operation.finish(Some(input), None)?.unwrap_or_default())
+}
+
+fn exercise_aes_gcm_round_trip(
+    level: &Strong<dyn IOhMySecurityLevel>,
+    key: &KeyDescriptor,
+) -> Result<()> {
+    let plaintext = b"duck_aes_gcm_probe";
+
+    let encrypt_response = level
+        .createOperation(None, key, &create_operation_params(), false)
+        .context("createOperation(AES-GCM encrypt) failed")?;
+    let nonce = extract_nonce(&encrypt_response)?;
+    let encrypt_operation = expect_operation(encrypt_response)?;
+    let ciphertext = finish_with_input(&encrypt_operation, plaintext)
+        .context("finish(AES-GCM encrypt input) failed")?;
+    if ciphertext.is_empty() {
+        return Err(anyhow!("AES-GCM encrypt returned empty ciphertext"));
+    }
+
+    let decrypt_response = level
+        .createOperation(None, key, &create_decrypt_operation_params(&nonce), false)
+        .context("createOperation(AES-GCM decrypt) failed")?;
+    let decrypt_operation = expect_operation(decrypt_response)?;
+    let decrypted = finish_with_input(&decrypt_operation, &ciphertext)
+        .context("finish(AES-GCM decrypt input) failed")?;
+    if decrypted != plaintext {
+        return Err(anyhow!(
+            "AES-GCM round-trip mismatch: plaintext_len={} decrypted_len={} ciphertext_len={} nonce_len={}",
+            plaintext.len(),
+            decrypted.len(),
+            ciphertext.len(),
+            nonce.len()
+        ));
+    }
+
     println!(
-        "operation update output size: {}",
-        first_chunk.as_ref().map_or(0, Vec::len)
-    );
-    let finish_chunk = operation
-        .finish(None, None)
-        .context("finish() failed on probe operation")?;
-    println!(
-        "operation finish output size: {}",
-        finish_chunk.as_ref().map_or(0, Vec::len)
+        "AES-GCM round-trip ok: plaintext_len={} ciphertext_len={} nonce_len={}",
+        plaintext.len(),
+        ciphertext.len(),
+        nonce.len()
     );
     Ok(())
 }

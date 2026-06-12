@@ -606,8 +606,7 @@ pub struct RawTrustConfig {
 impl Default for RawTrustConfig {
     fn default() -> Self {
         Self {
-            os_version: kmr_common::android_version::android_major_version()
-                .unwrap_or(16),
+            os_version: kmr_common::android_version::android_major_version().unwrap_or(16),
             security_patch: "auto".to_string(),
             vb_key: TrustValueSpec::Auto,
             vb_hash: TrustValueSpec::Auto,
