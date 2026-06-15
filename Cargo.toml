@@ -8,10 +8,6 @@ license = "AGPL-3.0-or-later"
 name = "keymint"
 path = "src/main.rs"
 
-[[bin]]
-name = "aosp_tamper_probe"
-path = "tests/bin/aosp_tamper_probe.rs"
-
 [dependencies]
 jni = "0.22.4"
 syscalls = "0.8.1"
