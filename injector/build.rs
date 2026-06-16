@@ -19,7 +19,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TARGET");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
-        println!("cargo:rustc-link-arg-bin=inject=-Wl,--export-dynamic");
+        println!("cargo:rustc-link-arg-bin=inject=-Wl,--export-dynamic-symbol=entry");
     }
 
     let build_target = std::env::var("TARGET").unwrap_or_else(|_| "unknown-target".to_string());
