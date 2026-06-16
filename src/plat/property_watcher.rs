@@ -31,7 +31,7 @@ impl PropertyWatcher {
         let system_props = rsproperties::system_properties();
         let val = system_props.find(&self.name)?;
         if let Some(val) = val {
-            system_props.wait(Some(&val), None);
+            system_props.wait(Some(&val), None, None);
             Ok(())
         } else {
             Err(anyhow!("Property '{}' not found", self.name))

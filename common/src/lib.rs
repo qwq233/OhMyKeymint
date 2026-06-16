@@ -16,13 +16,14 @@
 
 use core::convert::From;
 use der::ErrorKind;
-use kmr_wire::{cbor, keymint::ErrorCode, rpc, CborError};
+use kmr_wire::{cbor, keymint::ErrorCode, rpc as wire_rpc, CborError};
 
 pub use kmr_wire as wire;
 
 pub mod android_version;
 pub mod crypto;
 pub mod keyblob;
+pub mod rpc;
 pub mod runtime;
 pub mod tag;
 
@@ -40,7 +41,7 @@ pub enum Error {
     Hal(ErrorCode, String),
     /// Error as reported on the `IRemotelyProvisionedComponent` HAL, which uses its own error
     /// codes.
-    Rpc(rpc::ErrorCode, String),
+    Rpc(wire_rpc::ErrorCode, String),
     /// Memory allocation error.
     ///
     /// This holds a string literal rather than an allocated `String` to avoid allocating in an
@@ -92,7 +93,7 @@ macro_rules! der_err {
     }
 }
 
-/// Macro to build an [`Error::Rpc`] instance for a specific [`rpc::ErrorCode`] value known at
+/// Macro to build an [`Error::Rpc`] instance for a specific RPC error code value known at
 /// compile time: `rpc_err!(Removed, "some {} format", arg)`.
 #[macro_export]
 macro_rules! rpc_err {

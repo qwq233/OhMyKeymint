@@ -22,7 +22,7 @@ prost-types = "0.14.4"
 hex = "0.4.3"
 log4rs = "1.4.0"
 log = "0.4.32"
-rsbinder = { version = "0.8.0", features = ["android_12_plus"] }
+rsbinder = { version = "0.9.0", features = ["android_12_plus", "rpc"] }
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 anyhow = "1.0.102"
 async-trait = "0.1.89"
@@ -34,7 +34,7 @@ serde_json = "1.0.150"
 x509-cert = "0.2.5"
 watchdog_rs = { path = "watchdog", version = "0.1.0" }
 nix = { version = "0.31.3", features = ["mman"] }
-rsproperties = { version = "0.4.0", features = ["builder"] }
+rsproperties = { version = "0.5.0", features = ["builder"] }
 libsqlite3-sys = "0.38.0"
 rand = "0.10.1"
 der = "0.8.0"
@@ -86,7 +86,7 @@ injector = { path = "injector" }
 
 [build-dependencies]
 prost-build = "0.14.4"
-rsbinder-aidl = "0.8.0"
+rsbinder-aidl = "0.9.0"
 
 [dev-dependencies]
 rcgen = "0.14.8"

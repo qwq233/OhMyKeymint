@@ -7,3 +7,6 @@ pub const KEYMASTER_BLOB_HW_PREFIX: &[u8] = b"pKMblob\x00";
 /// software emulation device that has been wrapped by km_compat. (The final one
 /// byte indicates that the blob is software emulated.)
 pub const KEYMASTER_BLOB_SW_PREFIX: &[u8] = b"pKMblob\x01";
+
+pub const AID_ROOT: u32 = 0;
+pub const AID_KEYSTORE: u32 = 1017;

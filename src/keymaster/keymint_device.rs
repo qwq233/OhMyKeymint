@@ -27,7 +27,8 @@ use crate::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
 };
 use crate::config::{config, CryptoConfig};
-use crate::global::{AID_KEYSTORE, DB};
+use crate::global::DB;
+use crate::consts::AID_KEYSTORE;
 use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_km_error, map_ks_error, map_ks_result};
 use crate::keymaster::utils::{key_creation_result_to_aidl, key_params_to_aidl};

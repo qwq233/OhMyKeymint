@@ -1,12 +1,17 @@
 use std::ffi::{c_void, CString};
 use std::mem::{offset_of, size_of};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use kmr_common::rpc;
 use log::{debug, error, info, warn};
 use nix::{sys::signal::Signal, unistd::Pid};
 use rand::TryRng;
+use rsbinder::rpc::RpcSession;
 
 use crate::sys::wait_pid;
 use crate::{sys, utils};
@@ -14,6 +19,8 @@ use crate::{sys, utils};
 const ANDROID_DLEXT_USE_LIBRARY_FD: u64 = 0x10;
 const CMSG_STORAGE_WORDS: usize = 4;
 const REMOTE_PAYLOAD_STATE_PATH: &str = "/data/adb/omk/injector.payload";
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+const READY_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 #[repr(C)]
 struct android_dlextinfo {
@@ -24,6 +31,16 @@ struct android_dlextinfo {
     library_fd: i32,
     library_fd_offset: i64,
     library_namespace: *mut c_void,
+}
+
+struct RawFdGuard(RawFd);
+
+impl Drop for RawFdGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.0);
+        }
+    }
 }
 
 fn log_loader_abi() {
@@ -280,7 +297,244 @@ fn validate_received_remote_fd(
     Ok(fd)
 }
 
+fn send_fd_to_remote<F, G, H>(
+    pid: Pid,
+    local_fd: RawFd,
+    label: &str,
+    socket_addr: usize,
+    bind_addr: usize,
+    recvmsg_addr: usize,
+    libc_return_addr: usize,
+    push_to_remote_stack: &mut F,
+    get_remote_errno: &G,
+    close_remote: &H,
+) -> Result<i32>
+where
+    F: FnMut(&[u8]) -> Result<usize>,
+    G: Fn() -> Result<i32>,
+    H: Fn(i32) -> Result<()>,
+{
+    let local_socket =
+        unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if local_socket == -1 {
+        bail!(
+            "Failed to create local {label} handoff socket: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let _local_sock_guard = RawFdGuard(local_socket);
+
+    let args = vec![
+        libc::AF_UNIX as usize,
+        (libc::SOCK_DGRAM | libc::SOCK_CLOEXEC) as usize,
+        0,
+    ];
+    let remote_socket =
+        remote_c_int_result(sys::remote_call(pid, socket_addr, libc_return_addr, &args)?);
+    if remote_socket == -1 {
+        let err = get_remote_errno()?;
+        bail!("Failed to create remote {label} handoff socket. Remote errno: {err}");
+    }
+
+    let mut magic_bytes = Vec::with_capacity(16);
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .subsec_nanos();
+    for i in 0..16 {
+        magic_bytes.push(b'a' + ((time.wrapping_add(i) % 26) as u8));
+    }
+
+    let (addr_bytes, addr_len) = build_remote_abstract_sockaddr_bytes(&magic_bytes)?;
+    debug!(
+        "Generated {label} handoff socket: @{}",
+        String::from_utf8_lossy(&magic_bytes)
+    );
+
+    let remote_addr_ptr = push_to_remote_stack(&addr_bytes)?;
+    let args = vec![remote_socket as usize, remote_addr_ptr, addr_len];
+    let bind_res = remote_c_int_result(sys::remote_call(pid, bind_addr, libc_return_addr, &args)?);
+    if bind_res == -1 {
+        let err = get_remote_errno()?;
+        close_remote(remote_socket)?;
+        bail!("Failed to bind remote {label} handoff socket. Remote errno: {err}");
+    }
+
+    let cmsg_space = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) as usize };
+    let remote_cmsg_storage = [0usize; CMSG_STORAGE_WORDS];
+    let remote_cmsg_bytes = unsafe {
+        std::slice::from_raw_parts(remote_cmsg_storage.as_ptr() as *const u8, cmsg_space)
+    };
+    let remote_cmsg_ptr = push_to_remote_stack(remote_cmsg_bytes)?;
+    let remote_payload_storage = push_to_remote_stack(&[0u8])?;
+    let remote_iov = libc::iovec {
+        iov_base: remote_payload_storage as *mut c_void,
+        iov_len: 1,
+    };
+    let remote_iov_bytes = unsafe {
+        std::slice::from_raw_parts(
+            &remote_iov as *const _ as *const u8,
+            size_of::<libc::iovec>(),
+        )
+    };
+    let remote_iov_ptr = push_to_remote_stack(remote_iov_bytes)?;
+
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = remote_iov_ptr as *mut libc::iovec;
+    msg.msg_iovlen = 1;
+    msg.msg_control = remote_cmsg_ptr as *mut c_void;
+    msg.msg_controllen = cmsg_space;
+
+    let msg_bytes = unsafe {
+        std::slice::from_raw_parts(&msg as *const _ as *const u8, size_of::<libc::msghdr>())
+    };
+    let remote_msg_ptr = push_to_remote_stack(msg_bytes)?;
+
+    let recvmsg_call = sys::remote_pre_call(
+        pid,
+        recvmsg_addr,
+        libc_return_addr,
+        &[
+            remote_socket as usize,
+            remote_msg_ptr,
+            libc::MSG_WAITALL as usize,
+        ],
+    )?;
+
+    let mut local_dest_addr = build_local_abstract_sockaddr(&magic_bytes)?;
+    let mut local_cmsg_storage = [0usize; CMSG_STORAGE_WORDS];
+    let mut payload_byte = [0x42u8];
+    let mut local_iov = libc::iovec {
+        iov_base: payload_byte.as_mut_ptr() as *mut c_void,
+        iov_len: payload_byte.len(),
+    };
+
+    let mut local_hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+    local_hdr.msg_name = &mut local_dest_addr as *mut _ as *mut c_void;
+    local_hdr.msg_namelen = addr_len as u32;
+    local_hdr.msg_iov = &mut local_iov;
+    local_hdr.msg_iovlen = 1;
+    local_hdr.msg_control = local_cmsg_storage.as_mut_ptr() as *mut c_void;
+    local_hdr.msg_controllen = cmsg_space;
+
+    debug!(
+        "{label} cmsg buffer ptr=0x{:x} align={} remote cmsg ptr=0x{:x} align={}",
+        local_hdr.msg_control as usize,
+        (local_hdr.msg_control as usize) % size_of::<usize>(),
+        remote_cmsg_ptr,
+        remote_cmsg_ptr % size_of::<usize>()
+    );
+
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&local_hdr);
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as usize;
+        *(libc::CMSG_DATA(cmsg) as *mut libc::c_int) = local_fd;
+    }
+
+    let send_res = unsafe { libc::sendmsg(local_socket, &local_hdr, 0) };
+    if send_res == -1 {
+        let send_error = std::io::Error::last_os_error();
+        if let Err(cancel_error) = sys::remote_cancel_call(pid, recvmsg_call) {
+            return Err(
+                anyhow!("Failed to send {label} fd locally: {send_error}").context(format!(
+                    "failed to cancel remote recvmsg after local sendmsg failure: {cancel_error:#}"
+                )),
+            );
+        }
+        if let Err(close_error) = close_remote(remote_socket) {
+            return Err(
+                anyhow!("Failed to send {label} fd locally: {send_error}").context(format!(
+                    "failed to close remote socket after canceling recvmsg: {close_error:#}"
+                )),
+            );
+        }
+        bail!("Failed to send {label} fd locally: {send_error}");
+    }
+    debug!("Sent {label} fd {local_fd} to remote abstract socket");
+
+    let recv_status = sys::remote_post_call_with_status(pid, recvmsg_call);
+    let recv_res = match recv_status.result {
+        Ok(recv_res) => recv_res as isize,
+        Err(error) => {
+            if recv_status.restored {
+                if let Err(close_error) = close_remote(remote_socket) {
+                    return Err(error.context(format!(
+                        "remote recvmsg for {label} failed after register restore; remote socket close also failed: {close_error:#}"
+                    )));
+                }
+                return Err(error.context(format!(
+                    "remote recvmsg for {label} failed after register restore"
+                )));
+            }
+            return Err(error.context(format!(
+                "remote recvmsg for {label} failed and register restore failed; remote socket not closed because tracee state is uncertain"
+            )));
+        }
+    };
+
+    if recv_res == -1 {
+        let err = get_remote_errno()?;
+        close_remote(remote_socket)?;
+        bail!("remote recvmsg for {label} failed with errno {err}");
+    }
+
+    debug!("remote recvmsg for {label} completed: payload_bytes={recv_res}");
+
+    let mut remote_msg_data = vec![0u8; size_of::<libc::msghdr>()];
+    sys::read_stack(pid, remote_msg_ptr, &mut remote_msg_data)?;
+    let remote_msg =
+        unsafe { std::ptr::read_unaligned(remote_msg_data.as_ptr() as *const libc::msghdr) };
+    debug!(
+        "{label} remote msghdr after recvmsg: msg_controllen={} msg_flags=0x{:x}",
+        remote_msg.msg_controllen, remote_msg.msg_flags
+    );
+
+    let mut remote_cmsg_data = vec![0u8; cmsg_space];
+    sys::read_stack(pid, remote_cmsg_ptr, &mut remote_cmsg_data)?;
+    let fd = validate_received_remote_fd(&remote_msg, recv_res, &remote_cmsg_data, remote_socket)
+        .with_context(|| format!("failed to validate remote {label} fd from SCM_RIGHTS"))?;
+    debug!("Remote received {label} fd: {fd}");
+    close_remote(remote_socket)?;
+    Ok(fd)
+}
+
+fn check_rpc_ready_once() -> Result<()> {
+    let session = RpcSession::setup_unix_client_android13plus(rpc::SOCKET, rpc::WIRE_MAX_VERSION)
+        .context("failed to connect to OMK RPC socket")?;
+    session
+        .get_service(rpc::SERVICE)
+        .context("failed to resolve OMK RPC service")?;
+    Ok(())
+}
+
+fn wait_for_rpc_ready() -> Result<()> {
+    let start = Instant::now();
+    let mut last_error: Option<anyhow::Error> = None;
+
+    while start.elapsed() < READY_TIMEOUT {
+        match check_rpc_ready_once() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                thread::sleep(READY_RETRY_DELAY);
+            }
+        }
+    }
+
+    match last_error {
+        Some(error) => Err(error).context("OMK RPC server did not become ready in time"),
+        None => bail!("OMK RPC server did not become ready in time"),
+    }
+}
+
+fn open_payload_rpc_stream() -> Result<UnixStream> {
+    UnixStream::connect(rpc::SOCKET).context("failed to connect OMK RPC socket for payload")
+}
+
 pub fn inject_library(pid: Pid) -> Result<()> {
+    wait_for_rpc_ready()?;
+
     let self_path =
         std::fs::read_link("/proc/self/exe").context("Failed to read link /proc/self/exe")?;
 
@@ -477,34 +731,6 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         Ok(())
     };
 
-    // Keep the old sockcreate tweak as best-effort only; the main path uses
-    // the already deployed injector image and no longer stages an extra copy.
-    if let Err(error) = utils::set_sockcreate_con("u:object_r:system_file:s0") {
-        warn!("[Injector][Loader] sockcreate context setup failed: {error:#}");
-    }
-
-    // Create local socket
-    let local_socket =
-        unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
-    if local_socket == -1 {
-        bail!(
-            "Failed to create local socket: {}",
-            std::io::Error::last_os_error()
-        );
-    }
-    // Ensure local socket is closed when we drop/exit
-    let _local_sock_guard = {
-        // Simple scope guard to close fd
-        struct FdGuard(i32);
-        impl Drop for FdGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    libc::close(self.0);
-                }
-            }
-        }
-        FdGuard(local_socket)
-    };
     let local_lib_file = std::fs::File::open(self_path).with_context(|| {
         format!(
             "Failed to open deployed payload image {}",
@@ -519,229 +745,46 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         payload_identifier,
         utils::sha256_file(self_path).unwrap_or_else(|_| "<unavailable>".to_string())
     );
+    let rpc_stream = open_payload_rpc_stream()?;
 
-    let args = vec![
-        libc::AF_UNIX as usize,
-        (libc::SOCK_DGRAM | libc::SOCK_CLOEXEC) as usize,
-        0,
-    ];
-    let remote_fd =
-        remote_c_int_result(sys::remote_call(pid, socket_addr, libc_return_addr, &args)?);
-    if remote_fd == -1 {
-        let err = get_remote_errno()?;
-        bail!("Failed to create remote socket. Remote errno: {}", err);
+    // Keep the old sockcreate tweak as best-effort only; the main path uses
+    // the already deployed injector image and no longer stages an extra copy.
+    if let Err(error) = utils::set_sockcreate_con("u:object_r:system_file:s0") {
+        warn!("[Injector][Loader] sockcreate context setup failed: {error:#}");
     }
 
-    // generate magic socket name
-    let mut magic_bytes = Vec::with_capacity(16);
-    let time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .subsec_nanos();
-    for i in 0..16 {
-        magic_bytes.push(b'a' + ((time.wrapping_add(i) % 26) as u8)); // a-z
-    }
-
-    let (addr_bytes, addr_len) = build_remote_abstract_sockaddr_bytes(&magic_bytes)?;
-
-    debug!(
-        "Generated magic socket: @{}",
-        String::from_utf8_lossy(&magic_bytes)
-    );
-
-    let remote_addr_ptr = push_to_remote_stack(&addr_bytes)?;
-
-    let args = vec![remote_fd as usize, remote_addr_ptr, addr_len];
-    let bind_res = remote_c_int_result(sys::remote_call(pid, bind_addr, libc_return_addr, &args)?);
-    if bind_res == -1 {
-        let err = get_remote_errno()?;
-        close_remote(remote_fd)?;
-        bail!("Failed to bind remote socket. Remote errno: {}", err);
-    }
-
-    // CMSG buffer
-    let cmsg_space =
-        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) as usize };
-    let remote_cmsg_storage = [0usize; CMSG_STORAGE_WORDS];
-    let remote_cmsg_bytes = unsafe {
-        std::slice::from_raw_parts(remote_cmsg_storage.as_ptr() as *const u8, cmsg_space)
-    };
-    let remote_cmsg_ptr = push_to_remote_stack(remote_cmsg_bytes)?;
-    let remote_payload_storage = push_to_remote_stack(&[0u8])?;
-    let remote_iov = libc::iovec {
-        iov_base: remote_payload_storage as *mut c_void,
-        iov_len: 1,
-    };
-    let remote_iov_bytes = unsafe {
-        std::slice::from_raw_parts(
-            &remote_iov as *const _ as *const u8,
-            size_of::<libc::iovec>(),
-        )
-    };
-    let remote_iov_ptr = push_to_remote_stack(remote_iov_bytes)?;
-
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = remote_iov_ptr as *mut libc::iovec;
-    msg.msg_iovlen = 1;
-    msg.msg_control = remote_cmsg_ptr as *mut c_void;
-    msg.msg_controllen = cmsg_space;
-
-    let msg_bytes = unsafe {
-        std::slice::from_raw_parts(
-            &msg as *const _ as *const u8,
-            std::mem::size_of::<libc::msghdr>(),
-        )
-    };
-    let remote_msg_ptr = push_to_remote_stack(msg_bytes)?;
-
-    let recvmsg_call = sys::remote_pre_call(
+    let remote_lib_fd = match send_fd_to_remote(
         pid,
+        local_lib_fd,
+        "payload image",
+        socket_addr,
+        bind_addr,
         recvmsg_addr,
         libc_return_addr,
-        &[
-            remote_fd as usize,
-            remote_msg_ptr,
-            libc::MSG_WAITALL as usize,
-        ],
-    )?;
-
-    // 6b. Sendmsg (Local) -> Send the FD
-    // Construct local address to send TO
-    let mut local_dest_addr = build_local_abstract_sockaddr(&magic_bytes)?;
-
-    // Construct Control Message
-    // Requires explicit CMSG construction
-    let mut local_cmsg_storage = [0usize; CMSG_STORAGE_WORDS];
-    let mut payload_byte = [0x42u8];
-    let mut local_iov = libc::iovec {
-        iov_base: payload_byte.as_mut_ptr() as *mut c_void,
-        iov_len: payload_byte.len(),
-    };
-
-    let mut local_hdr: libc::msghdr = unsafe { std::mem::zeroed() };
-    local_hdr.msg_name = &mut local_dest_addr as *mut _ as *mut c_void;
-    local_hdr.msg_namelen = addr_len as u32;
-    local_hdr.msg_iov = &mut local_iov;
-    local_hdr.msg_iovlen = 1;
-    local_hdr.msg_control = local_cmsg_storage.as_mut_ptr() as *mut c_void;
-    local_hdr.msg_controllen = cmsg_space;
-
-    debug!(
-        "[Injector][Loader] local cmsg buffer ptr=0x{:x} align={} remote cmsg ptr=0x{:x} align={}",
-        local_hdr.msg_control as usize,
-        (local_hdr.msg_control as usize) % size_of::<usize>(),
-        remote_cmsg_ptr,
-        remote_cmsg_ptr % size_of::<usize>()
-    );
-
-    unsafe {
-        let cmsg = libc::CMSG_FIRSTHDR(&local_hdr);
-        (*cmsg).cmsg_level = libc::SOL_SOCKET;
-        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as usize;
-        *(libc::CMSG_DATA(cmsg) as *mut libc::c_int) = local_lib_fd;
-        // NOTE: Keep msg_controllen as cmsg_space (CMSG_SPACE), not cmsg_len.
-        // The kernel expects the full CMSG_SPACE which includes alignment padding.
-    }
-
-    let send_res = unsafe { libc::sendmsg(local_socket, &local_hdr, 0) };
-    if send_res == -1 {
-        let send_error = std::io::Error::last_os_error();
-        if let Err(cancel_error) = sys::remote_cancel_call(pid, recvmsg_call) {
-            return Err(
-                anyhow!("Failed to send FD locally: {send_error}").context(format!(
-                    "failed to cancel remote recvmsg after local sendmsg failure: {cancel_error:#}"
-                )),
-            );
-        }
-        if let Err(close_error) = close_remote(remote_fd) {
-            return Err(
-                anyhow!("Failed to send FD locally: {send_error}").context(format!(
-                    "failed to close remote socket after canceling recvmsg: {close_error:#}"
-                )),
-            );
-        }
-        bail!("Failed to send FD locally: {}", send_error);
-    }
-    debug!("Sent FD {} to remote abstract socket", local_lib_fd);
-
-    let recv_status = sys::remote_post_call_with_status(pid, recvmsg_call);
-    let recv_res = match recv_status.result {
-        Ok(recv_res) => recv_res as isize,
+        &mut push_to_remote_stack,
+        &get_remote_errno,
+        &close_remote,
+    ) {
+        Ok(fd) => fd,
         Err(error) => {
-            if recv_status.restored {
-                if let Err(close_error) = close_remote(remote_fd) {
-                    return Err(error.context(format!(
-                        "remote recvmsg failed after register restore; remote socket close also failed: {close_error:#}"
-                    )));
-                }
-                return Err(error.context("remote recvmsg failed after register restore"));
-            }
-            return Err(error.context(
-                "remote recvmsg failed and register restore failed; remote socket not closed because tracee state is uncertain",
-            ));
-        }
-    };
-
-    let remote_lib_fd = if recv_res == -1 {
-        let err = get_remote_errno()?;
-        close_remote(remote_fd)?;
-        warn!(
-            "[Injector][Loader] remote recvmsg failed with errno {}; trying direct fallback via {}",
-            err,
-            self_path.display()
-        );
-        open_remote_payload_fd_from_path(
-            pid,
-            open_addr,
-            libc_return_addr,
-            self_path,
-            &mut push_to_remote_stack,
-            &get_remote_errno,
-        )?
-    } else {
-        debug!(
-            "[Injector][Loader] remote recvmsg completed: payload_bytes={}",
-            recv_res
-        );
-
-        let mut remote_msg_data = vec![0u8; size_of::<libc::msghdr>()];
-        sys::read_stack(pid, remote_msg_ptr, &mut remote_msg_data)?;
-        let remote_msg =
-            unsafe { std::ptr::read_unaligned(remote_msg_data.as_ptr() as *const libc::msghdr) };
-        debug!(
-            "[Injector][Loader] remote msghdr after recvmsg: msg_controllen={} msg_flags=0x{:x}",
-            remote_msg.msg_controllen, remote_msg.msg_flags
-        );
-
-        let mut remote_cmsg_data = vec![0u8; cmsg_space];
-        sys::read_stack(pid, remote_cmsg_ptr, &mut remote_cmsg_data)?;
-        match validate_received_remote_fd(&remote_msg, recv_res, &remote_cmsg_data, remote_fd) {
-            Ok(fd) => {
-                debug!("Remote received FD: {}", fd);
-                close_remote(remote_fd)?;
-                fd
-            }
-            Err(error) => {
-                close_remote(remote_fd)?;
-                warn!(
-                    "[Injector][Loader] SCM_RIGHTS payload handoff failed: {error:#}. Trying direct fallback via {}.",
+            warn!(
+                "[Injector][Loader] SCM_RIGHTS payload handoff failed: {error:#}. Trying direct fallback via {}.",
+                self_path.display()
+            );
+            open_remote_payload_fd_from_path(
+                pid,
+                open_addr,
+                libc_return_addr,
+                self_path,
+                &mut push_to_remote_stack,
+                &get_remote_errno,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to hand off payload fd and could not reopen {} directly",
                     self_path.display()
-                );
-                open_remote_payload_fd_from_path(
-                    pid,
-                    open_addr,
-                    libc_return_addr,
-                    self_path,
-                    &mut push_to_remote_stack,
-                    &get_remote_errno,
                 )
-                .with_context(|| {
-                    format!(
-                        "failed to validate SCM_RIGHTS payload fd from remote recvmsg and could not reopen {} directly",
-                        self_path.display()
-                    )
-                })?
-            }
+            })?
         }
     };
 
@@ -804,7 +847,22 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     }
     debug!("Resolved remote entry via dlsym at 0x{:x}", injector_entry);
 
-    let args = vec![handle];
+    let remote_rpc_fd = send_fd_to_remote(
+        pid,
+        rpc_stream.as_raw_fd(),
+        "OMK RPC connection",
+        socket_addr,
+        bind_addr,
+        recvmsg_addr,
+        libc_return_addr,
+        &mut push_to_remote_stack,
+        &get_remote_errno,
+        &close_remote,
+    )
+    .context("failed to hand off OMK RPC fd to payload")?;
+    drop(rpc_stream);
+
+    let args = vec![handle, remote_rpc_fd as usize];
     let entry_result = sys::remote_call(pid, injector_entry, libc_return_addr, &args)?;
     if entry_result == 0 {
         bail!("Remote entry returned false");

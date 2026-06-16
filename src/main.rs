@@ -3,9 +3,12 @@
 
 use anyhow::{Context, Result};
 use std::panic;
+use std::sync::Arc;
 use std::{ffi::CString, os::unix::fs::PermissionsExt, path::Path};
 
+use kmr_common::rpc;
 use log::{debug, error, info, warn};
+use rsbinder::rpc::{PeerIdentity, RpcServer};
 use rsbinder::{hub, BinderFeatures};
 
 use crate::{
@@ -57,7 +60,7 @@ fn storage_warn(message: String) {
     if log::log_enabled!(log::Level::Warn) {
         warn!("{message}");
     } else {
-        eprintln!("[Keymint][Storage] {message}");
+        eprintln!("Storage warning: {message}");
     }
 }
 
@@ -126,6 +129,25 @@ fn prepare_android_storage() {
             storage_warn(format!("Failed to chown OMK file {file}: {e:?}"));
         }
     }
+}
+
+fn create_rpc_server() -> Result<Arc<RpcServer>> {
+    let server =
+        RpcServer::setup_unix_server(rpc::SOCKET).context("failed to bind OMK RPC socket")?;
+    server.set_android13plus(rpc::WIRE_MAX_VERSION);
+
+    server.set_authorizer(|peer| {
+        let allowed = matches!(
+            peer,
+            PeerIdentity::Local { uid, .. } if *uid == 0 || *uid == KEYSTORE_UID as u32
+        );
+        if !allowed {
+            warn!("Rejected OMK RPC peer {peer}");
+        }
+        allowed
+    });
+
+    Ok(server)
 }
 
 fn main() {
@@ -199,6 +221,11 @@ fn run() -> Result<()> {
 
     keybox::initialize().context("failed to initialize keybox runtime")?;
 
+    let injector_rpc_server = match backend {
+        Backend::Injector => Some(create_rpc_server()?),
+        Backend::OMK => None,
+    };
+
     unsafe {
         info!("Setting UID to KEYSTORE_UID (1017)");
         libc::setuid(KEYSTORE_UID); // KEYSTORE_UID
@@ -235,27 +262,38 @@ fn run() -> Result<()> {
         }
         Backend::Injector => {
             info!("Using Injector backend");
+            let server = injector_rpc_server
+                .context("injector RPC server was not initialized before dropping privileges")?;
+
             info!("Creating keystore service");
             let dev =
                 KeystoreService::new_native_binder().context("failed to create omk service")?;
 
-            info!("Adding OMK service to hub");
+            info!("Adding OMK service to RPC server");
             let service = BnOhMyKsService::new_binder_with_features(dev, sid_features());
-            hub::add_service("omk", service.as_binder()).context("failed to add omk service")?;
+            server
+                .add_service(rpc::SERVICE, service.as_binder())
+                .context("failed to add OMK RPC service")?;
 
             info!("Creating OMK authorization service");
             let auth = AuthorizationManager::new_omk_binder()
                 .context("failed to create OMK authorization service")?;
-            info!("Adding OMK authorization service to hub");
-            hub::add_service("omk_authorization", auth.as_binder())
-                .context("failed to add omk_authorization service")?;
+            info!("Adding OMK authorization service to RPC server");
+            server
+                .add_service(rpc::AUTHORIZATION_SERVICE, auth.as_binder())
+                .context("failed to add OMK authorization RPC service")?;
 
             info!("Creating OMK maintenance service");
             let maintenance = MaintenanceManager::new_omk_binder()
                 .context("failed to create OMK maintenance service")?;
-            info!("Adding OMK maintenance service to hub");
-            hub::add_service("omk_maintenance", maintenance.as_binder())
-                .context("failed to add omk_maintenance service")?;
+            info!("Adding OMK maintenance service to RPC server");
+            server
+                .add_service(rpc::MAINTENANCE_SERVICE, maintenance.as_binder())
+                .context("failed to add OMK maintenance RPC service")?;
+
+            info!("Serving OMK RPC on {}", rpc::SOCKET);
+            server.run().context("OMK RPC server stopped")?;
+            return Ok(());
         }
     }
 

@@ -1401,7 +1401,32 @@ fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<parcel::OwnedR
 
 fn omk_unavailable_status(status: &Status) -> bool {
     status.exception_code() == ExceptionCode::TransactionFailed
-        && status.transaction_error() == StatusCode::DeadObject
+        && omk_unavailable_status_code(status.transaction_error())
+}
+
+fn omk_unavailable_status_code(status: StatusCode) -> bool {
+    match status {
+        StatusCode::NameNotFound
+        | StatusCode::PermissionDenied
+        | StatusCode::NoInit
+        | StatusCode::DeadObject
+        | StatusCode::TimedOut
+        | StatusCode::RpcError => true,
+        StatusCode::Errno(errno) => {
+            let errno = errno.abs();
+            matches!(
+                errno,
+                libc::ENOENT
+                    | libc::ECONNREFUSED
+                    | libc::EACCES
+                    | libc::ECONNRESET
+                    | libc::ENOTCONN
+                    | libc::EPIPE
+                    | libc::ETIMEDOUT
+            )
+        }
+        _ => false,
+    }
 }
 
 fn omk_unavailable_error(error: &anyhow::Error) -> bool {
@@ -1410,6 +1435,15 @@ fn omk_unavailable_error(error: &anyhow::Error) -> bool {
         .filter_map(|cause| cause.downcast_ref::<Status>())
     {
         if omk_unavailable_status(status) {
+            return true;
+        }
+    }
+
+    for status in error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<StatusCode>())
+    {
+        if omk_unavailable_status_code(*status) {
             return true;
         }
     }
@@ -2738,10 +2772,26 @@ mod tests {
     }
 
     static MIRROR_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ROUTE_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn reset_mirror_state_for_tests() {
         AUTHORIZATION_MIRROR_STATE_DIRTY.store(false, Ordering::SeqCst);
         MAINTENANCE_MIRROR_STATE_DIRTY.store(false, Ordering::SeqCst);
+    }
+
+    fn route_state_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = ROUTE_STATE_TEST_LOCK
+            .lock()
+            .expect("route state test lock poisoned");
+        reset_route_state_for_tests();
+        guard
+    }
+
+    fn reset_route_state_for_tests() {
+        tracker::clear_state_for_tests();
+        clear_operation_state_for_tests();
+        PENDING_REPLY_QUEUE.with(|slot| slot.borrow_mut().clear());
+        clear_outbound_reply_buffers();
     }
 
     fn clear_synthetic_targets_for_tests() {
@@ -2749,6 +2799,7 @@ mod tests {
             .lock()
             .expect("synthetic target map poisoned")
             .clear();
+        NEXT_SYNTHETIC_BINDER_ID.store(1, Ordering::SeqCst);
     }
 
     fn clear_operation_state_for_tests() {
@@ -2846,6 +2897,22 @@ mod tests {
                 .expect("OMK connection errors should classify cleanly")
                 .is_none(),
             "OMK connection errors without a Status should preserve system"
+        );
+
+        let missing_service = anyhow::Error::new(StatusCode::NameNotFound);
+        assert!(
+            build_omk_error_reply_or_preserve_system(&missing_service)
+                .expect("missing RPC service should classify cleanly")
+                .is_none(),
+            "missing OMK RPC service means OMK is unavailable"
+        );
+
+        let rpc_transport = anyhow::Error::new(StatusCode::RpcError);
+        assert!(
+            build_omk_error_reply_or_preserve_system(&rpc_transport)
+                .expect("RPC transport errors should classify cleanly")
+                .is_none(),
+            "RPC transport failure means OMK is unavailable"
         );
 
         let local = anyhow::anyhow!("plain OMK failure");
@@ -3039,7 +3106,7 @@ mod tests {
 
     #[test]
     fn service_route_uses_omk_for_bridged_service_methods() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         let intercept = config::InterceptConfig::default();
 
         for request in sample_service_requests() {
@@ -3054,7 +3121,7 @@ mod tests {
 
     #[test]
     fn service_route_uses_system_when_intercept_methods_are_disabled() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         let intercept = disabled_intercept_config();
 
         for request in sample_service_requests() {
@@ -3069,7 +3136,7 @@ mod tests {
 
     #[test]
     fn service_route_preserves_tracked_system_grant_owner() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         let intercept = config::InterceptConfig::default();
         let grant = KeyDescriptor {
             domain: Domain::GRANT,
@@ -3093,7 +3160,7 @@ mod tests {
 
     #[test]
     fn tracked_grant_readback_bypasses_package_rejection() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         let surfaced = KeyDescriptor {
             domain: Domain::GRANT,
             nspace: 123,
@@ -3118,7 +3185,7 @@ mod tests {
 
     #[test]
     fn unconfirmed_grant_readback_stays_rejected() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         let decision = crate::filter::FilterDecision {
             allowed: false,
             reason: crate::filter::FilterReason::RejectedUnknownPackage,
@@ -3157,7 +3224,7 @@ mod tests {
 
     #[test]
     fn unknown_grant_readback_uses_positive_omk_probe() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         let grant = KeyDescriptor {
             domain: Domain::GRANT,
             nspace: 123,
@@ -3189,7 +3256,7 @@ mod tests {
 
     #[test]
     fn unknown_grant_create_operation_uses_positive_omk_probe() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         let grant = KeyDescriptor {
             domain: Domain::GRANT,
             nspace: 321,
@@ -3225,7 +3292,7 @@ mod tests {
 
     #[test]
     fn tracked_grant_readback_respects_non_unknown_package_rejection() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         let surfaced = KeyDescriptor {
             domain: Domain::GRANT,
             nspace: 123,
@@ -3250,7 +3317,7 @@ mod tests {
 
     #[test]
     fn pending_reply_queue_consumes_requests_in_binder_order() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         PENDING_REPLY_QUEUE.with(|slot| slot.borrow_mut().clear());
         push_pending_frame();
         replace_top_pending(PendingCall::Service(PendingServiceCall {
@@ -3296,7 +3363,7 @@ mod tests {
 
     #[test]
     fn rewrite_failures_preserve_system_only_for_non_omk_routes() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         clear_operation_state_for_tests();
 
         let caller = CallerIdentity::new(1000, 2000);
@@ -3434,7 +3501,7 @@ mod tests {
     #[test]
     fn no_carrier_omk_key_entry_reply_uses_returned_security_level_handle() {
         ensure_binder_process_state();
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         clear_synthetic_targets_for_tests();
 
         let security_level = SecurityLevel::TRUSTED_ENVIRONMENT;
@@ -3506,7 +3573,7 @@ mod tests {
 
     #[test]
     fn no_carrier_omk_pure_cert_key_entry_keeps_security_level_null() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         clear_synthetic_targets_for_tests();
 
         let metadata = KeyMetadata {
@@ -3556,7 +3623,7 @@ mod tests {
     #[test]
     fn no_carrier_create_operation_reply_uses_synthetic_operation_mapping() {
         ensure_binder_process_state();
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         clear_operation_state_for_tests();
 
         let omk_aborts = Arc::new(AtomicUsize::new(0));
@@ -3699,7 +3766,7 @@ mod tests {
     #[test]
     fn raw_create_operation_reply_still_does_not_register_operation_mapping() {
         ensure_binder_process_state();
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         clear_operation_state_for_tests();
 
         let omk_operation = BnKeystoreOperation::new_binder(TestOperationBackend {
@@ -3732,7 +3799,7 @@ mod tests {
 
     #[test]
     fn system_route_invalid_update_aad_preserves_native_reply() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         clear_operation_state_for_tests();
 
         let target = LocalBinderTarget {
@@ -3772,7 +3839,7 @@ mod tests {
     #[test]
     fn omk_route_invalid_update_aad_returns_omk_service_specific_reply() {
         ensure_binder_process_state();
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         clear_operation_state_for_tests();
 
         let target = LocalBinderTarget {
@@ -3822,7 +3889,7 @@ mod tests {
 
     #[test]
     fn omk_route_finish_allows_late_cleanup_abort() {
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         clear_operation_state_for_tests();
 
         let aborts = Arc::new(AtomicUsize::new(0));
@@ -3907,7 +3974,7 @@ mod tests {
     #[test]
     fn omk_route_abort_clears_operation_mapping() {
         ensure_binder_process_state();
-        tracker::clear_state_for_tests();
+        let _guard = route_state_test_guard();
         clear_operation_state_for_tests();
 
         let aborts = Arc::new(AtomicUsize::new(0));

@@ -1,10 +1,14 @@
 use std::cell::RefCell;
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Once;
 use std::thread::LocalKey;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use kmr_common::rpc;
 use log::{debug, warn};
+use rsbinder::rpc::RpcSession;
 use rsbinder::{
     hub, DeathRecipient, ExceptionCode, FromIBinder, Status, StatusCode, Strong, WIBinder,
 };
@@ -17,8 +21,6 @@ use crate::top::qwq2333::ohmykeymint::IOhMyKsService::IOhMyKsService;
 use crate::top::qwq2333::ohmykeymint::IOhMyMaintenanceService::IOhMyMaintenanceService;
 
 const SYSTEM_KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/default";
-const OMK_AUTHORIZATION_SERVICE: &str = "omk_authorization";
-const OMK_MAINTENANCE_SERVICE: &str = "omk_maintenance";
 
 thread_local! {
     static OMK: RefCell<Option<Strong<dyn IOhMyKsService>>> = const { RefCell::new(None) };
@@ -26,14 +28,12 @@ thread_local! {
     static OMK_MAINTENANCE: RefCell<Option<Strong<dyn IOhMyMaintenanceService>>> = const { RefCell::new(None) };
     static PM: RefCell<Option<Strong<dyn IKeyAttestationApplicationIdProvider>>> = const { RefCell::new(None) };
     static SYSTEM_KEYSTORE: RefCell<Option<Strong<dyn IKeystoreService>>> = const { RefCell::new(None) };
-    static OMK_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
-    static OMK_AUTHORIZATION_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
-    static OMK_MAINTENANCE_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
     static PM_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
     static SYSTEM_KEYSTORE_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
 }
 
 static PROCESS_STATE_INIT: Once = Once::new();
+static SESSION: Mutex<Option<RpcSession>> = Mutex::new(None);
 
 struct CachedBinderDeath {
     tag: &'static str,
@@ -43,15 +43,30 @@ struct CachedBinderDeath {
 impl DeathRecipient for CachedBinderDeath {
     fn binder_died(&self, _who: &WIBinder) {
         (self.clear)();
-        warn!("[Injector][IPC] {} binder died; cache cleared", self.tag);
+        warn!("{} binder died; cache cleared", self.tag);
     }
 }
 
 pub fn ensure_process_state() {
     PROCESS_STATE_INIT.call_once(|| {
         let _ = rsbinder::ProcessState::init_default();
-        debug!("[Injector][IPC] rsbinder process state initialized");
+        debug!("rsbinder process state initialized");
     });
+}
+
+pub fn install_rpc_session_from_fd(raw_fd: RawFd) -> Result<()> {
+    if raw_fd < 0 {
+        bail!("invalid OMK RPC fd {raw_fd}");
+    }
+
+    ensure_process_state();
+    clear_rpc_caches();
+
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let session = RpcSession::from_preconnected_fd(fd, rpc::WIRE_MAX_VERSION)
+        .context("failed to initialize OMK RPC session from preconnected fd")?;
+    *SESSION.lock().expect("RPC session cache poisoned") = Some(session);
+    Ok(())
 }
 
 fn get_cached_binder<T>(
@@ -84,6 +99,36 @@ where
     })
 }
 
+fn get_rpc_session(connect_context: &'static str) -> Result<RpcSession> {
+    let slot = SESSION.lock().expect("RPC session cache poisoned");
+    if let Some(session) = slot.as_ref() {
+        return Ok(session.clone());
+    }
+
+    Err(anyhow!("OMK RPC session is not initialized")).context(connect_context)
+}
+
+fn get_cached_rpc_binder<T>(
+    service_name: &'static str,
+    connect_context: &'static str,
+    slot: &'static LocalKey<RefCell<Option<Strong<T>>>>,
+) -> Result<Strong<T>>
+where
+    T: FromIBinder + ?Sized + 'static,
+{
+    slot.with(|slot| {
+        if let Some(client) = slot.borrow().as_ref() {
+            return Ok(client.clone());
+        }
+
+        let session = get_rpc_session(connect_context)?;
+        let binder = session.get_service(service_name).context(connect_context)?;
+        let client: Strong<T> = <T as FromIBinder>::try_from(binder).context(connect_context)?;
+        *slot.borrow_mut() = Some(client.clone());
+        Ok(client)
+    })
+}
+
 fn with_dead_object_retry<T, B, Get, Clear, F>(
     tag: &'static str,
     mut get: Get,
@@ -100,7 +145,7 @@ where
     match f(&client) {
         Ok(value) => Ok(value),
         Err(error) if is_dead_object_error(&error) => {
-            warn!("[Injector][IPC] {tag} transaction hit DeadObject; clearing cache and retrying once");
+            warn!("{tag} transaction hit DeadObject; clearing cache and retrying once");
             clear();
             let client = get()?;
             f(&client)
@@ -110,33 +155,21 @@ where
 }
 
 pub fn get_omk() -> Result<Strong<dyn IOhMyKsService>> {
-    get_cached_binder(
-        "omk",
-        "failed to connect to omk service",
-        "failed to watch omk death",
-        "omk",
-        &OMK,
-        &OMK_DEATH,
-        clear_omk_cache,
-    )
+    get_cached_rpc_binder(rpc::SERVICE, "failed to connect to omk service", &OMK)
 }
 
 pub fn with_omk_retry<T, F>(mut f: F) -> Result<T>
 where
     F: FnMut(&Strong<dyn IOhMyKsService>) -> Result<T>,
 {
-    with_dead_object_retry("omk", get_omk, clear_omk_cache, &mut f)
+    with_dead_object_retry("omk", get_omk, clear_rpc_caches, &mut f)
 }
 
 pub fn get_omk_authorization() -> Result<Strong<dyn IOhMyAuthorizationService>> {
-    get_cached_binder(
-        OMK_AUTHORIZATION_SERVICE,
+    get_cached_rpc_binder(
+        rpc::AUTHORIZATION_SERVICE,
         "failed to connect to omk_authorization service",
-        "failed to watch omk_authorization death",
-        OMK_AUTHORIZATION_SERVICE,
         &OMK_AUTHORIZATION,
-        &OMK_AUTHORIZATION_DEATH,
-        clear_omk_authorization_cache,
     )
 }
 
@@ -145,22 +178,18 @@ where
     F: FnMut(&Strong<dyn IOhMyAuthorizationService>) -> Result<T>,
 {
     with_dead_object_retry(
-        OMK_AUTHORIZATION_SERVICE,
+        rpc::AUTHORIZATION_SERVICE,
         get_omk_authorization,
-        clear_omk_authorization_cache,
+        clear_rpc_caches,
         &mut f,
     )
 }
 
 pub fn get_omk_maintenance() -> Result<Strong<dyn IOhMyMaintenanceService>> {
-    get_cached_binder(
-        OMK_MAINTENANCE_SERVICE,
+    get_cached_rpc_binder(
+        rpc::MAINTENANCE_SERVICE,
         "failed to connect to omk_maintenance service",
-        "failed to watch omk_maintenance death",
-        OMK_MAINTENANCE_SERVICE,
         &OMK_MAINTENANCE,
-        &OMK_MAINTENANCE_DEATH,
-        clear_omk_maintenance_cache,
     )
 }
 
@@ -169,9 +198,9 @@ where
     F: FnMut(&Strong<dyn IOhMyMaintenanceService>) -> Result<T>,
 {
     with_dead_object_retry(
-        OMK_MAINTENANCE_SERVICE,
+        rpc::MAINTENANCE_SERVICE,
         get_omk_maintenance,
-        clear_omk_maintenance_cache,
+        clear_rpc_caches,
         &mut f,
     )
 }
@@ -187,10 +216,7 @@ pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
             }
         }
         Err(error) => {
-            warn!(
-                "[Injector][IPC] failed to resolve packages for uid {}: {:#}",
-                uid, error
-            );
+            warn!("failed to resolve packages for uid {}: {:#}", uid, error);
             PackageResolution::Unknown
         }
     }
@@ -281,19 +307,11 @@ fn is_dead_object_status(status: &Status) -> bool {
         && status.transaction_error() == StatusCode::DeadObject
 }
 
-fn clear_omk_cache() {
+fn clear_rpc_caches() {
     OMK.with(|slot| *slot.borrow_mut() = None);
-    OMK_DEATH.with(|slot| *slot.borrow_mut() = None);
-}
-
-fn clear_omk_authorization_cache() {
     OMK_AUTHORIZATION.with(|slot| *slot.borrow_mut() = None);
-    OMK_AUTHORIZATION_DEATH.with(|slot| *slot.borrow_mut() = None);
-}
-
-fn clear_omk_maintenance_cache() {
     OMK_MAINTENANCE.with(|slot| *slot.borrow_mut() = None);
-    OMK_MAINTENANCE_DEATH.with(|slot| *slot.borrow_mut() = None);
+    *SESSION.lock().expect("RPC session cache poisoned") = None;
 }
 
 fn clear_pm_cache() {
@@ -320,5 +338,19 @@ mod tests {
     fn ignores_non_dead_object_status() {
         let status = Status::from(StatusCode::Ok);
         assert!(!is_dead_object_status(&status));
+    }
+
+    #[test]
+    fn missing_rpc_session_keeps_connect_context() {
+        clear_rpc_caches();
+
+        let error = match get_rpc_session("failed to connect to omk service") {
+            Ok(_) => panic!("missing preconnected RPC session should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .chain()
+            .any(|cause| cause.to_string() == "failed to connect to omk service"));
     }
 }

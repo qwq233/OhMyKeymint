@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use rsbinder::{hub, SIBinder, Status, Strong};
+use kmr_common::rpc;
+use rsbinder::rpc::RpcSession;
+use rsbinder::{hub, FromIBinder, SIBinder, Status, Strong};
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
 
@@ -8,7 +10,6 @@ use android::system::keystore2::IKeystoreService::{transactions as service_tx, I
 use top::qwq2333::ohmykeymint::IOhMyKsService::{transactions as omk_service_tx, IOhMyKsService};
 
 const KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/default";
-const OMK_SERVICE: &str = "omk";
 
 fn main() {
     if let Err(error) = run() {
@@ -39,57 +40,75 @@ fn run() -> Result<()> {
 
     println!("{}", raw_get_security_level_diagnostic(&service)?);
 
-    if let Some(raw_omk_service) = hub::get_service(OMK_SERVICE) {
-        println!(
-            "omk_raw_service={{descriptor={}, remote={}, interface_transaction={}}}",
-            raw_omk_service.descriptor(),
-            raw_omk_service.as_proxy().is_some(),
-            interface_transaction_result(&raw_omk_service)
-        );
-    } else {
-        println!("omk_raw_service=missing");
-    }
+    print_rpc_diagnostic()?;
 
-    if let Ok(omk) = hub::get_interface::<dyn IOhMyKsService>(OMK_SERVICE) {
-        println!("omk_service=connected");
-        match omk.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT) {
-            Ok(level) => {
-                let binder = level.as_binder();
-                println!(
-                    "omk_typed_getSecurityLevel=ok descriptor={} remote={}",
-                    binder.descriptor(),
-                    binder.as_proxy().is_some()
-                );
-            }
-            Err(error) => {
-                println!("omk_typed_getSecurityLevel=err {error:#}");
-            }
-        }
-        println!(
-            "{}",
-            raw_omk_get_security_level_diagnostic(&omk, omk_service_tx::r#getSecurityLevel)?
-        );
+    Ok(())
+}
 
-        match omk.getOhMySecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT) {
-            Ok(level) => {
-                let binder = level.as_binder();
-                println!(
-                    "omk_typed_getOhMySecurityLevel=ok descriptor={} remote={}",
-                    binder.descriptor(),
-                    binder.as_proxy().is_some()
-                );
-            }
+fn print_rpc_diagnostic() -> Result<()> {
+    let session =
+        match RpcSession::setup_unix_client_android13plus(rpc::SOCKET, rpc::WIRE_MAX_VERSION) {
+            Ok(session) => session,
             Err(error) => {
-                println!("omk_typed_getOhMySecurityLevel=err {error:#}");
+                println!("rpc_session=unavailable {error:#}");
+                return Ok(());
             }
+        };
+
+    let raw_omk_service = match session.get_service(rpc::SERVICE) {
+        Ok(service) => service,
+        Err(error) => {
+            println!("rpc_service=unavailable {error:#}");
+            return Ok(());
         }
-        println!(
-            "{}",
-            raw_omk_get_security_level_diagnostic(&omk, omk_service_tx::r#getOhMySecurityLevel)?
-        );
-    } else {
-        println!("omk_service=unavailable");
+    };
+    println!(
+        "rpc_raw_service={{descriptor={}, remote={}, interface_transaction={}}}",
+        raw_omk_service.descriptor(),
+        raw_omk_service.as_proxy().is_some(),
+        interface_transaction_result(&raw_omk_service)
+    );
+
+    let omk: Strong<dyn IOhMyKsService> =
+        <dyn IOhMyKsService as FromIBinder>::try_from(raw_omk_service)
+            .context("failed to convert OMK RPC service binder")?;
+    println!("rpc_service=connected");
+
+    match omk.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT) {
+        Ok(level) => {
+            let binder = level.as_binder();
+            println!(
+                "omk_typed_getSecurityLevel=ok descriptor={} remote={}",
+                binder.descriptor(),
+                binder.as_proxy().is_some()
+            );
+        }
+        Err(error) => {
+            println!("omk_typed_getSecurityLevel=err {error:#}");
+        }
     }
+    println!(
+        "{}",
+        raw_omk_get_security_level_diagnostic(&omk, omk_service_tx::r#getSecurityLevel)?
+    );
+
+    match omk.getOhMySecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT) {
+        Ok(level) => {
+            let binder = level.as_binder();
+            println!(
+                "omk_typed_getOhMySecurityLevel=ok descriptor={} remote={}",
+                binder.descriptor(),
+                binder.as_proxy().is_some()
+            );
+        }
+        Err(error) => {
+            println!("omk_typed_getOhMySecurityLevel=err {error:#}");
+        }
+    }
+    println!(
+        "{}",
+        raw_omk_get_security_level_diagnostic(&omk, omk_service_tx::r#getOhMySecurityLevel)?
+    );
 
     Ok(())
 }

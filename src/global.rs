@@ -129,5 +129,3 @@ fn connect_secureclock() -> Result<Strong<dyn ISecureClock>> {
 /// Per RFC 5280 4.1.2.5, an undefined expiration (not-after) field should be set to GeneralizedTime
 /// 999912312359559, which is 253402300799000 ms from Jan 1, 1970.
 pub const UNDEFINED_NOT_AFTER: i64 = 253402300799000i64;
-
-pub const AID_KEYSTORE: u32 = 1017;

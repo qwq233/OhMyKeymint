@@ -25,7 +25,7 @@ use crate::watchdog as wd;
 use crate::{
     android::system::keystore2::ResponseCode::ResponseCode,
     err,
-    global::AID_KEYSTORE,
+    consts::AID_KEYSTORE,
     keymaster::{
         boot_key::{get_level_zero_key, BootLevelKeyCache},
         db::{

@@ -83,7 +83,7 @@ fn main() {
 
 #[no_mangle]
 #[allow(unused)]
-pub extern "C" fn entry(handle: *const c_void) -> bool {
+pub extern "C" fn entry(handle: *const c_void, rpc_fd: libc::c_int) -> bool {
     // This runs inside the target process, so we must initialize logging again
     // for that process. On Android this enables both logcat and stdout logging.
     logging::init_logger_fallback(LevelFilter::Debug);
@@ -97,8 +97,9 @@ pub extern "C" fn entry(handle: *const c_void) -> bool {
     logging::update_runtime_level(config.main.log_level_filter());
     log_runtime_identity("Payload");
     log::info!(
-        "Injected library entry called! Handle: {:?}, build_id={}, build_target={}, runtime_arch={}, current_exe={}",
+        "Injected library entry called! Handle: {:?}, rpc_fd={}, build_id={}, build_target={}, runtime_arch={}, current_exe={}",
         handle,
+        rpc_fd,
         utils::build_id(),
         utils::build_target(),
         std::env::consts::ARCH,
@@ -106,6 +107,10 @@ pub extern "C" fn entry(handle: *const c_void) -> bool {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string()),
     );
+    if let Err(error) = ipc::install_rpc_session_from_fd(rpc_fd) {
+        error!("failed to initialize OMK RPC session: {error:#}");
+        return false;
+    }
     hook::init_hook().expect("failed to initialize binder ioctl hook");
     true
 }

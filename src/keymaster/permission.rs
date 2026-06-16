@@ -2,14 +2,14 @@ use std::ffi::{CStr, CString};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
-use rsbinder::{hub, thread_state::CallingContext, Status};
+use rsbinder::{calling_caller, hub, thread_state::CallingContext, Caller, Status};
 
 use crate::android::hardware::security::keymint::{ErrorCode::ErrorCode, Tag::Tag};
 use crate::android::system::keystore2::Domain::Domain;
 use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use crate::android::system::keystore2::KeyPermission::KeyPermission;
 use crate::android::system::keystore2::ResponseCode::ResponseCode;
-use crate::global::AID_KEYSTORE;
+use crate::consts::{AID_KEYSTORE, AID_ROOT};
 use crate::keymaster::error::KsError;
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 
@@ -1027,17 +1027,23 @@ pub fn check_keystore_permission(
     )
 }
 
-pub fn forwarded_caller_is_trusted_keystore(caller: &CallerCtx) -> bool {
-    caller.uid == AID_KEYSTORE
-        && caller
-            .sid
-            .as_ref()
-            .is_some_and(|sid| sid.to_bytes().starts_with(b"u:r:keystore:"))
+fn forwarding_transport_is_trusted(caller: Option<Caller>) -> bool {
+    match caller {
+        Some(Caller::Kernel { uid, sid, .. }) => {
+            uid == AID_KEYSTORE
+                && sid
+                    .as_ref()
+                    .is_some_and(|sid| sid.to_bytes().starts_with(b"u:r:keystore:"))
+        }
+        Some(Caller::Rpc(rsbinder::rpc::PeerIdentity::Local { uid, .. })) => {
+            matches!(uid, AID_ROOT | AID_KEYSTORE)
+        }
+        _ => false,
+    }
 }
 
 pub fn check_forwarded_caller_provenance(label: &str) -> Result<()> {
-    let caller = CallerCtx::from_caller_info(None);
-    if forwarded_caller_is_trusted_keystore(&caller) {
+    if forwarding_transport_is_trusted(calling_caller()) {
         return Ok(());
     }
 
@@ -1170,6 +1176,59 @@ mod tests {
             error.root_cause().downcast_ref::<KsError>(),
             Some(KsError::Rc(ResponseCode::PERMISSION_DENIED))
         ));
+    }
+
+    #[test]
+    fn forwarded_kernel_keystore_transport_is_trusted() {
+        assert!(forwarding_transport_is_trusted(Some(Caller::Kernel {
+            uid: AID_KEYSTORE,
+            pid: 1234,
+            sid: Some(CString::new("u:r:keystore:s0").unwrap()),
+        })));
+    }
+
+    #[test]
+    fn forwarded_kernel_transport_requires_keystore_sid() {
+        assert!(!forwarding_transport_is_trusted(Some(Caller::Kernel {
+            uid: AID_KEYSTORE,
+            pid: 1234,
+            sid: Some(CString::new("u:r:system_server:s0").unwrap()),
+        })));
+        assert!(!forwarding_transport_is_trusted(Some(Caller::Kernel {
+            uid: AID_KEYSTORE,
+            pid: 1234,
+            sid: None,
+        })));
+    }
+
+    #[test]
+    fn forwarded_rpc_root_or_keystore_transport_is_trusted() {
+        assert!(forwarding_transport_is_trusted(Some(Caller::Rpc(
+            rsbinder::rpc::PeerIdentity::Local {
+                uid: AID_ROOT,
+                pid: 1234,
+            },
+        ))));
+        assert!(forwarding_transport_is_trusted(Some(Caller::Rpc(
+            rsbinder::rpc::PeerIdentity::Local {
+                uid: AID_KEYSTORE,
+                pid: 1234,
+            },
+        ))));
+    }
+
+    #[test]
+    fn forwarded_rpc_transport_rejects_other_peers() {
+        assert!(!forwarding_transport_is_trusted(Some(Caller::Rpc(
+            rsbinder::rpc::PeerIdentity::Local {
+                uid: 2000,
+                pid: 1234,
+            },
+        ))));
+        assert!(!forwarding_transport_is_trusted(Some(Caller::Rpc(
+            rsbinder::rpc::PeerIdentity::Anonymous,
+        ))));
+        assert!(!forwarding_transport_is_trusted(None));
     }
 
     #[test]
