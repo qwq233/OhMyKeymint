@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use anyhow::{anyhow, bail, Context, Result};
 use kmr_common::crypto::Sha256;
@@ -37,6 +38,11 @@ pub(crate) struct KeyMintHardwareProfile {
     pub impl_name: String,
     pub author_name: String,
     pub unique_id: String,
+}
+
+pub(crate) fn strongbox_keymint_present() -> bool {
+    static STRONGBOX_PRESENT: OnceLock<bool> = OnceLock::new();
+    *STRONGBOX_PRESENT.get_or_init(detect_strongbox_keymint_present)
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +90,28 @@ pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMint
             fallback_profile(security_level, version_number)
         }
     }
+}
+
+fn detect_strongbox_keymint_present() -> bool {
+    let security_level = SecurityLevel::STRONGBOX;
+    if system_keymint_declared(security_level) {
+        return true;
+    }
+
+    match probe_system_keymint_presence(security_level) {
+        Ok(_) => true,
+        Err(error) => {
+            log::info!("StrongBox KeyMint HAL is not present: {error:#}");
+            false
+        }
+    }
+}
+
+fn system_keymint_declared(security_level: SecurityLevel) -> bool {
+    let Some(service) = system_keymint_service_name(security_level) else {
+        return false;
+    };
+    hub::is_declared(service) || keymint_instance_declared_in_vintf(security_level)
 }
 
 fn resolve_property_profile_with(
@@ -189,6 +217,18 @@ fn probe_system_keymint_profile(
     security_level: SecurityLevel,
     version_number: i32,
 ) -> Result<KeyMintHardwareProfile> {
+    let info = probe_system_keymint_hardware_info(security_level)?;
+    profile_from_system_hardware_info(&info, security_level, version_number)
+}
+
+fn probe_system_keymint_presence(security_level: SecurityLevel) -> Result<()> {
+    let info = probe_system_keymint_hardware_info(security_level)?;
+    ensure_system_hardware_security_level(&info, security_level)
+}
+
+fn probe_system_keymint_hardware_info(
+    security_level: SecurityLevel,
+) -> Result<KeyMintHardwareInfo> {
     let service = system_keymint_service_name(security_level)
         .ok_or_else(|| anyhow!("unsupported security level for system KeyMint probe"))?;
     let keymint: Strong<dyn IKeyMintDevice> =
@@ -200,7 +240,7 @@ fn probe_system_keymint_profile(
     let info = keymint
         .getHardwareInfo()
         .map_err(|status| anyhow!("getHardwareInfo from {service} failed: {status}"))?;
-    profile_from_system_hardware_info(&info, security_level, version_number)
+    Ok(info)
 }
 
 fn profile_from_system_hardware_info(
@@ -208,13 +248,7 @@ fn profile_from_system_hardware_info(
     security_level: SecurityLevel,
     version_number: i32,
 ) -> Result<KeyMintHardwareProfile> {
-    if info.securityLevel != security_level {
-        bail!(
-            "system KeyMint security level mismatch: expected {:?}, got {:?}",
-            security_level,
-            info.securityLevel
-        );
-    }
+    ensure_system_hardware_security_level(info, security_level)?;
 
     let impl_name = clean_dynamic_value(info.keyMintName.clone())
         .ok_or_else(|| anyhow!("system KeyMint returned an empty implementation name"))?;
@@ -229,6 +263,21 @@ fn profile_from_system_hardware_info(
         author_name,
         unique_id,
     })
+}
+
+fn ensure_system_hardware_security_level(
+    info: &KeyMintHardwareInfo,
+    security_level: SecurityLevel,
+) -> Result<()> {
+    if info.securityLevel != security_level {
+        bail!(
+            "system KeyMint security level mismatch: expected {:?}, got {:?}",
+            security_level,
+            info.securityLevel
+        );
+    }
+
+    Ok(())
 }
 
 fn system_keymint_service_name(security_level: SecurityLevel) -> Option<&'static str> {
@@ -265,6 +314,30 @@ fn probe_keymint_version_from_vintf(security_level: SecurityLevel) -> Option<i32
     None
 }
 
+fn keymint_instance_declared_in_vintf(security_level: SecurityLevel) -> bool {
+    let Some(instance) = security_level_instance(security_level) else {
+        return false;
+    };
+
+    for path in vintf_manifest_paths() {
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match parse_keymint_instance_xml(&contents, instance) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!(
+                    "Ignoring invalid VINTF manifest {}: {error:#}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    false
+}
+
 fn vintf_manifest_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for directory in VINTF_MANIFEST_DIRS {
@@ -288,17 +361,7 @@ fn parse_keymint_version_xml(xml: &str, instance: &str) -> Result<Option<i32>> {
     let manifest: ManifestXml =
         quick_xml::de::from_str(xml).context("failed to deserialize VINTF XML")?;
     for hal in manifest.hals {
-        if !hal
-            .format
-            .as_deref()
-            .is_some_and(|format| format.trim() == "aidl")
-        {
-            continue;
-        }
-        if hal.name.as_deref().map(str::trim) != Some(KEYMINT_HAL_NAME) {
-            continue;
-        }
-        if !hal.references_instance(KEYMINT_DEVICE_INTERFACE, instance) {
+        if !hal.references_keymint_device_instance(instance) {
             continue;
         }
 
@@ -316,7 +379,24 @@ fn parse_keymint_version_xml(xml: &str, instance: &str) -> Result<Option<i32>> {
     Ok(None)
 }
 
+fn parse_keymint_instance_xml(xml: &str, instance: &str) -> Result<bool> {
+    let manifest: ManifestXml =
+        quick_xml::de::from_str(xml).context("failed to deserialize VINTF XML")?;
+    Ok(manifest
+        .hals
+        .iter()
+        .any(|hal| hal.references_keymint_device_instance(instance)))
+}
+
 impl HalXml {
+    fn references_keymint_device_instance(&self, instance: &str) -> bool {
+        self.format
+            .as_deref()
+            .is_some_and(|format| format.trim() == "aidl")
+            && self.name.as_deref().map(str::trim) == Some(KEYMINT_HAL_NAME)
+            && self.references_instance(KEYMINT_DEVICE_INTERFACE, instance)
+    }
+
     fn references_instance(&self, interface: &str, instance: &str) -> bool {
         let fqname = format!("{interface}/{instance}");
         self.fqnames
@@ -542,6 +622,26 @@ mod tests {
             parse_keymint_version_xml(xml, "strongbox").unwrap(),
             Some(300)
         );
+        assert!(parse_keymint_instance_xml(xml, "default").unwrap());
+        assert!(parse_keymint_instance_xml(xml, "strongbox").unwrap());
+        assert!(!parse_keymint_instance_xml(xml, "foo").unwrap());
+    }
+
+    #[test]
+    fn vintf_instance_parser_does_not_require_version() {
+        let xml = r#"
+<manifest version="1.0" type="device">
+    <hal format="aidl">
+        <name>android.hardware.security.keymint</name>
+        <interface>
+            <name>IKeyMintDevice</name>
+            <instance>strongbox</instance>
+        </interface>
+    </hal>
+</manifest>
+"#;
+
+        assert!(parse_keymint_instance_xml(xml, "strongbox").unwrap());
     }
 
     #[test]
@@ -635,5 +735,21 @@ mod tests {
             KEYMINT_V4
         )
         .is_err());
+    }
+
+    #[test]
+    fn system_hardware_presence_only_checks_security_level() {
+        let info = KeyMintHardwareInfo {
+            versionNumber: 999,
+            securityLevel: SecurityLevel::STRONGBOX,
+            keyMintName: String::new(),
+            keyMintAuthorName: String::new(),
+            timestampTokenRequired: false,
+        };
+
+        assert!(ensure_system_hardware_security_level(&info, SecurityLevel::STRONGBOX).is_ok());
+        assert!(
+            profile_from_system_hardware_info(&info, SecurityLevel::STRONGBOX, KEYMINT_V4).is_err()
+        );
     }
 }

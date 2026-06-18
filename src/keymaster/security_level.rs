@@ -119,8 +119,8 @@ impl KeystoreSecurityLevel {
         km_uuid: Uuid,
         id_rotation_state: IdRotationState,
     ) -> Result<Self> {
-        let km_wrapper = KeyMintWrapper::new(security_level)
-            .expect(err!("Failed to init strongbox wrapper").as_str());
+        let km_wrapper =
+            KeyMintWrapper::new(security_level).context(err!("Failed to init KeyMint wrapper"))?;
 
         let hw_info = km_wrapper
             .get_hardware_info()

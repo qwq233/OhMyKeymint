@@ -59,6 +59,7 @@ use rsbinder::{Status, Strong};
 pub struct KeystoreService {
     security_levels: RwLock<SecurityLevels>,
     id_rotation_state: IdRotationState,
+    strongbox_enabled: bool,
 }
 
 impl Default for KeystoreService {
@@ -66,6 +67,7 @@ impl Default for KeystoreService {
         Self {
             security_levels: RwLock::new(Default::default()),
             id_rotation_state: IdRotationState::new_default(),
+            strongbox_enabled: false,
         }
     }
 }
@@ -89,7 +91,10 @@ impl SecurityLevels {
 impl KeystoreService {
     /// Create a new instance of the Keystore 2.0 service.
     pub fn new_native_binder() -> Result<KeystoreService> {
-        let result: Self = Default::default();
+        let result = Self {
+            strongbox_enabled: crate::plat::keymint_profile::strongbox_keymint_present(),
+            ..Default::default()
+        };
 
         let retired = result.retire_stale_keybox_bound_entries().context(err!(
             "retiring stale keybox-bound entries during service startup"
@@ -107,13 +112,17 @@ impl KeystoreService {
             }
         };
 
-        match result.register_security_level(SecurityLevel::STRONGBOX) {
-            Result::Ok(v) => v,
-            Err(e) => {
-                log::error!("Failed to construct mandatory security level StrongBox: {e:?}");
-                log::error!("But we ignore this error because StrongBox is optional.");
-            }
-        };
+        if result.strongbox_enabled {
+            match result.register_security_level(SecurityLevel::STRONGBOX) {
+                Result::Ok(v) => v,
+                Err(e) => {
+                    log::error!("Failed to construct optional security level StrongBox: {e:?}");
+                    log::error!("But we ignore this error because StrongBox is optional.");
+                }
+            };
+        } else {
+            log::info!("StrongBox KeyMint HAL is not present; skipping optional security level.");
+        }
 
         Ok(result)
     }
@@ -149,21 +158,23 @@ impl KeystoreService {
                 .context(err!("refreshing TEE security level after keybox change"))?;
         }
 
-        let strongbox_uuid = Uuid::from(SecurityLevel::STRONGBOX);
-        let refresh_strongbox = {
-            let security_levels = self.security_levels.read().unwrap();
-            security_levels
-                .uuid_by_sec_level
-                .get(&SecurityLevel::STRONGBOX)
-                .copied()
-                != Some(strongbox_uuid)
-        };
+        if self.strongbox_enabled {
+            let strongbox_uuid = Uuid::from(SecurityLevel::STRONGBOX);
+            let refresh_strongbox = {
+                let security_levels = self.security_levels.read().unwrap();
+                security_levels
+                    .uuid_by_sec_level
+                    .get(&SecurityLevel::STRONGBOX)
+                    .copied()
+                    != Some(strongbox_uuid)
+            };
 
-        if refresh_strongbox {
-            if let Err(error) = self.register_security_level(SecurityLevel::STRONGBOX) {
-                log::warn!(
-                    "Failed to refresh optional StrongBox security level after keybox change: {error:#}"
-                );
+            if refresh_strongbox {
+                if let Err(error) = self.register_security_level(SecurityLevel::STRONGBOX) {
+                    log::warn!(
+                        "Failed to refresh optional StrongBox security level after keybox change: {error:#}"
+                    );
+                }
             }
         }
 
