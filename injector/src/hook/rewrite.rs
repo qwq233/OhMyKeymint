@@ -1644,7 +1644,7 @@ fn synthetic_base_transaction_reply(
         rsbinder::SHELL_COMMAND_TRANSACTION | rsbinder::SYSPROPS_TRANSACTION => {
             synthetic_parcel_reply(parcel::build_empty_reply())
         }
-        rsbinder::DUMP_TRANSACTION => SyntheticReply::Status(StatusCode::UnexpectedNull.into()),
+        rsbinder::DUMP_TRANSACTION => synthetic_parcel_reply(parcel::build_empty_reply()),
         rsbinder::SET_RPC_CLIENT_TRANSACTION => {
             SyntheticReply::Status(StatusCode::InvalidOperation.into())
         }
@@ -3104,10 +3104,11 @@ mod tests {
         )
         .expect("dump handling should not fail")
         .expect("dump should produce a reply");
-        let SyntheticReply::Status(status) = dump else {
-            panic!("dump should be a binder status code");
+        let SyntheticReply::Parcel(dump) = dump else {
+            panic!("dump should be an empty parcel reply");
         };
-        assert_eq!(status, i32::from(StatusCode::UnexpectedNull));
+        assert_eq!(dump.data_size(), 0);
+        assert_eq!(dump.offsets_size(), 0);
 
         let unknown =
             synthetic_base_transaction_reply(SyntheticTargetKind::SecurityLevel, u32::MAX)
