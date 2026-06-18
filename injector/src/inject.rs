@@ -43,6 +43,14 @@ impl Drop for RawFdGuard {
     }
 }
 
+#[derive(Clone, Copy)]
+struct RemoteFdHandoffAddrs {
+    socket: usize,
+    bind: usize,
+    recvmsg: usize,
+    libc_return: usize,
+}
+
 fn log_loader_abi() {
     debug!(
         "[Injector][Loader] build_target={} runtime_arch={} sockaddr_un(size={}, sun_path_offset={}, c_char_size={}) msghdr(size={}, msg_control_offset={}, msg_controllen_offset={}) cmsghdr(size={}, cmsg_len_offset={}, cmsg_level_offset={}, cmsg_type_offset={}) cmsg_space_int={} cmsg_len_int={}",
@@ -301,10 +309,7 @@ fn send_fd_to_remote<F, G, H>(
     pid: Pid,
     local_fd: RawFd,
     label: &str,
-    socket_addr: usize,
-    bind_addr: usize,
-    recvmsg_addr: usize,
-    libc_return_addr: usize,
+    addrs: RemoteFdHandoffAddrs,
     push_to_remote_stack: &mut F,
     get_remote_errno: &G,
     close_remote: &H,
@@ -329,8 +334,12 @@ where
         (libc::SOCK_DGRAM | libc::SOCK_CLOEXEC) as usize,
         0,
     ];
-    let remote_socket =
-        remote_c_int_result(sys::remote_call(pid, socket_addr, libc_return_addr, &args)?);
+    let remote_socket = remote_c_int_result(sys::remote_call(
+        pid,
+        addrs.socket,
+        addrs.libc_return,
+        &args,
+    )?);
     if remote_socket == -1 {
         let err = get_remote_errno()?;
         bail!("Failed to create remote {label} handoff socket. Remote errno: {err}");
@@ -352,7 +361,8 @@ where
 
     let remote_addr_ptr = push_to_remote_stack(&addr_bytes)?;
     let args = vec![remote_socket as usize, remote_addr_ptr, addr_len];
-    let bind_res = remote_c_int_result(sys::remote_call(pid, bind_addr, libc_return_addr, &args)?);
+    let bind_res =
+        remote_c_int_result(sys::remote_call(pid, addrs.bind, addrs.libc_return, &args)?);
     if bind_res == -1 {
         let err = get_remote_errno()?;
         close_remote(remote_socket)?;
@@ -391,8 +401,8 @@ where
 
     let recvmsg_call = sys::remote_pre_call(
         pid,
-        recvmsg_addr,
-        libc_return_addr,
+        addrs.recvmsg,
+        addrs.libc_return,
         &[
             remote_socket as usize,
             remote_msg_ptr,
@@ -753,14 +763,18 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         warn!("[Injector][Loader] sockcreate context setup failed: {error:#}");
     }
 
+    let fd_handoff_addrs = RemoteFdHandoffAddrs {
+        socket: socket_addr,
+        bind: bind_addr,
+        recvmsg: recvmsg_addr,
+        libc_return: libc_return_addr,
+    };
+
     let remote_lib_fd = match send_fd_to_remote(
         pid,
         local_lib_fd,
         "payload image",
-        socket_addr,
-        bind_addr,
-        recvmsg_addr,
-        libc_return_addr,
+        fd_handoff_addrs,
         &mut push_to_remote_stack,
         &get_remote_errno,
         &close_remote,
@@ -851,10 +865,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         pid,
         rpc_stream.as_raw_fd(),
         "OMK RPC connection",
-        socket_addr,
-        bind_addr,
-        recvmsg_addr,
-        libc_return_addr,
+        fd_handoff_addrs,
         &mut push_to_remote_stack,
         &get_remote_errno,
         &close_remote,

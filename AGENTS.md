@@ -26,3 +26,5 @@
     key storage based on `sys.user.<id>.ce_available` or similar Android CE-availability signals.
 - Any chaneges to the `config` should be reflected to the READMD.md and template
 - You must run unit test on the real Android device after finishing your tasks unless device unavailable or you don't change the code.
+- Format code and make clippy happy.
+  - Using `[allow]` to bypass clippy is a compromise and should not be allowed unless there is a good reason (You should explain).

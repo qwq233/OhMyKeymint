@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use rsbinder::{hub, Parcel, SIBinder, Status};
@@ -13,16 +13,14 @@ const NONNULL_PARCELABLE: i32 = 1;
 const NULL_VECTOR_SIZE: i32 = -1;
 const AAID_MAX_VECTOR_LEN: i32 = 1024;
 
-thread_local! {
-    static PROVIDER: RefCell<Option<SIBinder>> = const { RefCell::new(None) };
-}
+static PROVIDER: Mutex<Option<SIBinder>> = Mutex::new(None);
 
 pub fn should_use_aaid_provider() -> bool {
     matches!(kmr_common::android_version::android_major_version(), Some(version) if version <= 12)
 }
 
 pub fn clear_provider_cache() {
-    PROVIDER.with(|slot| *slot.borrow_mut() = None);
+    *PROVIDER.lock().expect("legacy provider cache poisoned") = None;
 }
 
 pub fn resolve_package_names_for_uid(uid: u32) -> Result<Vec<String>> {
@@ -74,21 +72,23 @@ fn resolve_package_names_for_uid_once(uid: u32) -> Result<Vec<String>> {
 }
 
 fn get_provider_binder() -> Result<SIBinder> {
-    PROVIDER.with(|slot| {
-        if let Some(provider) = slot.borrow().as_ref() {
-            return Ok(provider.clone());
-        }
+    if let Some(provider) = PROVIDER
+        .lock()
+        .expect("legacy provider cache poisoned")
+        .as_ref()
+    {
+        return Ok(provider.clone());
+    }
 
-        let provider = hub::get_service(PROVIDER_SERVICE)
-            .ok_or_else(|| anyhow::anyhow!("service {PROVIDER_SERVICE} unavailable"))?;
-        let descriptor = provider.descriptor();
-        if descriptor != LEGACY_PROVIDER_DESCRIPTOR {
-            bail!("legacy key attestation provider descriptor mismatch: {descriptor}");
-        }
+    let provider = hub::get_service(PROVIDER_SERVICE)
+        .ok_or_else(|| anyhow::anyhow!("service {PROVIDER_SERVICE} unavailable"))?;
+    let descriptor = provider.descriptor();
+    if descriptor != LEGACY_PROVIDER_DESCRIPTOR {
+        bail!("legacy key attestation provider descriptor mismatch: {descriptor}");
+    }
 
-        *slot.borrow_mut() = Some(provider.clone());
-        Ok(provider)
-    })
+    *PROVIDER.lock().expect("legacy provider cache poisoned") = Some(provider.clone());
+    Ok(provider)
 }
 
 fn read_package_names(parcel: &mut Parcel) -> Result<Vec<String>> {

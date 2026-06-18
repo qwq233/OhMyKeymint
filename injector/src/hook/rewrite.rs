@@ -82,7 +82,12 @@ enum PrecomputedServiceReply {
         target_key: KeyDescriptor,
         grantee_uid: i32,
     },
+    Error(PrecomputedErrorReply),
+}
+
+enum PrecomputedErrorReply {
     Status(Status),
+    StatusCode(i32),
 }
 
 enum OmkGrantPrecompute {
@@ -102,6 +107,7 @@ enum PendingCall {
 thread_local! {
     static PENDING_REPLY_QUEUE: RefCell<VecDeque<Option<PendingCall>>> = RefCell::default();
     static OUTBOUND_REPLY_BUFFERS: RefCell<Vec<parcel::OwnedReply>> = RefCell::default();
+    static OUTBOUND_STATUS_BUFFERS: RefCell<Vec<i32>> = RefCell::default();
     static INBOUND_REQUEST_BUFFERS: RefCell<Vec<parcel::OwnedReply>> = RefCell::default();
 }
 
@@ -120,9 +126,20 @@ pub(super) enum SyntheticTargetKind {
 }
 
 pub(super) enum SyntheticReply {
-    Parcel(parcel::OwnedReply),
+    Parcel(Box<parcel::OwnedReply>),
     Status(i32),
     NoReply,
+}
+
+enum OutboundReply {
+    Parcel(Box<parcel::OwnedReply>),
+    Status(i32),
+}
+
+impl From<parcel::OwnedReply> for OutboundReply {
+    fn from(reply: parcel::OwnedReply) -> Self {
+        OutboundReply::Parcel(Box::new(reply))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -348,9 +365,9 @@ fn precompute_omk_grant_service_reply_with(
                     "[Injector][Route] OMK grant failed for uid={} pid={}: {:#}; returning OMK error",
                     caller.uid, caller.pid, error
                 );
-                OmkGrantPrecompute::Reply(PrecomputedServiceReply::Status(status_for_omk_error(
-                    &error,
-                )))
+                OmkGrantPrecompute::Reply(PrecomputedServiceReply::Error(
+                    precomputed_omk_error_reply(&error),
+                ))
             }
         },
         ParsedServiceRequest::Ungrant { key, grantee_uid } => {
@@ -371,8 +388,8 @@ fn precompute_omk_grant_service_reply_with(
                         "[Injector][Route] OMK ungrant failed for uid={} pid={}: {:#}; returning OMK error",
                         caller.uid, caller.pid, error
                     );
-                    OmkGrantPrecompute::Reply(PrecomputedServiceReply::Status(
-                        status_for_omk_error(&error),
+                    OmkGrantPrecompute::Reply(PrecomputedServiceReply::Error(
+                        precomputed_omk_error_reply(&error),
                     ))
                 }
             }
@@ -1196,7 +1213,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
                             format!("{:?}", call.method),
                             call.caller.uid,
                             call.caller.pid,
-                            reply,
+                            reply.into(),
                         )
                     })
                 })
@@ -1213,7 +1230,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
                             format!("{:?}", call.method),
                             call.caller.uid,
                             call.caller.pid,
-                            reply,
+                            reply.into(),
                         )
                     })
                 })
@@ -1317,7 +1334,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
                         "[Injector][Reply] failed to rewrite authoritative OMK reply: {:#}; returning SYSTEM_ERROR",
                         error
                     );
-                    install_outbound_reply(tr, synthetic_fallback_reply());
+                    install_outbound_reply(tr, synthetic_fallback_reply().into());
                 }
             }
         }
@@ -1368,41 +1385,55 @@ fn register_security_level_carrier(
     Ok(())
 }
 
-fn status_for_reply(status: &Status) -> Status {
+fn build_omk_status_reply(status: &Status) -> anyhow::Result<OutboundReply> {
     if status.is_ok() {
-        return Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None);
+        return Ok(synthetic_fallback_reply().into());
     }
 
-    match status.exception_code() {
-        ExceptionCode::None => {
-            Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None)
-        }
-        ExceptionCode::TransactionFailed => {
-            Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None)
-        }
-        ExceptionCode::ServiceSpecific => {
-            Status::new_service_specific_error(status.service_specific_error(), None)
-        }
-        exception => Status::from(exception),
+    if status.exception_code() == ExceptionCode::TransactionFailed {
+        return Ok(OutboundReply::Status(status.transaction_error().into()));
     }
+
+    Ok(parcel::build_status_reply(status)?.into())
 }
 
-fn build_omk_status_reply(status: &Status) -> anyhow::Result<parcel::OwnedReply> {
-    parcel::build_status_reply(&status_for_reply(status))
-}
-
-fn status_for_omk_error(error: &anyhow::Error) -> Status {
-    let status = error
+fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<OutboundReply> {
+    if let Some(status) = error
         .chain()
-        .find_map(|cause| cause.downcast_ref::<Status>());
-    match status {
-        Some(status) => status_for_reply(status),
-        None => Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
+        .find_map(|cause| cause.downcast_ref::<Status>())
+    {
+        return build_omk_status_reply(status);
     }
+
+    if let Some(status) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<StatusCode>())
+    {
+        return Ok(OutboundReply::Status((*status).into()));
+    }
+
+    Ok(synthetic_fallback_reply().into())
 }
 
-fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<parcel::OwnedReply> {
-    parcel::build_status_reply(&status_for_omk_error(error))
+fn precomputed_omk_error_reply(error: &anyhow::Error) -> PrecomputedErrorReply {
+    if let Some(status) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Status>())
+    {
+        return PrecomputedErrorReply::Status(status.clone());
+    }
+
+    if let Some(status) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<StatusCode>())
+    {
+        return PrecomputedErrorReply::StatusCode((*status).into());
+    }
+
+    PrecomputedErrorReply::Status(Status::new_service_specific_error(
+        ResponseCode::SYSTEM_ERROR.0,
+        None,
+    ))
 }
 
 fn omk_unavailable_status(status: &Status) -> bool {
@@ -1412,23 +1443,12 @@ fn omk_unavailable_status(status: &Status) -> bool {
 
 fn omk_unavailable_status_code(status: StatusCode) -> bool {
     match status {
-        StatusCode::NameNotFound
-        | StatusCode::PermissionDenied
-        | StatusCode::NoInit
-        | StatusCode::DeadObject
-        | StatusCode::TimedOut
-        | StatusCode::RpcError => true,
+        StatusCode::NameNotFound | StatusCode::NoInit | StatusCode::DeadObject => true,
         StatusCode::Errno(errno) => {
             let errno = errno.abs();
             matches!(
                 errno,
-                libc::ENOENT
-                    | libc::ECONNREFUSED
-                    | libc::EACCES
-                    | libc::ECONNRESET
-                    | libc::ENOTCONN
-                    | libc::EPIPE
-                    | libc::ETIMEDOUT
+                libc::ENOENT | libc::ECONNREFUSED | libc::ECONNRESET | libc::ENOTCONN | libc::EPIPE
             )
         }
         _ => false,
@@ -1461,7 +1481,7 @@ fn omk_unavailable_error(error: &anyhow::Error) -> bool {
 
 fn build_omk_error_reply_or_preserve_system(
     error: &anyhow::Error,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<Option<OutboundReply>> {
     if omk_unavailable_error(error) {
         Ok(None)
     } else {
@@ -1471,7 +1491,7 @@ fn build_omk_error_reply_or_preserve_system(
 
 fn build_omk_status_reply_or_preserve_system(
     status: &Status,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<Option<OutboundReply>> {
     if omk_unavailable_status(status) {
         Ok(None)
     } else {
@@ -1483,7 +1503,7 @@ fn omk_error_reply_for_method(
     method: &str,
     caller: &CallerIdentity,
     error: &anyhow::Error,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<Option<OutboundReply>> {
     match build_omk_error_reply_or_preserve_system(error)? {
         Some(reply) => {
             warn!(
@@ -1506,7 +1526,7 @@ fn omk_status_reply_for_method(
     method: &str,
     caller: &CallerIdentity,
     status: &Status,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<Option<OutboundReply>> {
     match build_omk_status_reply_or_preserve_system(status)? {
         Some(reply) => {
             warn!(
@@ -1545,6 +1565,18 @@ fn synthetic_unknown_transaction_reply() -> SyntheticReply {
     SyntheticReply::Status(StatusCode::UnknownTransaction.into())
 }
 
+fn synthetic_parcel_reply(reply: parcel::OwnedReply) -> SyntheticReply {
+    SyntheticReply::Parcel(Box::new(reply))
+}
+
+fn synthetic_reply_from_outbound(reply: Option<OutboundReply>) -> SyntheticReply {
+    match reply {
+        Some(OutboundReply::Parcel(reply)) => SyntheticReply::Parcel(reply),
+        Some(OutboundReply::Status(status)) => SyntheticReply::Status(status),
+        None => synthetic_parcel_reply(synthetic_fallback_reply()),
+    }
+}
+
 fn synthetic_unknown_transaction_reply_for(
     kind: SyntheticTargetKind,
     code: u32,
@@ -1560,7 +1592,7 @@ fn synthetic_unknown_transaction_reply_for(
 
 fn build_precomputed_service_reply(
     precomputed: &PrecomputedServiceReply,
-) -> anyhow::Result<parcel::OwnedReply> {
+) -> anyhow::Result<OutboundReply> {
     match precomputed {
         PrecomputedServiceReply::GrantSuccess {
             target_key,
@@ -1569,16 +1601,21 @@ fn build_precomputed_service_reply(
         } => {
             tracker::remember_key_descriptor_route(omk_grant, RouteTarget::Omk);
             tracker::remember_grant_descriptor_for_ungrant(target_key, *grantee_uid, omk_grant);
-            parcel::build_plain_reply(omk_grant)
+            Ok(parcel::build_plain_reply(omk_grant)?.into())
         }
         PrecomputedServiceReply::UngrantSuccess {
             target_key,
             grantee_uid,
         } => {
             tracker::retire_grant_descriptor_after_ungrant(target_key, *grantee_uid);
-            parcel::build_void_reply()
+            Ok(parcel::build_void_reply()?.into())
         }
-        PrecomputedServiceReply::Status(status) => parcel::build_status_reply(status),
+        PrecomputedServiceReply::Error(PrecomputedErrorReply::Status(status)) => {
+            build_omk_status_reply(status)
+        }
+        PrecomputedServiceReply::Error(PrecomputedErrorReply::StatusCode(status)) => {
+            Ok(OutboundReply::Status(*status))
+        }
     }
 }
 
@@ -1594,18 +1631,18 @@ fn synthetic_base_transaction_reply(
     code: u32,
 ) -> anyhow::Result<Option<SyntheticReply>> {
     let reply = match code {
-        rsbinder::INTERFACE_TRANSACTION => SyntheticReply::Parcel(
+        rsbinder::INTERFACE_TRANSACTION => synthetic_parcel_reply(
             parcel::build_interface_descriptor_reply(synthetic_descriptor(kind))?,
         ),
-        rsbinder::PING_TRANSACTION => SyntheticReply::Parcel(parcel::build_empty_reply()),
+        rsbinder::PING_TRANSACTION => synthetic_parcel_reply(parcel::build_empty_reply()),
         rsbinder::EXTENSION_TRANSACTION => {
-            SyntheticReply::Parcel(parcel::build_null_binder_reply()?)
+            synthetic_parcel_reply(parcel::build_null_binder_reply()?)
         }
         rsbinder::DEBUG_PID_TRANSACTION => {
-            SyntheticReply::Parcel(parcel::build_raw_i32_reply(std::process::id() as i32)?)
+            synthetic_parcel_reply(parcel::build_raw_i32_reply(std::process::id() as i32)?)
         }
         rsbinder::SHELL_COMMAND_TRANSACTION | rsbinder::SYSPROPS_TRANSACTION => {
-            SyntheticReply::Parcel(parcel::build_empty_reply())
+            synthetic_parcel_reply(parcel::build_empty_reply())
         }
         rsbinder::DUMP_TRANSACTION => SyntheticReply::Status(StatusCode::UnexpectedNull.into()),
         rsbinder::SET_RPC_CLIENT_TRANSACTION => {
@@ -1670,7 +1707,7 @@ pub(super) unsafe fn handle_synthetic_br_transaction(
                 tr.code,
                 error
             );
-            SyntheticReply::Parcel(synthetic_fallback_reply())
+            synthetic_parcel_reply(synthetic_fallback_reply())
         }
     };
     Some(reply)
@@ -1698,7 +1735,7 @@ unsafe fn build_synthetic_br_transaction_reply(
             "[Injector][Synthetic] injector disabled while synthetic target ptr=0x{:x} cookie=0x{:x} is still live; returning SYSTEM_ERROR",
             target.ptr, target.cookie
         );
-        return Ok(SyntheticReply::Parcel(build_service_specific_reply(
+        return Ok(synthetic_parcel_reply(build_service_specific_reply(
             ResponseCode::SYSTEM_ERROR.0,
         )?));
     }
@@ -1760,7 +1797,7 @@ unsafe fn build_synthetic_br_transaction_reply(
                     "[Injector][Synthetic] denied security-level {:?} for uid={} pid={} packages={:?} reason={:?}; returning PERMISSION_DENIED",
                     method, caller.uid, caller.pid, decision.packages, decision.reason
                 );
-                return Ok(SyntheticReply::Parcel(build_service_specific_reply(
+                return Ok(synthetic_parcel_reply(build_service_specific_reply(
                     ResponseCode::PERMISSION_DENIED.0,
                 )?));
             }
@@ -1786,9 +1823,7 @@ unsafe fn build_synthetic_br_transaction_reply(
                 security_level: target_info.security_level,
             };
             let reply = build_security_level_reply_rewrite(tr, &pending)?;
-            Ok(SyntheticReply::Parcel(
-                reply.unwrap_or_else(synthetic_fallback_reply),
-            ))
+            Ok(synthetic_reply_from_outbound(reply))
         }
         SyntheticTargetKind::Operation => {
             if request_interface != identify::KEYSTORE_OPERATION_INTERFACE {
@@ -1823,7 +1858,7 @@ unsafe fn build_synthetic_br_transaction_reply(
                     "[Injector][Synthetic] denied operation {:?} for uid={} pid={} packages={:?} reason={:?}; returning PERMISSION_DENIED",
                     method, caller.uid, caller.pid, decision.packages, decision.reason
                 );
-                return Ok(SyntheticReply::Parcel(build_service_specific_reply(
+                return Ok(synthetic_parcel_reply(build_service_specific_reply(
                     ResponseCode::PERMISSION_DENIED.0,
                 )?));
             }
@@ -1847,9 +1882,7 @@ unsafe fn build_synthetic_br_transaction_reply(
                 target,
             };
             let reply = build_operation_reply_rewrite(&pending)?;
-            Ok(SyntheticReply::Parcel(
-                reply.unwrap_or_else(synthetic_fallback_reply),
-            ))
+            Ok(synthetic_reply_from_outbound(reply))
         }
     }
 }
@@ -1869,11 +1902,11 @@ fn build_no_carrier_omk_key_entry_reply(
             ServiceMethod::GetKeyEntry,
             caller,
         );
-        return Ok(parcel::build_key_entry_reply_with_carrier_bytes(
+        return parcel::build_key_entry_reply_with_carrier_bytes(
             r#metadata,
             &carrier.bytes,
             carrier.is_object,
-        )?);
+        );
     }
 
     parcel::build_key_entry_reply(KeyEntryResponse {
@@ -1900,30 +1933,30 @@ fn build_no_carrier_create_operation_reply(
     } = response;
 
     let Some(operation) = r#iOperation else {
-        return Ok(parcel::build_create_operation_reply(
+        return parcel::build_create_operation_reply(
             crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse {
                 r#iOperation: None,
                 r#operationChallenge,
                 r#parameters,
                 r#upgradedBlob,
             },
-        )?);
+        );
     };
 
     let carrier = register_synthetic_operation_carrier(operation, aad_allowed, caller);
-    Ok(parcel::build_create_operation_reply_with_carrier_bytes(
+    parcel::build_create_operation_reply_with_carrier_bytes(
         r#operationChallenge,
         r#parameters,
         r#upgradedBlob,
         &carrier.bytes,
         carrier.is_object,
-    )?)
+    )
 }
 
 fn build_direct_omk_security_level_reply(
     security_level: crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel,
     pending: &PendingServiceCall,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<Option<OutboundReply>> {
     match ipc::with_omk_retry(|omk| Ok(omk.r#getSecurityLevel(security_level)?)) {
         Ok(_level) => {
             let carrier = register_synthetic_security_level_carrier(
@@ -1935,7 +1968,8 @@ fn build_direct_omk_security_level_reply(
                 parcel::build_get_security_level_reply_with_carrier_bytes(
                     &carrier.bytes,
                     carrier.is_object,
-                )?,
+                )?
+                .into(),
             ))
         }
         Err(error) => omk_error_reply_for_method("getSecurityLevel", &pending.caller, &error),
@@ -2178,7 +2212,7 @@ unsafe fn build_maintenance_reply_mirror(
 unsafe fn build_service_reply_rewrite(
     tr: &binder_transaction_data,
     pending: &PendingServiceCall,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<Option<OutboundReply>> {
     if pending.route != RouteTarget::Omk {
         observe_system_service_reply(tr, pending)?;
         return Ok(None);
@@ -2199,10 +2233,9 @@ unsafe fn build_service_reply_rewrite(
                     return omk_error_reply_for_method("getKeyEntry", &pending.caller, &error);
                 }
             };
-            Ok(Some(build_no_carrier_omk_key_entry_reply(
-                entry,
-                &pending.caller,
-            )?))
+            Ok(Some(
+                build_no_carrier_omk_key_entry_reply(entry, &pending.caller)?.into(),
+            ))
         }
         ParsedServiceRequest::UpdateSubcomponent {
             key,
@@ -2217,7 +2250,7 @@ unsafe fn build_service_reply_rewrite(
                     certificate_chain.as_deref(),
                 )?)
             }) {
-                Ok(()) => Ok(Some(parcel::build_void_reply()?)),
+                Ok(()) => Ok(Some(parcel::build_void_reply()?.into())),
                 Err(error) => {
                     omk_error_reply_for_method("updateSubcomponent", &pending.caller, &error)
                 }
@@ -2227,7 +2260,7 @@ unsafe fn build_service_reply_rewrite(
             match ipc::with_omk_retry(|omk| {
                 Ok(omk.r#listEntries(Some(&caller), *domain, *nspace)?)
             }) {
-                Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?)),
+                Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?.into())),
                 Err(error) => omk_error_reply_for_method("listEntries", &pending.caller, &error),
             }
         }
@@ -2244,13 +2277,13 @@ unsafe fn build_service_reply_rewrite(
             };
             tracker::remember_key_descriptor_route(&omk_grant, RouteTarget::Omk);
             tracker::remember_grant_descriptor_for_ungrant(key, *grantee_uid, &omk_grant);
-            Ok(Some(parcel::build_plain_reply(&omk_grant)?))
+            Ok(Some(parcel::build_plain_reply(&omk_grant)?.into()))
         }
         ParsedServiceRequest::Ungrant { key, grantee_uid } => {
             match ipc::with_omk_retry(|omk| Ok(omk.r#ungrant(Some(&caller), key, *grantee_uid)?)) {
                 Ok(()) => {
                     tracker::retire_grant_descriptor_after_ungrant(key, *grantee_uid);
-                    Ok(Some(parcel::build_void_reply()?))
+                    Ok(Some(parcel::build_void_reply()?.into()))
                 }
                 Err(error) => omk_error_reply_for_method("ungrant", &pending.caller, &error),
             }
@@ -2259,7 +2292,7 @@ unsafe fn build_service_reply_rewrite(
             match ipc::with_omk_retry(|omk| {
                 Ok(omk.r#getNumberOfEntries(Some(&caller), *domain, *nspace)?)
             }) {
-                Ok(count) => Ok(Some(parcel::build_plain_reply(&count)?)),
+                Ok(count) => Ok(Some(parcel::build_plain_reply(&count)?.into())),
                 Err(error) => {
                     omk_error_reply_for_method("getNumberOfEntries", &pending.caller, &error)
                 }
@@ -2278,7 +2311,7 @@ unsafe fn build_service_reply_rewrite(
                     starting_past_alias.as_deref(),
                 )?)
             }) {
-                Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?)),
+                Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?.into())),
                 Err(error) => {
                     omk_error_reply_for_method("listEntriesBatched", &pending.caller, &error)
                 }
@@ -2286,7 +2319,7 @@ unsafe fn build_service_reply_rewrite(
         }
         ParsedServiceRequest::GetSupplementaryAttestationInfo { tag } => {
             match ipc::with_omk_retry(|omk| Ok(omk.r#getSupplementaryAttestationInfo(*tag)?)) {
-                Ok(info) => Ok(Some(parcel::build_plain_reply(&info)?)),
+                Ok(info) => Ok(Some(parcel::build_plain_reply(&info)?.into())),
                 Err(error) => omk_error_reply_for_method(
                     "getSupplementaryAttestationInfo",
                     &pending.caller,
@@ -2298,7 +2331,7 @@ unsafe fn build_service_reply_rewrite(
             match ipc::with_omk_retry(|omk| Ok(omk.r#deleteKey(Some(&caller), key)?)) {
                 Ok(()) => {
                     tracker::forget_key_descriptor_route(key);
-                    Ok(Some(parcel::build_void_reply()?))
+                    Ok(Some(parcel::build_void_reply()?.into()))
                 }
                 Err(error) => omk_error_reply_for_method("deleteKey", &pending.caller, &error),
             }
@@ -2350,7 +2383,7 @@ unsafe fn observe_system_security_level_reply(
 unsafe fn build_security_level_reply_rewrite(
     tr: &binder_transaction_data,
     pending: &PendingSecurityLevelCall,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<Option<OutboundReply>> {
     if pending.route != RouteTarget::Omk {
         observe_system_security_level_reply(tr, pending)?;
         return Ok(None);
@@ -2384,11 +2417,14 @@ unsafe fn build_security_level_reply_rewrite(
                     return omk_status_reply_for_method("createOperation", &pending.caller, &error);
                 }
             };
-            Ok(Some(build_no_carrier_create_operation_reply(
-                omk_response,
-                operation_allows_aad(operation_parameters),
-                &pending.caller,
-            )?))
+            Ok(Some(
+                build_no_carrier_create_operation_reply(
+                    omk_response,
+                    operation_allows_aad(operation_parameters),
+                    &pending.caller,
+                )?
+                .into(),
+            ))
         }
         ParsedSecurityLevelRequest::GenerateKey {
             key,
@@ -2408,7 +2444,7 @@ unsafe fn build_security_level_reply_rewrite(
                 Ok(metadata) => {
                     tracker::remember_key_descriptor_route(key, RouteTarget::Omk);
                     tracker::remember_key_metadata_route(&metadata, RouteTarget::Omk);
-                    Ok(Some(parcel::build_plain_reply(&metadata)?))
+                    Ok(Some(parcel::build_plain_reply(&metadata)?.into()))
                 }
                 Err(error) => omk_status_reply_for_method("generateKey", &pending.caller, &error),
             }
@@ -2430,7 +2466,7 @@ unsafe fn build_security_level_reply_rewrite(
             ) {
                 Ok(metadata) => {
                     tracker::remember_key_descriptor_route(key, RouteTarget::Omk);
-                    Ok(Some(build_direct_omk_metadata_reply(metadata)?))
+                    Ok(Some(build_direct_omk_metadata_reply(metadata)?.into()))
                 }
                 Err(error) => omk_status_reply_for_method("importKey", &pending.caller, &error),
             }
@@ -2452,7 +2488,7 @@ unsafe fn build_security_level_reply_rewrite(
             ) {
                 Ok(metadata) => {
                     tracker::remember_key_descriptor_route(key, RouteTarget::Omk);
-                    Ok(Some(build_direct_omk_metadata_reply(metadata)?))
+                    Ok(Some(build_direct_omk_metadata_reply(metadata)?.into()))
                 }
                 Err(error) => {
                     omk_status_reply_for_method("importWrappedKey", &pending.caller, &error)
@@ -2462,7 +2498,7 @@ unsafe fn build_security_level_reply_rewrite(
         ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral { storage_key } => match omk_level
             .r#convertStorageKeyToEphemeral(Some(&caller), storage_key)
         {
-            Ok(response) => Ok(Some(parcel::build_plain_reply(&response)?)),
+            Ok(response) => Ok(Some(parcel::build_plain_reply(&response)?.into())),
             Err(error) => {
                 omk_status_reply_for_method("convertStorageKeyToEphemeral", &pending.caller, &error)
             }
@@ -2471,7 +2507,7 @@ unsafe fn build_security_level_reply_rewrite(
             match omk_level.r#deleteKey(Some(&caller), key) {
                 Ok(()) => {
                     tracker::forget_key_descriptor_route(key);
-                    Ok(Some(parcel::build_void_reply()?))
+                    Ok(Some(parcel::build_void_reply()?.into()))
                 }
                 Err(error) => omk_status_reply_for_method("deleteKey", &pending.caller, &error),
             }
@@ -2481,14 +2517,14 @@ unsafe fn build_security_level_reply_rewrite(
 
 fn build_operation_reply_rewrite(
     pending: &PendingOperationCall,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<Option<OutboundReply>> {
     let Some(target) = lookup_operation_target(pending.target) else {
         if lookup_synthetic_target(pending.target) == Some(SyntheticTargetKind::Operation) {
             debug!(
                 "[Injector][Reply] synthetic operation carrier ptr=0x{:x} cookie=0x{:x} has no live backend; returning INVALID_OPERATION_HANDLE",
                 pending.target.ptr, pending.target.cookie
             );
-            return Ok(Some(invalid_operation_handle_reply()?));
+            return Ok(Some(invalid_operation_handle_reply()?.into()));
         }
         anyhow::bail!("missing operation target mapping");
     };
@@ -2511,9 +2547,9 @@ fn build_operation_reply_rewrite(
                     pending.target.ptr, pending.target.cookie
                 );
                 forget_operation_target(pending.target);
-                return Ok(Some(invalid_operation_handle_reply()?));
+                return Ok(Some(invalid_operation_handle_reply()?.into()));
             }
-            return Ok(Some(invalid_operation_handle_reply()?));
+            return Ok(Some(invalid_operation_handle_reply()?.into()));
         }
         anyhow::bail!("missing OMK operation backend mapping");
     };
@@ -2527,19 +2563,19 @@ fn build_operation_reply_rewrite(
                 );
             }
             match backend.r#updateAad(aad_input) {
-                Ok(()) => parcel::build_void_reply()?,
+                Ok(()) => parcel::build_void_reply()?.into(),
                 Err(status) => build_omk_status_reply(&status)?,
             }
         }
         ParsedOperationRequest::Update { input } => match backend.r#update(input) {
-            Ok(output) => parcel::build_plain_reply(&output)?,
+            Ok(output) => parcel::build_plain_reply(&output)?.into(),
             Err(status) => build_omk_status_reply(&status)?,
         },
         ParsedOperationRequest::Finish { input, signature } => {
             match backend.r#finish(input.as_deref(), signature.as_deref()) {
                 Ok(output) => {
                     mark_operation_target_finalized(pending.target);
-                    parcel::build_plain_reply(&output)?
+                    parcel::build_plain_reply(&output)?.into()
                 }
                 Err(status) => build_omk_status_reply(&status)?,
             }
@@ -2547,7 +2583,7 @@ fn build_operation_reply_rewrite(
         ParsedOperationRequest::Abort => match backend.r#abort() {
             Ok(()) => {
                 forget_operation_target(pending.target);
-                parcel::build_void_reply()?
+                parcel::build_void_reply()?.into()
             }
             Err(status) => build_omk_status_reply(&status)?,
         },
@@ -2556,21 +2592,37 @@ fn build_operation_reply_rewrite(
     Ok(Some(reply))
 }
 
-unsafe fn install_outbound_reply(tr: &mut binder_transaction_data, reply: parcel::OwnedReply) {
-    OUTBOUND_REPLY_BUFFERS.with(|slot| {
-        let mut buffers = slot.borrow_mut();
-        buffers.push(reply);
-        let reply = buffers.last().expect("outbound reply buffer just pushed");
-        tr.flags &= !super::binder::TF_STATUS_CODE;
-        tr.data_size = reply.data_size();
-        tr.offsets_size = reply.offsets_size();
-        tr.data.ptr.buffer = reply.data_ptr() as libc::c_ulong;
-        tr.data.ptr.offsets = if reply.offsets.is_empty() {
-            0
-        } else {
-            reply.offsets.as_ptr() as libc::c_ulong
-        };
-    });
+unsafe fn install_outbound_reply(tr: &mut binder_transaction_data, reply: OutboundReply) {
+    match reply {
+        OutboundReply::Parcel(reply) => {
+            OUTBOUND_REPLY_BUFFERS.with(|slot| {
+                let mut buffers = slot.borrow_mut();
+                buffers.push(*reply);
+                let reply = buffers.last().expect("outbound reply buffer just pushed");
+                tr.flags &= !super::binder::TF_STATUS_CODE;
+                tr.data_size = reply.data_size();
+                tr.offsets_size = reply.offsets_size();
+                tr.data.ptr.buffer = reply.data_ptr() as libc::c_ulong;
+                tr.data.ptr.offsets = if reply.offsets.is_empty() {
+                    0
+                } else {
+                    reply.offsets.as_ptr() as libc::c_ulong
+                };
+            });
+        }
+        OutboundReply::Status(status) => {
+            OUTBOUND_STATUS_BUFFERS.with(|slot| {
+                let mut buffers = slot.borrow_mut();
+                buffers.push(status);
+                let status = buffers.last().expect("outbound status buffer just pushed");
+                tr.flags |= super::binder::TF_STATUS_CODE;
+                tr.data_size = size_of::<i32>();
+                tr.offsets_size = 0;
+                tr.data.ptr.buffer = status as *const i32 as libc::c_ulong;
+                tr.data.ptr.offsets = 0;
+            });
+        }
+    }
 }
 
 unsafe fn install_inbound_request(
@@ -2630,6 +2682,7 @@ fn pop_pending_frame() {
 
 pub(super) fn clear_outbound_reply_buffers() {
     OUTBOUND_REPLY_BUFFERS.with(|slot| slot.borrow_mut().clear());
+    OUTBOUND_STATUS_BUFFERS.with(|slot| slot.borrow_mut().clear());
     INBOUND_REQUEST_BUFFERS.with(|slot| slot.borrow_mut().clear());
 }
 
@@ -2854,6 +2907,20 @@ mod tests {
         )
     }
 
+    fn outbound_parcel(reply: OutboundReply) -> parcel::OwnedReply {
+        match reply {
+            OutboundReply::Parcel(reply) => *reply,
+            OutboundReply::Status(status) => panic!("expected parcel reply, got status {status}"),
+        }
+    }
+
+    fn assert_outbound_status(reply: OutboundReply, expected: StatusCode) {
+        let OutboundReply::Status(status) = reply else {
+            panic!("expected status reply");
+        };
+        assert_eq!(status, i32::from(expected));
+    }
+
     fn assert_unknown_transaction_reply(reply: SyntheticReply) {
         let SyntheticReply::Status(status) = reply else {
             panic!("unknown transaction should be returned as a binder status code");
@@ -2952,8 +3019,9 @@ mod tests {
     #[test]
     fn omk_service_specific_error_can_replace_system_success_reply() {
         let status = Status::new_service_specific_error(7, None);
-        let mut reply =
-            build_omk_status_reply(&status).expect("service-specific status should serialize");
+        let mut reply = outbound_parcel(
+            build_omk_status_reply(&status).expect("service-specific status should serialize"),
+        );
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
         let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
             .expect("status reply should parse");
@@ -2966,21 +3034,12 @@ mod tests {
     }
 
     #[test]
-    fn omk_transaction_error_becomes_system_error_reply() {
+    fn omk_transaction_error_keeps_native_status_code() {
         let status: Status = StatusCode::UnknownTransaction.into();
-        let mut reply = build_omk_status_reply(&status)
-            .expect("transaction status should be converted into a reply");
-        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
-        let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
-            .expect("status reply should parse");
-
-        assert_eq!(
-            parsed.exception_code(),
-            rsbinder::ExceptionCode::ServiceSpecific
-        );
-        assert_eq!(
-            parsed.service_specific_error(),
-            ResponseCode::SYSTEM_ERROR.0
+        assert_outbound_status(
+            build_omk_status_reply(&status)
+                .expect("transaction status should be converted into a reply"),
+            StatusCode::UnknownTransaction,
         );
     }
 
@@ -3179,8 +3238,9 @@ mod tests {
     #[test]
     fn plain_omk_error_becomes_system_error_reply() {
         let error = anyhow::anyhow!("plain OMK failure");
-        let mut reply =
-            build_omk_error_reply(&error).expect("plain error should produce a status reply");
+        let mut reply = outbound_parcel(
+            build_omk_error_reply(&error).expect("plain error should produce a status reply"),
+        );
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
         let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
             .expect("status reply should parse");
@@ -3199,8 +3259,9 @@ mod tests {
     fn contextual_omk_status_error_keeps_service_specific_code() {
         let status = Status::new_service_specific_error(7, None);
         let error = anyhow::Error::new(status).context("wrapped OMK failure");
-        let mut reply =
-            build_omk_error_reply(&error).expect("wrapped status should produce a status reply");
+        let mut reply = outbound_parcel(
+            build_omk_error_reply(&error).expect("wrapped status should produce a status reply"),
+        );
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
         let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
             .expect("status reply should parse");
@@ -3214,13 +3275,21 @@ mod tests {
 
     #[test]
     fn unavailable_omk_errors_preserve_system_reply() {
-        let dead = anyhow::Error::new(Status::from(StatusCode::DeadObject));
-        assert!(
-            build_omk_error_reply_or_preserve_system(&dead)
-                .expect("DeadObject should classify cleanly")
-                .is_none(),
-            "DeadObject after retry means OMK is unavailable, not authoritative"
-        );
+        for status in [
+            StatusCode::DeadObject,
+            StatusCode::NoInit,
+            StatusCode::NameNotFound,
+            StatusCode::Errno(libc::ECONNREFUSED),
+            StatusCode::Errno(libc::EPIPE),
+        ] {
+            let error = anyhow::Error::new(Status::from(status));
+            assert!(
+                build_omk_error_reply_or_preserve_system(&error)
+                    .expect("unavailable OMK errors should classify cleanly")
+                    .is_none(),
+                "{status:?} after retry means OMK is unavailable, not authoritative"
+            );
+        }
 
         let connect = anyhow::anyhow!("failed to connect to omk service");
         assert!(
@@ -3238,14 +3307,6 @@ mod tests {
             "missing OMK RPC service means OMK is unavailable"
         );
 
-        let rpc_transport = anyhow::Error::new(StatusCode::RpcError);
-        assert!(
-            build_omk_error_reply_or_preserve_system(&rpc_transport)
-                .expect("RPC transport errors should classify cleanly")
-                .is_none(),
-            "RPC transport failure means OMK is unavailable"
-        );
-
         let local = anyhow::anyhow!("plain OMK failure");
         assert!(
             build_omk_error_reply_or_preserve_system(&local)
@@ -3253,6 +3314,41 @@ mod tests {
                 .is_some(),
             "non-connection OMK errors must be returned instead of preserving system"
         );
+    }
+
+    #[test]
+    fn native_status_outbound_reply_installs_tf_status_code() {
+        clear_outbound_reply_buffers();
+        let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
+        let status = i32::from(StatusCode::UnknownTransaction);
+
+        unsafe { install_outbound_reply(&mut tr, OutboundReply::Status(status)) };
+
+        assert_ne!(tr.flags & crate::hook::binder::TF_STATUS_CODE, 0);
+        assert_eq!(tr.data_size, size_of::<i32>());
+        assert_eq!(tr.offsets_size, 0);
+        assert_eq!(unsafe { tr.data.ptr.offsets }, 0);
+        let installed = unsafe { *(tr.data.ptr.buffer as *const i32) };
+        assert_eq!(installed, status);
+        clear_outbound_reply_buffers();
+    }
+
+    #[test]
+    fn reachable_omk_status_code_errors_keep_native_status_code() {
+        for status in [
+            StatusCode::RpcError,
+            StatusCode::TimedOut,
+            StatusCode::PermissionDenied,
+            StatusCode::UnknownTransaction,
+        ] {
+            let error = anyhow::Error::new(status);
+            assert_outbound_status(
+                build_omk_error_reply_or_preserve_system(&error)
+                    .expect("reachable OMK errors should classify cleanly")
+                    .expect("non-dead OMK errors must replace system reply"),
+                status,
+            );
+        }
     }
 
     #[test]
@@ -3312,7 +3408,10 @@ mod tests {
             |_, _, _| panic!("grant requests must not call ungrant"),
         );
 
-        let OmkGrantPrecompute::Reply(PrecomputedServiceReply::Status(status)) = result else {
+        let OmkGrantPrecompute::Reply(PrecomputedServiceReply::Error(
+            PrecomputedErrorReply::Status(status),
+        )) = result
+        else {
             panic!("reachable OMK business error should be precomputed as an authoritative status");
         };
         assert_eq!(
@@ -3410,7 +3509,7 @@ mod tests {
         let reply = build_omk_status_reply_or_preserve_system(&status)
             .expect("service-specific status should build")
             .expect("reachable OMK status should replace system");
-        let mut reply = reply;
+        let mut reply = outbound_parcel(reply);
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
         let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
             .expect("status reply should parse");
@@ -4015,7 +4114,7 @@ mod tests {
         })
         .expect("synthetic update rewrite should succeed")
         .expect("synthetic update should return an OMK-owned reply");
-        let mut update_reply = update_reply;
+        let mut update_reply = outbound_parcel(update_reply);
         let (update_data, update_data_size, update_offsets, update_offsets_size) =
             raw_parts(&mut update_reply);
         let update_output: Option<Vec<u8>> = unsafe {
@@ -4038,7 +4137,7 @@ mod tests {
         })
         .expect("synthetic abort rewrite should succeed")
         .expect("synthetic abort should return an OMK-owned reply");
-        let mut abort_reply = abort_reply;
+        let mut abort_reply = outbound_parcel(abort_reply);
         let (abort_data, abort_data_size, abort_offsets, abort_offsets_size) =
             raw_parts(&mut abort_reply);
         let abort_status = unsafe {
@@ -4072,7 +4171,7 @@ mod tests {
         })
         .expect("stale synthetic update rewrite should succeed")
         .expect("stale synthetic update should return a native-style error");
-        let mut stale_update_reply = stale_update_reply;
+        let mut stale_update_reply = outbound_parcel(stale_update_reply);
         let (stale_data, stale_data_size, stale_offsets, stale_offsets_size) =
             raw_parts(&mut stale_update_reply);
         let stale_status = unsafe {
@@ -4203,7 +4302,7 @@ mod tests {
         })
         .expect("updateAad rewrite should succeed")
         .expect("OMK invalid updateAad should return an OMK-owned reply");
-        let mut reply = reply;
+        let mut reply = outbound_parcel(reply);
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
         let status = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
             .expect("invalid updateAad reply should deserialize to a binder status");
@@ -4254,19 +4353,7 @@ mod tests {
         })
         .expect("transaction status should be normalized into a reply")
         .expect("OMK transaction status should return an OMK-owned reply");
-        let mut reply = reply;
-        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
-        let status = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
-            .expect("transaction status mapping should deserialize");
-
-        assert_eq!(
-            status.exception_code(),
-            rsbinder::ExceptionCode::ServiceSpecific
-        );
-        assert_eq!(
-            status.service_specific_error(),
-            ResponseCode::SYSTEM_ERROR.0
-        );
+        assert_outbound_status(reply, StatusCode::UnknownTransaction);
     }
 
     #[test]
@@ -4306,7 +4393,7 @@ mod tests {
         })
         .expect("finish rewrite should succeed")
         .expect("OMK finish should return an OMK-owned reply");
-        let mut reply = reply;
+        let mut reply = outbound_parcel(reply);
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
         let output: Option<Vec<u8>> =
             unsafe { parcel::parse_success_reply(data, data_size, offsets, offsets_size) }
@@ -4328,7 +4415,7 @@ mod tests {
         })
         .expect("cleanup abort rewrite should succeed")
         .expect("cleanup abort should return an OMK-owned reply");
-        let mut cleanup_reply = cleanup_reply;
+        let mut cleanup_reply = outbound_parcel(cleanup_reply);
         let (cleanup_data, cleanup_data_size, cleanup_offsets, cleanup_offsets_size) =
             raw_parts(&mut cleanup_reply);
         let cleanup_status = unsafe {
@@ -4395,7 +4482,7 @@ mod tests {
         })
         .expect("abort rewrite should succeed")
         .expect("OMK abort should return an OMK-owned reply");
-        let mut reply = reply;
+        let mut reply = outbound_parcel(reply);
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
         let status = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
             .expect("abort reply should deserialize");
