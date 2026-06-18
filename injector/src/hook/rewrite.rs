@@ -145,11 +145,19 @@ impl From<parcel::OwnedReply> for OutboundReply {
 #[derive(Clone, Debug)]
 struct SyntheticTargetInfo {
     kind: SyntheticTargetKind,
-    caller: CallerIdentity,
+    caller: Option<CallerIdentity>,
 }
 
 static OPERATION_TARGETS: OnceLock<Mutex<HashMap<LocalBinderTarget, OperationTargetInfo>>> =
     OnceLock::new();
+static SYNTHETIC_SECURITY_LEVEL_TARGETS: OnceLock<
+    Mutex<
+        HashMap<
+            crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel,
+            LocalBinderTarget,
+        >,
+    >,
+> = OnceLock::new();
 static SYNTHETIC_TARGETS: OnceLock<Mutex<HashMap<LocalBinderTarget, SyntheticTargetInfo>>> =
     OnceLock::new();
 static AUTHORIZATION_MIRROR_STATE_DIRTY: AtomicBool = AtomicBool::new(false);
@@ -529,6 +537,15 @@ fn operation_targets() -> &'static Mutex<HashMap<LocalBinderTarget, OperationTar
     OPERATION_TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn synthetic_security_level_targets() -> &'static Mutex<
+    HashMap<
+        crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel,
+        LocalBinderTarget,
+    >,
+> {
+    SYNTHETIC_SECURITY_LEVEL_TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn synthetic_targets() -> &'static Mutex<HashMap<LocalBinderTarget, SyntheticTargetInfo>> {
     SYNTHETIC_TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -548,7 +565,7 @@ fn lookup_synthetic_target_info(target: LocalBinderTarget) -> Option<SyntheticTa
 fn remember_synthetic_target(
     target: LocalBinderTarget,
     kind: SyntheticTargetKind,
-    caller: &CallerIdentity,
+    caller: Option<&CallerIdentity>,
 ) {
     synthetic_targets()
         .lock()
@@ -557,7 +574,7 @@ fn remember_synthetic_target(
             target,
             SyntheticTargetInfo {
                 kind,
-                caller: caller.clone(),
+                caller: caller.cloned(),
             },
         );
 }
@@ -653,12 +670,23 @@ fn synthetic_binder_carrier(target: LocalBinderTarget) -> parcel::ReplyBinderCar
     }
 }
 
+fn synthetic_security_level_target(
+    security_level: crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel,
+) -> LocalBinderTarget {
+    let mut targets = synthetic_security_level_targets()
+        .lock()
+        .expect("synthetic security-level target map poisoned");
+    *targets
+        .entry(security_level)
+        .or_insert_with(allocate_synthetic_target)
+}
+
 fn register_synthetic_security_level_carrier(
     security_level: crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel,
     source_method: ServiceMethod,
     caller: &CallerIdentity,
 ) -> parcel::ReplyBinderCarrier {
-    let target = allocate_synthetic_target();
+    let target = synthetic_security_level_target(security_level);
     tracker::remember_security_level_target(
         target,
         SecurityLevelTargetInfo {
@@ -667,9 +695,9 @@ fn register_synthetic_security_level_carrier(
             source_method,
         },
     );
-    remember_synthetic_target(target, SyntheticTargetKind::SecurityLevel, caller);
+    remember_synthetic_target(target, SyntheticTargetKind::SecurityLevel, None);
     info!(
-        "[Injector][Synthetic] registered security-level target ptr=0x{:x} cookie=0x{:x} security_level={:?} source_method={:?} uid={} pid={} sid='{}'",
+        "[Injector][Synthetic] registered/reused security-level target ptr=0x{:x} cookie=0x{:x} security_level={:?} source_method={:?} uid={} pid={} sid='{}'",
         target.ptr, target.cookie, security_level, source_method, caller.uid, caller.pid, caller.sid
     );
     synthetic_binder_carrier(target)
@@ -690,7 +718,7 @@ fn register_synthetic_operation_carrier(
             finalized: false,
         },
     );
-    remember_synthetic_target(target, SyntheticTargetKind::Operation, caller);
+    remember_synthetic_target(target, SyntheticTargetKind::Operation, Some(caller));
     info!(
         "[Injector][Synthetic] registered operation target ptr=0x{:x} cookie=0x{:x} aad_allowed={} uid={} pid={} sid='{}'",
         target.ptr, target.cookie, aad_allowed, caller.uid, caller.pid, caller.sid
@@ -1685,6 +1713,20 @@ fn synthetic_transaction_caller(
     CallerIdentity::new(uid, pid).with_sid(sid)
 }
 
+fn synthetic_transaction_current_caller(
+    tr: &binder_transaction_data,
+    caller_sid: Option<String>,
+) -> CallerIdentity {
+    let uid = if tr.sender_euid >= 0 {
+        tr.sender_euid as u32
+    } else {
+        0
+    };
+    let pid = tr.sender_pid;
+    let sid = caller_sid.filter(|sid| !sid.is_empty()).unwrap_or_default();
+    CallerIdentity::new(uid, pid).with_sid(sid)
+}
+
 pub(super) unsafe fn handle_synthetic_br_transaction(
     tr: &binder_transaction_data,
     caller_sid: Option<String>,
@@ -1756,7 +1798,16 @@ unsafe fn build_synthetic_br_transaction_reply(
             return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
         }
     };
-    let caller = synthetic_transaction_caller(&info.caller, tr, caller_sid);
+    let caller = match kind {
+        SyntheticTargetKind::SecurityLevel => synthetic_transaction_current_caller(tr, caller_sid),
+        SyntheticTargetKind::Operation => {
+            let fallback = info
+                .caller
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing synthetic operation caller fallback"))?;
+            synthetic_transaction_caller(fallback, tr, caller_sid)
+        }
+    };
     let decision = evaluate_caller(&caller, &cfg);
 
     match kind {
@@ -2928,6 +2979,11 @@ mod tests {
         assert_eq!(status, i32::from(StatusCode::UnknownTransaction));
     }
 
+    fn carrier_target(carrier: &parcel::ReplyBinderCarrier) -> LocalBinderTarget {
+        unsafe { parse_local_binder_target_from_parcel_bytes(&carrier.bytes) }
+            .expect("synthetic carrier should expose a native target")
+    }
+
     fn request_parcel(interface: &str) -> rsbinder::Parcel {
         let mut parcel = rsbinder::Parcel::new();
         parcel.write(&0i32).unwrap();
@@ -3001,6 +3057,10 @@ mod tests {
     }
 
     fn clear_synthetic_targets_for_tests() {
+        synthetic_security_level_targets()
+            .lock()
+            .expect("synthetic security-level target map poisoned")
+            .clear();
         synthetic_targets()
             .lock()
             .expect("synthetic target map poisoned")
@@ -3151,7 +3211,7 @@ mod tests {
         );
         let info = SyntheticTargetInfo {
             kind: SyntheticTargetKind::Operation,
-            caller: CallerIdentity::new(10002, 2000),
+            caller: Some(CallerIdentity::new(10002, 2000)),
         };
 
         let reply = unsafe {
@@ -3194,7 +3254,7 @@ mod tests {
         );
         let info = SyntheticTargetInfo {
             kind: SyntheticTargetKind::SecurityLevel,
-            caller: CallerIdentity::new(10002, 2000),
+            caller: None,
         };
 
         let reply = unsafe {
@@ -3223,7 +3283,7 @@ mod tests {
         );
         let info = SyntheticTargetInfo {
             kind: SyntheticTargetKind::Operation,
-            caller: CallerIdentity::new(10002, 2000),
+            caller: Some(CallerIdentity::new(10002, 2000)),
         };
 
         let reply = unsafe {
@@ -3930,6 +3990,79 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_security_level_carrier_is_stable_per_security_level() {
+        let _guard = route_state_test_guard();
+        clear_synthetic_targets_for_tests();
+
+        let first_caller =
+            CallerIdentity::new(10002, 2000).with_sid("u:r:untrusted_app:s0:c123,c456");
+        let second_caller =
+            CallerIdentity::new(10003, 3000).with_sid("u:r:untrusted_app:s0:c789,c012");
+        let first = register_synthetic_security_level_carrier(
+            SecurityLevel::TRUSTED_ENVIRONMENT,
+            ServiceMethod::GetSecurityLevel,
+            &first_caller,
+        );
+        let second = register_synthetic_security_level_carrier(
+            SecurityLevel::TRUSTED_ENVIRONMENT,
+            ServiceMethod::GetKeyEntry,
+            &second_caller,
+        );
+
+        let target = carrier_target(&first);
+        assert_eq!(target, carrier_target(&second));
+        let synthetic_info =
+            lookup_synthetic_target_info(target).expect("synthetic target should be tracked");
+        assert_eq!(synthetic_info.kind, SyntheticTargetKind::SecurityLevel);
+        assert!(synthetic_info.caller.is_none());
+        let target_info = tracker::lookup_security_level_target(target)
+            .expect("synthetic security-level target should be tracked");
+        assert_eq!(
+            target_info.security_level,
+            SecurityLevel::TRUSTED_ENVIRONMENT
+        );
+        assert_eq!(target_info.source_method, ServiceMethod::GetKeyEntry);
+    }
+
+    #[test]
+    fn synthetic_security_level_carrier_is_distinct_per_security_level() {
+        let _guard = route_state_test_guard();
+        clear_synthetic_targets_for_tests();
+
+        let caller = CallerIdentity::new(10002, 2000);
+        let tee = register_synthetic_security_level_carrier(
+            SecurityLevel::TRUSTED_ENVIRONMENT,
+            ServiceMethod::GetSecurityLevel,
+            &caller,
+        );
+        let strongbox = register_synthetic_security_level_carrier(
+            SecurityLevel::STRONGBOX,
+            ServiceMethod::GetSecurityLevel,
+            &caller,
+        );
+
+        assert_ne!(carrier_target(&tee), carrier_target(&strongbox));
+    }
+
+    #[test]
+    fn synthetic_security_level_caller_does_not_use_registered_fallback() {
+        let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
+        tr.sender_euid = 10003;
+        tr.sender_pid = 3456;
+
+        let caller = synthetic_transaction_current_caller(&tr, None);
+        assert_eq!(caller.uid, 10003);
+        assert_eq!(caller.pid, 3456);
+        assert_eq!(caller.sid, "");
+
+        let caller = synthetic_transaction_current_caller(
+            &tr,
+            Some("u:r:platform_app:s0:c1,c2".to_string()),
+        );
+        assert_eq!(caller.sid, "u:r:platform_app:s0:c1,c2");
+    }
+
+    #[test]
     fn no_carrier_omk_key_entry_reply_uses_returned_security_level_handle() {
         ensure_binder_process_state();
         let _guard = route_state_test_guard();
@@ -3990,8 +4123,8 @@ mod tests {
         );
         let synthetic_info =
             lookup_synthetic_target_info(target).expect("synthetic target should be tracked");
-        assert_eq!(synthetic_info.caller.sid, caller.sid);
-        assert_eq!(synthetic_info.caller.uid, caller.uid);
+        assert_eq!(synthetic_info.kind, SyntheticTargetKind::SecurityLevel);
+        assert!(synthetic_info.caller.is_none());
         let target_info = tracker::lookup_security_level_target(target)
             .expect("synthetic security-level target should be tracked");
         assert_eq!(target_info.preferred_route, RouteTarget::Omk);
@@ -4101,8 +4234,12 @@ mod tests {
         assert!(target_info.backend.is_some());
         let synthetic_info =
             lookup_synthetic_target_info(target).expect("synthetic target should be tracked");
-        assert_eq!(synthetic_info.caller.sid, caller.sid);
-        assert_eq!(synthetic_info.caller.uid, caller.uid);
+        let synthetic_caller = synthetic_info
+            .caller
+            .as_ref()
+            .expect("synthetic operation target should keep caller fallback");
+        assert_eq!(synthetic_caller.sid, caller.sid);
+        assert_eq!(synthetic_caller.uid, caller.uid);
 
         let update_reply = build_operation_reply_rewrite(&PendingOperationCall {
             request: ParsedOperationRequest::Update {
