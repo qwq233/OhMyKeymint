@@ -14,15 +14,14 @@ use super::binder::{
     log_write_transaction, parse_secctx_sid, preview_transaction_parcel, BC_ACQUIRE_DONE_CMD,
     BC_REPLY_CMD, BC_REPLY_NR, BC_REPLY_SG_NR, BC_TRANSACTION_NR, BC_TRANSACTION_SG_NR,
     BINDER_WRITE_READ, BR_ACQUIRE_NR, BR_DECREFS_NR, BR_INCREFS_NR, BR_NOOP_CMD, BR_RELEASE_NR,
-    BR_REPLY_NR, BR_TRANSACTION_COMPLETE_CMD, BR_TRANSACTION_NR, TF_ONE_WAY,
+    BR_REPLY_NR, BR_TRANSACTION_COMPLETE_CMD, BR_TRANSACTION_NR, TF_ONE_WAY, TF_STATUS_CODE,
 };
 use super::rewrite::{
     clear_outbound_reply_buffers, handle_bc_reply, handle_br_transaction,
-    handle_synthetic_br_transaction, lookup_synthetic_target,
+    handle_synthetic_br_transaction, lookup_synthetic_target, SyntheticReply,
 };
 use super::OLD_IOCTL;
 use crate::hook::binder::{LocalBinderTarget, BC_FREE_BUFFER_CMD, BC_INCREFS_DONE_CMD};
-use crate::parcel;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct PendingCompletionKey {
@@ -372,33 +371,52 @@ unsafe fn submit_synthetic_transaction_reply(
     fd: c_int,
     old_ioctl_fn: unsafe extern "C" fn(c_int, c_int, *mut c_void) -> c_int,
     tr: &binder_transaction_data,
-    reply: Option<parcel::OwnedReply>,
+    reply: SyntheticReply,
 ) -> bool {
     let mut write = Vec::new();
     push_unaligned(&mut write, &BC_FREE_BUFFER_CMD);
     let free_buffer = tr.data.ptr.buffer;
     push_unaligned(&mut write, &free_buffer);
 
-    let has_reply = reply.is_some();
-    let mut reply = reply;
-    if let Some(reply) = reply.as_mut() {
-        let mut reply_tr = *tr;
-        reply_tr.target.handle = 0;
-        reply_tr.cookie = 0;
-        reply_tr.code = 0;
-        reply_tr.flags = 0;
-        reply_tr.sender_pid = 0;
-        reply_tr.sender_euid = 0;
-        reply_tr.data_size = reply.data_size();
-        reply_tr.offsets_size = reply.offsets_size();
-        reply_tr.data.ptr.buffer = reply.data_ptr() as libc::c_ulong;
-        reply_tr.data.ptr.offsets = if reply.offsets.is_empty() {
-            0
-        } else {
-            reply.offsets.as_ptr() as libc::c_ulong
-        };
-        push_unaligned(&mut write, &BC_REPLY_CMD);
-        push_unaligned(&mut write, &reply_tr);
+    let has_reply = !matches!(reply, SyntheticReply::NoReply);
+    let status_storage: i32;
+    match reply {
+        SyntheticReply::Parcel(reply) => {
+            let mut reply_tr = *tr;
+            reply_tr.target.handle = 0;
+            reply_tr.cookie = 0;
+            reply_tr.code = 0;
+            reply_tr.flags = 0;
+            reply_tr.sender_pid = 0;
+            reply_tr.sender_euid = 0;
+            reply_tr.data_size = reply.data_size();
+            reply_tr.offsets_size = reply.offsets_size();
+            reply_tr.data.ptr.buffer = reply.data_ptr() as libc::c_ulong;
+            reply_tr.data.ptr.offsets = if reply.offsets.is_empty() {
+                0
+            } else {
+                reply.offsets.as_ptr() as libc::c_ulong
+            };
+            push_unaligned(&mut write, &BC_REPLY_CMD);
+            push_unaligned(&mut write, &reply_tr);
+        }
+        SyntheticReply::Status(status) => {
+            status_storage = status;
+            let mut reply_tr = *tr;
+            reply_tr.target.handle = 0;
+            reply_tr.cookie = 0;
+            reply_tr.code = 0;
+            reply_tr.flags = TF_STATUS_CODE;
+            reply_tr.sender_pid = 0;
+            reply_tr.sender_euid = 0;
+            reply_tr.data_size = size_of::<i32>();
+            reply_tr.offsets_size = 0;
+            reply_tr.data.ptr.buffer = &status_storage as *const i32 as libc::c_ulong;
+            reply_tr.data.ptr.offsets = 0;
+            push_unaligned(&mut write, &BC_REPLY_CMD);
+            push_unaligned(&mut write, &reply_tr);
+        }
+        SyntheticReply::NoReply => {}
     }
 
     let submitted = submit_write_buffer(fd, old_ioctl_fn, &mut write, "synthetic BC_REPLY");

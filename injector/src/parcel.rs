@@ -789,6 +789,22 @@ pub fn build_interface_descriptor_reply(descriptor: &str) -> Result<OwnedReply> 
     Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
 }
 
+pub fn build_empty_reply() -> OwnedReply {
+    owned_reply_from_parcel(Parcel::new(), std::iter::empty::<usize>())
+}
+
+pub fn build_raw_i32_reply(value: i32) -> Result<OwnedReply> {
+    let mut parcel = Parcel::new();
+    parcel.write(&value)?;
+    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
+}
+
+pub fn build_null_binder_reply() -> Result<OwnedReply> {
+    let mut parcel = Parcel::new();
+    <rsbinder::SIBinder as SerializeOption>::serialize_option(None, &mut parcel)?;
+    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
+}
+
 pub fn build_local_binder_carrier_bytes(
     ptr: libc::c_ulong,
     cookie: libc::c_ulong,

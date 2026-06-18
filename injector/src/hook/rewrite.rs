@@ -119,6 +119,12 @@ pub(super) enum SyntheticTargetKind {
     Operation,
 }
 
+pub(super) enum SyntheticReply {
+    Parcel(parcel::OwnedReply),
+    Status(i32),
+    NoReply,
+}
+
 #[derive(Clone, Debug)]
 struct SyntheticTargetInfo {
     kind: SyntheticTargetKind,
@@ -1535,6 +1541,23 @@ fn synthetic_fallback_reply() -> parcel::OwnedReply {
         .expect("synthetic system-error status should serialize")
 }
 
+fn synthetic_unknown_transaction_reply() -> SyntheticReply {
+    SyntheticReply::Status(StatusCode::UnknownTransaction.into())
+}
+
+fn synthetic_unknown_transaction_reply_for(
+    kind: SyntheticTargetKind,
+    code: u32,
+) -> Option<SyntheticReply> {
+    let unknown = match kind {
+        SyntheticTargetKind::SecurityLevel => {
+            identify::security_level_method_from_code(code).is_none()
+        }
+        SyntheticTargetKind::Operation => identify::operation_method_from_code(code).is_none(),
+    };
+    unknown.then(synthetic_unknown_transaction_reply)
+}
+
 fn build_precomputed_service_reply(
     precomputed: &PrecomputedServiceReply,
 ) -> anyhow::Result<parcel::OwnedReply> {
@@ -1566,6 +1589,44 @@ fn synthetic_descriptor(kind: SyntheticTargetKind) -> &'static str {
     }
 }
 
+fn synthetic_base_transaction_reply(
+    kind: SyntheticTargetKind,
+    code: u32,
+) -> anyhow::Result<Option<SyntheticReply>> {
+    let reply = match code {
+        rsbinder::INTERFACE_TRANSACTION => SyntheticReply::Parcel(
+            parcel::build_interface_descriptor_reply(synthetic_descriptor(kind))?,
+        ),
+        rsbinder::PING_TRANSACTION => SyntheticReply::Parcel(parcel::build_empty_reply()),
+        rsbinder::EXTENSION_TRANSACTION => {
+            SyntheticReply::Parcel(parcel::build_null_binder_reply()?)
+        }
+        rsbinder::DEBUG_PID_TRANSACTION => {
+            SyntheticReply::Parcel(parcel::build_raw_i32_reply(std::process::id() as i32)?)
+        }
+        rsbinder::SHELL_COMMAND_TRANSACTION | rsbinder::SYSPROPS_TRANSACTION => {
+            SyntheticReply::Parcel(parcel::build_empty_reply())
+        }
+        rsbinder::DUMP_TRANSACTION => SyntheticReply::Status(StatusCode::UnexpectedNull.into()),
+        rsbinder::SET_RPC_CLIENT_TRANSACTION => {
+            SyntheticReply::Status(StatusCode::InvalidOperation.into())
+        }
+        rsbinder::START_RECORDING_TRANSACTION | rsbinder::STOP_RECORDING_TRANSACTION => {
+            SyntheticReply::Status(StatusCode::InvalidOperation.into())
+        }
+        rsbinder::TWEET_TRANSACTION | rsbinder::LIKE_TRANSACTION => {
+            synthetic_unknown_transaction_reply()
+        }
+        _ if !(rsbinder::FIRST_CALL_TRANSACTION..=rsbinder::LAST_CALL_TRANSACTION)
+            .contains(&code) =>
+        {
+            synthetic_unknown_transaction_reply()
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(reply))
+}
+
 fn synthetic_transaction_caller(
     fallback: &CallerIdentity,
     tr: &binder_transaction_data,
@@ -1591,7 +1652,7 @@ pub(super) unsafe fn handle_synthetic_br_transaction(
     tr: &binder_transaction_data,
     caller_sid: Option<String>,
     command_name: &str,
-) -> Option<Option<parcel::OwnedReply>> {
+) -> Option<SyntheticReply> {
     let target = target_from_transaction(tr)?;
     let info = lookup_synthetic_target_info(target)?;
     let kind = info.kind;
@@ -1609,7 +1670,7 @@ pub(super) unsafe fn handle_synthetic_br_transaction(
                 tr.code,
                 error
             );
-            Some(synthetic_fallback_reply())
+            SyntheticReply::Parcel(synthetic_fallback_reply())
         }
     };
     Some(reply)
@@ -1621,16 +1682,14 @@ unsafe fn build_synthetic_br_transaction_reply(
     info: SyntheticTargetInfo,
     caller_sid: Option<String>,
     command_name: &str,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<SyntheticReply> {
     let kind = info.kind;
     if (tr.flags & super::binder::TF_ONE_WAY) != 0 {
-        return Ok(None);
+        return Ok(SyntheticReply::NoReply);
     }
 
-    if tr.code == rsbinder::INTERFACE_TRANSACTION {
-        return Ok(Some(parcel::build_interface_descriptor_reply(
-            synthetic_descriptor(kind),
-        )?));
+    if let Some(reply) = synthetic_base_transaction_reply(kind, tr.code)? {
+        return Ok(reply);
     }
 
     let cfg = config::get();
@@ -1639,13 +1698,27 @@ unsafe fn build_synthetic_br_transaction_reply(
             "[Injector][Synthetic] injector disabled while synthetic target ptr=0x{:x} cookie=0x{:x} is still live; returning SYSTEM_ERROR",
             target.ptr, target.cookie
         );
-        return Ok(Some(build_service_specific_reply(
+        return Ok(SyntheticReply::Parcel(build_service_specific_reply(
             ResponseCode::SYSTEM_ERROR.0,
         )?));
     }
 
     let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
-    let request_interface = parcel::peek_request_interface(data, data_size, offsets, offsets_size)?;
+    let request_interface = match parcel::peek_request_interface(
+        data,
+        data_size,
+        offsets,
+        offsets_size,
+    ) {
+        Ok(interface) => interface,
+        Err(error) => {
+            warn!(
+                "[Injector][Synthetic] failed to read interface token for target ptr=0x{:x} cookie=0x{:x} kind={:?} code=0x{:x}: {:#}; returning BAD_TYPE",
+                target.ptr, target.cookie, kind, tr.code, error
+            );
+            return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
+        }
+    };
     let caller = synthetic_transaction_caller(&info.caller, tr, caller_sid);
     let decision = evaluate_caller(&caller, &cfg);
 
@@ -1656,6 +1729,9 @@ unsafe fn build_synthetic_br_transaction_reply(
                     "synthetic security-level target received unexpected interface {}",
                     request_interface
                 );
+            }
+            if let Some(reply) = synthetic_unknown_transaction_reply_for(kind, tr.code) {
+                return Ok(reply);
             }
             let target_info = tracker::lookup_security_level_target(target)
                 .ok_or_else(|| anyhow::anyhow!("missing synthetic security-level target info"))?;
@@ -1674,7 +1750,7 @@ unsafe fn build_synthetic_br_transaction_reply(
                     "[Injector][Synthetic] denied security-level {:?} for uid={} pid={} packages={:?} reason={:?}; returning PERMISSION_DENIED",
                     method, caller.uid, caller.pid, decision.packages, decision.reason
                 );
-                return Ok(Some(build_service_specific_reply(
+                return Ok(SyntheticReply::Parcel(build_service_specific_reply(
                     ResponseCode::PERMISSION_DENIED.0,
                 )?));
             }
@@ -1700,7 +1776,9 @@ unsafe fn build_synthetic_br_transaction_reply(
                 security_level: target_info.security_level,
             };
             let reply = build_security_level_reply_rewrite(tr, &pending)?;
-            Ok(Some(reply.unwrap_or_else(synthetic_fallback_reply)))
+            Ok(SyntheticReply::Parcel(
+                reply.unwrap_or_else(synthetic_fallback_reply),
+            ))
         }
         SyntheticTargetKind::Operation => {
             if request_interface != identify::KEYSTORE_OPERATION_INTERFACE {
@@ -1708,6 +1786,9 @@ unsafe fn build_synthetic_br_transaction_reply(
                     "synthetic operation target received unexpected interface {}",
                     request_interface
                 );
+            }
+            if let Some(reply) = synthetic_unknown_transaction_reply_for(kind, tr.code) {
+                return Ok(reply);
             }
             let request =
                 parcel::parse_operation_request(data, data_size, offsets, offsets_size, tr.code)?;
@@ -1717,7 +1798,7 @@ unsafe fn build_synthetic_br_transaction_reply(
                     "[Injector][Synthetic] denied operation {:?} for uid={} pid={} packages={:?} reason={:?}; returning PERMISSION_DENIED",
                     method, caller.uid, caller.pid, decision.packages, decision.reason
                 );
-                return Ok(Some(build_service_specific_reply(
+                return Ok(SyntheticReply::Parcel(build_service_specific_reply(
                     ResponseCode::PERMISSION_DENIED.0,
                 )?));
             }
@@ -1741,7 +1822,9 @@ unsafe fn build_synthetic_br_transaction_reply(
                 target,
             };
             let reply = build_operation_reply_rewrite(&pending)?;
-            Ok(Some(reply.unwrap_or_else(synthetic_fallback_reply)))
+            Ok(SyntheticReply::Parcel(
+                reply.unwrap_or_else(synthetic_fallback_reply),
+            ))
         }
     }
 }
@@ -2420,12 +2503,12 @@ fn build_operation_reply_rewrite(
             }
             match backend.r#updateAad(aad_input) {
                 Ok(()) => parcel::build_void_reply()?,
-                Err(status) => parcel::build_status_reply(&status)?,
+                Err(status) => build_omk_status_reply(&status)?,
             }
         }
         ParsedOperationRequest::Update { input } => match backend.r#update(input) {
             Ok(output) => parcel::build_plain_reply(&output)?,
-            Err(status) => parcel::build_status_reply(&status)?,
+            Err(status) => build_omk_status_reply(&status)?,
         },
         ParsedOperationRequest::Finish { input, signature } => {
             match backend.r#finish(input.as_deref(), signature.as_deref()) {
@@ -2433,7 +2516,7 @@ fn build_operation_reply_rewrite(
                     mark_operation_target_finalized(pending.target);
                     parcel::build_plain_reply(&output)?
                 }
-                Err(status) => parcel::build_status_reply(&status)?,
+                Err(status) => build_omk_status_reply(&status)?,
             }
         }
         ParsedOperationRequest::Abort => match backend.r#abort() {
@@ -2441,7 +2524,7 @@ fn build_operation_reply_rewrite(
                 forget_operation_target(pending.target);
                 parcel::build_void_reply()?
             }
-            Err(status) => parcel::build_status_reply(&status)?,
+            Err(status) => build_omk_status_reply(&status)?,
         },
     };
 
@@ -2710,10 +2793,7 @@ mod tests {
     impl AospKeystoreOperation for TestOperationBackend {
         fn r#updateAad(&self, _aad_input: &[u8]) -> rsbinder::status::Result<()> {
             match self.update_aad_status.as_ref() {
-                Some(status) => Err(Status::new_service_specific_error(
-                    status.service_specific_error(),
-                    None,
-                )),
+                Some(status) => Err(status.clone()),
                 None => Ok(()),
             }
         }
@@ -2747,6 +2827,13 @@ mod tests {
             },
             reply.offsets_size(),
         )
+    }
+
+    fn assert_unknown_transaction_reply(reply: SyntheticReply) {
+        let SyntheticReply::Status(status) = reply else {
+            panic!("unknown transaction should be returned as a binder status code");
+        };
+        assert_eq!(status, i32::from(StatusCode::UnknownTransaction));
     }
 
     fn test_local_binder_carrier(
@@ -2843,6 +2930,79 @@ mod tests {
             parsed.service_specific_error(),
             ResponseCode::SYSTEM_ERROR.0
         );
+    }
+
+    #[test]
+    fn synthetic_security_level_unknown_transaction_is_native_unknown_transaction() {
+        let reply =
+            synthetic_unknown_transaction_reply_for(SyntheticTargetKind::SecurityLevel, u32::MAX)
+                .expect("unknown security-level code should produce a synthetic reply");
+
+        assert_unknown_transaction_reply(reply);
+    }
+
+    #[test]
+    fn synthetic_operation_unknown_transaction_is_native_unknown_transaction() {
+        let reply =
+            synthetic_unknown_transaction_reply_for(SyntheticTargetKind::Operation, u32::MAX)
+                .expect("unknown operation code should produce a synthetic reply");
+
+        assert_unknown_transaction_reply(reply);
+    }
+
+    #[test]
+    fn synthetic_base_transactions_do_not_require_interface_token() {
+        let ping = synthetic_base_transaction_reply(
+            SyntheticTargetKind::SecurityLevel,
+            rsbinder::PING_TRANSACTION,
+        )
+        .expect("ping handling should not fail")
+        .expect("ping should produce a reply");
+        let SyntheticReply::Parcel(ping) = ping else {
+            panic!("ping should be an empty parcel reply");
+        };
+        assert_eq!(ping.data_size(), 0);
+        assert_eq!(ping.offsets_size(), 0);
+
+        let shell = synthetic_base_transaction_reply(
+            SyntheticTargetKind::SecurityLevel,
+            rsbinder::SHELL_COMMAND_TRANSACTION,
+        )
+        .expect("shell handling should not fail")
+        .expect("shell should produce a reply");
+        let SyntheticReply::Parcel(shell) = shell else {
+            panic!("shell should be an empty parcel reply");
+        };
+        assert_eq!(shell.data_size(), 0);
+        assert_eq!(shell.offsets_size(), 0);
+
+        let start_recording = synthetic_base_transaction_reply(
+            SyntheticTargetKind::SecurityLevel,
+            rsbinder::START_RECORDING_TRANSACTION,
+        )
+        .expect("start-recording handling should not fail")
+        .expect("start-recording should produce a reply");
+        let SyntheticReply::Status(status) = start_recording else {
+            panic!("unsupported base transaction should be a binder status code");
+        };
+        assert_eq!(status, i32::from(StatusCode::InvalidOperation));
+
+        let dump = synthetic_base_transaction_reply(
+            SyntheticTargetKind::SecurityLevel,
+            rsbinder::DUMP_TRANSACTION,
+        )
+        .expect("dump handling should not fail")
+        .expect("dump should produce a reply");
+        let SyntheticReply::Status(status) = dump else {
+            panic!("dump should be a binder status code");
+        };
+        assert_eq!(status, i32::from(StatusCode::UnexpectedNull));
+
+        let unknown =
+            synthetic_base_transaction_reply(SyntheticTargetKind::SecurityLevel, u32::MAX)
+                .expect("unknown outside call range should not fail")
+                .expect("unknown outside call range should produce a reply");
+        assert_unknown_transaction_reply(unknown);
     }
 
     #[test]
@@ -3884,6 +4044,57 @@ mod tests {
         assert_eq!(
             lookup_operation_target(target).unwrap().route,
             RouteTarget::Omk
+        );
+    }
+
+    #[test]
+    fn omk_route_operation_transaction_error_uses_omk_status_mapping() {
+        ensure_binder_process_state();
+        let _guard = route_state_test_guard();
+        clear_operation_state_for_tests();
+
+        let target = LocalBinderTarget {
+            ptr: 0x1234,
+            cookie: 0x5678,
+        };
+        let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
+            update_output: vec![1, 2, 3],
+            aborts: Arc::new(AtomicUsize::new(0)),
+            update_aad_status: Some(StatusCode::UnknownTransaction.into()),
+        });
+        remember_operation_target(
+            target,
+            OperationTargetInfo {
+                route: RouteTarget::Omk,
+                aad_allowed: false,
+                backend: Some(backend),
+                finalized: false,
+            },
+        );
+
+        let reply = build_operation_reply_rewrite(&PendingOperationCall {
+            request: ParsedOperationRequest::UpdateAad {
+                aad_input: vec![1, 2, 3],
+            },
+            method: OperationMethod::UpdateAad,
+            caller: CallerIdentity::new(1000, 2000),
+            packages: vec!["com.example".to_string()],
+            target,
+        })
+        .expect("transaction status should be normalized into a reply")
+        .expect("OMK transaction status should return an OMK-owned reply");
+        let mut reply = reply;
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let status = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("transaction status mapping should deserialize");
+
+        assert_eq!(
+            status.exception_code(),
+            rsbinder::ExceptionCode::ServiceSpecific
+        );
+        assert_eq!(
+            status.service_specific_error(),
+            ResponseCode::SYSTEM_ERROR.0
         );
     }
 
