@@ -664,6 +664,53 @@ fn forget_operation_target(target: LocalBinderTarget) {
         .remove(&target);
 }
 
+fn take_operation_target(target: LocalBinderTarget) -> Option<OperationTargetInfo> {
+    operation_targets()
+        .lock()
+        .expect("operation target map poisoned")
+        .remove(&target)
+}
+
+fn drop_synthetic_operation_target(target: LocalBinderTarget) {
+    let Some(info) = take_operation_target(target) else {
+        debug!(
+            "[Injector][Synthetic] release for stale operation target ptr=0x{:x} cookie=0x{:x}",
+            target.ptr, target.cookie
+        );
+        return;
+    };
+    if info.finalized {
+        debug!(
+            "[Injector][Synthetic] release for finalized operation target ptr=0x{:x} cookie=0x{:x}",
+            target.ptr, target.cookie
+        );
+        return;
+    }
+    let Some(backend) = info.backend else {
+        return;
+    };
+    let _guard = BypassGuard::enter();
+    if let Err(status) = backend.r#abort() {
+        debug!(
+            "[Injector][Synthetic] drop abort for operation target ptr=0x{:x} cookie=0x{:x} failed: {}",
+            target.ptr, target.cookie, status
+        );
+    }
+}
+
+pub(super) fn handle_synthetic_ref_command(target: LocalBinderTarget, command: u32) -> bool {
+    match lookup_synthetic_target(target) {
+        Some(SyntheticTargetKind::Operation) => {
+            if command == super::binder::BR_RELEASE_NR {
+                drop_synthetic_operation_target(target);
+            }
+            true
+        }
+        Some(SyntheticTargetKind::SecurityLevel) => true,
+        None => false,
+    }
+}
+
 fn mark_operation_target_finalized(target: LocalBinderTarget) {
     if let Some(info) = operation_targets()
         .lock()
@@ -4740,6 +4787,84 @@ mod tests {
             stale_status.service_specific_error(),
             crate::android::hardware::security::keymint::ErrorCode::ErrorCode::INVALID_OPERATION_HANDLE.0
         );
+    }
+
+    #[test]
+    fn synthetic_operation_release_aborts_once_and_clears_mapping() {
+        ensure_binder_process_state();
+        let _guard = route_state_test_guard();
+        clear_operation_state_for_tests();
+
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
+            update_output: vec![9, 9, 9],
+            aborts: aborts.clone(),
+            update_aad_status: None,
+        });
+        let caller = CallerIdentity::new(10002, 2000).with_sid("u:r:untrusted_app:s0:c123,c456");
+        let carrier = register_synthetic_operation_carrier(backend, true, &caller);
+        let target = carrier_target(&carrier);
+
+        assert!(lookup_operation_target(target).is_some());
+        assert_eq!(
+            lookup_synthetic_target(target),
+            Some(SyntheticTargetKind::Operation)
+        );
+
+        assert!(handle_synthetic_ref_command(
+            target,
+            crate::hook::binder::BR_RELEASE_NR
+        ));
+        assert_eq!(aborts.load(Ordering::SeqCst), 1);
+        assert!(
+            lookup_operation_target(target).is_none(),
+            "release should clear the live operation mapping"
+        );
+        assert_eq!(
+            lookup_synthetic_target(target),
+            Some(SyntheticTargetKind::Operation),
+            "release should keep the synthetic target for stale native-style errors"
+        );
+
+        assert!(handle_synthetic_ref_command(
+            target,
+            crate::hook::binder::BR_RELEASE_NR
+        ));
+        assert_eq!(
+            aborts.load(Ordering::SeqCst),
+            1,
+            "repeated release must not abort twice"
+        );
+    }
+
+    #[test]
+    fn synthetic_security_level_release_keeps_cached_target() {
+        let _guard = route_state_test_guard();
+        clear_operation_state_for_tests();
+
+        let caller = CallerIdentity::new(10002, 2000).with_sid("u:r:untrusted_app:s0:c123,c456");
+        let first = register_synthetic_security_level_carrier(
+            SecurityLevel::TRUSTED_ENVIRONMENT,
+            ServiceMethod::GetSecurityLevel,
+            &caller,
+        );
+        let target = carrier_target(&first);
+
+        assert!(handle_synthetic_ref_command(
+            target,
+            crate::hook::binder::BR_RELEASE_NR
+        ));
+        assert_eq!(
+            lookup_synthetic_target(target),
+            Some(SyntheticTargetKind::SecurityLevel)
+        );
+
+        let second = register_synthetic_security_level_carrier(
+            SecurityLevel::TRUSTED_ENVIRONMENT,
+            ServiceMethod::GetSecurityLevel,
+            &caller,
+        );
+        assert_eq!(carrier_target(&second), target);
     }
 
     #[test]

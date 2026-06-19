@@ -18,7 +18,7 @@ use super::binder::{
 };
 use super::rewrite::{
     clear_outbound_reply_buffers, handle_bc_reply, handle_br_transaction,
-    handle_synthetic_br_transaction, lookup_synthetic_target, SyntheticReply,
+    handle_synthetic_br_transaction, handle_synthetic_ref_command, SyntheticReply,
 };
 use super::OLD_IOCTL;
 use crate::hook::binder::{LocalBinderTarget, BC_FREE_BUFFER_CMD, BC_INCREFS_DONE_CMD};
@@ -256,7 +256,7 @@ unsafe fn parse_read_buffer(
                             ptr: ptr_cookie.ptr,
                             cookie: ptr_cookie.cookie,
                         };
-                        if lookup_synthetic_target(target).is_some() {
+                        if handle_synthetic_ref_command(target, cmd_nr) {
                             let submitted = match cmd_nr {
                                 BR_INCREFS_NR => submit_synthetic_ref_done(
                                     fd,
