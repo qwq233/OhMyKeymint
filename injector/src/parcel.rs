@@ -24,7 +24,7 @@ use crate::android::system::keystore2::KeyParameters::KeyParameters;
 use crate::android::system::keystore2::OperationChallenge::OperationChallenge;
 use crate::hook::binder::{
     binder_object_header, flat_binder_object, flat_binder_object_handle_or_ptr, BINDER_TYPE_BINDER,
-    BINDER_TYPE_HANDLE, BINDER_TYPE_WEAK_BINDER, BINDER_TYPE_WEAK_HANDLE,
+    BINDER_TYPE_FD, BINDER_TYPE_HANDLE, BINDER_TYPE_WEAK_BINDER, BINDER_TYPE_WEAK_HANDLE,
 };
 use crate::identify::{
     authorization_method_from_code, maintenance_method_from_code, operation_method_from_code,
@@ -371,6 +371,7 @@ pub unsafe fn parse_authorization_request(
         },
     };
 
+    ensure_no_request_trailing_data(&parcel, "IKeystoreAuthorization")?;
     Ok(parsed)
 }
 
@@ -386,6 +387,72 @@ pub unsafe fn peek_request_interface(
 ) -> Result<String> {
     let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
     read_request_interface(&mut parcel)
+}
+
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder transaction parcel for the duration of this call.
+pub unsafe fn parse_no_arg_request_interface(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+) -> Result<String> {
+    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
+    let interface = read_request_interface(&mut parcel)?;
+    ensure_no_request_trailing_data(&parcel, "AIDL metadata")?;
+    Ok(interface)
+}
+
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder transaction parcel for the duration of this call.
+pub unsafe fn validate_dump_request(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+) -> Result<()> {
+    let object_size = size_of::<flat_binder_object>();
+    if data_size < object_size + size_of::<i32>() {
+        bail!("dump request is missing fd object or argument count");
+    }
+    if data.is_null() {
+        bail!("dump request data pointer is null");
+    }
+    if offsets_size < size_of::<usize>() || offsets.is_null() {
+        bail!("dump request is missing fd object offset");
+    }
+    if !offsets_size.is_multiple_of(size_of::<usize>()) {
+        bail!("dump request offsets size is not aligned");
+    }
+    if offsets_size != size_of::<usize>() {
+        bail!("dump request has unexpected binder objects");
+    }
+
+    let first_offset = std::ptr::read_unaligned(offsets);
+    if first_offset != 0 {
+        bail!("dump request fd object is not first");
+    }
+
+    let object = std::ptr::read_unaligned(data as *const flat_binder_object);
+    if object.hdr.type_ != BINDER_TYPE_FD {
+        bail!("dump request first object is not a file descriptor");
+    }
+
+    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
+    parcel.set_data_position(object_size);
+    let argc: i32 = parcel.read().context("missing dump argument count")?;
+    if argc < 0 {
+        bail!("dump request has negative argument count");
+    }
+    for _ in 0..argc {
+        let _: String = parcel.read().context("missing dump argument")?;
+    }
+    ensure_no_request_trailing_data(&parcel, "DUMP_TRANSACTION")?;
+    Ok(())
 }
 
 /// # Safety
@@ -445,6 +512,7 @@ pub unsafe fn parse_maintenance_request(
         }
     };
 
+    ensure_no_request_trailing_data(&parcel, "IKeystoreMaintenance")?;
     Ok(parsed)
 }
 
@@ -516,6 +584,7 @@ pub unsafe fn parse_service_request(
         }
     };
 
+    ensure_no_request_trailing_data(&parcel, "IKeystoreService")?;
     Ok(parsed)
 }
 
@@ -580,6 +649,7 @@ pub unsafe fn parse_security_level_request(
         },
     };
 
+    ensure_no_request_trailing_data(&parcel, "IKeystoreSecurityLevel")?;
     Ok(parsed)
 }
 
@@ -621,6 +691,7 @@ pub unsafe fn parse_operation_request(
         OperationMethod::Abort => ParsedOperationRequest::Abort,
     };
 
+    ensure_no_request_trailing_data(&parcel, "IKeystoreOperation")?;
     Ok(parsed)
 }
 
@@ -1001,6 +1072,14 @@ fn read_request_interface(parcel: &mut Parcel) -> Result<String> {
     let _: i32 = parcel.read().context("missing work source header")?;
     let _: u32 = parcel.read().context("missing interface marker")?;
     parcel.read().context("missing interface token")
+}
+
+fn ensure_no_request_trailing_data(parcel: &Parcel, interface_name: &str) -> Result<()> {
+    let remaining = parcel.data_avail();
+    if remaining != 0 {
+        bail!("{interface_name} request has {remaining} trailing bytes");
+    }
+    Ok(())
 }
 
 struct RequestEnvelope {

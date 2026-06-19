@@ -1893,10 +1893,12 @@ impl VintfHalXml {
     }
 }
 
-fn synthetic_base_transaction_reply(
+unsafe fn synthetic_base_transaction_reply(
     kind: SyntheticTargetKind,
-    code: u32,
+    target: LocalBinderTarget,
+    tr: &binder_transaction_data,
 ) -> anyhow::Result<Option<SyntheticReply>> {
+    let code = tr.code;
     let reply = match code {
         rsbinder::INTERFACE_TRANSACTION => synthetic_parcel_reply(
             parcel::build_interface_descriptor_reply(synthetic_descriptor(kind))?,
@@ -1909,9 +1911,22 @@ fn synthetic_base_transaction_reply(
             synthetic_parcel_reply(parcel::build_raw_i32_reply(std::process::id() as i32)?)
         }
         rsbinder::SHELL_COMMAND_TRANSACTION | rsbinder::SYSPROPS_TRANSACTION => {
-            synthetic_parcel_reply(parcel::build_empty_reply())
+            SyntheticReply::Status(StatusCode::InvalidOperation.into())
         }
-        rsbinder::DUMP_TRANSACTION => synthetic_parcel_reply(parcel::build_empty_reply()),
+        rsbinder::DUMP_TRANSACTION => {
+            let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
+            if let Err(error) =
+                parcel::validate_dump_request(data, data_size, offsets, offsets_size)
+            {
+                warn!(
+                    "[Injector][Synthetic] malformed DUMP_TRANSACTION for target ptr=0x{:x} cookie=0x{:x} kind={:?}: {:#}; returning BAD_TYPE",
+                    target.ptr, target.cookie, kind, error
+                );
+                SyntheticReply::Status(StatusCode::BadType.into())
+            } else {
+                synthetic_parcel_reply(parcel::build_empty_reply())
+            }
+        }
         rsbinder::SET_RPC_CLIENT_TRANSACTION => {
             SyntheticReply::Status(StatusCode::InvalidOperation.into())
         }
@@ -2023,13 +2038,13 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
     command_name: &str,
 ) -> anyhow::Result<SyntheticReply> {
     let kind = info.kind;
-    if let Some(reply) = synthetic_base_transaction_reply(kind, tr.code)? {
+    if let Some(reply) = synthetic_base_transaction_reply(kind, target, tr)? {
         return Ok(reply);
     }
 
     if let Some(method) = identify::aidl_metadata_method_from_code(tr.code) {
         let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
-        let request_interface = match parcel::peek_request_interface(
+        let request_interface = match parcel::parse_no_arg_request_interface(
             data,
             data_size,
             offsets,
@@ -3049,7 +3064,7 @@ mod tests {
         android::system::keystore2::KeyMetadata::KeyMetadata,
         hook::binder::{
             binder_object_header, flat_binder_object, flat_binder_object_handle_or_ptr,
-            BINDER_TYPE_BINDER,
+            BINDER_TYPE_BINDER, BINDER_TYPE_FD,
         },
         route,
     };
@@ -3295,6 +3310,52 @@ mod tests {
         tr
     }
 
+    fn transaction_for_raw_parts(
+        target: LocalBinderTarget,
+        code: rsbinder::TransactionCode,
+        data: &mut [u8],
+        offsets: &mut [usize],
+    ) -> binder_transaction_data {
+        let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
+        tr.target.ptr = target.ptr;
+        tr.data.ptr.buffer = data.as_mut_ptr() as libc::c_ulong;
+        tr.data.ptr.offsets = offsets.as_mut_ptr() as libc::c_ulong;
+        tr.cookie = target.cookie;
+        tr.code = code;
+        tr.sender_euid = 10002;
+        tr.sender_pid = 2000;
+        tr.data_size = data.len();
+        tr.offsets_size = std::mem::size_of_val(offsets);
+        tr
+    }
+
+    fn dump_transaction_data(argc: i32, args: &[String]) -> Vec<u8> {
+        let mut tail = rsbinder::Parcel::new();
+        tail.write(&argc).unwrap();
+        for arg in args {
+            tail.write(arg).unwrap();
+        }
+
+        let mut data = vec![0u8; size_of::<flat_binder_object>() + tail.data_size()];
+        let object = flat_binder_object {
+            hdr: binder_object_header {
+                type_: BINDER_TYPE_FD,
+            },
+            flags: 0,
+            handle_or_ptr: flat_binder_object_handle_or_ptr { handle: 0 },
+            cookie: 0,
+        };
+        unsafe {
+            std::ptr::write_unaligned(data.as_mut_ptr() as *mut flat_binder_object, object);
+            std::ptr::copy_nonoverlapping(
+                tail.as_ptr(),
+                data.as_mut_ptr().add(size_of::<flat_binder_object>()),
+                tail.data_size(),
+            );
+        }
+        data
+    }
+
     fn test_local_binder_carrier(
         ptr: libc::c_ulong,
         cookie: libc::c_ulong,
@@ -3407,10 +3468,15 @@ mod tests {
 
     #[test]
     fn synthetic_base_transactions_do_not_require_interface_token() {
-        let ping = synthetic_base_transaction_reply(
-            SyntheticTargetKind::SecurityLevel,
-            rsbinder::PING_TRANSACTION,
-        )
+        let target = LocalBinderTarget {
+            ptr: 0x4100,
+            cookie: 0x5100,
+        };
+        let empty = rsbinder::Parcel::new();
+        let ping_tr = transaction_for_parcel(target, rsbinder::PING_TRANSACTION, &empty);
+        let ping = unsafe {
+            synthetic_base_transaction_reply(SyntheticTargetKind::SecurityLevel, target, &ping_tr)
+        }
         .expect("ping handling should not fail")
         .expect("ping should produce a reply");
         let SyntheticReply::Parcel(ping) = ping else {
@@ -3419,22 +3485,41 @@ mod tests {
         assert_eq!(ping.data_size(), 0);
         assert_eq!(ping.offsets_size(), 0);
 
-        let shell = synthetic_base_transaction_reply(
-            SyntheticTargetKind::SecurityLevel,
-            rsbinder::SHELL_COMMAND_TRANSACTION,
-        )
+        let shell_tr = transaction_for_parcel(target, rsbinder::SHELL_COMMAND_TRANSACTION, &empty);
+        let shell = unsafe {
+            synthetic_base_transaction_reply(SyntheticTargetKind::SecurityLevel, target, &shell_tr)
+        }
         .expect("shell handling should not fail")
         .expect("shell should produce a reply");
-        let SyntheticReply::Parcel(shell) = shell else {
-            panic!("shell should be an empty parcel reply");
+        let SyntheticReply::Status(status) = shell else {
+            panic!("shell should be a binder status code");
         };
-        assert_eq!(shell.data_size(), 0);
-        assert_eq!(shell.offsets_size(), 0);
+        assert_eq!(status, i32::from(StatusCode::InvalidOperation));
 
-        let start_recording = synthetic_base_transaction_reply(
-            SyntheticTargetKind::SecurityLevel,
-            rsbinder::START_RECORDING_TRANSACTION,
-        )
+        let sysprops_tr = transaction_for_parcel(target, rsbinder::SYSPROPS_TRANSACTION, &empty);
+        let sysprops = unsafe {
+            synthetic_base_transaction_reply(
+                SyntheticTargetKind::SecurityLevel,
+                target,
+                &sysprops_tr,
+            )
+        }
+        .expect("sysprops handling should not fail")
+        .expect("sysprops should produce a reply");
+        let SyntheticReply::Status(status) = sysprops else {
+            panic!("sysprops should be a binder status code");
+        };
+        assert_eq!(status, i32::from(StatusCode::InvalidOperation));
+
+        let start_recording_tr =
+            transaction_for_parcel(target, rsbinder::START_RECORDING_TRANSACTION, &empty);
+        let start_recording = unsafe {
+            synthetic_base_transaction_reply(
+                SyntheticTargetKind::SecurityLevel,
+                target,
+                &start_recording_tr,
+            )
+        }
         .expect("start-recording handling should not fail")
         .expect("start-recording should produce a reply");
         let SyntheticReply::Status(status) = start_recording else {
@@ -3442,22 +3527,115 @@ mod tests {
         };
         assert_eq!(status, i32::from(StatusCode::InvalidOperation));
 
-        let dump = synthetic_base_transaction_reply(
-            SyntheticTargetKind::SecurityLevel,
+        let malformed_dump_tr = transaction_for_parcel(target, rsbinder::DUMP_TRANSACTION, &empty);
+        let malformed_dump = unsafe {
+            synthetic_base_transaction_reply(
+                SyntheticTargetKind::SecurityLevel,
+                target,
+                &malformed_dump_tr,
+            )
+        }
+        .expect("dump handling should not fail")
+        .expect("dump should produce a reply");
+        let SyntheticReply::Status(status) = malformed_dump else {
+            panic!("malformed dump should be a binder status code");
+        };
+        assert_eq!(status, i32::from(StatusCode::BadType));
+
+        let mut dump_data = dump_transaction_data(0, &[]);
+        let mut offsets = [0usize];
+        let dump_tr = transaction_for_raw_parts(
+            target,
             rsbinder::DUMP_TRANSACTION,
-        )
+            &mut dump_data,
+            &mut offsets,
+        );
+        let dump = unsafe {
+            synthetic_base_transaction_reply(SyntheticTargetKind::SecurityLevel, target, &dump_tr)
+        }
         .expect("dump handling should not fail")
         .expect("dump should produce a reply");
         let SyntheticReply::Parcel(dump) = dump else {
-            panic!("dump should be an empty parcel reply");
+            panic!("valid dump should be an empty parcel reply");
         };
         assert_eq!(dump.data_size(), 0);
         assert_eq!(dump.offsets_size(), 0);
 
-        let unknown =
-            synthetic_base_transaction_reply(SyntheticTargetKind::SecurityLevel, u32::MAX)
-                .expect("unknown outside call range should not fail")
-                .expect("unknown outside call range should produce a reply");
+        let mut dump_with_args_data = dump_transaction_data(1, &[String::from("--proto")]);
+        let dump_with_args_tr = transaction_for_raw_parts(
+            target,
+            rsbinder::DUMP_TRANSACTION,
+            &mut dump_with_args_data,
+            &mut offsets,
+        );
+        let dump_with_args = unsafe {
+            synthetic_base_transaction_reply(
+                SyntheticTargetKind::SecurityLevel,
+                target,
+                &dump_with_args_tr,
+            )
+        }
+        .expect("dump with args handling should not fail")
+        .expect("dump with args should produce a reply");
+        let SyntheticReply::Parcel(dump_with_args) = dump_with_args else {
+            panic!("valid dump with args should be an empty parcel reply");
+        };
+        assert_eq!(dump_with_args.data_size(), 0);
+        assert_eq!(dump_with_args.offsets_size(), 0);
+
+        let mut negative_argc_data = dump_transaction_data(-1, &[]);
+        let negative_argc_tr = transaction_for_raw_parts(
+            target,
+            rsbinder::DUMP_TRANSACTION,
+            &mut negative_argc_data,
+            &mut offsets,
+        );
+        let negative_argc = unsafe {
+            synthetic_base_transaction_reply(
+                SyntheticTargetKind::SecurityLevel,
+                target,
+                &negative_argc_tr,
+            )
+        }
+        .expect("negative argc dump handling should not fail")
+        .expect("negative argc dump should produce a reply");
+        let SyntheticReply::Status(status) = negative_argc else {
+            panic!("negative argc dump should be a binder status code");
+        };
+        assert_eq!(status, i32::from(StatusCode::BadType));
+
+        let mut trailing_dump_data = dump_transaction_data(0, &[]);
+        trailing_dump_data.extend_from_slice(&0x4f4d4bu32.to_ne_bytes());
+        let trailing_dump_tr = transaction_for_raw_parts(
+            target,
+            rsbinder::DUMP_TRANSACTION,
+            &mut trailing_dump_data,
+            &mut offsets,
+        );
+        let trailing_dump = unsafe {
+            synthetic_base_transaction_reply(
+                SyntheticTargetKind::SecurityLevel,
+                target,
+                &trailing_dump_tr,
+            )
+        }
+        .expect("trailing dump handling should not fail")
+        .expect("trailing dump should produce a reply");
+        let SyntheticReply::Status(status) = trailing_dump else {
+            panic!("trailing dump should be a binder status code");
+        };
+        assert_eq!(status, i32::from(StatusCode::BadType));
+
+        let unknown_tr = transaction_for_parcel(target, u32::MAX, &empty);
+        let unknown = unsafe {
+            synthetic_base_transaction_reply(
+                SyntheticTargetKind::SecurityLevel,
+                target,
+                &unknown_tr,
+            )
+        }
+        .expect("unknown outside call range should not fail")
+        .expect("unknown outside call range should produce a reply");
         assert_unknown_transaction_reply(unknown);
     }
 
@@ -3567,6 +3745,34 @@ mod tests {
         .expect("wrong metadata interface should be handled");
         let SyntheticReply::Status(status) = reply else {
             panic!("wrong metadata interface should return a binder status");
+        };
+        assert_eq!(status, i32::from(StatusCode::BadType));
+    }
+
+    #[test]
+    fn synthetic_aidl_metadata_rejects_trailing_payload() {
+        let target = LocalBinderTarget {
+            ptr: 0x7334,
+            cookie: 0xb778,
+        };
+        let mut request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
+        request.write(&0x4f4d4bi32).unwrap();
+        let tr = transaction_for_parcel(
+            target,
+            identify::AIDL_GET_INTERFACE_HASH_TRANSACTION,
+            &request,
+        );
+        let info = SyntheticTargetInfo {
+            kind: SyntheticTargetKind::Operation,
+            caller: Some(CallerIdentity::new(10002, 2000)),
+        };
+
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+        }
+        .expect("trailing metadata request should be handled");
+        let SyntheticReply::Status(status) = reply else {
+            panic!("trailing metadata request should return a binder status");
         };
         assert_eq!(status, i32::from(StatusCode::BadType));
     }
@@ -3683,6 +3889,57 @@ mod tests {
         assert!(
             lookup_operation_target(target).is_some(),
             "malformed parse must not finalize the operation"
+        );
+        assert_eq!(aborts.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn synthetic_operation_trailing_abort_returns_bad_value_status() {
+        let _guard = route_state_test_guard();
+
+        let target = LocalBinderTarget {
+            ptr: 0x1334,
+            cookie: 0x5778,
+        };
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
+            update_output: vec![5, 6, 7],
+            aborts: aborts.clone(),
+            update_aad_status: None,
+        });
+        remember_operation_target(
+            target,
+            OperationTargetInfo {
+                route: RouteTarget::Omk,
+                aad_allowed: true,
+                backend: Some(backend),
+                finalized: false,
+            },
+        );
+
+        let mut request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
+        request.write(&0x4f4d4bi32).unwrap();
+        let tr = transaction_for_parcel(
+            target,
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
+            &request,
+        );
+        let info = SyntheticTargetInfo {
+            kind: SyntheticTargetKind::Operation,
+            caller: Some(CallerIdentity::new(10002, 2000)),
+        };
+
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+        }
+        .expect("trailing abort should be handled without fallback");
+        let SyntheticReply::Status(status) = reply else {
+            panic!("trailing abort should return a binder status, not a service reply");
+        };
+        assert_eq!(status, i32::from(StatusCode::BadValue));
+        assert!(
+            lookup_operation_target(target).is_some(),
+            "trailing data must not finalize the operation"
         );
         assert_eq!(aborts.load(Ordering::SeqCst), 0);
     }
