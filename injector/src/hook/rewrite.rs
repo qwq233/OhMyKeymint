@@ -169,6 +169,10 @@ static NEXT_SYNTHETIC_BINDER_ID: AtomicU64 = AtomicU64::new(1);
 
 const SYNTHETIC_BINDER_FLAGS: u32 = 0x1113;
 const SYNTHETIC_BINDER_STABILITY: i32 = 0x0c;
+const SYNTHETIC_BINDER_PTR_PREFIX_64: u64 = 0x4f4d_4b53_0000_0000;
+const SYNTHETIC_BINDER_COOKIE_PREFIX_64: u64 = 0x4f4d_4b43_0000_0000;
+const SYNTHETIC_BINDER_PTR_PREFIX_32: u64 = 0x4f4d_0000;
+const SYNTHETIC_BINDER_COOKIE_PREFIX_32: u64 = 0x4d4b_0000;
 const KEYSTORE2_HAL_NAME: &str = "android.system.keystore2";
 const KEYSTORE2_SERVICE_INTERFACE: &str = "IKeystoreService";
 const KEYSTORE2_SERVICE_INSTANCE: &str = "default";
@@ -614,6 +618,28 @@ fn lookup_synthetic_target_info(target: LocalBinderTarget) -> Option<SyntheticTa
         .cloned()
 }
 
+fn is_synthetic_binder_target(target: LocalBinderTarget) -> bool {
+    let (ptr_prefix, cookie_prefix, low_mask) = if size_of::<libc::c_ulong>() >= 8 {
+        (
+            SYNTHETIC_BINDER_PTR_PREFIX_64,
+            SYNTHETIC_BINDER_COOKIE_PREFIX_64,
+            0x0000_0000_ffff_ffffu64,
+        )
+    } else {
+        (
+            SYNTHETIC_BINDER_PTR_PREFIX_32,
+            SYNTHETIC_BINDER_COOKIE_PREFIX_32,
+            0x0000_ffffu64,
+        )
+    };
+    let ptr = target.ptr;
+    let cookie = target.cookie;
+    (ptr & !low_mask) == ptr_prefix
+        && (cookie & !low_mask) == cookie_prefix
+        && (ptr & low_mask) != 0
+        && (ptr & low_mask) == (cookie & low_mask)
+}
+
 fn remember_synthetic_target(
     target: LocalBinderTarget,
     kind: SyntheticTargetKind,
@@ -707,6 +733,13 @@ pub(super) fn handle_synthetic_ref_command(target: LocalBinderTarget, command: u
             true
         }
         Some(SyntheticTargetKind::SecurityLevel) => true,
+        None if is_synthetic_binder_target(target) => {
+            warn!(
+                "[Injector][Synthetic] consuming stale synthetic binder ref command nr={} for ptr=0x{:x} cookie=0x{:x}",
+                command, target.ptr, target.cookie
+            );
+            true
+        }
         None => false,
     }
 }
@@ -745,14 +778,14 @@ fn allocate_synthetic_target() -> LocalBinderTarget {
         0x0000_ffffu64
     };
     let ptr = if size_of::<libc::c_ulong>() >= 8 {
-        0x4f4d_4b53_0000_0000u64 | (id & low_mask)
+        SYNTHETIC_BINDER_PTR_PREFIX_64 | (id & low_mask)
     } else {
-        0x4f4d_0000u64 | (id & low_mask)
+        SYNTHETIC_BINDER_PTR_PREFIX_32 | (id & low_mask)
     } as libc::c_ulong;
     let cookie = if size_of::<libc::c_ulong>() >= 8 {
-        0x4f4d_4b43_0000_0000u64 | (id & low_mask)
+        SYNTHETIC_BINDER_COOKIE_PREFIX_64 | (id & low_mask)
     } else {
-        0x4d4b_0000u64 | (id & low_mask)
+        SYNTHETIC_BINDER_COOKIE_PREFIX_32 | (id & low_mask)
     } as libc::c_ulong;
     LocalBinderTarget { ptr, cookie }
 }
@@ -1894,15 +1927,18 @@ impl VintfHalXml {
 }
 
 unsafe fn synthetic_base_transaction_reply(
-    kind: SyntheticTargetKind,
+    kind: Option<SyntheticTargetKind>,
     target: LocalBinderTarget,
     tr: &binder_transaction_data,
 ) -> anyhow::Result<Option<SyntheticReply>> {
     let code = tr.code;
     let reply = match code {
-        rsbinder::INTERFACE_TRANSACTION => synthetic_parcel_reply(
-            parcel::build_interface_descriptor_reply(synthetic_descriptor(kind))?,
-        ),
+        rsbinder::INTERFACE_TRANSACTION => match kind {
+            Some(kind) => synthetic_parcel_reply(parcel::build_interface_descriptor_reply(
+                synthetic_descriptor(kind),
+            )?),
+            None => synthetic_unknown_transaction_reply(),
+        },
         rsbinder::PING_TRANSACTION => synthetic_parcel_reply(parcel::build_empty_reply()),
         rsbinder::EXTENSION_TRANSACTION => {
             synthetic_parcel_reply(parcel::build_null_binder_reply()?)
@@ -1911,7 +1947,7 @@ unsafe fn synthetic_base_transaction_reply(
             synthetic_parcel_reply(parcel::build_raw_i32_reply(std::process::id() as i32)?)
         }
         rsbinder::SHELL_COMMAND_TRANSACTION | rsbinder::SYSPROPS_TRANSACTION => {
-            SyntheticReply::Status(StatusCode::InvalidOperation.into())
+            synthetic_parcel_reply(parcel::build_empty_reply())
         }
         rsbinder::DUMP_TRANSACTION => {
             let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
@@ -1987,7 +2023,32 @@ pub(super) unsafe fn handle_synthetic_br_transaction(
     command_name: &str,
 ) -> Option<SyntheticReply> {
     let target = target_from_transaction(tr)?;
-    let info = lookup_synthetic_target_info(target)?;
+    let Some(info) = lookup_synthetic_target_info(target) else {
+        if !is_synthetic_binder_target(target) {
+            return None;
+        }
+        let reply = match synthetic_base_transaction_reply(None, target, tr) {
+            Ok(Some(reply)) => reply,
+            Ok(None) => synthetic_unknown_transaction_reply(),
+            Err(error) => {
+                warn!(
+                    "[Injector][Synthetic] failed to handle stale {} target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning SYSTEM_ERROR",
+                    command_name, target.ptr, target.cookie, tr.code, error
+                );
+                synthetic_parcel_reply(synthetic_fallback_reply())
+            }
+        };
+        let reply = if (tr.flags & super::binder::TF_ONE_WAY) != 0 {
+            SyntheticReply::NoReply
+        } else {
+            reply
+        };
+        warn!(
+            "[Injector][Synthetic] consumed stale synthetic {} target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}",
+            command_name, target.ptr, target.cookie, tr.code
+        );
+        return Some(reply);
+    };
     let kind = info.kind;
 
     let result = build_synthetic_br_transaction_reply(tr, target, info, caller_sid, command_name);
@@ -2038,7 +2099,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
     command_name: &str,
 ) -> anyhow::Result<SyntheticReply> {
     let kind = info.kind;
-    if let Some(reply) = synthetic_base_transaction_reply(kind, target, tr)? {
+    if let Some(reply) = synthetic_base_transaction_reply(Some(kind), target, tr)? {
         return Ok(reply);
     }
 
@@ -3467,6 +3528,48 @@ mod tests {
     }
 
     #[test]
+    fn stale_synthetic_magic_target_is_consumed() {
+        let _guard = route_state_test_guard();
+        let target = allocate_synthetic_target();
+        assert!(is_synthetic_binder_target(target));
+
+        let empty = rsbinder::Parcel::new();
+        let shell_tr = transaction_for_parcel(target, rsbinder::SHELL_COMMAND_TRANSACTION, &empty);
+        let shell = unsafe { handle_synthetic_br_transaction(&shell_tr, None, "BR_TRANSACTION") }
+            .expect("stale synthetic shell should be consumed");
+        let SyntheticReply::Parcel(shell) = shell else {
+            panic!("stale synthetic shell should be an empty parcel reply");
+        };
+        assert_eq!(shell.data_size(), 0);
+        assert_eq!(shell.offsets_size(), 0);
+
+        let business_tr = transaction_for_parcel(target, rsbinder::FIRST_CALL_TRANSACTION, &empty);
+        let business =
+            unsafe { handle_synthetic_br_transaction(&business_tr, None, "BR_TRANSACTION") }
+                .expect("stale synthetic business call should be consumed");
+        assert_unknown_transaction_reply(business);
+
+        let mut oneway_tr =
+            transaction_for_parcel(target, rsbinder::START_RECORDING_TRANSACTION, &empty);
+        oneway_tr.flags |= crate::hook::binder::TF_ONE_WAY;
+        let oneway = unsafe { handle_synthetic_br_transaction(&oneway_tr, None, "BR_TRANSACTION") }
+            .expect("stale synthetic oneway should be consumed");
+        assert!(matches!(oneway, SyntheticReply::NoReply));
+
+        assert!(handle_synthetic_ref_command(
+            target,
+            crate::hook::binder::BR_RELEASE_NR
+        ));
+        assert!(!handle_synthetic_ref_command(
+            LocalBinderTarget {
+                ptr: 0x1234,
+                cookie: 0x5678,
+            },
+            crate::hook::binder::BR_RELEASE_NR
+        ));
+    }
+
+    #[test]
     fn synthetic_base_transactions_do_not_require_interface_token() {
         let target = LocalBinderTarget {
             ptr: 0x4100,
@@ -3475,7 +3578,11 @@ mod tests {
         let empty = rsbinder::Parcel::new();
         let ping_tr = transaction_for_parcel(target, rsbinder::PING_TRANSACTION, &empty);
         let ping = unsafe {
-            synthetic_base_transaction_reply(SyntheticTargetKind::SecurityLevel, target, &ping_tr)
+            synthetic_base_transaction_reply(
+                Some(SyntheticTargetKind::SecurityLevel),
+                target,
+                &ping_tr,
+            )
         }
         .expect("ping handling should not fail")
         .expect("ping should produce a reply");
@@ -3487,35 +3594,41 @@ mod tests {
 
         let shell_tr = transaction_for_parcel(target, rsbinder::SHELL_COMMAND_TRANSACTION, &empty);
         let shell = unsafe {
-            synthetic_base_transaction_reply(SyntheticTargetKind::SecurityLevel, target, &shell_tr)
+            synthetic_base_transaction_reply(
+                Some(SyntheticTargetKind::SecurityLevel),
+                target,
+                &shell_tr,
+            )
         }
         .expect("shell handling should not fail")
         .expect("shell should produce a reply");
-        let SyntheticReply::Status(status) = shell else {
-            panic!("shell should be a binder status code");
+        let SyntheticReply::Parcel(shell) = shell else {
+            panic!("shell should be an empty parcel reply");
         };
-        assert_eq!(status, i32::from(StatusCode::InvalidOperation));
+        assert_eq!(shell.data_size(), 0);
+        assert_eq!(shell.offsets_size(), 0);
 
         let sysprops_tr = transaction_for_parcel(target, rsbinder::SYSPROPS_TRANSACTION, &empty);
         let sysprops = unsafe {
             synthetic_base_transaction_reply(
-                SyntheticTargetKind::SecurityLevel,
+                Some(SyntheticTargetKind::SecurityLevel),
                 target,
                 &sysprops_tr,
             )
         }
         .expect("sysprops handling should not fail")
         .expect("sysprops should produce a reply");
-        let SyntheticReply::Status(status) = sysprops else {
-            panic!("sysprops should be a binder status code");
+        let SyntheticReply::Parcel(sysprops) = sysprops else {
+            panic!("sysprops should be an empty parcel reply");
         };
-        assert_eq!(status, i32::from(StatusCode::InvalidOperation));
+        assert_eq!(sysprops.data_size(), 0);
+        assert_eq!(sysprops.offsets_size(), 0);
 
         let start_recording_tr =
             transaction_for_parcel(target, rsbinder::START_RECORDING_TRANSACTION, &empty);
         let start_recording = unsafe {
             synthetic_base_transaction_reply(
-                SyntheticTargetKind::SecurityLevel,
+                Some(SyntheticTargetKind::SecurityLevel),
                 target,
                 &start_recording_tr,
             )
@@ -3530,7 +3643,7 @@ mod tests {
         let malformed_dump_tr = transaction_for_parcel(target, rsbinder::DUMP_TRANSACTION, &empty);
         let malformed_dump = unsafe {
             synthetic_base_transaction_reply(
-                SyntheticTargetKind::SecurityLevel,
+                Some(SyntheticTargetKind::SecurityLevel),
                 target,
                 &malformed_dump_tr,
             )
@@ -3551,7 +3664,11 @@ mod tests {
             &mut offsets,
         );
         let dump = unsafe {
-            synthetic_base_transaction_reply(SyntheticTargetKind::SecurityLevel, target, &dump_tr)
+            synthetic_base_transaction_reply(
+                Some(SyntheticTargetKind::SecurityLevel),
+                target,
+                &dump_tr,
+            )
         }
         .expect("dump handling should not fail")
         .expect("dump should produce a reply");
@@ -3570,7 +3687,7 @@ mod tests {
         );
         let dump_with_args = unsafe {
             synthetic_base_transaction_reply(
-                SyntheticTargetKind::SecurityLevel,
+                Some(SyntheticTargetKind::SecurityLevel),
                 target,
                 &dump_with_args_tr,
             )
@@ -3592,7 +3709,7 @@ mod tests {
         );
         let negative_argc = unsafe {
             synthetic_base_transaction_reply(
-                SyntheticTargetKind::SecurityLevel,
+                Some(SyntheticTargetKind::SecurityLevel),
                 target,
                 &negative_argc_tr,
             )
@@ -3614,7 +3731,7 @@ mod tests {
         );
         let trailing_dump = unsafe {
             synthetic_base_transaction_reply(
-                SyntheticTargetKind::SecurityLevel,
+                Some(SyntheticTargetKind::SecurityLevel),
                 target,
                 &trailing_dump_tr,
             )
@@ -3629,7 +3746,7 @@ mod tests {
         let unknown_tr = transaction_for_parcel(target, u32::MAX, &empty);
         let unknown = unsafe {
             synthetic_base_transaction_reply(
-                SyntheticTargetKind::SecurityLevel,
+                Some(SyntheticTargetKind::SecurityLevel),
                 target,
                 &unknown_tr,
             )
