@@ -1941,7 +1941,11 @@ pub(super) unsafe fn handle_synthetic_br_transaction(
                 tr.code,
                 error
             );
-            synthetic_parcel_reply(synthetic_fallback_reply())
+            if (tr.flags & super::binder::TF_ONE_WAY) != 0 {
+                SyntheticReply::NoReply
+            } else {
+                synthetic_parcel_reply(synthetic_fallback_reply())
+            }
         }
     };
     Some(reply)
@@ -1954,11 +1958,24 @@ unsafe fn build_synthetic_br_transaction_reply(
     caller_sid: Option<String>,
     command_name: &str,
 ) -> anyhow::Result<SyntheticReply> {
-    let kind = info.kind;
-    if (tr.flags & super::binder::TF_ONE_WAY) != 0 {
-        return Ok(SyntheticReply::NoReply);
+    let expects_reply = (tr.flags & super::binder::TF_ONE_WAY) == 0;
+    let reply =
+        build_synthetic_br_transaction_reply_inner(tr, target, info, caller_sid, command_name)?;
+    if expects_reply {
+        Ok(reply)
+    } else {
+        Ok(SyntheticReply::NoReply)
     }
+}
 
+unsafe fn build_synthetic_br_transaction_reply_inner(
+    tr: &binder_transaction_data,
+    target: LocalBinderTarget,
+    info: SyntheticTargetInfo,
+    caller_sid: Option<String>,
+    command_name: &str,
+) -> anyhow::Result<SyntheticReply> {
+    let kind = info.kind;
     if let Some(reply) = synthetic_base_transaction_reply(kind, tr.code)? {
         return Ok(reply);
     }
