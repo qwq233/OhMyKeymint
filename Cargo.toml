@@ -54,7 +54,7 @@ multi_log = "0.1.2"
 incremental = true
 
 [profile.release]
-opt-level = 'z'     # Optimize for size
+opt-level = 3
 lto = true          # Enable link-time optimization
 codegen-units = 1   # Reduce number of codegen units to increase optimizations
 panic = 'abort'     # Abort on panic

@@ -18,7 +18,9 @@ const NULL_VECTOR_SIZE: i32 = -1;
 const AAID_MAX_VECTOR_LEN: i32 = 1024;
 
 thread_local! {
-    static PROVIDER: Mutex<Option<SIBinder>> = Mutex::new(None);
+    // clippy still flags this const initializer through thread_local!.
+    #[allow(clippy::missing_const_for_thread_local)]
+    static PROVIDER: Mutex<Option<SIBinder>> = const { Mutex::new(None) };
 }
 
 pub fn should_use_aaid_provider() -> bool {

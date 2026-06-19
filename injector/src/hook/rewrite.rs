@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex, OnceLock,
@@ -8,6 +9,7 @@ use std::sync::{
 
 use log::{debug, info, warn};
 use rsbinder::{ExceptionCode, Status, StatusCode};
+use serde::Deserialize;
 
 use super::binder::{
     binder_transaction_data, describe_transaction_objects, format_target,
@@ -23,8 +25,8 @@ use crate::config;
 use crate::filter::{self, FilterReason};
 use crate::forward::{self, BypassGuard};
 use crate::identify::{
-    self, AuthorizationMethod, MaintenanceMethod, OperationMethod, SecurityLevelMethod,
-    ServiceMethod,
+    self, AidlMetadataMethod, AuthorizationMethod, MaintenanceMethod, OperationMethod,
+    SecurityLevelMethod, ServiceMethod,
 };
 use crate::ipc;
 use crate::parcel::{
@@ -160,12 +162,62 @@ static SYNTHETIC_SECURITY_LEVEL_TARGETS: OnceLock<
 > = OnceLock::new();
 static SYNTHETIC_TARGETS: OnceLock<Mutex<HashMap<LocalBinderTarget, SyntheticTargetInfo>>> =
     OnceLock::new();
+static KEYSTORE2_AIDL_METADATA: OnceLock<Result<Keystore2AidlMetadata, String>> = OnceLock::new();
 static AUTHORIZATION_MIRROR_STATE_DIRTY: AtomicBool = AtomicBool::new(false);
 static MAINTENANCE_MIRROR_STATE_DIRTY: AtomicBool = AtomicBool::new(false);
 static NEXT_SYNTHETIC_BINDER_ID: AtomicU64 = AtomicU64::new(1);
 
 const SYNTHETIC_BINDER_FLAGS: u32 = 0x1113;
 const SYNTHETIC_BINDER_STABILITY: i32 = 0x0c;
+const KEYSTORE2_HAL_NAME: &str = "android.system.keystore2";
+const KEYSTORE2_SERVICE_INTERFACE: &str = "IKeystoreService";
+const KEYSTORE2_SERVICE_INSTANCE: &str = "default";
+const VINTF_MANIFEST_DIRS: &[&str] = &[
+    "/system/etc/vintf/manifest",
+    "/system_ext/etc/vintf/manifest",
+    "/product/etc/vintf/manifest",
+    "/vendor/etc/vintf/manifest",
+    "/odm/etc/vintf/manifest",
+];
+const VINTF_MANIFEST_FILES: &[&str] = &[
+    "/system/etc/vintf/manifest.xml",
+    "/system_ext/etc/vintf/manifest.xml",
+    "/product/etc/vintf/manifest.xml",
+    "/vendor/etc/vintf/manifest.xml",
+    "/odm/etc/vintf/manifest.xml",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Keystore2AidlMetadata {
+    version: i32,
+    hash: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct VintfManifestXml {
+    #[serde(rename = "hal", default)]
+    hals: Vec<VintfHalXml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VintfHalXml {
+    #[serde(rename = "@format")]
+    format: Option<String>,
+    name: Option<String>,
+    #[serde(rename = "version", default)]
+    versions: Vec<String>,
+    #[serde(rename = "fqname", default)]
+    fqnames: Vec<String>,
+    #[serde(rename = "interface", default)]
+    interfaces: Vec<VintfInterfaceXml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VintfInterfaceXml {
+    name: Option<String>,
+    #[serde(rename = "instance", default)]
+    instances: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MirrorStateKind {
@@ -1654,6 +1706,146 @@ fn synthetic_descriptor(kind: SyntheticTargetKind) -> &'static str {
     }
 }
 
+fn build_synthetic_aidl_metadata_reply(
+    method: AidlMetadataMethod,
+) -> anyhow::Result<SyntheticReply> {
+    let metadata = keystore2_aidl_metadata()?;
+    match method {
+        AidlMetadataMethod::GetInterfaceHash => {
+            let hash = metadata.hash.to_string();
+            Ok(synthetic_parcel_reply(parcel::build_plain_reply(&hash)?))
+        }
+        AidlMetadataMethod::GetInterfaceVersion => Ok(synthetic_parcel_reply(
+            parcel::build_plain_reply(&metadata.version)?,
+        )),
+    }
+}
+
+fn keystore2_aidl_metadata() -> anyhow::Result<Keystore2AidlMetadata> {
+    match KEYSTORE2_AIDL_METADATA
+        .get_or_init(|| resolve_keystore2_aidl_metadata().map_err(|error| format!("{error:#}")))
+    {
+        Ok(metadata) => Ok(*metadata),
+        Err(error) => Err(anyhow::anyhow!("{}", error)),
+    }
+}
+
+fn resolve_keystore2_aidl_metadata() -> anyhow::Result<Keystore2AidlMetadata> {
+    let version = probe_keystore2_aidl_version_from_vintf().unwrap_or_else(|| {
+        let fallback = fallback_keystore2_aidl_version_from_android();
+        warn!(
+            "[Injector][Synthetic] failed to resolve {} AIDL version from VINTF; using Android-version fallback v{}",
+            KEYSTORE2_HAL_NAME, fallback
+        );
+        fallback
+    });
+    let hash =
+        kmr_common::consts::android_system_keystore2_aidl_hash(version).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no precomputed {} AIDL hash for version {}",
+                KEYSTORE2_HAL_NAME,
+                version
+            )
+        })?;
+    Ok(Keystore2AidlMetadata { version, hash })
+}
+
+fn fallback_keystore2_aidl_version_from_android() -> i32 {
+    kmr_common::android_version::android_major_version()
+        .and_then(kmr_common::consts::android_system_keystore2_aidl_version_for_android_major)
+        .unwrap_or(kmr_common::consts::ANDROID_SYSTEM_KEYSTORE2_LATEST_AIDL_VERSION)
+}
+
+fn probe_keystore2_aidl_version_from_vintf() -> Option<i32> {
+    for path in vintf_manifest_paths() {
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match parse_keystore2_aidl_version_xml(&contents) {
+            Ok(Some(version)) => return Some(version),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    "[Injector][Synthetic] ignoring invalid VINTF manifest {}: {error:#}",
+                    path.display()
+                );
+            }
+        }
+    }
+    None
+}
+
+fn vintf_manifest_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for directory in VINTF_MANIFEST_DIRS {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("xml") {
+                paths.push(path);
+            }
+        }
+    }
+    for file in VINTF_MANIFEST_FILES {
+        paths.push(PathBuf::from(file));
+    }
+    paths
+}
+
+fn parse_keystore2_aidl_version_xml(xml: &str) -> anyhow::Result<Option<i32>> {
+    let manifest: VintfManifestXml = quick_xml::de::from_str(xml)
+        .map_err(|error| anyhow::anyhow!("failed to deserialize VINTF XML: {error}"))?;
+    for hal in manifest.hals {
+        if !hal.references_keystore2_service() {
+            continue;
+        }
+        for version in hal.versions {
+            let version = version
+                .trim()
+                .parse::<i32>()
+                .map_err(|error| anyhow::anyhow!("invalid keystore2 VINTF version: {error}"))?;
+            if let Some(version) = normalize_keystore2_aidl_version(version) {
+                return Ok(Some(version));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn normalize_keystore2_aidl_version(version: i32) -> Option<i32> {
+    if (1..=kmr_common::consts::ANDROID_SYSTEM_KEYSTORE2_LATEST_AIDL_VERSION).contains(&version) {
+        Some(version)
+    } else {
+        None
+    }
+}
+
+impl VintfHalXml {
+    fn references_keystore2_service(&self) -> bool {
+        self.format
+            .as_deref()
+            .is_some_and(|format| format.trim() == "aidl")
+            && self.name.as_deref().map(str::trim) == Some(KEYSTORE2_HAL_NAME)
+            && self.references_instance(KEYSTORE2_SERVICE_INTERFACE, KEYSTORE2_SERVICE_INSTANCE)
+    }
+
+    fn references_instance(&self, interface: &str, instance: &str) -> bool {
+        let fqname = format!("{interface}/{instance}");
+        self.fqnames
+            .iter()
+            .any(|candidate| candidate.trim() == fqname)
+            || self.interfaces.iter().any(|candidate| {
+                candidate.name.as_deref().map(str::trim) == Some(interface)
+                    && candidate
+                        .instances
+                        .iter()
+                        .any(|candidate| candidate.trim() == instance)
+            })
+    }
+}
+
 fn synthetic_base_transaction_reply(
     kind: SyntheticTargetKind,
     code: u32,
@@ -1769,6 +1961,34 @@ unsafe fn build_synthetic_br_transaction_reply(
 
     if let Some(reply) = synthetic_base_transaction_reply(kind, tr.code)? {
         return Ok(reply);
+    }
+
+    if let Some(method) = identify::aidl_metadata_method_from_code(tr.code) {
+        let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
+        let request_interface = match parcel::peek_request_interface(
+            data,
+            data_size,
+            offsets,
+            offsets_size,
+        ) {
+            Ok(interface) => interface,
+            Err(error) => {
+                warn!(
+                        "[Injector][Synthetic] failed to read AIDL metadata interface token for target ptr=0x{:x} cookie=0x{:x} kind={:?} code=0x{:x}: {:#}; returning BAD_TYPE",
+                        target.ptr, target.cookie, kind, tr.code, error
+                    );
+                return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
+            }
+        };
+        let expected_interface = synthetic_descriptor(kind);
+        if request_interface != expected_interface {
+            warn!(
+                "[Injector][Synthetic] synthetic {:?} target ptr=0x{:x} cookie=0x{:x} received metadata request for unexpected interface {}; returning BAD_TYPE",
+                kind, target.ptr, target.cookie, request_interface
+            );
+            return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
+        }
+        return build_synthetic_aidl_metadata_reply(method);
     }
 
     let cfg = config::get();
@@ -3175,6 +3395,180 @@ mod tests {
                 .expect("unknown outside call range should not fail")
                 .expect("unknown outside call range should produce a reply");
         assert_unknown_transaction_reply(unknown);
+    }
+
+    #[test]
+    fn synthetic_security_level_aidl_metadata_returns_keystore2_version_and_hash() {
+        let target = LocalBinderTarget {
+            ptr: 0x5234,
+            cookie: 0x9678,
+        };
+        let info = SyntheticTargetInfo {
+            kind: SyntheticTargetKind::SecurityLevel,
+            caller: None,
+        };
+        let hash_request = request_parcel(identify::KEYSTORE_SECURITY_LEVEL_INTERFACE);
+        let hash_tr = transaction_for_parcel(
+            target,
+            identify::AIDL_GET_INTERFACE_HASH_TRANSACTION,
+            &hash_request,
+        );
+
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(
+                &hash_tr,
+                target,
+                info.clone(),
+                None,
+                "BR_TRANSACTION",
+            )
+        }
+        .expect("metadata hash should be handled");
+        let SyntheticReply::Parcel(mut reply) = reply else {
+            panic!("metadata hash should return a parcel reply");
+        };
+        let hash: String = parcel::parse_owned_success_reply(&mut reply)
+            .expect("metadata hash reply should parse");
+        let expected = keystore2_aidl_metadata().expect("keystore2 metadata should resolve");
+        assert_eq!(hash, expected.hash);
+
+        let version_request = request_parcel(identify::KEYSTORE_SECURITY_LEVEL_INTERFACE);
+        let version_tr = transaction_for_parcel(
+            target,
+            identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION,
+            &version_request,
+        );
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(&version_tr, target, info, None, "BR_TRANSACTION")
+        }
+        .expect("metadata version should be handled");
+        let SyntheticReply::Parcel(mut reply) = reply else {
+            panic!("metadata version should return a parcel reply");
+        };
+        let version: i32 = parcel::parse_owned_success_reply(&mut reply)
+            .expect("metadata version reply should parse");
+        assert_eq!(version, expected.version);
+    }
+
+    #[test]
+    fn synthetic_operation_aidl_metadata_returns_keystore2_version() {
+        let target = LocalBinderTarget {
+            ptr: 0x6234,
+            cookie: 0xa678,
+        };
+        let request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
+        let tr = transaction_for_parcel(
+            target,
+            identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION,
+            &request,
+        );
+        let info = SyntheticTargetInfo {
+            kind: SyntheticTargetKind::Operation,
+            caller: Some(CallerIdentity::new(10002, 2000)),
+        };
+
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+        }
+        .expect("operation metadata version should be handled");
+        let SyntheticReply::Parcel(mut reply) = reply else {
+            panic!("operation metadata version should return a parcel reply");
+        };
+        let version: i32 = parcel::parse_owned_success_reply(&mut reply)
+            .expect("metadata version reply should parse");
+        let expected = keystore2_aidl_metadata().expect("keystore2 metadata should resolve");
+        assert_eq!(version, expected.version);
+    }
+
+    #[test]
+    fn synthetic_aidl_metadata_rejects_wrong_interface_token() {
+        let target = LocalBinderTarget {
+            ptr: 0x7234,
+            cookie: 0xb678,
+        };
+        let request = request_parcel(identify::KEYSTORE_SERVICE_INTERFACE);
+        let tr = transaction_for_parcel(
+            target,
+            identify::AIDL_GET_INTERFACE_HASH_TRANSACTION,
+            &request,
+        );
+        let info = SyntheticTargetInfo {
+            kind: SyntheticTargetKind::Operation,
+            caller: Some(CallerIdentity::new(10002, 2000)),
+        };
+
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+        }
+        .expect("wrong metadata interface should be handled");
+        let SyntheticReply::Status(status) = reply else {
+            panic!("wrong metadata interface should return a binder status");
+        };
+        assert_eq!(status, i32::from(StatusCode::BadType));
+    }
+
+    #[test]
+    fn keystore2_vintf_parser_matches_fqname_and_interface_forms() {
+        let xml = r#"
+<manifest version="1.0" type="framework">
+    <hal format="aidl">
+        <name>android.system.keystore2</name>
+        <version>5</version>
+        <fqname>IKeystoreService/default</fqname>
+    </hal>
+    <hal format="aidl">
+        <name>android.system.keystore2</name>
+        <version>4</version>
+        <interface>
+            <name>IKeystoreService</name>
+            <instance>secondary</instance>
+        </interface>
+    </hal>
+</manifest>
+"#;
+
+        assert_eq!(parse_keystore2_aidl_version_xml(xml).unwrap(), Some(5));
+
+        let xml = r#"
+<manifest version="1.0" type="framework">
+    <hal format="aidl">
+        <name>android.system.keystore2</name>
+        <version>4</version>
+        <interface>
+            <name>IKeystoreService</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+</manifest>
+"#;
+
+        assert_eq!(parse_keystore2_aidl_version_xml(xml).unwrap(), Some(4));
+    }
+
+    #[test]
+    fn keystore2_vintf_parser_ignores_unrelated_and_invalid_versions() {
+        let unrelated = r#"
+<manifest version="1.0" type="framework">
+    <hal format="aidl">
+        <name>android.hardware.security.keymint</name>
+        <version>5</version>
+        <fqname>IKeystoreService/default</fqname>
+    </hal>
+</manifest>
+"#;
+        assert_eq!(parse_keystore2_aidl_version_xml(unrelated).unwrap(), None);
+
+        let future = r#"
+<manifest version="1.0" type="framework">
+    <hal format="aidl">
+        <name>android.system.keystore2</name>
+        <version>99</version>
+        <fqname>IKeystoreService/default</fqname>
+    </hal>
+</manifest>
+"#;
+        assert_eq!(parse_keystore2_aidl_version_xml(future).unwrap(), None);
+        assert!(parse_keystore2_aidl_version_xml("<manifest>").is_err());
     }
 
     #[test]

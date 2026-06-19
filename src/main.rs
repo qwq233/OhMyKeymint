@@ -139,7 +139,7 @@ fn create_rpc_server() -> Result<Arc<RpcServer>> {
     server.set_authorizer(|peer| {
         let allowed = matches!(
             peer,
-            PeerIdentity::Local { uid, .. } if *uid == 0 || *uid == KEYSTORE_UID as u32
+            PeerIdentity::Local { uid, .. } if *uid == 0 || *uid == KEYSTORE_UID
         );
         if !allowed {
             warn!("Rejected OMK RPC peer {peer}");

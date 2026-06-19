@@ -23,6 +23,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.11.0"
 toml = "1.1.0"
 rand = "0.10.1"
+quick-xml = { version = "0.40.1", features = ["serialize"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15.1"

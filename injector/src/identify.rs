@@ -14,6 +14,17 @@ pub const KEYSTORE_SECURITY_LEVEL_INTERFACE: &str =
     "android.system.keystore2.IKeystoreSecurityLevel";
 pub const KEYSTORE_OPERATION_INTERFACE: &str = "android.system.keystore2.IKeystoreOperation";
 
+pub const AIDL_GET_INTERFACE_HASH_TRANSACTION: u32 =
+    kmr_common::consts::AIDL_GET_INTERFACE_HASH_TRANSACTION;
+pub const AIDL_GET_INTERFACE_VERSION_TRANSACTION: u32 =
+    kmr_common::consts::AIDL_GET_INTERFACE_VERSION_TRANSACTION;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AidlMetadataMethod {
+    GetInterfaceHash,
+    GetInterfaceVersion,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorizationMethod {
     AddAuthToken,
@@ -69,6 +80,14 @@ pub enum OperationMethod {
     Update,
     Finish,
     Abort,
+}
+
+pub fn aidl_metadata_method_from_code(code: u32) -> Option<AidlMetadataMethod> {
+    match code {
+        AIDL_GET_INTERFACE_HASH_TRANSACTION => Some(AidlMetadataMethod::GetInterfaceHash),
+        AIDL_GET_INTERFACE_VERSION_TRANSACTION => Some(AidlMetadataMethod::GetInterfaceVersion),
+        _ => None,
+    }
 }
 
 pub fn authorization_method_from_code(code: u32) -> Option<AuthorizationMethod> {
@@ -286,6 +305,14 @@ mod tests {
         }
 
         assert_eq!(security_level_method_from_code(u32::MAX), None);
+        assert_eq!(
+            security_level_method_from_code(AIDL_GET_INTERFACE_HASH_TRANSACTION),
+            None
+        );
+        assert_eq!(
+            security_level_method_from_code(AIDL_GET_INTERFACE_VERSION_TRANSACTION),
+            None
+        );
     }
 
     #[test]
@@ -302,5 +329,26 @@ mod tests {
         }
 
         assert_eq!(operation_method_from_code(u32::MAX), None);
+        assert_eq!(
+            operation_method_from_code(AIDL_GET_INTERFACE_HASH_TRANSACTION),
+            None
+        );
+        assert_eq!(
+            operation_method_from_code(AIDL_GET_INTERFACE_VERSION_TRANSACTION),
+            None
+        );
+    }
+
+    #[test]
+    fn aidl_metadata_codes_are_not_business_methods() {
+        assert_eq!(
+            aidl_metadata_method_from_code(AIDL_GET_INTERFACE_HASH_TRANSACTION),
+            Some(AidlMetadataMethod::GetInterfaceHash)
+        );
+        assert_eq!(
+            aidl_metadata_method_from_code(AIDL_GET_INTERFACE_VERSION_TRANSACTION),
+            Some(AidlMetadataMethod::GetInterfaceVersion)
+        );
+        assert_eq!(aidl_metadata_method_from_code(u32::MAX), None);
     }
 }
