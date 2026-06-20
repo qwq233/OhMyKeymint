@@ -3,7 +3,7 @@ use std::mem::size_of;
 use anyhow::{anyhow, bail, Context, Result};
 use rsbinder::{
     Deserialize, FromIBinder, Parcel, Proxy, Serialize, SerializeOption, Status, StatusCode,
-    Strong, NON_NULL_PARCELABLE_FLAG,
+    Strong, NON_NULL_PARCELABLE_FLAG, NULL_PARCELABLE_FLAG,
 };
 
 use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
@@ -265,6 +265,81 @@ pub enum ParsedSecurityLevelRequest {
     },
 }
 
+fn read_key_descriptor_preserving_empty_blob(
+    parcel: &mut Parcel,
+) -> rsbinder::Result<KeyDescriptor> {
+    let status: i32 = parcel.read()?;
+    if status == NULL_PARCELABLE_FLAG {
+        return Err(StatusCode::UnexpectedNull);
+    }
+    read_key_descriptor_body_preserving_empty_blob(parcel)
+}
+
+fn read_key_descriptor_body_preserving_empty_blob(
+    parcel: &mut Parcel,
+) -> rsbinder::Result<KeyDescriptor> {
+    let mut key = KeyDescriptor::default();
+    parcel.sized_read(|sub_parcel| {
+        if !sub_parcel.has_more_data() {
+            return Ok(());
+        }
+        key.domain = sub_parcel.read()?;
+        if !sub_parcel.has_more_data() {
+            return Ok(());
+        }
+        key.nspace = sub_parcel.read()?;
+        if !sub_parcel.has_more_data() {
+            return Ok(());
+        }
+        key.alias = sub_parcel.read()?;
+        if !sub_parcel.has_more_data() {
+            return Ok(());
+        }
+        key.blob = read_nullable_byte_array_preserving_empty(sub_parcel)?;
+        Ok(())
+    })?;
+    Ok(key)
+}
+
+fn read_optional_key_descriptor_preserving_empty_blob(
+    parcel: &mut Parcel,
+) -> rsbinder::Result<Option<KeyDescriptor>> {
+    let null: i32 = parcel.read()?;
+    if null == NULL_PARCELABLE_FLAG {
+        Ok(None)
+    } else {
+        read_key_descriptor_body_preserving_empty_blob(parcel).map(Some)
+    }
+}
+
+fn read_nullable_byte_array_preserving_empty(
+    parcel: &mut Parcel,
+) -> rsbinder::Result<Option<Vec<u8>>> {
+    let len: i32 = parcel.read()?;
+    if len < -1 {
+        return Err(StatusCode::BadValue);
+    }
+    if len == -1 {
+        return Ok(None);
+    }
+
+    let len = usize::try_from(len).map_err(|_| StatusCode::BadValue)?;
+    let padded = len.checked_add(3).ok_or(StatusCode::BadValue)? & !3;
+    if padded > parcel.data_avail() {
+        return Err(StatusCode::NotEnoughData);
+    }
+
+    let pos = parcel.data_position();
+    let bytes = if len == 0 {
+        Vec::new()
+    } else {
+        // Parcel byte arrays are packed bytes followed by 4-byte padding.
+        unsafe { std::slice::from_raw_parts(parcel.as_ptr().add(pos), len) }.to_vec()
+    };
+    parcel.set_data_position(pos + padded);
+    Ok(Some(bytes))
+}
+
 impl ParsedSecurityLevelRequest {
     pub fn method(&self) -> SecurityLevelMethod {
         match self {
@@ -500,8 +575,8 @@ pub unsafe fn parse_maintenance_request(
         },
         MaintenanceMethod::EarlyBootEnded => ParsedMaintenanceRequest::EarlyBootEnded,
         MaintenanceMethod::MigrateKeyNamespace => ParsedMaintenanceRequest::MigrateKeyNamespace {
-            source: parcel.read()?,
-            destination: parcel.read()?,
+            source: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+            destination: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
         },
         MaintenanceMethod::DeleteAllKeys => ParsedMaintenanceRequest::DeleteAllKeys,
         MaintenanceMethod::GetAppUidsAffectedBySid => {
@@ -545,10 +620,10 @@ pub unsafe fn parse_service_request(
             security_level: parcel.read()?,
         },
         ServiceMethod::GetKeyEntry => ParsedServiceRequest::GetKeyEntry {
-            key: parcel.read()?,
+            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
         },
         ServiceMethod::UpdateSubcomponent => ParsedServiceRequest::UpdateSubcomponent {
-            key: parcel.read()?,
+            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             public_cert: parcel.read()?,
             certificate_chain: parcel.read()?,
         },
@@ -557,15 +632,15 @@ pub unsafe fn parse_service_request(
             nspace: parcel.read()?,
         },
         ServiceMethod::DeleteKey => ParsedServiceRequest::DeleteKey {
-            key: parcel.read()?,
+            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
         },
         ServiceMethod::Grant => ParsedServiceRequest::Grant {
-            key: parcel.read()?,
+            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             grantee_uid: parcel.read()?,
             access_vector: parcel.read()?,
         },
         ServiceMethod::Ungrant => ParsedServiceRequest::Ungrant {
-            key: parcel.read()?,
+            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             grantee_uid: parcel.read()?,
         },
         ServiceMethod::GetNumberOfEntries => ParsedServiceRequest::GetNumberOfEntries {
@@ -614,38 +689,38 @@ pub unsafe fn parse_security_level_request(
 
     let parsed = match method {
         SecurityLevelMethod::CreateOperation => ParsedSecurityLevelRequest::CreateOperation {
-            key: parcel.read()?,
+            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             operation_parameters: parcel.read()?,
             forced: parcel.read()?,
         },
         SecurityLevelMethod::GenerateKey => ParsedSecurityLevelRequest::GenerateKey {
-            key: parcel.read()?,
-            attestation_key: parcel.read()?,
+            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+            attestation_key: read_optional_key_descriptor_preserving_empty_blob(&mut parcel)?,
             params: parcel.read()?,
             flags: parcel.read()?,
             entropy: parcel.read()?,
         },
         SecurityLevelMethod::ImportKey => ParsedSecurityLevelRequest::ImportKey {
-            key: parcel.read()?,
-            attestation_key: parcel.read()?,
+            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+            attestation_key: read_optional_key_descriptor_preserving_empty_blob(&mut parcel)?,
             params: parcel.read()?,
             flags: parcel.read()?,
             key_data: parcel.read()?,
         },
         SecurityLevelMethod::ImportWrappedKey => ParsedSecurityLevelRequest::ImportWrappedKey {
-            key: parcel.read()?,
-            wrapping_key: parcel.read()?,
+            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+            wrapping_key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             masking_key: parcel.read()?,
             params: parcel.read()?,
             authenticators: parcel.read()?,
         },
         SecurityLevelMethod::ConvertStorageKeyToEphemeral => {
             ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral {
-                storage_key: parcel.read()?,
+                storage_key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             }
         }
         SecurityLevelMethod::DeleteKey => ParsedSecurityLevelRequest::DeleteKey {
-            key: parcel.read()?,
+            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
         },
     };
 
@@ -1316,16 +1391,46 @@ mod tests {
         unsafe { std::slice::from_raw_parts(parcel.as_ptr().add(start), end - start).to_vec() }
     }
 
-    fn build_request(interface: &str, payload_token: Option<&str>) -> OwnedReply {
+    fn build_request_with_payload(
+        interface: &str,
+        write_payload: impl FnOnce(&mut Parcel),
+    ) -> OwnedReply {
         let mut parcel = Parcel::new();
         parcel.write(&0i32).unwrap();
         parcel.write(&0i32).unwrap();
         parcel.write(&0u32).unwrap();
         parcel.write(&interface.to_string()).unwrap();
-        if let Some(payload_token) = payload_token {
-            parcel.write(&payload_token.to_string()).unwrap();
-        }
+        write_payload(&mut parcel);
         owned_reply_from_parcel(parcel, std::iter::empty::<usize>())
+    }
+
+    fn build_request(interface: &str, payload_token: Option<&str>) -> OwnedReply {
+        build_request_with_payload(interface, |parcel| {
+            if let Some(payload_token) = payload_token {
+                parcel.write(&payload_token.to_string()).unwrap();
+            }
+        })
+    }
+
+    fn blob_key_descriptor(blob: Option<Vec<u8>>) -> KeyDescriptor {
+        KeyDescriptor {
+            domain: crate::android::system::keystore2::Domain::Domain::BLOB,
+            nspace: 0,
+            alias: None,
+            blob,
+        }
+    }
+
+    fn parse_security_level_key_request(
+        code: rsbinder::TransactionCode,
+        key: &KeyDescriptor,
+    ) -> ParsedSecurityLevelRequest {
+        let mut request = build_request_with_payload(KEYSTORE_SECURITY_LEVEL_INTERFACE, |parcel| {
+            parcel.write(key).unwrap();
+        });
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        unsafe { parse_security_level_request(data, data_size, offsets, offsets_size, code) }
+            .expect("security-level key request should parse")
     }
 
     #[test]
@@ -1341,6 +1446,56 @@ mod tests {
         let interface = unsafe { peek_request_interface(data, data_size, offsets, offsets_size) }
             .expect("request interface should parse");
         assert_eq!(interface, KEYSTORE_SERVICE_INTERFACE);
+    }
+
+    #[test]
+    fn security_level_delete_key_preserves_non_null_empty_blob_descriptor() {
+        let parsed = parse_security_level_key_request(
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
+            &blob_key_descriptor(Some(Vec::new())),
+        );
+
+        let ParsedSecurityLevelRequest::DeleteKey { key } = parsed else {
+            panic!("deleteKey request should parse as DeleteKey");
+        };
+        assert_eq!(
+            key.domain,
+            crate::android::system::keystore2::Domain::Domain::BLOB
+        );
+        assert_eq!(key.blob, Some(Vec::new()));
+    }
+
+    #[test]
+    fn security_level_convert_storage_key_preserves_non_null_empty_blob_descriptor() {
+        let parsed = parse_security_level_key_request(
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#convertStorageKeyToEphemeral,
+            &blob_key_descriptor(Some(Vec::new())),
+        );
+
+        let ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral { storage_key } = parsed
+        else {
+            panic!(
+                "convertStorageKeyToEphemeral request should parse as ConvertStorageKeyToEphemeral"
+            );
+        };
+        assert_eq!(
+            storage_key.domain,
+            crate::android::system::keystore2::Domain::Domain::BLOB
+        );
+        assert_eq!(storage_key.blob, Some(Vec::new()));
+    }
+
+    #[test]
+    fn security_level_blob_descriptor_keeps_null_blob_distinct_from_empty() {
+        let parsed = parse_security_level_key_request(
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
+            &blob_key_descriptor(None),
+        );
+
+        let ParsedSecurityLevelRequest::DeleteKey { key } = parsed else {
+            panic!("deleteKey request should parse as DeleteKey");
+        };
+        assert_eq!(key.blob, None);
     }
 
     #[test]
