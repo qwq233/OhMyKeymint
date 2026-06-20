@@ -609,15 +609,16 @@ fn keystore2_key_contexts() -> Result<&'static Vec<(i64, CString)>> {
         .map_err(|error| anyhow!(error.clone()))
 }
 
-fn lookup_keystore2_key_context(namespace: i64) -> Result<CString> {
-    keystore2_key_contexts()?
+fn lookup_keystore2_key_context_in(contexts: &[(i64, CString)], namespace: i64) -> Result<CString> {
+    contexts
         .iter()
         .find(|(candidate, _)| *candidate == namespace)
         .map(|(_, context)| context.clone())
-        .ok_or_else(|| anyhow!(KsError::perm()))
-        .context(format!(
-            "no keystore2 key context for namespace {namespace}"
-        ))
+        .ok_or_else(|| anyhow!("no keystore2 key context for namespace {namespace}"))
+}
+
+fn lookup_keystore2_key_context(namespace: i64) -> Result<CString> {
+    lookup_keystore2_key_context_in(keystore2_key_contexts()?.as_slice(), namespace)
 }
 
 #[cfg(target_os = "android")]
@@ -1115,6 +1116,33 @@ mod tests {
         assert_eq!(parsed[0].0, 100);
         assert_eq!(parsed[0].1.to_string_lossy(), "u:object_r:vold_key:s0");
         assert_eq!(parsed[1].0, 120);
+    }
+
+    #[test]
+    fn lookup_keystore2_key_context_finds_known_namespace() {
+        let contexts = vec![(100, CString::new("u:object_r:vold_key:s0").unwrap())];
+
+        let context = lookup_keystore2_key_context_in(&contexts, 100)
+            .expect("known namespace should resolve");
+
+        assert_eq!(context.to_string_lossy(), "u:object_r:vold_key:s0");
+    }
+
+    #[test]
+    fn missing_keystore2_key_context_is_system_error() {
+        let contexts = vec![(100, CString::new("u:object_r:vold_key:s0").unwrap())];
+
+        let error = lookup_keystore2_key_context_in(&contexts, -1)
+            .expect_err("unknown namespace should not resolve");
+
+        assert!(!matches!(
+            error.root_cause().downcast_ref::<KsError>(),
+            Some(KsError::Rc(ResponseCode::PERMISSION_DENIED))
+        ));
+        assert_eq!(
+            crate::keymaster::error::anyhow_error_to_serialized_error(&error).0,
+            ResponseCode::SYSTEM_ERROR.0
+        );
     }
 
     #[test]

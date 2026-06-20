@@ -1926,6 +1926,10 @@ impl VintfHalXml {
     }
 }
 
+fn synthetic_debug_pid() -> i32 {
+    unsafe { libc::getpid() }
+}
+
 unsafe fn synthetic_base_transaction_reply(
     kind: Option<SyntheticTargetKind>,
     target: LocalBinderTarget,
@@ -1944,10 +1948,10 @@ unsafe fn synthetic_base_transaction_reply(
             synthetic_parcel_reply(parcel::build_null_binder_reply()?)
         }
         rsbinder::DEBUG_PID_TRANSACTION => {
-            synthetic_parcel_reply(parcel::build_raw_i32_reply(std::process::id() as i32)?)
+            synthetic_parcel_reply(parcel::build_raw_i32_reply(synthetic_debug_pid())?)
         }
         rsbinder::SHELL_COMMAND_TRANSACTION | rsbinder::SYSPROPS_TRANSACTION => {
-            synthetic_parcel_reply(parcel::build_empty_reply())
+            synthetic_parcel_reply(parcel::build_void_reply()?)
         }
         rsbinder::DUMP_TRANSACTION => {
             let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
@@ -1960,7 +1964,7 @@ unsafe fn synthetic_base_transaction_reply(
                 );
                 SyntheticReply::Status(StatusCode::BadType.into())
             } else {
-                synthetic_parcel_reply(parcel::build_empty_reply())
+                synthetic_parcel_reply(parcel::build_void_reply()?)
             }
         }
         rsbinder::SET_RPC_CLIENT_TRANSACTION => {
@@ -3339,6 +3343,28 @@ mod tests {
         assert_eq!(status, i32::from(StatusCode::UnknownTransaction));
     }
 
+    fn assert_synthetic_ok_reply(reply: SyntheticReply, label: &str) {
+        let SyntheticReply::Parcel(mut reply) = reply else {
+            panic!("{label} should be a status-bearing parcel reply");
+        };
+        assert_eq!(reply.offsets_size(), 0);
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let status = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("status reply should parse");
+        assert!(status.is_ok(), "{label} should be OK");
+    }
+
+    fn assert_synthetic_raw_i32_reply(reply: SyntheticReply, expected: i32) {
+        let SyntheticReply::Parcel(mut reply) = reply else {
+            panic!("raw i32 reply should be a parcel");
+        };
+        assert_eq!(reply.data_size(), size_of::<i32>());
+        assert_eq!(reply.offsets_size(), 0);
+        let (data, _, _, _) = raw_parts(&mut reply);
+        let value = unsafe { std::ptr::read_unaligned(data as *const i32) };
+        assert_eq!(value, expected);
+    }
+
     fn carrier_target(carrier: &parcel::ReplyBinderCarrier) -> LocalBinderTarget {
         unsafe { parse_local_binder_target_from_parcel_bytes(&carrier.bytes) }
             .expect("synthetic carrier should expose a native target")
@@ -3537,11 +3563,25 @@ mod tests {
         let shell_tr = transaction_for_parcel(target, rsbinder::SHELL_COMMAND_TRANSACTION, &empty);
         let shell = unsafe { handle_synthetic_br_transaction(&shell_tr, None, "BR_TRANSACTION") }
             .expect("stale synthetic shell should be consumed");
-        let SyntheticReply::Parcel(shell) = shell else {
-            panic!("stale synthetic shell should be an empty parcel reply");
-        };
-        assert_eq!(shell.data_size(), 0);
-        assert_eq!(shell.offsets_size(), 0);
+        assert_synthetic_ok_reply(shell, "stale synthetic shell");
+
+        let sysprops_tr = transaction_for_parcel(target, rsbinder::SYSPROPS_TRANSACTION, &empty);
+        let sysprops =
+            unsafe { handle_synthetic_br_transaction(&sysprops_tr, None, "BR_TRANSACTION") }
+                .expect("stale synthetic sysprops should be consumed");
+        assert_synthetic_ok_reply(sysprops, "stale synthetic sysprops");
+
+        let mut dump_data = dump_transaction_data(0, &[]);
+        let mut offsets = [0usize];
+        let dump_tr = transaction_for_raw_parts(
+            target,
+            rsbinder::DUMP_TRANSACTION,
+            &mut dump_data,
+            &mut offsets,
+        );
+        let dump = unsafe { handle_synthetic_br_transaction(&dump_tr, None, "BR_TRANSACTION") }
+            .expect("stale synthetic dump should be consumed");
+        assert_synthetic_ok_reply(dump, "stale synthetic dump");
 
         let business_tr = transaction_for_parcel(target, rsbinder::FIRST_CALL_TRANSACTION, &empty);
         let business =
@@ -3592,6 +3632,25 @@ mod tests {
         assert_eq!(ping.data_size(), 0);
         assert_eq!(ping.offsets_size(), 0);
 
+        let mut debug_pid_tr =
+            transaction_for_parcel(target, rsbinder::DEBUG_PID_TRANSACTION, &empty);
+        debug_pid_tr.sender_pid = if synthetic_debug_pid() == 2000 {
+            2001
+        } else {
+            2000
+        };
+        let debug_pid = unsafe {
+            synthetic_base_transaction_reply(
+                Some(SyntheticTargetKind::SecurityLevel),
+                target,
+                &debug_pid_tr,
+            )
+        }
+        .expect("debug pid handling should not fail")
+        .expect("debug pid should produce a reply");
+        assert_synthetic_raw_i32_reply(debug_pid, synthetic_debug_pid());
+        assert_ne!(synthetic_debug_pid(), debug_pid_tr.sender_pid);
+
         let shell_tr = transaction_for_parcel(target, rsbinder::SHELL_COMMAND_TRANSACTION, &empty);
         let shell = unsafe {
             synthetic_base_transaction_reply(
@@ -3602,11 +3661,7 @@ mod tests {
         }
         .expect("shell handling should not fail")
         .expect("shell should produce a reply");
-        let SyntheticReply::Parcel(shell) = shell else {
-            panic!("shell should be an empty parcel reply");
-        };
-        assert_eq!(shell.data_size(), 0);
-        assert_eq!(shell.offsets_size(), 0);
+        assert_synthetic_ok_reply(shell, "shell");
 
         let sysprops_tr = transaction_for_parcel(target, rsbinder::SYSPROPS_TRANSACTION, &empty);
         let sysprops = unsafe {
@@ -3618,11 +3673,7 @@ mod tests {
         }
         .expect("sysprops handling should not fail")
         .expect("sysprops should produce a reply");
-        let SyntheticReply::Parcel(sysprops) = sysprops else {
-            panic!("sysprops should be an empty parcel reply");
-        };
-        assert_eq!(sysprops.data_size(), 0);
-        assert_eq!(sysprops.offsets_size(), 0);
+        assert_synthetic_ok_reply(sysprops, "sysprops");
 
         let start_recording_tr =
             transaction_for_parcel(target, rsbinder::START_RECORDING_TRANSACTION, &empty);
@@ -3672,11 +3723,7 @@ mod tests {
         }
         .expect("dump handling should not fail")
         .expect("dump should produce a reply");
-        let SyntheticReply::Parcel(dump) = dump else {
-            panic!("valid dump should be an empty parcel reply");
-        };
-        assert_eq!(dump.data_size(), 0);
-        assert_eq!(dump.offsets_size(), 0);
+        assert_synthetic_ok_reply(dump, "valid dump");
 
         let mut dump_with_args_data = dump_transaction_data(1, &[String::from("--proto")]);
         let dump_with_args_tr = transaction_for_raw_parts(
@@ -3694,11 +3741,7 @@ mod tests {
         }
         .expect("dump with args handling should not fail")
         .expect("dump with args should produce a reply");
-        let SyntheticReply::Parcel(dump_with_args) = dump_with_args else {
-            panic!("valid dump with args should be an empty parcel reply");
-        };
-        assert_eq!(dump_with_args.data_size(), 0);
-        assert_eq!(dump_with_args.offsets_size(), 0);
+        assert_synthetic_ok_reply(dump_with_args, "valid dump with args");
 
         let mut negative_argc_data = dump_transaction_data(-1, &[]);
         let negative_argc_tr = transaction_for_raw_parts(
