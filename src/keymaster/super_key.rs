@@ -1136,6 +1136,19 @@ impl SuperKeyManager {
         Ok(())
     }
 
+    /// Resets the user's legacy LSKF-bound state without deleting unrelated APP keys.
+    pub fn reset_lskf_bound_state(
+        &mut self,
+        db: &mut KeystoreDB,
+        user: AndroidUserId,
+    ) -> Result<()> {
+        info!("reset_lskf_bound_state({user:?})");
+        db.unbind_lskf_bound_keys_for_user(user)
+            .context(ks_err!("Error in unbinding LSKF-bound keys for {user:?}"))?;
+        self.forget_all_keys_for_user(user);
+        Ok(())
+    }
+
     /// Initializes the given user by creating their super keys, both CredentialEncrypted and
     /// UnlockedDeviceRequired. If allow_existing is true, then the user already being initialized
     /// is not considered an error.

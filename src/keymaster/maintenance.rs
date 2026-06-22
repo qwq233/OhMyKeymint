@@ -72,6 +72,29 @@ impl MaintenanceManager {
         .context(err!("initializing user {user_id:?} super keys"))
     }
 
+    fn on_user_password_changed(
+        &self,
+        ctx: Option<&CallerInfo>,
+        user_id: i32,
+        password: Option<&[u8]>,
+    ) -> Result<()> {
+        check_maintenance_permission(KeystorePerm::ChangePassword, ctx, "onUserPasswordChanged")
+            .context(err!("caller missing change_password permission"))?;
+        let user_id = checked_user_id(user_id)?;
+        DB.with(|db| {
+            let mut db = db.borrow_mut();
+            let mut super_key = SUPER_KEY.write().unwrap();
+            match password {
+                Some(password) => {
+                    let password = password.into();
+                    super_key.unlock_or_initialize_user(&mut db, user_id, &password)
+                }
+                None => super_key.reset_lskf_bound_state(&mut db, user_id),
+            }
+        })
+        .context(err!("handling legacy password change for user {user_id:?}"))
+    }
+
     fn on_user_removed(&self, ctx: Option<&CallerInfo>, user_id: i32) -> Result<()> {
         check_maintenance_permission(KeystorePerm::ChangeUser, ctx, "onUserRemoved")
             .context(err!("caller missing change_user permission"))?;
@@ -489,6 +512,21 @@ impl IOhMyMaintenanceService for MaintenanceManager {
             "IOhMyMaintenanceService::getAppUidsAffectedBySid",
         )?);
         self.get_app_uids_affected_by_sid(ctx, user_id, sid)
+            .map_err(into_logged_binder)
+    }
+
+    fn onUserPasswordChanged(
+        &self,
+        ctx: Option<&CallerInfo>,
+        user_id: i32,
+        password: Option<&[u8]>,
+    ) -> rsbinder::status::Result<()> {
+        let _wp = wd::watch("IOhMyMaintenanceService::onUserPasswordChanged");
+        let ctx = Some(require_omk_ctx(
+            ctx,
+            "IOhMyMaintenanceService::onUserPasswordChanged",
+        )?);
+        self.on_user_password_changed(ctx, user_id, password)
             .map_err(into_logged_binder)
     }
 }

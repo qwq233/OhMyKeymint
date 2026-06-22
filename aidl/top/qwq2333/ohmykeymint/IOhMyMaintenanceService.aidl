@@ -16,4 +16,6 @@ interface IOhMyMaintenanceService {
             in KeyDescriptor destination);
     void deleteAllKeys(in @nullable CallerInfo ctx);
     long[] getAppUidsAffectedBySid(in @nullable CallerInfo ctx, in int userId, in long sid);
+    void onUserPasswordChanged(in @nullable CallerInfo ctx, in int userId,
+            in @nullable byte[] password);
 }

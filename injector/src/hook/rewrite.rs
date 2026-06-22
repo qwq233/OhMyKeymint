@@ -617,8 +617,7 @@ fn authorization_mirror_mutates(method: AuthorizationMethod) -> bool {
 fn maintenance_mirror_mutates(method: MaintenanceMethod) -> bool {
     !matches!(
         method,
-        MaintenanceMethod::OnUserPasswordChanged
-            | MaintenanceMethod::GetState
+        MaintenanceMethod::GetState
             | MaintenanceMethod::OnDeviceOffBody
             | MaintenanceMethod::GetAppUidsAffectedBySid
     )
@@ -2658,9 +2657,16 @@ unsafe fn build_maintenance_reply_mirror(
         ParsedMaintenanceRequest::DeleteAllKeys => ipc::with_omk_maintenance_retry(|maintenance| {
             Ok(maintenance.r#deleteAllKeys(Some(&caller))?)
         }),
-        ParsedMaintenanceRequest::OnUserPasswordChanged { .. }
-        | ParsedMaintenanceRequest::GetState { .. }
-        | ParsedMaintenanceRequest::OnDeviceOffBody => {
+        ParsedMaintenanceRequest::OnUserPasswordChanged { user_id, password } => {
+            ipc::with_omk_maintenance_retry(|maintenance| {
+                Ok(maintenance.r#onUserPasswordChanged(
+                    Some(&caller),
+                    *user_id,
+                    password.as_deref(),
+                )?)
+            })
+        }
+        ParsedMaintenanceRequest::GetState { .. } | ParsedMaintenanceRequest::OnDeviceOffBody => {
             debug!(
                 "[Injector][Maintenance] {:?} has no OMK mirror endpoint; preserving system reply",
                 call.method
@@ -4776,7 +4782,7 @@ mod tests {
         assert!(!maintenance_mirror_mutates(
             MaintenanceMethod::GetAppUidsAffectedBySid
         ));
-        assert!(!maintenance_mirror_mutates(
+        assert!(maintenance_mirror_mutates(
             MaintenanceMethod::OnUserPasswordChanged
         ));
         assert!(!maintenance_mirror_mutates(MaintenanceMethod::GetState));

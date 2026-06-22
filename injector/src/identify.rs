@@ -202,7 +202,42 @@ fn current_maintenance_method_from_code(code: u32) -> Option<MaintenanceMethod> 
     }
 }
 
+pub fn service_method_from_code_for(
+    android_major_version: Option<i32>,
+    code: u32,
+) -> Option<ServiceMethod> {
+    match android_major_version {
+        Some(12 | 13) => match transaction_offset(code)? {
+            0 => Some(ServiceMethod::GetSecurityLevel),
+            1 => Some(ServiceMethod::GetKeyEntry),
+            2 => Some(ServiceMethod::UpdateSubcomponent),
+            3 => Some(ServiceMethod::ListEntries),
+            4 => Some(ServiceMethod::DeleteKey),
+            5 => Some(ServiceMethod::Grant),
+            6 => Some(ServiceMethod::Ungrant),
+            _ => None,
+        },
+        Some(14 | 15) => match transaction_offset(code)? {
+            0 => Some(ServiceMethod::GetSecurityLevel),
+            1 => Some(ServiceMethod::GetKeyEntry),
+            2 => Some(ServiceMethod::UpdateSubcomponent),
+            3 => Some(ServiceMethod::ListEntries),
+            4 => Some(ServiceMethod::DeleteKey),
+            5 => Some(ServiceMethod::Grant),
+            6 => Some(ServiceMethod::Ungrant),
+            7 => Some(ServiceMethod::GetNumberOfEntries),
+            8 => Some(ServiceMethod::ListEntriesBatched),
+            _ => None,
+        },
+        _ => current_service_method_from_code(code),
+    }
+}
+
 pub fn service_method_from_code(code: u32) -> Option<ServiceMethod> {
+    service_method_from_code_for(kmr_common::android_version::android_major_version(), code)
+}
+
+fn current_service_method_from_code(code: u32) -> Option<ServiceMethod> {
     match code {
         service_tx::r#getSecurityLevel => Some(ServiceMethod::GetSecurityLevel),
         service_tx::r#getKeyEntry => Some(ServiceMethod::GetKeyEntry),
@@ -464,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn service_method_codes_follow_generated_aidl_constants() {
+    fn service_method_codes_follow_current_generated_aidl_constants() {
         let cases = [
             (
                 service_tx::r#getSecurityLevel,
@@ -494,10 +529,59 @@ mod tests {
         ];
 
         for (code, expected) in cases {
-            assert_eq!(service_method_from_code(code), Some(expected));
+            assert_eq!(service_method_from_code_for(Some(17), code), Some(expected));
+            assert_eq!(service_method_from_code_for(None, code), Some(expected));
         }
 
-        assert_eq!(service_method_from_code(u32::MAX), None);
+        assert_eq!(service_method_from_code_for(Some(17), u32::MAX), None);
+    }
+
+    #[test]
+    fn service_method_codes_follow_android_12_to_13_layout() {
+        let cases = [
+            (0, ServiceMethod::GetSecurityLevel),
+            (1, ServiceMethod::GetKeyEntry),
+            (2, ServiceMethod::UpdateSubcomponent),
+            (3, ServiceMethod::ListEntries),
+            (4, ServiceMethod::DeleteKey),
+            (5, ServiceMethod::Grant),
+            (6, ServiceMethod::Ungrant),
+        ];
+
+        for version in [Some(12), Some(13)] {
+            for (offset, expected) in cases {
+                assert_eq!(
+                    service_method_from_code_for(version, tx(offset)),
+                    Some(expected)
+                );
+            }
+            assert_eq!(service_method_from_code_for(version, tx(7)), None);
+        }
+    }
+
+    #[test]
+    fn service_method_codes_follow_android_14_to_15_layout() {
+        let cases = [
+            (0, ServiceMethod::GetSecurityLevel),
+            (1, ServiceMethod::GetKeyEntry),
+            (2, ServiceMethod::UpdateSubcomponent),
+            (3, ServiceMethod::ListEntries),
+            (4, ServiceMethod::DeleteKey),
+            (5, ServiceMethod::Grant),
+            (6, ServiceMethod::Ungrant),
+            (7, ServiceMethod::GetNumberOfEntries),
+            (8, ServiceMethod::ListEntriesBatched),
+        ];
+
+        for version in [Some(14), Some(15)] {
+            for (offset, expected) in cases {
+                assert_eq!(
+                    service_method_from_code_for(version, tx(offset)),
+                    Some(expected)
+                );
+            }
+            assert_eq!(service_method_from_code_for(version, tx(9)), None);
+        }
     }
 
     #[test]

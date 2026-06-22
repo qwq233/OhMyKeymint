@@ -1478,28 +1478,6 @@ mod tests {
         owned_reply_from_parcel(parcel, std::iter::empty::<usize>())
     }
 
-    fn parse_authorization_request_for_android(
-        android_major_version: Option<i32>,
-        code: rsbinder::TransactionCode,
-        write_payload: impl FnOnce(&mut Parcel),
-    ) -> Result<ParsedAuthorizationRequest> {
-        let mut request =
-            build_request_with_payload(KEYSTORE_AUTHORIZATION_INTERFACE, write_payload);
-        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
-        unsafe {
-            parse_authorization_request_with_resolver(
-                data,
-                data_size,
-                offsets,
-                offsets_size,
-                code,
-                |code| {
-                    crate::identify::authorization_method_from_code_for(android_major_version, code)
-                },
-            )
-        }
-    }
-
     fn parse_maintenance_request_for_android(
         android_major_version: Option<i32>,
         code: rsbinder::TransactionCode,
@@ -1625,6 +1603,33 @@ mod tests {
             panic!("deleteKey request should parse as DeleteKey");
         };
         assert_eq!(key.blob, None);
+    }
+
+    #[test]
+    fn android_12_maintenance_password_change_parses_optional_password() {
+        let parsed = parse_maintenance_request_for_android(Some(12), tx(2), |parcel| {
+            parcel.write(&10i32).unwrap();
+            parcel.write(&Some(vec![1u8, 2, 3])).unwrap();
+        })
+        .expect("legacy password change should parse");
+
+        let ParsedMaintenanceRequest::OnUserPasswordChanged { user_id, password } = parsed else {
+            panic!("legacy password change should stay OnUserPasswordChanged");
+        };
+        assert_eq!(user_id, 10);
+        assert_eq!(password.as_deref(), Some(&[1, 2, 3][..]));
+
+        let parsed = parse_maintenance_request_for_android(Some(12), tx(2), |parcel| {
+            parcel.write(&11i32).unwrap();
+            parcel.write(&None::<Vec<u8>>).unwrap();
+        })
+        .expect("legacy password removal should parse");
+
+        let ParsedMaintenanceRequest::OnUserPasswordChanged { user_id, password } = parsed else {
+            panic!("legacy password removal should stay OnUserPasswordChanged");
+        };
+        assert_eq!(user_id, 11);
+        assert_eq!(password, None);
     }
 
     #[test]

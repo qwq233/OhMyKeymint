@@ -3051,6 +3051,93 @@ impl KeystoreDB {
         .context(ks_err!())
     }
 
+    /// Deletes auth-bound client keys, super-encrypted client keys, and super keys for the user.
+    /// This is the legacy password-removal scope; user removal must still use
+    /// `unbind_keys_for_user`.
+    pub fn unbind_lskf_bound_keys_for_user(&mut self, user: AndroidUserId) -> Result<()> {
+        let _wp = wd::watch("KeystoreDB::unbind_lskf_bound_keys_for_user");
+
+        self.with_transaction(Immediate("TX_unbind_lskf_bound_keys_for_user"), |tx| {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT id, key_type from persistent.keyentry
+                     WHERE (
+                         key_type = ?
+                         AND domain = ?
+                         AND cast ( (namespace/{AID_USER_OFFSET}) as int) = ?
+                         AND state = ?
+                     ) OR (
+                         key_type = ?
+                         AND namespace = ?
+                         AND state = ?
+                     );",
+                ))
+                .context(concat!(
+                    "In unbind_lskf_bound_keys_for_user. ",
+                    "Failed to prepare the query to find the keys created by apps."
+                ))?;
+
+            let mut rows = stmt
+                .query(params![
+                    KeyType::Client,
+                    Domain::APP.0 as u32,
+                    user.0,
+                    KeyLifeCycle::Live,
+                    KeyType::Super,
+                    user.0,
+                    KeyLifeCycle::Live
+                ])
+                .context(ks_err!("Failed to query the keys created by apps."))?;
+
+            let mut candidates: Vec<(i64, KeyType)> = Vec::new();
+            db_utils::with_rows_extract_all(&mut rows, |row| {
+                candidates.push((
+                    row.get(0)
+                        .context("Failed to read key id of a key created by an app.")?,
+                    row.get(1)
+                        .context("Failed to read key type of a key created by an app.")?,
+                ));
+                Ok(())
+            })
+            .context(ks_err!())?;
+
+            let mut notify_gc = false;
+            let mut num_unbound = 0;
+            for (key_id, key_type) in candidates {
+                let should_unbind = if key_type == KeyType::Super {
+                    true
+                } else {
+                    let key_params = Self::load_key_parameters(key_id, tx)
+                        .context("Failed to load key parameters.")?;
+                    let is_auth_bound_key = key_params.iter().any(|kp| {
+                        matches!(kp.key_parameter_value(), KeyParameterValue::UserSecureID(_))
+                    });
+                    let is_super_encrypted_key =
+                        match Self::load_blob_components(key_id, KeyEntryLoadBits::KM, tx)
+                            .context(ks_err!("Trying to load blob info."))?
+                        {
+                            (_, Some((_, blob_metadata)), _, _) => {
+                                blob_metadata.encrypted_by().is_some()
+                            }
+                            _ => false,
+                        };
+
+                    is_auth_bound_key || is_super_encrypted_key
+                };
+
+                if should_unbind {
+                    notify_gc = Self::remove_key_rows(tx, key_id)
+                        .context("In unbind_lskf_bound_keys_for_user.")?
+                        || notify_gc;
+                    num_unbound += 1;
+                }
+            }
+            info!("Deleting {num_unbound} LSKF-bound keys for {user:?}");
+            Ok(()).do_gc(notify_gc)
+        })
+        .context(ks_err!())
+    }
+
     /// Removes every known key entry after KeyMint deleteAllKeys succeeds.
     pub fn unbind_all_keys(&mut self) -> Result<()> {
         let _wp = wd::watch("KeystoreDB::unbind_all_keys");
@@ -3520,6 +3607,62 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_live_super_key(tx: &Transaction, id: i64, user: AndroidUserId) {
+        tx.execute(
+            "INSERT INTO persistent.keyentry
+                (id, key_type, domain, namespace, alias, state, km_uuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?);",
+            params![
+                id,
+                KeyType::Super,
+                Domain::APP.0 as u32,
+                user.0,
+                "super",
+                KeyLifeCycle::Live,
+                KEYSTORE_UUID
+            ],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO persistent.blobentry
+                (id, subcomponent_type, keyentryid, blob, state)
+                VALUES (?, ?, ?, ?, ?);",
+            params![
+                id + 100,
+                SubComponentType::KEY_BLOB,
+                id,
+                vec![id as u8],
+                BlobState::Current
+            ],
+        )
+        .unwrap();
+    }
+
+    fn add_user_secure_id(tx: &Transaction, key_id: i64) {
+        let param = KeyParameter::new(
+            KeyParameterValue::UserSecureID(0x1234),
+            SecurityLevel::TRUSTED_ENVIRONMENT,
+        );
+        tx.execute(
+            "INSERT INTO persistent.keyparameter
+                (keyentryid, tag, data, security_level)
+                VALUES (?, ?, ?, ?);",
+            params![
+                key_id,
+                param.get_tag().0,
+                param.key_parameter_value(),
+                param.security_level().0
+            ],
+        )
+        .unwrap();
+    }
+
+    fn add_super_encryption_metadata(tx: &Transaction, key_id: i64) {
+        let mut metadata = BlobMetaData::new();
+        metadata.add(BlobMetaEntry::EncryptedBy(EncryptedBy::KeyId(42)));
+        metadata.store_in_db(key_id + 100, tx).unwrap();
+    }
+
     fn key_entry_count(db: &KeystoreDB, id: i64) -> i64 {
         db.conn
             .query_row(
@@ -3537,6 +3680,17 @@ mod tests {
                 params![key_id],
                 |row| row.get(0),
             )
+            .unwrap()
+    }
+
+    fn try_blob_state(db: &KeystoreDB, key_id: i64) -> Option<BlobState> {
+        db.conn
+            .query_row(
+                "SELECT state FROM persistent.blobentry WHERE keyentryid = ?;",
+                params![key_id],
+                |row| row.get(0),
+            )
+            .optional()
             .unwrap()
     }
 
@@ -3686,6 +3840,34 @@ mod tests {
         assert_eq!(1, key_entry_count(&db, 2));
         assert_eq!(BlobState::Orphaned, blob_state(&db, 1));
         assert_eq!(BlobState::Current, blob_state(&db, 2));
+    }
+
+    #[test]
+    fn unbind_lskf_bound_keys_keeps_unbound_client_keys() {
+        let mut db = make_test_db();
+        let user = AndroidUserId(0);
+
+        {
+            let tx = db.conn.transaction().unwrap();
+            insert_live_client_key(&tx, 1, KEYSTORE_UUID, "plain");
+            insert_live_client_key(&tx, 2, KEYSTORE_UUID, "auth-bound");
+            add_user_secure_id(&tx, 2);
+            insert_live_client_key(&tx, 3, KEYSTORE_UUID, "super-encrypted");
+            add_super_encryption_metadata(&tx, 3);
+            insert_live_super_key(&tx, 4, user);
+            tx.commit().unwrap();
+        }
+
+        db.unbind_lskf_bound_keys_for_user(user).unwrap();
+
+        assert_eq!(1, key_entry_count(&db, 1));
+        assert_eq!(0, key_entry_count(&db, 2));
+        assert_eq!(0, key_entry_count(&db, 3));
+        assert_eq!(0, key_entry_count(&db, 4));
+        assert_eq!(BlobState::Current, blob_state(&db, 1));
+        assert_eq!(Some(BlobState::Orphaned), try_blob_state(&db, 2));
+        assert_eq!(Some(BlobState::Orphaned), try_blob_state(&db, 3));
+        assert_eq!(Some(BlobState::Orphaned), try_blob_state(&db, 4));
     }
 
     #[test]
