@@ -16,11 +16,14 @@
 //! when dropped.
 
 use nix::sys::mman::{mlock, munlock};
+use std::boxed::Box;
 use std::convert::TryFrom;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::ptr::write_volatile;
 use std::ptr::NonNull;
+use std::vec;
+use std::vec::Vec;
 
 /// A semi fixed size u8 vector that is zeroed when dropped.  It can shrink in
 /// size but cannot grow larger than the original size (and if it shrinks it

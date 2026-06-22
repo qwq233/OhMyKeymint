@@ -1421,6 +1421,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn generated_key_descriptor_round_trip_collapses_non_null_empty_blob() {
+        let key = blob_key_descriptor(Some(Vec::new()));
+        let mut parcel = Parcel::new();
+        parcel.write(&key).unwrap();
+        parcel.set_data_position(0);
+
+        let decoded: KeyDescriptor = parcel.read().unwrap();
+
+        assert_eq!(decoded.blob, None);
+    }
+
     fn parse_security_level_key_request(
         code: rsbinder::TransactionCode,
         key: &KeyDescriptor,

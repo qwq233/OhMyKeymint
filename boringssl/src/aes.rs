@@ -20,8 +20,8 @@ use kmr_common::{
     FallibleAllocExt,
 };
 use openssl::symm::{Cipher, Crypter};
-use Box;
-use Vec;
+use std::boxed::Box;
+use std::vec::Vec;
 
 /// [`crypto::Aes`] implementation based on BoringSSL.
 pub struct BoringAes;

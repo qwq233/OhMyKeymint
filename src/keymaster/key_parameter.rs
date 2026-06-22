@@ -74,18 +74,18 @@
 //!
 //! These macros usually have four rules:
 //!  * Two main recursive rules, of the form:
-//! ```text
-//! (
-//!     @<marker>
-//!     <non repeating args>,
-//!     [<out list>],
-//!     [<one element pattern> <in tail>]
-//! ) => {
-//!     macro!{@<marker> <non repeating args>, [<out list>
-//!         <one element expansion>
-//!     ], [<in tail>]}
-//! };
-//! ```
+//!    ```text
+//!    (
+//!        @<marker>
+//!        <non repeating args>,
+//!        [<out list>],
+//!        [<one element pattern> <in tail>]
+//!    ) => {
+//!        macro!{@<marker> <non repeating args>, [<out list>
+//!            <one element expansion>
+//!        ], [<in tail>]}
+//!    };
+//!    ```
 //!    They pop one element off the <in list> and add one expansion to the out list.
 //!    The element expansion is kept on a separate line (or lines) for better readability.
 //!    The two variants differ in whether or not $vtype is expected.
@@ -94,23 +94,36 @@
 
 use std::convert::TryInto;
 
+use crate::android::system::keystore2::Authorization::Authorization;
 use crate::keymaster::database::utils::SqlField;
-use crate::keymaster::error::KsError as KeystoreError;
+use crate::keymaster::error::Error as KeystoreError;
+use crate::keymaster::error::ResponseCode;
 
-use crate::android::hardware::security::keymint::{
+pub use crate::android::hardware::security::keymint::{
     Algorithm::Algorithm, BlockMode::BlockMode, Digest::Digest, EcCurve::EcCurve,
     HardwareAuthenticatorType::HardwareAuthenticatorType, KeyOrigin::KeyOrigin,
     KeyParameter::KeyParameter as KmKeyParameter,
     KeyParameterValue::KeyParameterValue as KmKeyParameterValue, KeyPurpose::KeyPurpose,
-    PaddingMode::PaddingMode, SecurityLevel::SecurityLevel, Tag::Tag,
+    MlDsaVariant::MlDsaVariant, PaddingMode::PaddingMode, SecurityLevel::SecurityLevel, Tag::Tag,
 };
-use crate::android::system::keystore2::Authorization::Authorization;
 use anyhow::{Context, Result};
 use rusqlite::types::{Null, ToSql, ToSqlOutput};
 use rusqlite::Result as SqlResult;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+mod generated_key_parameter_tests;
+
+#[cfg(test)]
+mod basic_tests;
+
+#[cfg(test)]
+mod storage_tests;
+
+#[cfg(test)]
+mod wire_tests;
 
 /// This trait is used to associate a primitive to any type that can be stored inside a
 /// KeyParameterValue, especially the AIDL enum types, e.g., keymint::{Algorithm, Digest, ...}.
@@ -171,6 +184,7 @@ implement_associate_primitive_for_aidl_enum! {EcCurve}
 implement_associate_primitive_for_aidl_enum! {HardwareAuthenticatorType}
 implement_associate_primitive_for_aidl_enum! {KeyOrigin}
 implement_associate_primitive_for_aidl_enum! {KeyPurpose}
+implement_associate_primitive_for_aidl_enum! {MlDsaVariant}
 implement_associate_primitive_for_aidl_enum! {PaddingMode}
 implement_associate_primitive_for_aidl_enum! {SecurityLevel}
 
@@ -486,7 +500,7 @@ macro_rules! implement_new_from_sql {
                     Tag::$tag_name => {
                         $enum_name::$vname$((<$vtype>::from_primitive(data
                             .get()
-                            .map_err(|_| KeystoreError::Rc(crate::android::system::keystore2::ResponseCode::ResponseCode::VALUE_CORRUPTED))
+                            .map_err(|_| KeystoreError::Rc(ResponseCode::VALUE_CORRUPTED))
                             .context(concat!(
                                 "Failed to read sql data for tag: ",
                                 stringify!($tag_name),
@@ -782,6 +796,22 @@ macro_rules! implement_key_parameter_value {
             implement_new_from_sql!($enum_name; $($vname$(($vtype))? $tag_name),*);
             implement_get_tag!($enum_name; $($vname$(($vtype))? $tag_name),*);
             implement_from_tag_primitive_pair!($enum_name; $($vname$(($vtype))? $tag_name),*);
+
+            #[cfg(test)]
+            fn make_field_matches_tag_type_test_vector() -> Vec<KmKeyParameter> {
+                vec![$(KmKeyParameter{
+                    tag: Tag::$tag_name,
+                    value: KmKeyParameterValue::$field_name(Default::default())}
+                ),*]
+            }
+
+            #[cfg(test)]
+            fn make_key_parameter_defaults_vector() -> Vec<KeyParameter> {
+                vec![$(KeyParameter{
+                    value: KeyParameterValue::$vname$((<$vtype as Default>::default()))?,
+                    security_level: SecurityLevel(100),
+                }),*]
+            }
         }
 
         implement_try_from_to_km_parameter!(
@@ -845,6 +875,11 @@ pub enum KeyParameterValue {
     #[serde(serialize_with = "serialize_primitive")]
     #[key_param(tag = EC_CURVE, field = EcCurve)]
     EcCurve(EcCurve),
+    /// The ML-DSA variant.
+    #[serde(deserialize_with = "deserialize_primitive")]
+    #[serde(serialize_with = "serialize_primitive")]
+    #[key_param(tag = ML_DSA_VARIANT, field = MlDsaVariant)]
+    MlDsaVariant(MlDsaVariant),
     /// Value of the public exponent for an RSA key pair
     #[key_param(tag = RSA_PUBLIC_EXPONENT, field = LongInteger)]
     RSAPublicExponent(i64),
@@ -1072,6 +1107,11 @@ impl KeyParameter {
     /// Returns the security level of this key parameter.
     pub fn security_level(&self) -> &SecurityLevel {
         &self.security_level
+    }
+
+    /// Convert into KeyMint KeyParameter.
+    pub fn into_key_parameter(self) -> KmKeyParameter {
+        self.value.into()
     }
 
     /// An authorization is a KeyParameter with an associated security level that is used

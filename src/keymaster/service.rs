@@ -19,37 +19,34 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
-use crate::android::system::keystore2::ResponseCode::ResponseCode;
-use crate::err;
-use crate::keybox;
-use crate::keymaster::database::utils::{count_key_entries, list_key_entries};
-use crate::keymaster::db::KEYSTORE_UUID;
-use crate::keymaster::db::{KeyEntryLoadBits, KeyType, SubComponentType};
-use crate::keymaster::error::{into_logged_binder, KsError as Error};
-use crate::keymaster::id_rotation::IdRotationState;
-use crate::keymaster::permission::{
-    check_grant_permission, check_key_permission, check_keystore_permission, KeyPerm, KeyPermSet,
-    KeystorePerm,
-};
-use crate::keymaster::security_level::KeystoreSecurityLevel;
-use crate::keymaster::utils::key_parameters_to_authorizations;
-use crate::plat::utils::multiuser_get_user_id;
-use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
-use crate::top::qwq2333::ohmykeymint::IOhMyKsService::IOhMyKsService;
-use crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::IOhMySecurityLevel;
-use crate::watchdog as wd;
-use crate::{
-    global::{DB, SUPER_KEY},
-    keymaster::db::Uuid,
-};
-
 use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
 use crate::android::hardware::security::keymint::Tag::Tag;
 use crate::android::system::keystore2::{
     Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
     IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor,
-    KeyEntryResponse::KeyEntryResponse, KeyMetadata::KeyMetadata,
+    KeyEntryResponse::KeyEntryResponse, KeyMetadata::KeyMetadata, ResponseCode::ResponseCode,
 };
+use crate::err;
+use crate::global::{db_root_path, DB, SUPER_KEY};
+use crate::keybox;
+use crate::keymaster::audit_log::log_key_deleted;
+use crate::keymaster::db::Uuid;
+use crate::keymaster::db::KEYSTORE_UUID;
+use crate::keymaster::db::{KeyEntryLoadBits, KeyType, SubComponentType};
+use crate::keymaster::error::{into_logged_binder, KsError as Error};
+use crate::keymaster::id_rotation::IdRotationState;
+use crate::keymaster::permission::{
+    check_grant_permission, check_key_permission, check_keystore_permission,
+    require_forwarded_context, KeyPerm, KeyPermSet, KeystorePerm,
+};
+use crate::keymaster::security_level::KeystoreSecurityLevel;
+use crate::keymaster::utils::{
+    count_key_entries, key_parameters_to_authorizations, list_key_entries, AppUid,
+};
+use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
+use crate::top::qwq2333::ohmykeymint::IOhMyKsService::IOhMyKsService;
+use crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::IOhMySecurityLevel;
+use crate::watchdog as wd;
 use anyhow::{Context, Result};
 use log::debug;
 use rsbinder::thread_state::CallingContext;
@@ -66,7 +63,7 @@ impl Default for KeystoreService {
     fn default() -> Self {
         Self {
             security_levels: RwLock::new(Default::default()),
-            id_rotation_state: IdRotationState::new_default(),
+            id_rotation_state: IdRotationState::new(db_root_path()),
             strongbox_enabled: false,
         }
     }
@@ -135,10 +132,9 @@ impl KeystoreService {
             return Ok(0);
         }
 
-        let current_identity = keybox::current_identity_digest();
         DB.with(|db| {
             db.borrow_mut()
-                .retire_stale_keybox_bound_entries(current_identity)
+                .retire_stale_keybox_bound_entries(keybox::current_identity_digest())
         })
     }
 
@@ -185,19 +181,14 @@ impl KeystoreService {
         debug!("Registering security level {sec_level:?}");
         let uuid = Uuid::from(sec_level);
 
-        // Check if we need to terminate old UUID and do it before acquiring write lock
         let old_uuid_to_terminate = {
             let security_levels = self.security_levels.read().unwrap();
             if let Some(&cur_uuid) = security_levels.uuid_by_sec_level.get(&sec_level) {
-                if uuid != cur_uuid {
-                    Some(cur_uuid)
-                } else {
-                    None
-                }
+                (uuid != cur_uuid).then_some(cur_uuid)
             } else {
                 None
             }
-        }; // Release read lock
+        };
 
         if let Some(cur_uuid) = old_uuid_to_terminate {
             log::warn!("Security level {sec_level:?} was registered with a different UUID {cur_uuid:?}, overwriting with {uuid:?}.");
@@ -218,25 +209,16 @@ impl KeystoreService {
             }
         }
 
-        // Create security level instances BEFORE acquiring write lock to avoid holding lock during hardware calls
-        debug!("Creating security level instance (may involve hardware calls)");
-        let (i_sec_level, i_osec_level) = match KeystoreSecurityLevel::new_binders(
-            sec_level,
-            uuid,
-            self.id_rotation_state.clone(),
-        ) {
-            Result::Ok(v) => v,
-            Err(e) => {
-                log::error!("Failed to construct security level {sec_level:?}: {e:?}");
-                return Err(e.context(err!("Trying to construct security level {sec_level:?}")));
-            }
-        };
+        let (i_sec_level, i_osec_level) =
+            match KeystoreSecurityLevel::new_binders(sec_level, self.id_rotation_state.clone()) {
+                Result::Ok(v) => v,
+                Err(e) => {
+                    log::error!("Failed to construct security level {sec_level:?}: {e:?}");
+                    return Err(e.context(err!("Trying to construct security level {sec_level:?}")));
+                }
+            };
 
-        // Now acquire write lock only for the minimal time needed to update the maps
-        debug!("Obtaining exclusive lock to register security level");
         let mut security_levels = self.security_levels.write().unwrap();
-        debug!("Obtained exclusive lock to register security level");
-
         if let Some(cur_uuid) = security_levels.unregister(sec_level) {
             log::warn!("Security level {sec_level:?} was already registered, overwriting.");
             if cur_uuid != uuid {
@@ -279,7 +261,7 @@ impl KeystoreService {
 
     fn get_security_level(
         &self,
-        _ctx: Option<&CallerInfo>, // reserved for future use
+        _ctx: Option<&CallerInfo>,
         sec_level: SecurityLevel,
     ) -> Result<Strong<dyn IKeystoreSecurityLevel>> {
         self.ensure_security_levels_current()?;
@@ -299,7 +281,7 @@ impl KeystoreService {
 
     fn get_iohmy_security_level(
         &self,
-        _ctx: Option<&CallerInfo>, // reserved for future use
+        _ctx: Option<&CallerInfo>,
         sec_level: SecurityLevel,
     ) -> Result<Strong<dyn IOhMySecurityLevel>> {
         self.ensure_security_levels_current()?;
@@ -324,26 +306,10 @@ impl KeystoreService {
         self.ensure_security_levels_current()?;
         let caller_uid = calling_uid(ctx);
 
-        debug!("get_key_entry: key={:?}, uid={}", key, caller_uid);
-
         let _super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_credential_encrypted_key_by_user_id(multiuser_get_user_id(caller_uid));
-
-        let resolved = DB
-            .with(|db| {
-                db.borrow_mut()
-                    .resolve_key_permission(key, KeyType::Client, caller_uid)
-            })
-            .context(err!("while trying to resolve key permissions."))?;
-        check_key_permission(
-            KeyPerm::GetInfo,
-            &resolved.descriptor,
-            resolved.access_vector.as_ref(),
-            ctx,
-        )
-        .context(err!("Caller does not have permission to inspect this key."))?;
+            .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
 
         let (key_id_guard, mut key_entry) = DB
             .with(|db| {
@@ -352,6 +318,7 @@ impl KeystoreService {
                     KeyType::Client,
                     KeyEntryLoadBits::PUBLIC,
                     caller_uid,
+                    |k, av| check_key_permission(KeyPerm::GetInfo, k, av.as_ref(), ctx),
                 )
             })
             .context(err!("while trying to load key info."))?;
@@ -399,35 +366,26 @@ impl KeystoreService {
         let _super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_credential_encrypted_key_by_user_id(multiuser_get_user_id(caller_uid));
+            .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
         let existing_key = match DB.with(|db| {
-            db.borrow_mut()
-                .resolve_key_permission(key, KeyType::Client, caller_uid)
+            db.borrow_mut().load_key_entry(
+                key,
+                KeyType::Client,
+                KeyEntryLoadBits::NONE,
+                caller_uid,
+                |k, av| check_key_permission(KeyPerm::Update, k, av.as_ref(), ctx),
+            )
         }) {
-            Ok(resolved) => Some(resolved),
+            Ok((key_id_guard, key_entry)) => Some((key_id_guard, key_entry)),
             Err(e) => match e.root_cause().downcast_ref::<Error>() {
                 Some(Error::Rc(ResponseCode::KEY_NOT_FOUND)) => None,
                 _ => return Err(e).context(err!("Failed to resolve key permissions.")),
             },
         };
 
-        if let Some(resolved) = existing_key {
-            check_key_permission(
-                KeyPerm::Update,
-                &resolved.descriptor,
-                resolved.access_vector.as_ref(),
-                ctx,
-            )
-            .context(err!("Caller does not have permission to update this key."))?;
-
+        if let Some((key_id_guard, _key_entry)) = existing_key {
             return DB
                 .with::<_, Result<()>>(|db| {
-                    let (key_id_guard, _) = db.borrow_mut().load_key_entry(
-                        key,
-                        KeyType::Client,
-                        KeyEntryLoadBits::NONE,
-                        caller_uid,
-                    )?;
                     let mut db = db.borrow_mut();
                     db.set_blob(&key_id_guard, SubComponentType::CERT, public_cert, None)
                         .context(err!("Failed to update cert subcomponent."))?;
@@ -450,7 +408,7 @@ impl KeystoreService {
         let key = match (key.domain, &key.alias) {
             (Domain::APP, Some(ref alias)) => KeyDescriptor {
                 domain: Domain::APP,
-                nspace: caller_uid as i64,
+                nspace: caller_uid.0,
                 alias: Some(alias.clone()),
                 blob: None,
             },
@@ -485,12 +443,12 @@ impl KeystoreService {
         namespace: i64,
     ) -> Result<KeyDescriptor> {
         self.ensure_security_levels_current()?;
-        let caller_uid = calling_uid(ctx) as i64;
+        let caller_uid = calling_uid(ctx);
 
         let mut k = match domain {
             Domain::APP => KeyDescriptor {
                 domain,
-                nspace: caller_uid,
+                nspace: caller_uid.0,
                 ..Default::default()
             },
             Domain::SELINUX => KeyDescriptor {
@@ -505,11 +463,6 @@ impl KeystoreService {
             }
         };
 
-        // First we check if the caller has the info permission for the selected domain/namespace.
-        // By default we use the calling uid as namespace if domain is Domain::APP.
-        // If the first check fails we check if the caller has the list permission allowing to list
-        // any namespace. In that case we also adjust the queried namespace if a specific uid was
-        // selected.
         if let Err(e) = check_key_permission(KeyPerm::GetInfo, &k, None, ctx) {
             if is_permission_denied(&e) {
                 check_keystore_permission(KeystorePerm::List, ctx)
@@ -531,7 +484,6 @@ impl KeystoreService {
         namespace: i64,
     ) -> Result<Vec<KeyDescriptor>> {
         let k = self.get_key_descriptor_for_lookup(ctx, domain, namespace)?;
-
         DB.with(|db| list_key_entries(&mut db.borrow_mut(), k.domain, k.nspace, None))
     }
 
@@ -542,7 +494,6 @@ impl KeystoreService {
         namespace: i64,
     ) -> Result<i32> {
         let k = self.get_key_descriptor_for_lookup(ctx, domain, namespace)?;
-
         DB.with(|db| count_key_entries(&mut db.borrow_mut(), k.domain, k.nspace))
     }
 
@@ -575,24 +526,15 @@ impl KeystoreService {
         let _super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_credential_encrypted_key_by_user_id(multiuser_get_user_id(caller_uid));
+            .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
 
-        let resolved = DB
-            .with(|db| {
-                db.borrow_mut()
-                    .resolve_key_permission(key, KeyType::Client, caller_uid)
-            })
-            .context(err!("Trying to resolve key permissions."))?;
-        check_key_permission(
-            KeyPerm::Delete,
-            &resolved.descriptor,
-            resolved.access_vector.as_ref(),
-            ctx,
-        )
-        .context(err!("Caller does not have permission to delete this key."))?;
-
-        DB.with(|db| db.borrow_mut().unbind_key(key, KeyType::Client, caller_uid))
-            .context(err!("Trying to unbind the key."))?;
+        DB.with(|db| {
+            db.borrow_mut()
+                .unbind_key(key, KeyType::Client, caller_uid, |k, av| {
+                    check_key_permission(KeyPerm::Delete, k, av.as_ref(), ctx)
+                })
+        })
+        .context(err!("Trying to unbind the key."))?;
         Ok(())
     }
 
@@ -608,20 +550,16 @@ impl KeystoreService {
         let _super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_credential_encrypted_key_by_user_id(multiuser_get_user_id(caller_uid));
-
-        let resolved = DB
-            .with(|db| {
-                db.borrow_mut()
-                    .resolve_key_permission(key, KeyType::Client, caller_uid)
-            })
-            .context(err!("KeystoreService::grant: resolving permissions"))?;
-        check_grant_permission(access_vector, &resolved.descriptor, ctx)
-            .context(err!("KeystoreService::grant: permission denied"))?;
+            .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
 
         DB.with(|db| {
-            db.borrow_mut()
-                .grant(key, caller_uid, grantee_uid as u32, access_vector)
+            db.borrow_mut().grant(
+                key,
+                caller_uid,
+                AppUid(grantee_uid as i64),
+                access_vector,
+                |k, av| check_grant_permission(*av, k, ctx),
+            )
         })
         .context(err!("KeystoreService::grant."))
     }
@@ -634,32 +572,40 @@ impl KeystoreService {
     ) -> Result<()> {
         self.ensure_security_levels_current()?;
         let caller_uid = calling_uid(ctx);
-        let resolved = DB
-            .with(|db| {
-                db.borrow_mut()
-                    .resolve_key_permission(key, KeyType::Client, caller_uid)
-            })
-            .context(err!("KeystoreService::ungrant: resolving permissions"))?;
-        check_key_permission(
-            KeyPerm::Grant,
-            &resolved.descriptor,
-            resolved.access_vector.as_ref(),
-            ctx,
-        )
-        .context(err!("KeystoreService::ungrant: permission denied"))?;
-        DB.with(|db| db.borrow_mut().ungrant(key, caller_uid, grantee_uid as u32))
-            .context(err!("KeystoreService::ungrant."))
+        DB.with(|db| {
+            db.borrow_mut()
+                .ungrant(key, caller_uid, AppUid(grantee_uid as i64), |k| {
+                    check_key_permission(KeyPerm::Grant, k, None, ctx)
+                })
+        })
+        .context(err!("KeystoreService::ungrant."))
     }
 
     fn is_omk_grant(&self, ctx: Option<&CallerInfo>, grant: &KeyDescriptor) -> Result<bool> {
+        if grant.domain != Domain::GRANT {
+            return Ok(false);
+        }
+
         let caller_uid = calling_uid(ctx);
-        DB.with(|db| db.borrow_mut().is_live_grant_for_grantee(grant, caller_uid))
-            .context(err!("KeystoreService::is_omk_grant."))
+        match DB.with(|db| {
+            db.borrow_mut().load_key_entry(
+                grant,
+                KeyType::Client,
+                KeyEntryLoadBits::NONE,
+                caller_uid,
+                |_k, _av| Ok(()),
+            )
+        }) {
+            Ok(_) => Ok(true),
+            Err(error) => match error.root_cause().downcast_ref::<Error>() {
+                Some(Error::Rc(ResponseCode::KEY_NOT_FOUND)) => Ok(false),
+                _ => Err(error).context(err!("KeystoreService::is_omk_grant.")),
+            },
+        }
     }
 
-    fn enforce_keybox_admin(&self) -> Result<()> {
-        let calling_uid: i64 = CallingContext::default().uid.into();
-        match calling_uid {
+    fn enforce_keybox_admin(&self, ctx: &CallerInfo) -> Result<()> {
+        match ctx.callingUid {
             0 | 1000 | 1017 => Ok(()),
             uid => Err(Error::perm()).context(err!(
                 "keybox update requires root/system/keystore caller, got uid={uid}"
@@ -668,9 +614,15 @@ impl KeystoreService {
     }
 }
 
-fn calling_uid(ctx: Option<&CallerInfo>) -> u32 {
-    ctx.map(|ctx| ctx.callingUid)
-        .unwrap_or(CallingContext::default().uid.into()) as u32
+fn calling_uid(ctx: Option<&CallerInfo>) -> AppUid {
+    AppUid(
+        ctx.map(|ctx| ctx.callingUid)
+            .unwrap_or(CallingContext::default().uid.into()),
+    )
+}
+
+fn require_omk_ctx<'a>(ctx: Option<&'a CallerInfo>, label: &str) -> Result<&'a CallerInfo, Status> {
+    require_forwarded_context(ctx, label).map_err(into_logged_binder)
 }
 
 fn is_permission_denied(error: &anyhow::Error) -> bool {
@@ -694,10 +646,12 @@ impl IKeystoreService for KeystoreService {
         self.get_security_level(None, security_level)
             .map_err(into_logged_binder)
     }
+
     fn getKeyEntry(&self, key: &KeyDescriptor) -> Result<KeyEntryResponse, Status> {
         let _wp = wd::watch("IKeystoreService::get_key_entry");
         self.get_key_entry(None, key).map_err(into_logged_binder)
     }
+
     fn updateSubcomponent(
         &self,
         key: &KeyDescriptor,
@@ -708,21 +662,20 @@ impl IKeystoreService for KeystoreService {
         self.update_subcomponent(None, key, public_cert, certificate_chain)
             .map_err(into_logged_binder)
     }
+
     fn listEntries(&self, domain: Domain, namespace: i64) -> Result<Vec<KeyDescriptor>, Status> {
         let _wp = wd::watch("IKeystoreService::listEntries");
         self.list_entries(None, domain, namespace)
             .map_err(into_logged_binder)
     }
+
     fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
         let _wp = wd::watch("IKeystoreService::deleteKey");
         let result = self.delete_key(None, key);
-        debug!(
-            "deleteKey: key={:?}, uid={}",
-            key,
-            CallingContext::default().uid
-        );
+        log_key_deleted(key, calling_uid(None).0 as libc::uid_t, result.is_ok());
         result.map_err(into_logged_binder)
     }
+
     fn grant(
         &self,
         key: &KeyDescriptor,
@@ -733,11 +686,13 @@ impl IKeystoreService for KeystoreService {
         self.grant(None, key, grantee_uid, access_vector.into())
             .map_err(into_logged_binder)
     }
+
     fn ungrant(&self, key: &KeyDescriptor, grantee_uid: i32) -> Result<(), Status> {
         let _wp = wd::watch("IKeystoreService::ungrant");
         self.ungrant(None, key, grantee_uid)
             .map_err(into_logged_binder)
     }
+
     fn getNumberOfEntries(&self, domain: Domain, namespace: i64) -> Result<i32, Status> {
         let _wp = wd::watch("IKeystoreService::getNumberOfEntries");
         self.count_num_entries(None, domain, namespace)
@@ -762,6 +717,7 @@ impl IKeystoreService for KeystoreService {
     }
 }
 
+#[allow(non_snake_case)]
 impl IOhMyKsService for KeystoreService {
     fn getSecurityLevel(
         &self,
@@ -771,6 +727,7 @@ impl IOhMyKsService for KeystoreService {
         self.get_security_level(None, security_level)
             .map_err(into_logged_binder)
     }
+
     fn getOhMySecurityLevel(
         &self,
         security_level: SecurityLevel,
@@ -779,14 +736,17 @@ impl IOhMyKsService for KeystoreService {
         self.get_iohmy_security_level(None, security_level)
             .map_err(into_logged_binder)
     }
+
     fn getKeyEntry(
         &self,
         ctx: Option<&CallerInfo>,
         key: &KeyDescriptor,
     ) -> Result<KeyEntryResponse, Status> {
         let _wp = wd::watch("IOhMyKsService::get_key_entry");
+        let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::getKeyEntry")?);
         self.get_key_entry(ctx, key).map_err(into_logged_binder)
     }
+
     fn updateSubcomponent(
         &self,
         ctx: Option<&CallerInfo>,
@@ -795,9 +755,11 @@ impl IOhMyKsService for KeystoreService {
         certificate_chain: Option<&[u8]>,
     ) -> Result<(), Status> {
         let _wp = wd::watch("IOhMyKsService::updateSubcomponent");
+        let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::updateSubcomponent")?);
         self.update_subcomponent(ctx, key, public_cert, certificate_chain)
             .map_err(into_logged_binder)
     }
+
     fn listEntries(
         &self,
         ctx: Option<&CallerInfo>,
@@ -805,23 +767,19 @@ impl IOhMyKsService for KeystoreService {
         namespace: i64,
     ) -> Result<Vec<KeyDescriptor>, Status> {
         let _wp = wd::watch("IOhMyKsService::listEntries");
+        let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::listEntries")?);
         self.list_entries(ctx, domain, namespace)
             .map_err(into_logged_binder)
     }
+
     fn deleteKey(&self, ctx: Option<&CallerInfo>, key: &KeyDescriptor) -> Result<(), Status> {
         let _wp = wd::watch("IOhMyKsService::deleteKey");
+        let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::deleteKey")?);
         let result = self.delete_key(ctx, key);
-        debug!(
-            "deleteKey: key={:?}, uid={}",
-            key,
-            if let Some(ctx) = ctx {
-                ctx.callingUid
-            } else {
-                CallingContext::default().uid.into()
-            }
-        );
+        log_key_deleted(key, calling_uid(ctx).0 as libc::uid_t, result.is_ok());
         result.map_err(into_logged_binder)
     }
+
     fn grant(
         &self,
         ctx: Option<&CallerInfo>,
@@ -830,9 +788,11 @@ impl IOhMyKsService for KeystoreService {
         access_vector: i32,
     ) -> Result<KeyDescriptor, Status> {
         let _wp = wd::watch("IOhMyKsService::grant");
+        let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::grant")?);
         self.grant(ctx, key, grantee_uid, access_vector.into())
             .map_err(into_logged_binder)
     }
+
     fn ungrant(
         &self,
         ctx: Option<&CallerInfo>,
@@ -840,9 +800,11 @@ impl IOhMyKsService for KeystoreService {
         grantee_uid: i32,
     ) -> Result<(), Status> {
         let _wp = wd::watch("IOhMyKsService::ungrant");
+        let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::ungrant")?);
         self.ungrant(ctx, key, grantee_uid)
             .map_err(into_logged_binder)
     }
+
     fn getNumberOfEntries(
         &self,
         ctx: Option<&CallerInfo>,
@@ -850,6 +812,7 @@ impl IOhMyKsService for KeystoreService {
         namespace: i64,
     ) -> Result<i32, Status> {
         let _wp = wd::watch("IOhMyKsService::getNumberOfEntries");
+        let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::getNumberOfEntries")?);
         self.count_num_entries(ctx, domain, namespace)
             .map_err(into_logged_binder)
     }
@@ -862,6 +825,7 @@ impl IOhMyKsService for KeystoreService {
         start_past_alias: Option<&str>,
     ) -> Result<Vec<KeyDescriptor>, Status> {
         let _wp = wd::watch("IOhMyKsService::listEntriesBatched");
+        let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::listEntriesBatched")?);
         self.list_entries_batched(ctx, domain, namespace, start_past_alias)
             .map_err(into_logged_binder)
     }
@@ -874,10 +838,12 @@ impl IOhMyKsService for KeystoreService {
 
     fn updateEcKeybox(
         &self,
+        ctx: Option<&CallerInfo>,
         key: &[u8],
         chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
     ) -> rsbinder::status::Result<()> {
-        self.enforce_keybox_admin().map_err(into_logged_binder)?;
+        let ctx = require_omk_ctx(ctx, "IOhMyKsService::updateEcKeybox")?;
+        self.enforce_keybox_admin(ctx).map_err(into_logged_binder)?;
         let chain: Vec<kmr_wire::keymint::Certificate> = chain
             .iter()
             .map(|c| kmr_wire::keymint::Certificate {
@@ -893,10 +859,12 @@ impl IOhMyKsService for KeystoreService {
 
     fn updateRsaKeybox(
         &self,
+        ctx: Option<&CallerInfo>,
         key: &[u8],
         chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
     ) -> rsbinder::status::Result<()> {
-        self.enforce_keybox_admin().map_err(into_logged_binder)?;
+        let ctx = require_omk_ctx(ctx, "IOhMyKsService::updateRsaKeybox")?;
+        self.enforce_keybox_admin(ctx).map_err(into_logged_binder)?;
         let chain: Vec<kmr_wire::keymint::Certificate> = chain
             .iter()
             .map(|c| kmr_wire::keymint::Certificate {
@@ -912,6 +880,7 @@ impl IOhMyKsService for KeystoreService {
 
     fn isOmkGrant(&self, ctx: Option<&CallerInfo>, grant: &KeyDescriptor) -> Result<bool, Status> {
         let _wp = wd::watch("IOhMyKsService::isOmkGrant");
+        let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::isOmkGrant")?);
         self.is_omk_grant(ctx, grant).map_err(into_logged_binder)
     }
 }

@@ -23,7 +23,10 @@
 
 #![allow(non_snake_case)]
 
-use core::{convert::TryInto, fmt::Debug};
+use core::{
+    convert::TryInto,
+    fmt::{self, Debug},
+};
 use kmr_wire::{
     cbor, cbor_type_error, keymint::ErrorCode, keymint::NEXT_MESSAGE_SIGNAL_TRUE, AsCborValue,
     CborError, Code, KeyMintOperation,
@@ -33,8 +36,9 @@ use std::{
     ffi::CString,
     io::{Read, Write},
     ops::DerefMut,
-    sync::MutexGuard,
+    sync::{Arc, Mutex, MutexGuard},
 };
+use thiserror::Error;
 
 pub use binder;
 
@@ -44,15 +48,63 @@ pub mod keymint;
 pub mod rpc;
 pub mod secureclock;
 pub mod sharedsecret;
+
 #[cfg(test)]
 mod tests;
+
+/// Defines the KeyMint HALs that can be registered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hal {
+    /// IKeyMintDevice HAL.
+    KeyMintDevice,
+    /// IRemotelyProvisionedComponent HAL.
+    RemotelyProvisionedComponent,
+    /// ISecureClock HAL.
+    SecureClock,
+    /// ISharedSecret HAL.
+    SharedSecret,
+}
+
+impl fmt::Display for Hal {
+    /// Formats the HAL enum as its corresponding fully qualified interface name.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::KeyMintDevice => "android.hardware.security.keymint.IKeyMintDevice",
+            Self::RemotelyProvisionedComponent => {
+                "android.hardware.security.keymint.IRemotelyProvisionedComponent"
+            }
+            Self::SecureClock => "android.hardware.security.secureclock.ISecureClock",
+            Self::SharedSecret => "android.hardware.security.sharedsecret.ISharedSecret",
+        })
+    }
+}
+
+impl Hal {
+    fn new_binder<T: SerializedChannel + 'static>(
+        &self,
+        channel: &Arc<Mutex<T>>,
+    ) -> binder::SpIBinder {
+        match self {
+            Hal::KeyMintDevice => keymint::Device::new_as_binder(channel.clone()).as_binder(),
+            Hal::RemotelyProvisionedComponent => {
+                rpc::Device::new_as_binder(channel.clone()).as_binder()
+            }
+            Hal::SecureClock => secureclock::Device::new_as_binder(channel.clone()).as_binder(),
+            Hal::SharedSecret => sharedsecret::Device::new_as_binder(channel.clone()).as_binder(),
+        }
+    }
+}
+
+/// A list of all HAL services that are registered by default.
+pub const ALL_HALS: &[Hal] =
+    &[Hal::KeyMintDevice, Hal::RemotelyProvisionedComponent, Hal::SecureClock, Hal::SharedSecret];
 
 /// Emit a failure for a failed CBOR conversion.
 #[inline]
 pub fn failed_cbor(err: CborError) -> binder::Status {
     binder::Status::new_service_specific_error(
         ErrorCode::EncodingError as i32,
-        Some(&CString::new(format!("CBOR conversion failed: {:?}", err)).unwrap()),
+        Some(&CString::new(format!("CBOR conversion failed: {err:?}")).unwrap()),
     )
 }
 
@@ -97,14 +149,14 @@ pub fn write_msg<W: Write>(w: &mut W, data: &[u8]) -> binder::Result<()> {
     })?;
     let data_len_data = data_len.to_be_bytes();
     w.write_all(&data_len_data[..]).map_err(|e| {
-        error!("Failed to write length to stream: {}", e);
+        error!("Failed to write length to stream: {e}");
         binder::Status::new_exception(
             binder::ExceptionCode::BAD_PARCELABLE,
             Some(&CString::new("failed to write framing length").unwrap()),
         )
     })?;
     w.write_all(data).map_err(|e| {
-        error!("Failed to write data to stream: {}", e);
+        error!("Failed to write data to stream: {e}");
         binder::Status::new_exception(
             binder::ExceptionCode::BAD_PARCELABLE,
             Some(&CString::new("failed to write data").unwrap()),
@@ -118,13 +170,13 @@ pub fn read_msg<R: Read>(r: &mut R) -> binder::Result<Vec<u8>> {
     // The data read from the `Read` item has a 4-byte big-endian length prefix.
     let mut len_data = [0u8; 4];
     r.read_exact(&mut len_data).map_err(|e| {
-        error!("Failed to read length from stream: {}", e);
+        error!("Failed to read length from stream: {e}");
         binder::Status::new_exception(binder::ExceptionCode::TRANSACTION_FAILED, None)
     })?;
     let len = u32::from_be_bytes(len_data);
     let mut data = vec![0; len as usize];
     r.read_exact(&mut data).map_err(|e| {
-        error!("Failed to read data from stream: {}", e);
+        error!("Failed to read data from stream: {e}");
         binder::Status::new_exception(binder::ExceptionCode::TRANSACTION_FAILED, None)
     })?;
     Ok(data)
@@ -169,9 +221,7 @@ where
     cbor::ser::into_writer(&req_arr, &mut req_data).map_err(|e| {
         binder::Status::new_service_specific_error(
             ErrorCode::EncodingError as i32,
-            Some(
-                &CString::new(format!("failed to write CBOR request to buffer: {:?}", e)).unwrap(),
-            ),
+            Some(&CString::new(format!("failed to write CBOR request to buffer: {e:?}")).unwrap()),
         )
     })?;
 
@@ -183,7 +233,7 @@ where
             T::MAX_SIZE
         );
         return Err(binder::Status::new_service_specific_error(
-            ErrorCode::InvalidInputLength as i32,
+            ErrorCode::InvalidArgument as i32,
             Some(&CString::new("encoded request message too large").unwrap()),
         ));
     }
@@ -234,7 +284,7 @@ where
     let op_type =
         <KeyMintOperation>::from_cbor_value(inner_rsp_array.remove(0)).map_err(failed_cbor)?;
     if op_type != <S>::CODE {
-        error!("HAL: inner response data for unexpected opcode {:?}!", op_type);
+        error!("HAL: inner response data for unexpected opcode {op_type:?}!");
         return Err(failed_cbor(CborError::UnexpectedItem("wrong ret code", "rsp ret code")));
     }
 
@@ -263,10 +313,10 @@ pub fn send_hal_info<T: SerializedChannel>(channel: &mut T) -> binder::Result<()
     let req = env::populate_hal_info().map_err(|e| {
         binder::Status::new_exception(
             binder::ExceptionCode::BAD_PARCELABLE,
-            Some(&CString::new(format!("failed to determine HAL environment: {}", e)).unwrap()),
+            Some(&CString::new(format!("failed to determine HAL environment: {e}")).unwrap()),
         )
     })?;
-    info!("HAL->TA: environment info is {:?}", req);
+    info!("HAL->TA: environment info is {req:?}");
     let _rsp: kmr_wire::SetHalInfoResponse = channel_execute(channel, req)?;
 
     let aidl_version = if cfg!(feature = "hal_v5") {
@@ -281,11 +331,11 @@ pub fn send_hal_info<T: SerializedChannel>(channel: &mut T) -> binder::Result<()
         100
     };
     let req = kmr_wire::SetHalVersionRequest { aidl_version };
-    info!("HAL->TA: setting KeyMint HAL version to {}", aidl_version);
+    info!("HAL->TA: setting KeyMint HAL version to {aidl_version}");
     let result: binder::Result<kmr_wire::SetHalVersionResponse> = channel_execute(channel, req);
     if let Err(e) = result {
         // The SetHalVersionRequest message was added later; an earlier TA may not recognize it.
-        warn!("Setting KeyMint HAL version failed: {:?}", e);
+        warn!("Setting KeyMint HAL version failed: {e:?}");
     }
     Ok(())
 }
@@ -295,7 +345,7 @@ pub fn send_boot_info<T: SerializedChannel>(
     channel: &mut T,
     req: kmr_wire::SetBootInfoRequest,
 ) -> binder::Result<()> {
-    info!("boot->TA: boot info is {:?}", req);
+    info!("boot->TA: boot info is {req:?}");
     let _rsp: kmr_wire::SetBootInfoResponse = channel_execute(channel, req)?;
     Ok(())
 }
@@ -306,15 +356,42 @@ pub fn send_attest_ids<T: SerializedChannel>(
     ids: kmr_wire::AttestationIdInfo,
 ) -> binder::Result<()> {
     let req = kmr_wire::SetAttestationIdsRequest { ids };
-    info!("provision->attestation IDs are {:?}", req);
+    info!("provision->attestation IDs are {req:?}");
     let _rsp: kmr_wire::SetAttestationIdsResponse = channel_execute(channel, req)?;
     Ok(())
 }
 
-/// Let the TA know that early boot has ended
+/// Let the TA know that early boot has ended.
 pub fn early_boot_ended<T: SerializedChannel>(channel: &mut T) -> binder::Result<()> {
     info!("boot->TA: early boot ended");
     let req = kmr_wire::EarlyBootEndedRequest {};
     let _rsp: kmr_wire::EarlyBootEndedResponse = channel_execute(channel, req)?;
+    Ok(())
+}
+
+/// Local error type for failures in the HAL service.
+#[derive(Error, Debug, Clone)]
+#[error("HalServiceError: {0}")]
+pub struct HalServiceError(pub String);
+
+impl From<String> for HalServiceError {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+/// Register the given set of KeyMint-related HAL services with Binder.
+pub fn register_binder_services<T: SerializedChannel + 'static>(
+    channel: &Arc<Mutex<T>>,
+    hals_to_register: &[Hal],
+    instance: &str,
+) -> Result<(), HalServiceError> {
+    for hal in hals_to_register {
+        let service_name = format!("{hal}/{instance}");
+
+        binder::add_service(&service_name, hal.new_binder(channel))
+            .map_err(|e| format!("Failed to register service {service_name}: {e:?}"))?;
+        info!("Successfully registered {service_name}");
+    }
     Ok(())
 }

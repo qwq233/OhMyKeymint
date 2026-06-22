@@ -31,6 +31,9 @@ use crate::{
 };
 use enumn::N;
 use kmr_derive::{AsCborValue, FromRawTag};
+use std::format;
+use std::string::{String, ToString};
+use std::vec::Vec;
 
 /// Default certificate serial number of 1.
 pub const DEFAULT_CERT_SERIAL: &[u8] = &[0x01];
@@ -132,6 +135,7 @@ impl AsCborValue for DateTime {
 pub enum Algorithm {
     Rsa = 1,
     Ec = 3,
+    MlDsa = 4,
     Aes = 32,
     TripleDes = 33,
     Hmac = 128,
@@ -180,10 +184,18 @@ pub enum EcCurve {
     P256 = 1,
     P384 = 2,
     P521 = 3,
-    #[cfg(feature = "hal_v2")]
-    Curve25519 = 4,
+    Curve25519 = 4, // Only for >= v2 of the HAL
 }
 try_from_n!(EcCurve);
+
+// Only for >= v5 of the HAL
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, AsCborValue, N)]
+#[repr(i32)]
+pub enum MlDsaVariant {
+    MlDsa65 = 1,
+    MlDsa87 = 2,
+}
+try_from_n!(MlDsaVariant);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, AsCborValue, N)]
 #[repr(i32)]
@@ -273,6 +285,7 @@ pub enum ErrorCode {
     BootLevelExceeded = -84,
     HardwareNotYetAvailable = -85,
     ModuleHashAlreadySet = -86,
+    UnsupportedMlDsaVariant = -87,
     Unimplemented = -100,
     VersionMismatch = -101,
     UnknownError = -1000,
@@ -356,6 +369,7 @@ pub enum KeyParam {
     CallerNonce,
     MinMacLength(u32),
     EcCurve(EcCurve),
+    MlDsaVariant(MlDsaVariant), // Only for >= v5 of the HAL
     RsaPublicExponent(RsaExponent),
     IncludeUniqueId,
     RsaOaepMgfDigest(Digest),
@@ -390,8 +404,7 @@ pub enum KeyParam {
     AttestationIdProduct(Vec<u8>),
     AttestationIdSerial(Vec<u8>),
     AttestationIdImei(Vec<u8>),
-    #[cfg(feature = "hal_v3")]
-    AttestationIdSecondImei(Vec<u8>),
+    AttestationIdSecondImei(Vec<u8>), // Only for >= v3 of the HAL
     AttestationIdMeid(Vec<u8>),
     AttestationIdManufacturer(Vec<u8>),
     AttestationIdModel(Vec<u8>),
@@ -407,8 +420,7 @@ pub enum KeyParam {
     CertificateNotBefore(DateTime),
     CertificateNotAfter(DateTime),
     MaxBootLevel(u32),
-    #[cfg(feature = "hal_v4")]
-    ModuleHash(Vec<u8>),
+    ModuleHash(Vec<u8>), // Only for >= v4 of the HAL
 }
 
 impl KeyParam {
@@ -419,6 +431,7 @@ impl KeyParam {
             KeyParam::Padding(_) => Tag::Padding,
             KeyParam::Digest(_) => Tag::Digest,
             KeyParam::EcCurve(_) => Tag::EcCurve,
+            KeyParam::MlDsaVariant(_) => Tag::MlDsaVariant, // Only for >= v5 of the HAL
             KeyParam::Origin(_) => Tag::Origin,
             KeyParam::Purpose(_) => Tag::Purpose,
             KeyParam::KeySize(_) => Tag::KeySize,
@@ -457,8 +470,7 @@ impl KeyParam {
             KeyParam::AttestationIdProduct(_) => Tag::AttestationIdProduct,
             KeyParam::AttestationIdSerial(_) => Tag::AttestationIdSerial,
             KeyParam::AttestationIdImei(_) => Tag::AttestationIdImei,
-            #[cfg(feature = "hal_v3")]
-            KeyParam::AttestationIdSecondImei(_) => Tag::AttestationIdSecondImei,
+            KeyParam::AttestationIdSecondImei(_) => Tag::AttestationIdSecondImei, // Only for >= v3 of the HAL
             KeyParam::AttestationIdMeid(_) => Tag::AttestationIdMeid,
             KeyParam::AttestationIdManufacturer(_) => Tag::AttestationIdManufacturer,
             KeyParam::AttestationIdModel(_) => Tag::AttestationIdModel,
@@ -474,8 +486,7 @@ impl KeyParam {
             KeyParam::CertificateNotBefore(_) => Tag::CertificateNotBefore,
             KeyParam::CertificateNotAfter(_) => Tag::CertificateNotAfter,
             KeyParam::MaxBootLevel(_) => Tag::MaxBootLevel,
-            #[cfg(feature = "hal_v4")]
-            KeyParam::ModuleHash(_) => Tag::ModuleHash,
+            KeyParam::ModuleHash(_) => Tag::ModuleHash, // Only for >= v4 of the HAL
         }
     }
 }
@@ -511,6 +522,7 @@ impl crate::AsCborValue for KeyParam {
             Tag::Padding => KeyParam::Padding(<PaddingMode>::from_cbor_value(raw)?),
             Tag::Digest => KeyParam::Digest(<Digest>::from_cbor_value(raw)?),
             Tag::EcCurve => KeyParam::EcCurve(<EcCurve>::from_cbor_value(raw)?),
+            Tag::MlDsaVariant => KeyParam::MlDsaVariant(<MlDsaVariant>::from_cbor_value(raw)?),
             Tag::Origin => KeyParam::Origin(<KeyOrigin>::from_cbor_value(raw)?),
             Tag::Purpose => KeyParam::Purpose(<KeyPurpose>::from_cbor_value(raw)?),
             Tag::KeySize => KeyParam::KeySize(<KeySizeInBits>::from_cbor_value(raw)?),
@@ -591,7 +603,6 @@ impl crate::AsCborValue for KeyParam {
                 KeyParam::AttestationIdSerial(<Vec<u8>>::from_cbor_value(raw)?)
             }
             Tag::AttestationIdImei => KeyParam::AttestationIdImei(<Vec<u8>>::from_cbor_value(raw)?),
-            #[cfg(feature = "hal_v3")]
             Tag::AttestationIdSecondImei => {
                 KeyParam::AttestationIdSecondImei(<Vec<u8>>::from_cbor_value(raw)?)
             }
@@ -626,7 +637,6 @@ impl crate::AsCborValue for KeyParam {
                 KeyParam::CertificateNotAfter(<DateTime>::from_cbor_value(raw)?)
             }
             Tag::MaxBootLevel => KeyParam::MaxBootLevel(<u32>::from_cbor_value(raw)?),
-            #[cfg(feature = "hal_v4")]
             Tag::ModuleHash => KeyParam::ModuleHash(<Vec<u8>>::from_cbor_value(raw)?),
 
             _ => return Err(crate::CborError::UnexpectedItem("tag", "known tag")),
@@ -639,6 +649,7 @@ impl crate::AsCborValue for KeyParam {
             KeyParam::Padding(v) => (Tag::Padding, v.to_cbor_value()?),
             KeyParam::Digest(v) => (Tag::Digest, v.to_cbor_value()?),
             KeyParam::EcCurve(v) => (Tag::EcCurve, v.to_cbor_value()?),
+            KeyParam::MlDsaVariant(v) => (Tag::MlDsaVariant, v.to_cbor_value()?),
             KeyParam::Origin(v) => (Tag::Origin, v.to_cbor_value()?),
             KeyParam::Purpose(v) => (Tag::Purpose, v.to_cbor_value()?),
             KeyParam::KeySize(v) => (Tag::KeySize, v.to_cbor_value()?),
@@ -687,7 +698,6 @@ impl crate::AsCborValue for KeyParam {
             KeyParam::AttestationIdProduct(v) => (Tag::AttestationIdProduct, v.to_cbor_value()?),
             KeyParam::AttestationIdSerial(v) => (Tag::AttestationIdSerial, v.to_cbor_value()?),
             KeyParam::AttestationIdImei(v) => (Tag::AttestationIdImei, v.to_cbor_value()?),
-            #[cfg(feature = "hal_v3")]
             KeyParam::AttestationIdSecondImei(v) => {
                 (Tag::AttestationIdSecondImei, v.to_cbor_value()?)
             }
@@ -710,7 +720,6 @@ impl crate::AsCborValue for KeyParam {
             KeyParam::CertificateNotBefore(v) => (Tag::CertificateNotBefore, v.to_cbor_value()?),
             KeyParam::CertificateNotAfter(v) => (Tag::CertificateNotAfter, v.to_cbor_value()?),
             KeyParam::MaxBootLevel(v) => (Tag::MaxBootLevel, v.to_cbor_value()?),
-            #[cfg(feature = "hal_v4")]
             KeyParam::ModuleHash(v) => (Tag::ModuleHash, v.to_cbor_value()?),
         };
         Ok(cbor::value::Value::Array(vec_try![
@@ -753,6 +762,12 @@ impl crate::AsCborValue for KeyParam {
             Tag::EcCurve as i32,
             EcCurve::cddl_ref(),
             "Tag_EcCurve",
+        );
+        result += &format!(
+            "    [{}, {}], ; {}\n",
+            Tag::MlDsaVariant as i32,
+            MlDsaVariant::cddl_ref(),
+            "Tag_MlDsaVariant",
         );
         result += &format!(
             "    [{}, {}], ; {}\n",
@@ -982,15 +997,12 @@ impl crate::AsCborValue for KeyParam {
             Vec::<u8>::cddl_ref(),
             "Tag_AttestationIdImei",
         );
-        #[cfg(feature = "hal_v3")]
-        {
-            result += &format!(
-                "    [{}, {}], ; {}\n",
-                Tag::AttestationIdSecondImei as i32,
-                Vec::<u8>::cddl_ref(),
-                "Tag_AttestationIdSecondImei",
-            );
-        }
+        result += &format!(
+            "    [{}, {}], ; {}\n",
+            Tag::AttestationIdSecondImei as i32,
+            Vec::<u8>::cddl_ref(),
+            "Tag_AttestationIdSecondImei",
+        );
         result += &format!(
             "    [{}, {}], ; {}\n",
             Tag::AttestationIdMeid as i32,
@@ -1081,15 +1093,12 @@ impl crate::AsCborValue for KeyParam {
             u32::cddl_ref(),
             "Tag_MaxBootLevel",
         );
-        #[cfg(feature = "hal_v4")]
-        {
-            result += &format!(
-                "    [{}, {}], ; {}\n",
-                Tag::ModuleHash as i32,
-                Vec::<u8>::cddl_ref(),
-                "Tag_ModuleHash",
-            );
-        }
+        result += &format!(
+            "    [{}, {}], ; {}\n",
+            Tag::ModuleHash as i32,
+            Vec::<u8>::cddl_ref(),
+            "Tag_ModuleHash",
+        );
         result += ")";
         Some(result)
     }
@@ -1165,6 +1174,7 @@ pub enum Tag {
     CallerNonce = 1879048199,
     MinMacLength = 805306376,
     EcCurve = 268435466,
+    MlDsaVariant = 268435467, // Only in >= v5 of the HAL
     RsaPublicExponent = 1342177480,
     IncludeUniqueId = 1879048394,
     RsaOaepMgfDigest = 536871115,
@@ -1210,8 +1220,7 @@ pub enum Tag {
     DeviceUniqueAttestation = 1879048912,
     IdentityCredentialKey = 1879048913,
     StorageKey = 1879048914,
-    #[cfg(feature = "hal_v3")]
-    AttestationIdSecondImei = -1879047469,
+    AttestationIdSecondImei = -1879047469, // Only in >= v3 of the HAL
     AssociatedData = -1879047192,
     Nonce = -1879047191,
     MacLength = 805307371,
@@ -1222,8 +1231,7 @@ pub enum Tag {
     CertificateNotBefore = 1610613744,
     CertificateNotAfter = 1610613745,
     MaxBootLevel = 805307378,
-    #[cfg(feature = "hal_v4")]
-    ModuleHash = -1879047468,
+    ModuleHash = -1879047468, // Only in >= v4 of the HAL
 }
 try_from_n!(Tag);
 

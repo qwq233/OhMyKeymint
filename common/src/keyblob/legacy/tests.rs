@@ -15,6 +15,7 @@
 use super::*;
 use crate::expect_err;
 use crate::tag::legacy::{consume_u32, consume_u64, consume_u8, consume_vec};
+use std::vec;
 
 #[test]
 fn test_consume_u8() {
@@ -278,4 +279,28 @@ fn test_deserialize_encrypted_keyblob_truncated() {
             data.len()
         );
     }
+}
+
+#[test]
+fn test_deserialize_encrypted_keyblob_overrun() {
+    let data = hex::decode(concat!(
+        "00", // format
+        "01000000",
+        "aa", // nonce
+        "02000000",
+        "bbbb", // ciphertext
+        "01000000",
+        "cc", // tag
+        concat!(
+            "00000000", // no blob data
+            "00000000", // no params
+            "00000000", // zero size of params
+        ),
+        concat!(
+            "00000001", // blob data
+            "000000",   // truncated params
+        ),
+    ))
+    .unwrap();
+    assert!(EncryptedKeyBlob::deserialize(&data).is_err());
 }

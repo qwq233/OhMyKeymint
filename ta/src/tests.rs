@@ -16,7 +16,7 @@
 
 use crate::{error_rsp, invalid_cbor_rsp_data, keys::SecureKeyWrapper, split_rsp};
 use der::{Decode, Encode};
-use kmr_common::Error;
+use kmr_common::ErrorKind;
 use kmr_wire::{
     keymint::{
         ErrorCode, KeyFormat, KeyParam, KeyPurpose, NEXT_MESSAGE_SIGNAL_FALSE,
@@ -24,6 +24,7 @@ use kmr_wire::{
     },
     AsCborValue,
 };
+use std::{vec, vec::Vec};
 
 #[test]
 fn test_invalid_data() {
@@ -232,15 +233,15 @@ fn test_split_rsp_invalid_input() {
     let result = split_rsp(&rsp, 5);
     assert!(result.is_err());
     assert!(matches!(
-        result,
-        Err(Error::Hal(ErrorCode::InvalidArgument, _))
+        result.unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::InvalidArgument, _)
     ));
 
     let rsp = vec![0x82, 0x21, 0x80];
     let result = split_rsp(&rsp, 1);
     assert!(matches!(
-        result,
-        Err(Error::Hal(ErrorCode::InvalidArgument, _))
+        result.unwrap_err().kind(),
+        ErrorKind::Hal(ErrorCode::InvalidArgument, _)
     ));
 }
 

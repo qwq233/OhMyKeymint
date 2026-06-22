@@ -414,7 +414,8 @@ impl HalXml {
 
 fn fallback_keymint_version_from_android() -> i32 {
     match detect_android_major_version() {
-        Some(version) if version >= 16 => KEYMINT_V4, // TODO: still use V4 until V5 is implemented upstream.
+        Some(version) if version >= 17 => KEYMINT_V5,
+        Some(16) => KEYMINT_V4,
         Some(14 | 15) => KEYMINT_V3,
         Some(13) => KEYMINT_V2,
         Some(12) => KEYMINT_V1,

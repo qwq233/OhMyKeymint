@@ -18,6 +18,11 @@
 use crate::{cbor_type_error, try_from_n, AsCborValue, CborError};
 use enumn::N;
 use kmr_derive::AsCborValue;
+use std::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 /// IRPC HAL Versions
 pub const IRPC_V2: i32 = 2;

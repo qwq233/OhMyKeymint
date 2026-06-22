@@ -20,6 +20,7 @@ use crate::{
 };
 use core::mem::size_of;
 use kmr_wire::keymint::KeyParam;
+use std::vec::Vec;
 
 #[cfg(test)]
 mod tests;

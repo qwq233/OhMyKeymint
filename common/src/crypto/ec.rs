@@ -19,6 +19,7 @@ use crate::{der_err, km_err, try_to_vec, vec_try, Error, FallibleAllocExt};
 use der::{asn1::BitStringRef, AnyRef, Decode, Encode, Sequence};
 use kmr_wire::{coset, keymint::EcCurve, rpc, KeySizeInBits};
 use spki::{AlgorithmIdentifier, SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
+use std::vec::Vec;
 use zeroize::ZeroizeOnDrop;
 
 /// Size (in bytes) of a curve 25519 private key.
@@ -398,51 +399,39 @@ pub fn import_sec1_private_key(data: &[u8]) -> Result<KeyMaterial, Error> {
         oid: X509_NIST_OID,
         parameters: Some(AnyRef::from(&parameters_oid)),
     };
-    let private_key = der::asn1::OctetStringRef::new(data)
-        .map_err(|e| der_err!(e, "failed to wrap ECPrivateKey as PKCS#8 private key"))?;
-    let pkcs8_key = pkcs8::PrivateKeyInfo::new(algorithm, private_key);
-    import_pkcs8_key_impl(&pkcs8_key)
+    import_pkcs8_key_impl(&algorithm, data)
 }
 
 /// Import an EC key in PKCS#8 format.
 pub fn import_pkcs8_key(data: &[u8]) -> Result<KeyMaterial, Error> {
     let key_info = pkcs8::PrivateKeyInfoRef::try_from(data)
         .map_err(|_| km_err!(InvalidArgument, "failed to parse PKCS#8 EC key"))?;
-    import_pkcs8_key_impl(&key_info)
+    import_pkcs8_key_impl(&key_info.algorithm, key_info.private_key.as_bytes())
 }
 
-/// Import a `pkcs8::PrivateKeyInfo` EC key.
-fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfoRef<'_>) -> Result<KeyMaterial, Error> {
-    let algo_params = key_info.algorithm.parameters;
-    match key_info.algorithm.oid {
+/// Import EC key material described by PKCS#8 algorithm metadata.
+fn import_pkcs8_key_impl(
+    algorithm: &AlgorithmIdentifier<AnyRef<'_>>,
+    private_key: &[u8],
+) -> Result<KeyMaterial, Error> {
+    let algo_params = algorithm.parameters;
+    match algorithm.oid {
         X509_NIST_OID => {
             let algo_params = algo_params.ok_or_else(|| {
                 km_err!(
                     InvalidArgument,
                     "missing PKCS#8 parameters for NIST curve import under OID {:?}",
-                    key_info.algorithm.oid
+                    algorithm.oid
                 )
             })?;
             let curve_oid = algo_params
                 .decode_as()
                 .map_err(|_e| km_err!(InvalidArgument, "imported key has no OID parameter"))?;
-            let (curve, key) = match curve_oid {
-                ALGO_PARAM_P224_OID => (
-                    EcCurve::P224,
-                    Key::P224(NistKey(try_to_vec(key_info.private_key.as_bytes())?)),
-                ),
-                ALGO_PARAM_P256_OID => (
-                    EcCurve::P256,
-                    Key::P256(NistKey(try_to_vec(key_info.private_key.as_bytes())?)),
-                ),
-                ALGO_PARAM_P384_OID => (
-                    EcCurve::P384,
-                    Key::P384(NistKey(try_to_vec(key_info.private_key.as_bytes())?)),
-                ),
-                ALGO_PARAM_P521_OID => (
-                    EcCurve::P521,
-                    Key::P521(NistKey(try_to_vec(key_info.private_key.as_bytes())?)),
-                ),
+            let curve = match curve_oid {
+                ALGO_PARAM_P224_OID => EcCurve::P224,
+                ALGO_PARAM_P256_OID => EcCurve::P256,
+                ALGO_PARAM_P384_OID => EcCurve::P384,
+                ALGO_PARAM_P521_OID => EcCurve::P521,
                 oid => {
                     return Err(km_err!(
                         ImportParameterMismatch,
@@ -450,6 +439,14 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfoRef<'_>) -> Result<KeyM
                         oid,
                     ))
                 }
+            };
+            let private_key = normalize_nist_private_key(curve_oid, private_key)?;
+            let key = match curve {
+                EcCurve::P224 => Key::P224(NistKey(private_key)),
+                EcCurve::P256 => Key::P256(NistKey(private_key)),
+                EcCurve::P384 => Key::P384(NistKey(private_key)),
+                EcCurve::P521 => Key::P521(NistKey(private_key)),
+                EcCurve::Curve25519 => unreachable!("NIST import cannot produce Curve25519"),
             };
             Ok(KeyMaterial::Ec(curve, CurveType::Nist, key.into()))
         }
@@ -463,7 +460,6 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfoRef<'_>) -> Result<KeyM
                 // For Ed25519 the PKCS#8 `privateKey` field holds a `CurvePrivateKey`
                 // (RFC 8410 s7) that is an OCTET STRING holding the raw key.  As this is DER,
                 // this is just a 2 byte prefix (0x04 = OCTET STRING, 0x20 = length of raw key).
-                let private_key = key_info.private_key.as_bytes();
                 if private_key.len() != 2 + CURVE25519_PRIV_KEY_LEN
                     || private_key[0] != 0x04
                     || private_key[1] != 0x20
@@ -486,7 +482,6 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfoRef<'_>) -> Result<KeyM
                 // For X25519 the PKCS#8 `privateKey` field holds a `CurvePrivateKey`
                 // (RFC 8410 s7) that is an OCTET STRING holding the raw key.  As this is DER,
                 // this is just a 2 byte prefix (0x04 = OCTET STRING, 0x20 = length of raw key).
-                let private_key = key_info.private_key.as_bytes();
                 if private_key.len() != 2 + CURVE25519_PRIV_KEY_LEN
                     || private_key[0] != 0x04
                     || private_key[1] != 0x20
@@ -502,8 +497,41 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfoRef<'_>) -> Result<KeyM
         _ => Err(km_err!(
             InvalidArgument,
             "unexpected OID {:?} for PKCS#8 EC key import",
-            key_info.algorithm.oid,
+            algorithm.oid,
         )),
+    }
+}
+
+fn normalize_nist_private_key(
+    curve_oid: pkcs8::ObjectIdentifier,
+    private_key: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let mut ec_key = sec1::EcPrivateKey::from_der(private_key)
+        .map_err(|e| der_err!(e, "failed to parse ECPrivateKey"))?;
+    match ec_key.parameters {
+        Some(parameters) => {
+            let parameters_oid = parameters.named_curve().ok_or_else(|| {
+                km_err!(
+                    InvalidArgument,
+                    "couldn't retrieve parameters oid from sec1 ECPrivateKey formatted ec key parameters"
+                )
+            })?;
+            if parameters_oid != curve_oid {
+                return Err(km_err!(
+                    ImportParameterMismatch,
+                    "imported key has mismatched OID {:?}, expected {:?}",
+                    parameters_oid,
+                    curve_oid,
+                ));
+            }
+            try_to_vec(private_key)
+        }
+        None => {
+            ec_key.parameters = Some(curve_oid.into());
+            ec_key
+                .to_der()
+                .map_err(|e| km_err!(EncodingError, "failed to encode ECPrivateKey: {:?}", e))
+        }
     }
 }
 
@@ -717,5 +745,32 @@ mod tests {
         } else {
             panic!("unexpected key type");
         }
+    }
+
+    #[test]
+    fn test_pkcs8_ec_import_adds_missing_sec1_parameters() {
+        let key_data = hex::decode(concat!(
+            "308187020100301306072a8648ce3d020106082a8648ce3d030107",
+            "046d306b0201010420fa370fbd35e8de457faad315371b9cbf8",
+            "a05c373d2441f4cfad013a5ac0d1df0a14403420004dbb7",
+            "c89f916a64c8828ebcc955bf9c6eb95d6234179d10c3bbef",
+            "b0f050bbbe43acf3e897bc6604414eba233d7cfcec50af0",
+            "fc3b5709621a695f6ca0f7cc4e2c8"
+        ))
+        .unwrap();
+
+        let key = import_pkcs8_key(&key_data).expect("PKCS#8 parse failed");
+        let KeyMaterial::Ec(curve, curve_type, OpaqueOr::Explicit(Key::P256(key))) = key else {
+            panic!("unexpected key type");
+        };
+        assert_eq!(curve, EcCurve::P256);
+        assert_eq!(curve_type, CurveType::Nist);
+
+        let ec_key = sec1::EcPrivateKey::from_der(&key.0).expect("SEC1 parse failed");
+        assert_eq!(
+            ec_key.parameters.and_then(|params| params.named_curve()),
+            Some(ALGO_PARAM_P256_OID)
+        );
+        assert!(ec_key.public_key.is_some());
     }
 }

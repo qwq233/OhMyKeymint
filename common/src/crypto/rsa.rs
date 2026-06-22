@@ -21,6 +21,7 @@ use kmr_wire::keymint::{Digest, KeyParam, PaddingMode};
 use pkcs1::der::{Decode as Pkcs1Decode, Encode as Pkcs1Encode};
 use pkcs1::RsaPrivateKey;
 use spki::{AlgorithmIdentifier, SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
+use std::vec::Vec;
 use zeroize::ZeroizeOnDrop;
 
 /// Overhead for PKCS#1 v1.5 signature padding of undigested messages.  Digested messages have
@@ -37,7 +38,7 @@ pub const SHA256_PKCS1_SIGNATURE_OID: pkcs8::ObjectIdentifier =
 
 fn pkcs1_der_error(err: pkcs1::der::Error, context: core::fmt::Arguments<'_>) -> Error {
     log::warn!("{}: {:?} at {:?}", context, err, err.position());
-    Error::Der(der::ErrorKind::Failed)
+    Error::from(crate::ErrorKind::Der(der::ErrorKind::Failed))
 }
 
 /// An RSA key, in the form of an ASN.1 DER encoding of an PKCS#1 `RSAPrivateKey` structure,

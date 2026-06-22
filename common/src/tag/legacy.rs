@@ -20,10 +20,11 @@ use core::convert::{TryFrom, TryInto};
 use kmr_wire::{
     keymint::{
         Algorithm, BlockMode, DateTime, Digest, EcCurve, KeyOrigin, KeyParam, KeyPurpose,
-        PaddingMode, Tag,
+        MlDsaVariant, PaddingMode, Tag,
     },
     KeySizeInBits, RsaExponent,
 };
+use std::vec::Vec;
 
 /// Retrieve a `u8` from the start of the given slice, if possible.
 pub fn consume_u8(data: &mut &[u8]) -> Result<u8, Error> {
@@ -181,6 +182,9 @@ pub fn serialize(params: &[KeyParam]) -> Result<Vec<u8>, Error> {
                 result.try_extend_from_slice(&(*v as u32).to_ne_bytes())?
             }
             KeyParam::Origin(v) => result.try_extend_from_slice(&(*v as u32).to_ne_bytes())?,
+            KeyParam::MlDsaVariant(v) => {
+                result.try_extend_from_slice(&(*v as u32).to_ne_bytes())?
+            }
 
             // `u32`-holding variants.
             KeyParam::KeySize(v) => result.try_extend_from_slice(&(v.0).to_ne_bytes())?,
@@ -301,6 +305,12 @@ fn consume_blob(
 /// modified to contain the unconsumed part of the data.
 pub fn deserialize(data: &mut &[u8]) -> Result<Vec<KeyParam>, Error> {
     let blob_data_size = consume_u32(data)? as usize;
+    if blob_data_size > data.len() {
+        return Err(km_err!(
+            InvalidKeyBlob,
+            "failed to find {blob_data_size} bytes"
+        ));
+    }
 
     let blob_data = &data[..blob_data_size];
     let mut next_blob_offset = 0;
@@ -352,6 +362,9 @@ pub fn deserialize(data: &mut &[u8]) -> Result<Vec<KeyParam>, Error> {
             Tag::Origin => {
                 KeyParam::Origin(<KeyOrigin>::try_from(consume_i32(data)?).map_err(enum_err)?)
             }
+            Tag::MlDsaVariant => KeyParam::MlDsaVariant(
+                <MlDsaVariant>::try_from(consume_i32(data)?).map_err(enum_err)?,
+            ),
 
             // `u32`-holding variants.
             Tag::KeySize => KeyParam::KeySize(KeySizeInBits(consume_u32(data)?)),

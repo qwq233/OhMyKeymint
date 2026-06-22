@@ -23,6 +23,16 @@ pub struct BoringRng;
 
 impl crypto::Rng for BoringRng {
     fn add_entropy(&mut self, data: &[u8]) {
+        #[cfg(soong)]
+        // Safety: `data` is a valid slice.
+        unsafe {
+            ffi::RAND_seed(
+                data.as_ptr() as *const libc::c_void,
+                data.len() as libc::c_int,
+            );
+        }
+        #[cfg(not(soong))]
+        // Safety: `data` is a valid slice.
         unsafe {
             ffi::RAND_add(
                 data.as_ptr() as *const libc::c_void,

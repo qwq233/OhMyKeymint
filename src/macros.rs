@@ -1,20 +1,3 @@
-#[macro_export]
-macro_rules! jni_methods {
-    ($([$method:expr, $signature:expr, $fn:expr]),* $(,)?) => {
-        vec![
-            $(
-                {
-                    jni::NativeMethod {
-                        name: jni::strings::JNIString::from($method),
-                        sig: jni::strings::JNIString::from($signature),
-                        fn_ptr: $fn as *mut _,
-                    }
-                }
-            ),*
-        ]
-    };
-}
-
 /// Generates a message containing the current source file name and line number.
 ///
 /// # Examples
@@ -31,5 +14,15 @@ macro_rules! err {
     };
     {} => {
         format!("{}:{}", file!(), line!())
+    };
+}
+
+#[macro_export]
+macro_rules! root_path {
+    () => {
+        "/data/misc/keystore/omk"
+    };
+    ($leaf:literal) => {
+        concat!("/data/misc/keystore/omk/", $leaf)
     };
 }

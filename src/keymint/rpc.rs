@@ -42,7 +42,7 @@ pub struct Artifacts<T: DeriveBytes> {
     bcc_signing_key: RefCell<Option<ec::Key>>,
 }
 
-impl<T: DeriveBytes> RetrieveRpcArtifacts for Artifacts<T> {
+impl<T: DeriveBytes + Send> RetrieveRpcArtifacts for Artifacts<T> {
     fn derive_bytes_from_hbk(
         &self,
         _hkdf: &dyn crypto::Hkdf,
@@ -89,7 +89,7 @@ impl<T: DeriveBytes> RetrieveRpcArtifacts for Artifacts<T> {
     }
 }
 
-impl<T: DeriveBytes> Artifacts<T> {
+impl<T: DeriveBytes + Send> Artifacts<T> {
     /// Constructor.
     pub fn new(derive: T, sign_algo: CsrSigningAlgorithm) -> Self {
         Self {

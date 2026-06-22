@@ -16,6 +16,11 @@
 
 use crate::{cbor_type_error, AsCborValue, CborError};
 use kmr_derive::AsCborValue;
+use std::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 pub const KEY_AGREEMENT_LABEL: &str = "KeymasterSharedMac";
 pub const KEY_CHECK_LABEL: &str = "Keymaster HMAC Verification";

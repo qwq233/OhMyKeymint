@@ -1,3 +1,6 @@
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppUid(pub i64);
+
 /// This returns the current time (in milliseconds) as an instance of a monotonic clock,
 /// by invoking the system call since Rust does not support getting monotonic time instance
 /// as an integer.

@@ -24,10 +24,9 @@ use kmr_common::crypto::{
     ec::{CoseKeyPurpose, RKP_TEST_KEY_CBOR_MARKER},
     hmac_sha256, KeyMaterial,
 };
-use kmr_common::{keyblob, km_err, rpc_err, try_to_vec, Error, FallibleAllocExt};
+use kmr_common::{keyblob, km_err, rpc_err, try_to_vec, Error, ErrorKind, FallibleAllocExt};
 use kmr_wire::{
     cbor,
-    cbor::cbor,
     keymint::{
         Algorithm, Digest, EcCurve, KeyParam, KeyPurpose, SecurityLevel, VerifiedBootState,
         UNDEFINED_NOT_AFTER, UNDEFINED_NOT_BEFORE,
@@ -41,6 +40,8 @@ use kmr_wire::{
     types::KeySizeInBits,
     CborError,
 };
+use std::string::{String, ToString};
+use std::{vec, vec::Vec};
 
 const RPC_P256_KEYGEN_PARAMS: [KeyParam; 8] = [
     KeyParam::Purpose(KeyPurpose::AttestKey),
@@ -113,8 +114,7 @@ impl KeyMintTa {
             l => {
                 return Err(km_err!(
                     HardwareTypeUnavailable,
-                    "security level {:?} not supported",
-                    l
+                    "security level {l:?} not supported"
                 ))
             }
         };
@@ -128,22 +128,40 @@ impl KeyMintTa {
         // - shorter-encoded key < longer-encoded key
         // - lexicographic comparison for same-length keys
         // Note that this is *different* than the ordering required in RFC 8949 s4.2.1.
-        let info = cbor!({
-            "brand" => brand,
-            "fused" => i32::from(fused),
-            "model" => model,
-            "device" => device,
-            "product" => product,
-            "vb_state" => vb_state,
-            "os_version" => hal_info.os_version.to_string(),
-            "manufacturer" => manufacturer,
-            "vbmeta_digest" => vbmeta_digest,
-            "security_level" => security_level,
-            "boot_patch_level" => boot_info.boot_patchlevel,
-            "bootloader_state" => bootloader_state,
-            "system_patch_level" => hal_info.os_patchlevel,
-            "vendor_patch_level" => hal_info.vendor_patchlevel,
-        })?;
+        let info = Value::Map(vec![
+            (Value::from("brand"), Value::from(brand.into_owned())),
+            (Value::from("fused"), Value::from(i32::from(fused))),
+            (Value::from("model"), Value::from(model.into_owned())),
+            (Value::from("device"), Value::from(device.into_owned())),
+            (Value::from("product"), Value::from(product.into_owned())),
+            (Value::from("vb_state"), Value::from(vb_state)),
+            (
+                Value::from("os_version"),
+                Value::from(hal_info.os_version.to_string()),
+            ),
+            (
+                Value::from("manufacturer"),
+                Value::from(manufacturer.into_owned()),
+            ),
+            (Value::from("vbmeta_digest"), vbmeta_digest),
+            (Value::from("security_level"), Value::from(security_level)),
+            (
+                Value::from("boot_patch_level"),
+                Value::from(boot_info.boot_patchlevel),
+            ),
+            (
+                Value::from("bootloader_state"),
+                Value::from(bootloader_state),
+            ),
+            (
+                Value::from("system_patch_level"),
+                Value::from(hal_info.os_patchlevel),
+            ),
+            (
+                Value::from("vendor_patch_level"),
+                Value::from(hal_info.vendor_patchlevel),
+            ),
+        ]);
         Ok(info)
     }
 
@@ -257,9 +275,8 @@ impl KeyMintTa {
         if challenge.len() > MAX_CHALLENGE_SIZE_V2 {
             return Err(km_err!(
                 InvalidArgument,
-                "Challenge is too big. Actual: {:?}. Maximum: {:?}.",
+                "Challenge is too big. Actual: {:?}. Maximum: {MAX_CHALLENGE_SIZE_V2:?}.",
                 challenge.len(),
-                MAX_CHALLENGE_SIZE_V2
             ));
         }
         // Validate mac and extract the public keys to sign from the MacedPublicKeys
@@ -309,18 +326,18 @@ impl KeyMintTa {
         }
         // Construct the `CsrPayload`
         let rpc_device_info = self.rpc_device_info_cbor()?;
-        let csr_payload = cbor!([
+        let csr_payload = Value::Array(vec![
             Value::Integer(self.rpc_info.get_version().into()),
             Value::Text(String::from(CERT_TYPE_KEYMINT)),
             rpc_device_info,
             Value::Array(pub_cose_keys),
-        ])?;
+        ]);
         let csr_payload_data = serialize_cbor(&csr_payload)?;
         // Construct the payload for `SignedData`
-        let signed_data_payload = cbor!([
+        let signed_data_payload = Value::Array(vec![
             Value::Bytes(challenge.to_vec()),
-            Value::Bytes(csr_payload_data)
-        ])?;
+            Value::Bytes(csr_payload_data),
+        ]);
         let signed_data_payload_data = serialize_cbor(&signed_data_payload)?;
 
         // Process DICE info.
@@ -340,12 +357,12 @@ impl KeyMintTa {
         )?)?;
 
         // Construct `AuthenticatedRequest<CsrPayload>`
-        let authn_req = cbor!([
+        let authn_req = Value::Array(vec![
             Value::Integer(AUTH_REQ_SCHEMA_V1.into()),
             uds_certs,
             dice_cert_chain,
             signed_data_cbor,
-        ])?;
+        ]);
         serialize_cbor(&authn_req)
     }
 }
@@ -370,6 +387,6 @@ where
 pub fn serialize_cbor(cbor_value: &Value) -> Result<Vec<u8>, Error> {
     let mut buf = Vec::new();
     cbor::ser::into_writer(cbor_value, &mut buf)
-        .map_err(|_e| Error::Cbor(CborError::EncodeFailed))?;
+        .map_err(|_e| Error::from(ErrorKind::Cbor(CborError::EncodeFailed)))?;
     Ok(buf)
 }

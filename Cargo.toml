@@ -9,7 +9,6 @@ name = "keymint"
 path = "src/main.rs"
 
 [dependencies]
-jni = "0.22.4"
 syscalls = "0.8.1"
 kmr-derive = { path = "derive" }
 kmr-common = { path = "common" }
@@ -33,7 +32,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 x509-cert = "0.2.5"
 watchdog_rs = { path = "watchdog", version = "0.1.0" }
-nix = { version = "0.31.3", features = ["mman"] }
+nix = { version = "0.31.3", features = ["fs", "mman"] }
 rsproperties = { version = "0.5.0", features = ["builder"] }
 libsqlite3-sys = "0.38.0"
 rand = "0.10.1"
@@ -89,4 +88,6 @@ prost-build = "0.14.4"
 rsbinder-aidl = "0.9.0"
 
 [dev-dependencies]
+ciborium = "0.2.2"
 rcgen = "0.14.8"
+tempfile = "3.27.0"

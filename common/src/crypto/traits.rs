@@ -18,6 +18,7 @@ use crate::{crypto::ec::Key, der_err, explicit, keyblob, vec_try, Error};
 use der::Decode;
 use kmr_wire::{keymint, keymint::Digest, KeySizeInBits, RsaExponent};
 use log::{error, warn};
+use std::{boxed::Box, vec::Vec};
 
 /// Combined collection of trait implementations that must be provided.
 pub struct Implementation {
@@ -54,6 +55,9 @@ pub struct Implementation {
 
     /// SHA-256 implementation.
     pub sha256: Box<dyn Sha256>,
+
+    /// ML-DSA implementation.
+    pub mldsa: Box<dyn MlDsa>,
 }
 
 /// Abstraction of a random number generator that is cryptographically secure
@@ -281,9 +285,9 @@ pub trait Rsa: Send {
         mode: rsa::DecryptionMode,
     ) -> Result<Box<dyn AccumulatingOperation>, Error>;
 
-    /// Create an RSA signing operation.  For [`rsa::SignMode::Pkcs1_1_5Padding(Digest::None)`] the
-    /// implementation should reject (with `ErrorCode::InvalidInputLength`) accumulated input that
-    /// is larger than the size of the RSA key less overhead
+    /// Create an RSA signing operation.  For [`rsa::SignMode::Pkcs1_1_5Padding`]([`Digest::None`])
+    /// the implementation should reject (with `ErrorCode::InvalidInputLength`) accumulated input
+    /// that is larger than the size of the RSA key less overhead
     /// ([`rsa::PKCS1_UNDIGESTED_SIGNATURE_PADDING_OVERHEAD`]).
     fn begin_sign(
         &self,
@@ -401,6 +405,57 @@ pub trait Ec: Send {
         &self,
         key: OpaqueOr<ec::Key>,
         digest: Digest,
+    ) -> Result<Box<dyn AccumulatingOperation>, Error>;
+}
+
+/// Abstraction of ML-DSA functionality.
+pub trait MlDsa: Send {
+    /// Generate an ML-DSA key.  Key generation parameters are passed in for reference, to allow for
+    /// implementations that might have parameter-specific behaviour.
+    fn generate_key(
+        &self,
+        rng: &mut dyn Rng,
+        variant: MlDsaVariant,
+        _params: &[keymint::KeyParam],
+    ) -> Result<KeyMaterial, Error> {
+        let mut key = [0; mldsa::SEED_SIZE];
+        rng.fill_bytes(&mut key[..]);
+        let key = match variant {
+            MlDsaVariant::MlDsa65 => mldsa::Key::MlDsa65(key),
+            MlDsaVariant::MlDsa87 => mldsa::Key::MlDsa87(key),
+        };
+        Ok(KeyMaterial::MlDsa(variant, key.into()))
+    }
+
+    /// Import an ML-DSA key in raw format.  Key import parameters are passed in for reference, to
+    /// allow for implementations that might have parameter-specific behaviour.
+    fn import_raw_key(
+        &self,
+        data: &[u8],
+        variant: MlDsaVariant,
+        _params: &[keymint::KeyParam],
+    ) -> Result<KeyMaterial, Error> {
+        mldsa::import_raw_key(data, variant)
+    }
+
+    /// Import an ML-DSA key in PKCS#8 format.  Key import parameters are passed in for reference,
+    /// to allow for implementations that might have parameter-specific behaviour.
+    fn import_pkcs8_key(
+        &self,
+        data: &[u8],
+        _params: &[keymint::KeyParam],
+    ) -> Result<KeyMaterial, Error> {
+        mldsa::import_pkcs8_key(data)
+    }
+
+    /// Return the public key data that corresponds to the provided private `key`, as
+    /// the bytes of the public key.
+    fn subject_public_key(&self, key: &OpaqueOr<mldsa::Key>) -> Result<Vec<u8>, Error>;
+
+    /// Create an ML-DSA signing operation.
+    fn begin_sign(
+        &self,
+        key: OpaqueOr<mldsa::Key>,
     ) -> Result<Box<dyn AccumulatingOperation>, Error>;
 }
 
@@ -531,10 +586,7 @@ macro_rules! log_unimpl {
 macro_rules! unimpl {
     () => {
         log_unimpl!();
-        return Err(Error::Hal(
-            kmr_wire::keymint::ErrorCode::Unimplemented,
-            format!("{}:{}: method unimplemented", file!(), line!()),
-        ));
+        return Err($crate::km_err!(Unimplemented, "method unimplemented"));
     };
 }
 
@@ -703,6 +755,21 @@ impl Ec for NoOpEc {
         &self,
         _key: OpaqueOr<ec::Key>,
         _digest: Digest,
+    ) -> Result<Box<dyn AccumulatingOperation>, Error> {
+        unimpl!();
+    }
+}
+
+/// Stub implementation of [`MlDsa`].
+pub struct NoOpMlDsa;
+impl MlDsa for NoOpMlDsa {
+    fn subject_public_key(&self, _key: &OpaqueOr<mldsa::Key>) -> Result<Vec<u8>, Error> {
+        unimpl!();
+    }
+
+    fn begin_sign(
+        &self,
+        _key: OpaqueOr<mldsa::Key>,
     ) -> Result<Box<dyn AccumulatingOperation>, Error> {
         unimpl!();
     }

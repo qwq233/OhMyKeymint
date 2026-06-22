@@ -62,6 +62,7 @@ pub const KEYMINT_ENFORCED_CHARACTERISTICS: &[Tag] = &[
     Tag::UserSecureId,
     Tag::Algorithm,
     Tag::EcCurve,
+    Tag::MlDsaVariant,
     Tag::UserAuthType,
     Tag::Origin,
     Tag::Purpose,
@@ -212,7 +213,7 @@ pub struct Info {
 /// Global "map" of tags to information about their behaviour.
 /// Encoded as an array to avoid allocation; lookup should only be slightly slower
 /// for this few entries.
-const INFO: [(Tag, Info); 61] = [
+const INFO: [(Tag, Info); 62] = [
     (
         Tag::Purpose,
         Info {
@@ -1151,6 +1152,21 @@ const INFO: [(Tag, Info); 61] = [
             lifetime: ValueLifetime::FixedAtStartup,
             cert_gen: CertGenParam::NotRequired,
             bit_index: 60,
+        },
+    ),
+    (
+        Tag::MlDsaVariant,
+        Info {
+            name: "ML_DSA_VARIANT",
+            tt: TagType::Enum,
+            ext_asn1_type: Some("INTEGER"),
+            user_can_specify: UserSpecifiable(true),
+            characteristic: Characteristic::KeyMintEnforced,
+            op_param: OperationParam::NotOperationParam,
+            keymint_auto_adds: AutoAddedCharacteristic(false),
+            lifetime: ValueLifetime::Variable,
+            cert_gen: CertGenParam::NotRequired,
+            bit_index: 61,
         },
     ),
 ];

@@ -15,7 +15,7 @@ use kmr_common::{
     crypto::{ec, rsa, KeyMaterial, Sha256},
     Error,
 };
-use kmr_crypto_boring::{ec::BoringEc, rsa::BoringRsa, sha256::BoringSha256};
+use kmr_crypto_boring::{ec::BoringEc, mldsa::BoringMlDsa, rsa::BoringRsa, sha256::BoringSha256};
 use kmr_ta::device::{
     RetrieveCertSigningInfo, SigningAlgorithm, SigningInfoSnapshot, SigningKeyType,
 };
@@ -369,7 +369,12 @@ fn validate_chain_matches_key(
         })?;
     let mut spki_buf = Vec::new();
     let derived_spki = key
-        .subject_public_key_info(&mut spki_buf, &BoringEc::default(), &BoringRsa::default())
+        .subject_public_key_info(
+            &mut spki_buf,
+            &BoringEc::default(),
+            &BoringRsa::default(),
+            &BoringMlDsa,
+        )
         .map_err(|e| {
             anyhow!(
                 "failed to derive {} public key info from private key: {e:?}",

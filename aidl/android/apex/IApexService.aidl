@@ -67,12 +67,6 @@ interface IApexService {
    void unstagePackages(in @utf8InCpp List<String> active_package_paths);
 
    /**
-    * Returns the active package corresponding to |package_name| and null
-    * if none exists.
-    */
-   ApexInfo getActivePackage(in @utf8InCpp String package_name);
-
-   /**
     * Not meant for use outside of testing. The call will not be
     * functional on user builds.
     */

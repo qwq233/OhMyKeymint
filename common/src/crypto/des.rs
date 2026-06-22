@@ -14,13 +14,10 @@
 
 //! Functionality related to triple DES encryption
 
-use super::{nonce, Rng};
-use crate::{km_err, tag, try_to_vec, Error};
+use crate::{km_err, try_to_vec, Error};
 use core::convert::TryInto;
-use kmr_wire::{
-    keymint::{BlockMode, KeyParam, PaddingMode},
-    KeySizeInBits,
-};
+use kmr_wire::KeySizeInBits;
+use std::vec::Vec;
 use zeroize::ZeroizeOnDrop;
 
 /// Size of an DES block in bytes.
@@ -72,46 +69,4 @@ pub enum Mode {
         /// Nonce to use.
         nonce: [u8; BLOCK_SIZE],
     },
-}
-
-impl Mode {
-    /// Determine the [`Mode`], rejecting invalid parameters. Use `caller_nonce` if provided,
-    /// otherwise generate a new nonce using the provided [`Rng`] instance.
-    pub fn new(
-        params: &[KeyParam],
-        caller_nonce: Option<&Vec<u8>>,
-        rng: &mut dyn Rng,
-    ) -> Result<Self, Error> {
-        let mode = tag::get_block_mode(params)?;
-        let padding = tag::get_padding_mode(params)?;
-        match mode {
-            BlockMode::Ecb => {
-                if caller_nonce.is_some() {
-                    return Err(km_err!(InvalidNonce, "nonce unexpectedly provided"));
-                }
-                match padding {
-                    PaddingMode::None => Ok(Mode::EcbNoPadding),
-                    PaddingMode::Pkcs7 => Ok(Mode::EcbPkcs7Padding),
-                    _ => Err(km_err!(
-                        IncompatiblePaddingMode,
-                        "expected NONE/PKCS7 padding for DES-ECB"
-                    )),
-                }
-            }
-            BlockMode::Cbc => {
-                let nonce: [u8; BLOCK_SIZE] = nonce(BLOCK_SIZE, caller_nonce, rng)?
-                    .try_into()
-                    .map_err(|_e| km_err!(InvalidNonce, "want {} byte nonce", BLOCK_SIZE))?;
-                match padding {
-                    PaddingMode::None => Ok(Mode::CbcNoPadding { nonce }),
-                    PaddingMode::Pkcs7 => Ok(Mode::CbcPkcs7Padding { nonce }),
-                    _ => Err(km_err!(
-                        IncompatiblePaddingMode,
-                        "expected NONE/PKCS7 padding for DES-CBC"
-                    )),
-                }
-            }
-            _ => Err(km_err!(UnsupportedBlockMode, "want ECB/CBC")),
-        }
-    }
 }

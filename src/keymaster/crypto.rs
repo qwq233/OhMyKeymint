@@ -1,11 +1,23 @@
 use anyhow::{Context, Result};
-use kmr_crypto_boring::{km::*, zvec::ZVec};
+pub use kmr_crypto_boring::{km::*, zvec::ZVec};
+use x509_cert::{
+    der::{Decode, Encode},
+    Certificate,
+};
 
 use crate::err;
 
 pub struct ECDHPrivateKey(ECKey);
 
 pub type EncryptedMessage = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
+pub fn parse_subject_from_certificate(cert_buf: &[u8]) -> Result<Vec<u8>> {
+    let cert = Certificate::from_der(cert_buf).context(err!("parsing certificate failed"))?;
+    cert.tbs_certificate
+        .subject
+        .to_der()
+        .context(err!("encoding certificate subject failed"))
+}
 
 impl ECDHPrivateKey {
     /// Randomly generate a fresh keypair.

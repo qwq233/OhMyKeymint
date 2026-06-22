@@ -20,37 +20,64 @@
 use crate::android::hardware::security::keymint::{
     Algorithm::Algorithm, BlockMode::BlockMode, Digest::Digest, EcCurve::EcCurve,
     HardwareAuthenticatorType::HardwareAuthenticatorType, KeyOrigin::KeyOrigin,
-    KeyParameter::KeyParameter, KeyPurpose::KeyPurpose, PaddingMode::PaddingMode,
-    SecurityLevel::SecurityLevel,
+    KeyParameter::KeyParameter, KeyPurpose::KeyPurpose, MlDsaVariant::MlDsaVariant,
+    PaddingMode::PaddingMode, SecurityLevel::SecurityLevel,
 };
 use crate::android::security::metrics::{
     Algorithm::Algorithm as MetricsAlgorithm, AtomID::AtomID, CrashStats::CrashStats,
     EcCurve::EcCurve as MetricsEcCurve,
     HardwareAuthenticatorType::HardwareAuthenticatorType as MetricsHardwareAuthenticatorType,
-    KeyCreationWithAuthInfo::KeyCreationWithAuthInfo,
+    KeyCreationPerUid::KeyCreationPerUid, KeyCreationWithAuthInfo::KeyCreationWithAuthInfo,
     KeyCreationWithGeneralInfo::KeyCreationWithGeneralInfo,
     KeyCreationWithPurposeAndModesInfo::KeyCreationWithPurposeAndModesInfo,
+    KeyOperationPerUid::KeyOperationPerUid, KeyOperationStreamingStats::KeyOperationStreamingStats,
     KeyOperationWithGeneralInfo::KeyOperationWithGeneralInfo,
     KeyOperationWithPurposeAndModesInfo::KeyOperationWithPurposeAndModesInfo,
-    KeyOrigin::KeyOrigin as MetricsKeyOrigin, Keystore2AtomWithOverflow::Keystore2AtomWithOverflow,
-    KeystoreAtom::KeystoreAtom, KeystoreAtomPayload::KeystoreAtomPayload,
-    Outcome::Outcome as MetricsOutcome, Purpose::Purpose as MetricsPurpose,
-    RkpError::RkpError as MetricsRkpError, RkpErrorStats::RkpErrorStats,
+    KeyOrigin::KeyOrigin as MetricsKeyOrigin, KeysPerUid::KeysPerUid,
+    Keystore2AtomWithOverflow::Keystore2AtomWithOverflow, KeystoreAtom::KeystoreAtom,
+    KeystoreAtomPayload::KeystoreAtomPayload, OperationLatency::OperationLatency,
+    OperationType::OperationType as MetricsOperationType, Outcome::Outcome as MetricsOutcome,
+    Purpose::Purpose as MetricsPurpose, RkpError::RkpError as MetricsRkpError,
     SecurityLevel::SecurityLevel as MetricsSecurityLevel, Storage::Storage as MetricsStorage,
 };
-use crate::err;
+use crate::err as ks_err;
 use crate::global::DB;
 use crate::keymaster::error::anyhow_error_to_serialized_error;
 use crate::keymaster::key_parameter::KeyParameterValue as KsKeyParamValue;
 use crate::keymaster::operation::Outcome;
 use crate::watchdog as wd;
 use anyhow::{anyhow, Context, Result};
+use log::{error, warn};
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
+
+/// Helper macro to time a function call and return a tuple of (Duration, Result).
+#[macro_export]
+macro_rules! timed_call {
+    ($f:expr) => {{
+        let start = std::time::Instant::now();
+        let result = $f;
+        (start.elapsed(), result)
+    }};
+}
+
+#[cfg(test)]
+mod tests;
 
 // Note: Crash events are recorded at keystore restarts, based on the assumption that keystore only
 // gets restarted after a crash, during a boot cycle.
-const KEYSTORE_CRASH_COUNT_PROPERTY: &str = "keystore.omk.crash_count";
+const KEYSTORE_CRASH_COUNT_PATH: &str = crate::root_path!("crash_count");
+const KERNEL_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+
+/// The Keystore2KeysPerUid atom should be emitted for the top X UIDs with a key count > Y.
+/// This constant is X.
+pub const KEYS_PER_UID_MAX_UIDS: usize = 10;
+
+/// The Keystore2KeysPerUid atom should be emitted for the top X UIDs with a key count > Y.
+/// This constant is Y.
+pub const KEYS_PER_UID_MIN_KEY_COUNT: usize = 5;
 
 /// Singleton for MetricsStore.
 pub static METRICS_STORE: LazyLock<MetricsStore> = LazyLock::new(Default::default);
@@ -102,39 +129,60 @@ impl MetricsStore {
     /// If any atom object does not exist in the metrics_store for the given atom ID, return an
     /// empty vector.
     pub fn get_atoms(&self, atom_id: AtomID) -> Result<Vec<KeystoreAtom>> {
-        // StorageStats is an original pulled atom (i.e. not a pushed atom converted to a
-        // pulled atom). Therefore, it is handled separately.
-        if AtomID::STORAGE_STATS == atom_id {
-            let _wp = wd::watch("MetricsStore::get_atoms calling pull_storage_stats");
-            return pull_storage_stats();
+        match atom_id {
+            // StorageStats, KeysPerUid, and CrashStats are handled separately since they
+            // aren't recorded in the metrics store map. Instead, the atom values are
+            // computed when the pull is triggered.
+            AtomID::STORAGE_STATS => {
+                let _wp = wd::watch("MetricsStore::get_atoms calling pull_storage_stats");
+                pull_storage_stats()
+            }
+            AtomID::KEYS_PER_UID => {
+                let _wp = wd::watch("MetricsStore::get_atoms calling pull_keys_per_uid");
+                pull_keys_per_uid()
+            }
+            AtomID::CRASH_STATS => {
+                let _wp = wd::watch("MetricsStore::get_atoms calling read_keystore_crash_count");
+                match read_keystore_crash_count()? {
+                    Some(count) => Ok(vec![KeystoreAtom {
+                        payload: KeystoreAtomPayload::CrashStats(CrashStats {
+                            count_of_crash_events: count,
+                        }),
+                        ..Default::default()
+                    }]),
+                    None => Err(anyhow!("Crash count file is not set")),
+                }
+            }
+            AtomID::KEY_CREATION_WITH_GENERAL_INFO
+            | AtomID::KEY_CREATION_WITH_AUTH_INFO
+            | AtomID::KEY_CREATION_WITH_PURPOSE_AND_MODES_INFO
+            | AtomID::KEYSTORE2_ATOM_WITH_OVERFLOW
+            | AtomID::KEY_OPERATION_WITH_PURPOSE_AND_MODES_INFO
+            | AtomID::KEY_OPERATION_WITH_GENERAL_INFO
+            | AtomID::KEY_CREATION_PER_UID
+            | AtomID::KEY_OPERATION_PER_UID
+            | AtomID::RKP_ERROR_STATS
+            | AtomID::OPERATION_LATENCY
+            | AtomID::KEY_OPERATION_STREAMING_STATS => {
+                let metrics_store_guard = self.metrics_store.lock().unwrap();
+                metrics_store_guard.get(&atom_id).map_or(
+                    Ok(Vec::<KeystoreAtom>::new()),
+                    |atom_count_map| {
+                        Ok(atom_count_map
+                            .iter()
+                            .map(|(atom, count)| KeystoreAtom {
+                                payload: atom.clone(),
+                                count: *count,
+                            })
+                            .collect())
+                    },
+                )
+            }
+            _ => Err(anyhow!(
+                "MetricsStore::get_atoms: Unrecognized AtomID {:?}",
+                atom_id
+            )),
         }
-
-        // Process keystore crash stats.
-        if AtomID::CRASH_STATS == atom_id {
-            let _wp = wd::watch("MetricsStore::get_atoms calling read_keystore_crash_count");
-            return match read_keystore_crash_count()? {
-                Some(count) => Ok(vec![KeystoreAtom {
-                    payload: KeystoreAtomPayload::CrashStats(CrashStats {
-                        count_of_crash_events: count,
-                    }),
-                    ..Default::default()
-                }]),
-                None => Err(anyhow!("Crash count property is not set")),
-            };
-        }
-
-        let metrics_store_guard = self.metrics_store.lock().unwrap();
-        metrics_store_guard
-            .get(&atom_id)
-            .map_or(Ok(Vec::<KeystoreAtom>::new()), |atom_count_map| {
-                Ok(atom_count_map
-                    .iter()
-                    .map(|(atom, count)| KeystoreAtom {
-                        payload: atom.clone(),
-                        count: *count,
-                    })
-                    .collect())
-            })
     }
 
     /// Insert an atom object to the metrics_store indexed by the atom ID.
@@ -160,7 +208,7 @@ impl MetricsStore {
                 *atom_count += 1;
             } else {
                 // This is a rare case, if at all.
-                log::error!("In insert_atom: Maximum storage limit reached for overflow atom.")
+                error!("In insert_atom: Maximum storage limit reached for overflow atom.")
             }
         }
     }
@@ -168,15 +216,18 @@ impl MetricsStore {
 
 /// Log key creation events to be sent to statsd.
 pub fn log_key_creation_event_stats<U>(
+    uid: i32,
     sec_level: SecurityLevel,
     key_params: &[KeyParameter],
+    origin: KeyOrigin,
     result: &Result<U>,
 ) {
     let (
         key_creation_with_general_info,
         key_creation_with_auth_info,
         key_creation_with_purpose_and_modes_info,
-    ) = process_key_creation_event_stats(sec_level, key_params, result);
+        key_creation_per_uid,
+    ) = process_key_creation_event_stats(uid, sec_level, key_params, origin, result);
 
     METRICS_STORE.insert_atom(
         AtomID::KEY_CREATION_WITH_GENERAL_INFO,
@@ -190,16 +241,22 @@ pub fn log_key_creation_event_stats<U>(
         AtomID::KEY_CREATION_WITH_PURPOSE_AND_MODES_INFO,
         key_creation_with_purpose_and_modes_info,
     );
+    if crate::keymaster::flags::atoms_v2() {
+        METRICS_STORE.insert_atom(AtomID::KEY_CREATION_PER_UID, key_creation_per_uid);
+    }
 }
 
-// Process the statistics related to key creations and return the three atom objects related to key
+// Process the statistics related to key creations and return the four atom objects related to key
 // creations: i) KeyCreationWithGeneralInfo ii) KeyCreationWithAuthInfo
-// iii) KeyCreationWithPurposeAndModesInfo
+// iii) KeyCreationWithPurposeAndModesInfo iv) KeyCreationPerUid
 fn process_key_creation_event_stats<U>(
+    uid: i32,
     sec_level: SecurityLevel,
     key_params: &[KeyParameter],
+    origin: KeyOrigin,
     result: &Result<U>,
 ) -> (
+    KeystoreAtomPayload,
     KeystoreAtomPayload,
     KeystoreAtomPayload,
     KeystoreAtomPayload,
@@ -215,14 +272,21 @@ fn process_key_creation_event_stats<U>(
         algorithm: MetricsAlgorithm::ALGORITHM_UNSPECIFIED,
         key_size: -1,
         ec_curve: MetricsEcCurve::EC_CURVE_UNSPECIFIED,
-        key_origin: MetricsKeyOrigin::ORIGIN_UNSPECIFIED,
+        key_origin: match origin {
+            KeyOrigin::GENERATED => MetricsKeyOrigin::GENERATED,
+            KeyOrigin::DERIVED => MetricsKeyOrigin::DERIVED,
+            KeyOrigin::IMPORTED => MetricsKeyOrigin::IMPORTED,
+            KeyOrigin::RESERVED => MetricsKeyOrigin::RESERVED,
+            KeyOrigin::SECURELY_IMPORTED => MetricsKeyOrigin::SECURELY_IMPORTED,
+            _ => MetricsKeyOrigin::ORIGIN_UNSPECIFIED,
+        },
         error_code: 1,
         // Default for bool is false (for attestation_requested field).
         ..Default::default()
     };
 
     let mut key_creation_with_auth_info = KeyCreationWithAuthInfo {
-        user_auth_type: MetricsHardwareAuthenticatorType::AUTH_TYPE_UNSPECIFIED,
+        user_auth_type: MetricsHardwareAuthenticatorType::NO_AUTH_TYPE,
         log10_auth_key_timeout_seconds: -1,
         security_level: MetricsSecurityLevel::SECURITY_LEVEL_UNSPECIFIED,
     };
@@ -239,33 +303,15 @@ fn process_key_creation_event_stats<U>(
 
     key_creation_with_auth_info.security_level = process_security_level(sec_level);
 
+    let (algorithm, key_size, ec_curve) = parse_key_parameters(key_params);
+    let key_size = key_size.unwrap_or(-1);
+    key_creation_with_purpose_and_modes_info.algorithm = algorithm;
+    key_creation_with_general_info.algorithm = algorithm;
+    key_creation_with_general_info.key_size = key_size;
+    key_creation_with_general_info.ec_curve = ec_curve;
+
     for key_param in key_params.iter().map(KsKeyParamValue::from) {
         match key_param {
-            KsKeyParamValue::Algorithm(a) => {
-                let algorithm = match a {
-                    Algorithm::RSA => MetricsAlgorithm::RSA,
-                    Algorithm::EC => MetricsAlgorithm::EC,
-                    Algorithm::AES => MetricsAlgorithm::AES,
-                    Algorithm::TRIPLE_DES => MetricsAlgorithm::TRIPLE_DES,
-                    Algorithm::HMAC => MetricsAlgorithm::HMAC,
-                    _ => MetricsAlgorithm::ALGORITHM_UNSPECIFIED,
-                };
-                key_creation_with_general_info.algorithm = algorithm;
-                key_creation_with_purpose_and_modes_info.algorithm = algorithm;
-            }
-            KsKeyParamValue::KeySize(s) => {
-                key_creation_with_general_info.key_size = s;
-            }
-            KsKeyParamValue::KeyOrigin(o) => {
-                key_creation_with_general_info.key_origin = match o {
-                    KeyOrigin::GENERATED => MetricsKeyOrigin::GENERATED,
-                    KeyOrigin::DERIVED => MetricsKeyOrigin::DERIVED,
-                    KeyOrigin::IMPORTED => MetricsKeyOrigin::IMPORTED,
-                    KeyOrigin::RESERVED => MetricsKeyOrigin::RESERVED,
-                    KeyOrigin::SECURELY_IMPORTED => MetricsKeyOrigin::SECURELY_IMPORTED,
-                    _ => MetricsKeyOrigin::ORIGIN_UNSPECIFIED,
-                }
-            }
             KsKeyParamValue::HardwareAuthenticatorType(a) => {
                 key_creation_with_auth_info.user_auth_type = match a {
                     HardwareAuthenticatorType::NONE => MetricsHardwareAuthenticatorType::NONE,
@@ -274,6 +320,12 @@ fn process_key_creation_event_stats<U>(
                     }
                     HardwareAuthenticatorType::FINGERPRINT => {
                         MetricsHardwareAuthenticatorType::FINGERPRINT
+                    }
+                    a if a.0
+                        == HardwareAuthenticatorType::PASSWORD.0
+                            | HardwareAuthenticatorType::FINGERPRINT.0 =>
+                    {
+                        MetricsHardwareAuthenticatorType::PASSWORD_OR_FINGERPRINT
                     }
                     HardwareAuthenticatorType::ANY => MetricsHardwareAuthenticatorType::ANY,
                     _ => MetricsHardwareAuthenticatorType::AUTH_TYPE_UNSPECIFIED,
@@ -308,26 +360,20 @@ fn process_key_creation_event_stats<U>(
                     k,
                 );
             }
-            KsKeyParamValue::EcCurve(e) => {
-                key_creation_with_general_info.ec_curve = match e {
-                    EcCurve::P_224 => MetricsEcCurve::P_224,
-                    EcCurve::P_256 => MetricsEcCurve::P_256,
-                    EcCurve::P_384 => MetricsEcCurve::P_384,
-                    EcCurve::P_521 => MetricsEcCurve::P_521,
-                    EcCurve::CURVE_25519 => MetricsEcCurve::CURVE_25519,
-                    _ => MetricsEcCurve::EC_CURVE_UNSPECIFIED,
-                }
-            }
             KsKeyParamValue::AttestationChallenge(_) => {
                 key_creation_with_general_info.attestation_requested = true;
             }
             _ => {}
         }
     }
-    if key_creation_with_general_info.algorithm == MetricsAlgorithm::EC {
-        // Do not record key sizes if Algorithm = EC, in order to reduce cardinality.
-        key_creation_with_general_info.key_size = -1;
-    }
+
+    let key_creation_per_uid = KeyCreationPerUid {
+        uid,
+        security_level: key_creation_with_auth_info.security_level,
+        algorithm,
+        user_auth_type: key_creation_with_auth_info.user_auth_type,
+        attestation_requested: key_creation_with_general_info.attestation_requested,
+    };
 
     (
         KeystoreAtomPayload::KeyCreationWithGeneralInfo(key_creation_with_general_info),
@@ -335,25 +381,33 @@ fn process_key_creation_event_stats<U>(
         KeystoreAtomPayload::KeyCreationWithPurposeAndModesInfo(
             key_creation_with_purpose_and_modes_info,
         ),
+        KeystoreAtomPayload::KeyCreationPerUid(key_creation_per_uid),
     )
 }
 
 /// Log key operation events to be sent to statsd.
 pub fn log_key_operation_event_stats(
+    uid: i32,
     sec_level: SecurityLevel,
     key_purpose: KeyPurpose,
     op_params: &[KeyParameter],
     op_outcome: &Outcome,
     key_upgraded: bool,
+    is_attested: bool,
 ) {
-    let (key_operation_with_general_info, key_operation_with_purpose_and_modes_info) =
-        process_key_operation_event_stats(
-            sec_level,
-            key_purpose,
-            op_params,
-            op_outcome,
-            key_upgraded,
-        );
+    let (
+        key_operation_with_general_info,
+        key_operation_with_purpose_and_modes_info,
+        key_operation_per_uid,
+    ) = process_key_operation_event_stats(
+        uid,
+        sec_level,
+        key_purpose,
+        op_params,
+        op_outcome,
+        key_upgraded,
+        is_attested,
+    );
     METRICS_STORE.insert_atom(
         AtomID::KEY_OPERATION_WITH_GENERAL_INFO,
         key_operation_with_general_info,
@@ -362,21 +416,38 @@ pub fn log_key_operation_event_stats(
         AtomID::KEY_OPERATION_WITH_PURPOSE_AND_MODES_INFO,
         key_operation_with_purpose_and_modes_info,
     );
+    if crate::keymaster::flags::atoms_v2() {
+        METRICS_STORE.insert_atom(AtomID::KEY_OPERATION_PER_UID, key_operation_per_uid);
+    }
 }
 
-// Process the statistics related to key operations and return the two atom objects related to key
+// Process the statistics related to key operations and return the three atom objects related to key
 // operations: i) KeyOperationWithGeneralInfo ii) KeyOperationWithPurposeAndModesInfo
+// iii) KeyOperationPerUid
 fn process_key_operation_event_stats(
+    uid: i32,
     sec_level: SecurityLevel,
     key_purpose: KeyPurpose,
     op_params: &[KeyParameter],
     op_outcome: &Outcome,
     key_upgraded: bool,
-) -> (KeystoreAtomPayload, KeystoreAtomPayload) {
+    is_attested: bool,
+) -> (
+    KeystoreAtomPayload,
+    KeystoreAtomPayload,
+    KeystoreAtomPayload,
+) {
+    let security_level = process_security_level(sec_level);
+    let key_operation_per_uid = KeyOperationPerUid {
+        uid,
+        security_level,
+    };
+
     let mut key_operation_with_general_info = KeyOperationWithGeneralInfo {
         outcome: MetricsOutcome::OUTCOME_UNSPECIFIED,
         error_code: 1,
-        security_level: MetricsSecurityLevel::SECURITY_LEVEL_UNSPECIFIED,
+        security_level,
+        is_attested,
         // Default for bool is false (for key_upgraded field).
         ..Default::default()
     };
@@ -386,8 +457,6 @@ fn process_key_operation_event_stats(
         // Default for i32 is 0 (for the remaining bitmap fields).
         ..Default::default()
     };
-
-    key_operation_with_general_info.security_level = process_security_level(sec_level);
 
     key_operation_with_general_info.key_upgraded = key_upgraded;
 
@@ -442,6 +511,7 @@ fn process_key_operation_event_stats(
         KeystoreAtomPayload::KeyOperationWithPurposeAndModesInfo(
             key_operation_with_purpose_and_modes_info,
         ),
+        KeystoreAtomPayload::KeyOperationPerUid(key_operation_per_uid),
     )
 }
 
@@ -563,10 +633,7 @@ pub(crate) fn pull_storage_stats() -> Result<Vec<KeystoreAtom>> {
                 ..Default::default()
             }),
             Err(error) => {
-                log::error!(
-                    "pull_metrics_callback: Error getting storage stat: {}",
-                    error
-                )
+                error!("pull_metrics_callback: Error getting storage stat: {error}")
             }
         };
     };
@@ -590,29 +657,204 @@ pub(crate) fn pull_storage_stats() -> Result<Vec<KeystoreAtom>> {
     Ok(atom_vec)
 }
 
-/// Log error events related to Remote Key Provisioning (RKP).
-pub fn log_rkp_error_stats(rkp_error: MetricsRkpError, sec_level: &SecurityLevel) {
-    let rkp_error_stats = KeystoreAtomPayload::RkpErrorStats(RkpErrorStats {
-        rkpError: rkp_error,
-        security_level: process_security_level(*sec_level),
+fn pull_keys_per_uid() -> Result<Vec<KeystoreAtom>> {
+    let counts = DB.with(|db| {
+        let mut db = db.borrow_mut();
+        db.per_uid_counts(KEYS_PER_UID_MAX_UIDS, KEYS_PER_UID_MIN_KEY_COUNT)
+            .unwrap_or_else(|e| {
+                error!("pull_keys_per_uid: failed to retrieve top per-UID key counts: {e:?}");
+                Vec::new()
+            })
     });
-    METRICS_STORE.insert_atom(AtomID::RKP_ERROR_STATS, rkp_error_stats);
+    Ok(counts
+        .into_iter()
+        .map(|(uid, count)| {
+            let key_count: i32 = count.try_into().unwrap_or_else(|e| {
+                error!("pull_keys_per_uid: key count {count} for {uid} out of range: {e:?}");
+                i32::MAX
+            });
+            let s = KeysPerUid { uid, key_count };
+            KeystoreAtom {
+                payload: KeystoreAtomPayload::KeysPerUid(s),
+                ..Default::default()
+            }
+        })
+        .collect())
 }
 
-/// This function tries to read and update the system property: keystore.crash_count.
-/// If the property is absent, it sets the property with value 0. If the property is present, it
-/// increments the value. This helps tracking keystore crashes internally.
-pub fn update_keystore_crash_sysprop() {
-    let new_count = match read_keystore_crash_count() {
+pub(crate) fn parse_key_parameters(
+    params: &[KeyParameter],
+) -> (MetricsAlgorithm, Option<i32>, MetricsEcCurve) {
+    let mut algorithm = MetricsAlgorithm::ALGORITHM_UNSPECIFIED;
+    let mut key_size = None;
+    let mut ec_curve = MetricsEcCurve::EC_CURVE_UNSPECIFIED;
+
+    for p in params.iter().map(KsKeyParamValue::from) {
+        match p {
+            KsKeyParamValue::Algorithm(alg) => {
+                algorithm = match alg {
+                    Algorithm::RSA => MetricsAlgorithm::RSA,
+                    Algorithm::EC => MetricsAlgorithm::EC,
+                    Algorithm::AES => MetricsAlgorithm::AES,
+                    Algorithm::TRIPLE_DES => MetricsAlgorithm::TRIPLE_DES,
+                    Algorithm::HMAC => MetricsAlgorithm::HMAC,
+                    // Don't touch the algorithm for ML-DSA since
+                    // MetricsAlgorithm has an enum value for each ML-DSA
+                    // variant, which is determined from
+                    // KsKeyParameterValue::MlDsaVariant.
+                    Algorithm::ML_DSA => algorithm,
+                    _ => MetricsAlgorithm::ALGORITHM_UNSPECIFIED,
+                };
+            }
+            KsKeyParamValue::MlDsaVariant(v) => {
+                algorithm = match v {
+                    MlDsaVariant::ML_DSA_65 => MetricsAlgorithm::ML_DSA_65,
+                    MlDsaVariant::ML_DSA_87 => MetricsAlgorithm::ML_DSA_87,
+                    _ => algorithm,
+                };
+            }
+            KsKeyParamValue::KeySize(sz) => {
+                key_size = Some(sz);
+            }
+            KsKeyParamValue::EcCurve(curve) => {
+                ec_curve = match curve {
+                    EcCurve::P_224 => MetricsEcCurve::P_224,
+                    EcCurve::P_256 => MetricsEcCurve::P_256,
+                    EcCurve::P_384 => MetricsEcCurve::P_384,
+                    EcCurve::P_521 => MetricsEcCurve::P_521,
+                    EcCurve::CURVE_25519 => MetricsEcCurve::CURVE_25519,
+                    _ => MetricsEcCurve::EC_CURVE_UNSPECIFIED,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    if algorithm == MetricsAlgorithm::EC {
+        // Do not record key sizes if Algorithm = EC, in order to reduce cardinality.
+        key_size = None;
+    }
+
+    (algorithm, key_size, ec_curve)
+}
+
+/// Log key operation latency events to be sent to statsd
+pub fn log_operation_latency(
+    op_type: MetricsOperationType,
+    sec_level: SecurityLevel,
+    params: &[KeyParameter],
+    is_success: bool,
+    latency: Duration,
+) {
+    if !crate::keymaster::flags::atoms_v2() {
+        return;
+    }
+
+    let (algorithm, key_size, ec_curve) = parse_key_parameters(params);
+    if algorithm == MetricsAlgorithm::ALGORITHM_UNSPECIFIED {
+        warn!("Unknown algorithm in log_operation_latency - skipping metrics");
+        return;
+    }
+    let key_size = key_size.unwrap_or(-1);
+    let security_level = process_security_level(sec_level);
+    let latency_ms = round_latency(latency);
+
+    METRICS_STORE.insert_atom(
+        AtomID::OPERATION_LATENCY,
+        KeystoreAtomPayload::OperationLatency(OperationLatency {
+            operation_type: op_type,
+            algorithm,
+            key_size,
+            ec_curve,
+            security_level,
+            is_success,
+            latency_ms,
+        }),
+    );
+}
+
+/// Log key operation streaming stats events to be sent to statsd
+pub fn log_key_operation_streaming_stats(
+    algorithm: MetricsAlgorithm,
+    is_success: bool,
+    call_count: i32,
+    total_input_bytes: u64,
+) {
+    if !crate::keymaster::flags::atoms_v2() {
+        return;
+    }
+    METRICS_STORE.insert_atom(
+        AtomID::KEY_OPERATION_STREAMING_STATS,
+        KeystoreAtomPayload::KeyOperationStreamingStats(KeyOperationStreamingStats {
+            algorithm,
+            is_success,
+            call_count: round_logarithmic(call_count as u64, 10, 1, 20) as i32,
+            total_input_bytes: round_logarithmic(total_input_bytes, 10, 1, 0),
+        }),
+    );
+}
+
+/// Rounds a value to a bucket that preserves relative precision while limiting cardinality.
+/// * `buckets_per_decade`: number of buckets between 10^n and 10^n+1.
+/// * `min_step`: the smallest rounding increment allowed
+/// * `no_round_threshold`: values below this threshold are not rounded
+fn round_logarithmic(
+    val: u64,
+    buckets_per_decade: u32,
+    min_step: u64,
+    no_round_threshold: u64,
+) -> i64 {
+    if val <= no_round_threshold {
+        return val as i64;
+    }
+    let exponent = val.ilog10();
+    let step = 10u64.pow(exponent + 1) / (buckets_per_decade as u64);
+    let step = std::cmp::max(step, min_step);
+    let rounded = (val + step / 2) / step * step;
+    std::cmp::min(rounded, i64::MAX as u64) as i64
+}
+
+/// Rounds latency to a value that preserves useful precision while limiting cardinality.
+///
+/// Cardinality management is critical for metrics because the internal cache is
+/// limited to 250 unique entries. Latency is the highest-cardinality dimension.
+///
+/// The function follows the rounding logic documented in OperationLatency.aidl.
+fn round_latency(latency: std::time::Duration) -> i32 {
+    let ms = latency.as_millis().clamp(0, i32::MAX as u128) as u32;
+    let step = match ms {
+        0..=10 => 5,
+        11..=100 => 10,
+        _ => 10u32.pow(ms.ilog10()) / 2,
+    };
+    let rounded_ms = (ms + step / 2) / step * step;
+    rounded_ms as i32
+}
+
+/// Read and update the local crash-count file.
+/// If the file is absent, write 0. If it is present, increment the value.
+pub fn update_keystore_crash_count() {
+    let boot_id = match current_boot_id() {
+        Ok(boot_id) => boot_id,
+        Err(error) => {
+            warn!(
+                "In update_keystore_crash_count: Failed to read boot ID due to: {error:?}. Therefore, keystore crashes will not be logged."
+            );
+            return;
+        }
+    };
+
+    let new_count = match read_keystore_crash_count_for_boot(&boot_id) {
         Ok(Some(count)) => count + 1,
-        // If the property is absent, then this is the first start up during the boot.
-        // Proceed to write the system property with value 0.
+        // If the file is absent or belongs to an older boot, this is the first start up
+        // during this boot.
+        // Proceed to write the file with value 0.
         Ok(None) => 0,
         Err(error) => {
-            log::warn!(
+            warn!(
                 concat!(
-                    "In update_keystore_crash_sysprop: ",
-                    "Failed to read the existing system property due to: {:?}.",
+                    "In update_keystore_crash_count: ",
+                    "Failed to read the existing crash count due to: {:?}.",
                     "Therefore, keystore crashes will not be logged."
                 ),
                 error
@@ -620,29 +862,65 @@ pub fn update_keystore_crash_sysprop() {
             return;
         }
     };
-    if let Err(e) = rsproperties::set(KEYSTORE_CRASH_COUNT_PROPERTY, &new_count.to_string()) {
-        log::error!(
+
+    if let Err(e) = std::fs::write(
+        KEYSTORE_CRASH_COUNT_PATH,
+        format_crash_count_record(&boot_id, new_count),
+    ) {
+        error!(
             concat!(
-                "In update_keystore_crash_sysprop:: ",
-                "Failed to write the system property due to error: {:?}"
+                "In update_keystore_crash_count: ",
+                "Failed to write the crash count file due to error: {:?}"
             ),
             e
         );
     }
 }
 
-/// Read the system property: keystore.crash_count.
+/// Read the local crash-count file.
 pub fn read_keystore_crash_count() -> Result<Option<i32>> {
-    let sp: std::result::Result<String, rsproperties::Error> =
-        rsproperties::get(KEYSTORE_CRASH_COUNT_PROPERTY);
-    match sp {
-        Ok(count_str) => {
-            let count = count_str.parse::<i32>()?;
-            Ok(Some(count))
-        }
-        Err(rsproperties::Error::NotFound(_)) => Ok(None),
-        Err(e) => Err(e).context(err!("Failed to read crash count property.")),
+    let boot_id = current_boot_id()?;
+    read_keystore_crash_count_for_boot(&boot_id)
+}
+
+fn read_keystore_crash_count_for_boot(boot_id: &str) -> Result<Option<i32>> {
+    match std::fs::read_to_string(KEYSTORE_CRASH_COUNT_PATH) {
+        Ok(record) => parse_crash_count_record(&record, boot_id),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).context(ks_err!("Failed to read crash count file.")),
     }
+}
+
+fn current_boot_id() -> Result<String> {
+    std::fs::read_to_string(KERNEL_BOOT_ID_PATH)
+        .map(|boot_id| boot_id.trim().to_string())
+        .context(ks_err!("Failed to read boot ID."))
+}
+
+fn parse_crash_count_record(record: &str, current_boot_id: &str) -> Result<Option<i32>> {
+    let mut lines = record.lines();
+    let Some(boot_id) = lines.next().map(str::trim).filter(|line| !line.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(count) = lines.next().map(str::trim).filter(|line| !line.is_empty()) else {
+        return Err(anyhow!("crash count record has no count"));
+    };
+
+    if boot_id != current_boot_id {
+        return Ok(None);
+    }
+
+    let count = count
+        .parse::<i32>()
+        .context(ks_err!("Failed to parse crash count."))?;
+    if count < 0 {
+        return Err(anyhow!("crash count is negative"));
+    }
+    Ok(Some(count))
+}
+
+fn format_crash_count_record(boot_id: &str, count: i32) -> String {
+    format!("{boot_id}\n{count}\n")
 }
 
 /// Enum defining the bit position for each padding mode. Since padding mode can be repeatable, it
@@ -757,8 +1035,13 @@ impl_summary_enum!(AtomID, 14,
     KEY_CREATION_WITH_PURPOSE_AND_MODES_INFO => "KEYGEN_MODES",
     KEY_OPERATION_WITH_PURPOSE_AND_MODES_INFO => "KEYOP_MODES",
     KEY_OPERATION_WITH_GENERAL_INFO => "KEYOP_GENERAL",
+    KEY_CREATION_PER_UID => "KEYGEN_UID",
+    KEY_OPERATION_PER_UID => "KEYOP_UID",
     RKP_ERROR_STATS => "RKP_ERR",
     CRASH_STATS => "CRASH",
+    KEYS_PER_UID => "KEYS_PER_UID",
+    OPERATION_LATENCY => "OP_LATENCY",
+    KEY_OPERATION_STREAMING_STATS => "KEYOP_STREAMING",
 );
 
 impl_summary_enum!(MetricsStorage, 28,
@@ -781,10 +1064,12 @@ impl_summary_enum!(MetricsStorage, 28,
     LEGACY_STORAGE => "LEGACY_STORAGE",
 );
 
-impl_summary_enum!(MetricsAlgorithm, 4,
+impl_summary_enum!(MetricsAlgorithm, 7,
     ALGORITHM_UNSPECIFIED => "NONE",
     RSA => "RSA",
     EC => "EC",
+    ML_DSA_65 => "MLDSA65",
+    ML_DSA_87 => "MLDSA87",
     AES => "AES",
     TRIPLE_DES => "DES",
     HMAC => "HMAC",
@@ -816,14 +1101,14 @@ impl_summary_enum!(MetricsSecurityLevel, 9,
     SECURITY_LEVEL_KEYSTORE => "KEYSTORE",
 );
 
-// Metrics values for HardwareAuthenticatorType are broken -- the AIDL type is a bitmask
-// not an enum, so offseting the enum values by 1 doesn't work.
-impl_summary_enum!(MetricsHardwareAuthenticatorType, 6,
+impl_summary_enum!(MetricsHardwareAuthenticatorType, 8,
     AUTH_TYPE_UNSPECIFIED => "UNSPEC",
     NONE => "NONE",
     PASSWORD => "PASSWD",
     FINGERPRINT => "FPRINT",
+    PASSWORD_OR_FINGERPRINT => "PW_OR_FP",
     ANY => "ANY",
+    NO_AUTH_TYPE => "NOAUTH",
 );
 
 impl_summary_enum!(MetricsPurpose, 7,
@@ -850,6 +1135,15 @@ impl_summary_enum!(MetricsRkpError, 6,
     RKP_ERROR_UNSPECIFIED => "UNSPEC",
     OUT_OF_KEYS => "OOKEYS",
     FALL_BACK_DURING_HYBRID => "FALLBK",
+);
+
+impl_summary_enum!(MetricsOperationType, 7,
+    UNSPECIFIED => "UNSPEC",
+    GENERATE_KEY => "GENKEY",
+    IMPORT_KEY => "IMPKEY",
+    IMPORT_WRAPPED_KEY => "IMPWKEY",
+    CREATE_OPERATION => "BEGIN",
+    ENTIRE_OPERATION => "OPERATION",
 );
 
 /// Convert an argument into a corresponding format clause.  (This is needed because
@@ -1000,34 +1294,43 @@ impl Summary for KeystoreAtomPayload {
             KeystoreAtomPayload::Keystore2AtomWithOverflow(v) => {
                 format!("atom={}", v.atom_id.show())
             }
+            KeystoreAtomPayload::KeysPerUid(v) => {
+                format!("uid={} key_count={}", v.uid, v.key_count)
+            }
+            KeystoreAtomPayload::KeyCreationPerUid(v) => {
+                format!(
+                    "uid={} sec={} alg={} auth={} attest? {}",
+                    v.uid,
+                    v.security_level.show(),
+                    v.algorithm.show(),
+                    v.user_auth_type.show(),
+                    if v.attestation_requested { "Y" } else { "N" }
+                )
+            }
+            KeystoreAtomPayload::KeyOperationPerUid(v) => {
+                format!("uid={} sec={}", v.uid, v.security_level.show())
+            }
+            KeystoreAtomPayload::OperationLatency(v) => {
+                format!(
+                    "op_type={} alg={} size={} crv={} sec={} success? {} latency={}",
+                    v.operation_type.show(),
+                    v.algorithm.show(),
+                    v.key_size,
+                    v.ec_curve.show(),
+                    v.security_level.show(),
+                    if v.is_success { "Y" } else { "N" },
+                    v.latency_ms
+                )
+            }
+            KeystoreAtomPayload::KeyOperationStreamingStats(v) => {
+                format!(
+                    "alg={} success={} call_cnt={} bytes={}",
+                    v.algorithm.show(),
+                    v.is_success,
+                    v.call_count,
+                    v.total_input_bytes
+                )
+            }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_enum_show() {
-        let algo = MetricsAlgorithm::RSA;
-        assert_eq!("RSA ", algo.show());
-        let algo = MetricsAlgorithm(42);
-        assert_eq!("Unknown(42)", algo.show());
-    }
-
-    #[test]
-    fn test_enum_bitmask_show() {
-        let mut modes = 0i32;
-        compute_block_mode_bitmap(&mut modes, BlockMode::ECB);
-        compute_block_mode_bitmap(&mut modes, BlockMode::CTR);
-
-        assert_eq!(show_blockmode(modes), "-T-E");
-
-        // Add some bits not covered by the enum of valid bit positions.
-        modes |= 0xa0;
-        assert_eq!(show_blockmode(modes), "-T-E(full:0x000000aa)");
-        modes |= 0x300;
-        assert_eq!(show_blockmode(modes), "-T-E(full:0x000003aa)");
     }
 }

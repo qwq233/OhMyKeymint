@@ -16,6 +16,11 @@
 
 use crate::{cbor_type_error, AsCborValue, CborError};
 use kmr_derive::AsCborValue;
+use std::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 pub const TIME_STAMP_MAC_LABEL: &[u8] = b"Auth Verification";
 

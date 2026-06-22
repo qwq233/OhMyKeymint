@@ -69,6 +69,10 @@ pub fn failed_conversion(err: wire::ValueNotRecognized) -> binder::Status {
             keymint::ErrorCode::ErrorCode::UNSUPPORTED_KEY_FORMAT
         }
         wire::ValueNotRecognized::EcCurve => keymint::ErrorCode::ErrorCode::UNSUPPORTED_EC_CURVE,
+        #[cfg(feature = "hal_v5")]
+        wire::ValueNotRecognized::MlDsaVariant => {
+            keymint::ErrorCode::ErrorCode::UNSUPPORTED_ML_DSA_VARIANT
+        }
         _ => keymint::ErrorCode::ErrorCode::INVALID_ARGUMENT,
     };
     binder::Status::new_service_specific_error(
@@ -261,6 +265,15 @@ impl Fromm<wire::keymint::KeyParam> for keymint::KeyParameter::KeyParameter {
                 (Tag::RSA_OAEP_MGF_DIGEST, KeyParameterValue::Digest(v.innto()))
             }
             KeyParam::Origin(v) => (Tag::ORIGIN, KeyParameterValue::Origin(v.innto())),
+            #[cfg(feature = "hal_v5")]
+            KeyParam::MlDsaVariant(v) => {
+                (Tag::ML_DSA_VARIANT, KeyParameterValue::MlDsaVariant(v.innto()))
+            }
+            #[cfg(not(feature = "hal_v5"))]
+            KeyParam::MlDsaVariant(v) => {
+                error!("TA emitted ML_DSA_VARIANT tag but HAL v5 is not supported");
+                (Tag::INVALID, KeyParameterValue::Integer(v as i32))
+            }
 
             // `u32`-holding variants.
             KeyParam::KeySize(v) => (Tag::KEY_SIZE, KeyParameterValue::Integer(v.0 as i32)),
@@ -385,6 +398,11 @@ impl Fromm<wire::keymint::KeyParam> for keymint::KeyParameter::KeyParameter {
             KeyParam::AttestationIdSecondImei(v) => {
                 (Tag::ATTESTATION_ID_SECOND_IMEI, KeyParameterValue::Blob(v))
             }
+            #[cfg(not(feature = "hal_v3"))]
+            KeyParam::AttestationIdSecondImei(v) => {
+                error!("TA emitted ATTESTATION_ID_SECOND_IMEI tag but HAL v3 is not supported");
+                (Tag::INVALID, KeyParameterValue::Blob(v))
+            }
             KeyParam::AttestationIdMeid(v) => {
                 (Tag::ATTESTATION_ID_MEID, KeyParameterValue::Blob(v))
             }
@@ -402,6 +420,11 @@ impl Fromm<wire::keymint::KeyParam> for keymint::KeyParameter::KeyParameter {
             }
             #[cfg(feature = "hal_v4")]
             KeyParam::ModuleHash(v) => (Tag::MODULE_HASH, KeyParameterValue::Blob(v)),
+            #[cfg(not(feature = "hal_v4"))]
+            KeyParam::ModuleHash(v) => {
+                error!("TA emitted MODULE_HASH tag but HAL v4 is not supported");
+                (Tag::INVALID, KeyParameterValue::Blob(v))
+            }
         };
         Self { tag, value }
     }
@@ -533,6 +556,10 @@ impl TryFromm<&keymint::KeyParameter::KeyParameter> for Option<KeyParam> {
             }
             keymint::Tag::Tag::ORIGIN => {
                 Some(KeyParam::Origin(value_of!(val, Origin)?.try_innto()?))
+            }
+            #[cfg(feature = "hal_v5")]
+            keymint::Tag::Tag::ML_DSA_VARIANT => {
+                Some(KeyParam::MlDsaVariant(value_of!(val, MlDsaVariant)?.try_innto()?))
             }
 
             // Special case: although `Tag::USER_AUTH_TYPE` claims to have an associated enum, it's
@@ -766,6 +793,8 @@ keymint::HardwareAuthenticatorType::HardwareAuthenticatorType }
 enum_convert! { wire::keymint::KeyFormat => keymint::KeyFormat::KeyFormat }
 enum_convert! { wire::keymint::KeyOrigin => keymint::KeyOrigin::KeyOrigin }
 enum_convert! { wire::keymint::KeyPurpose => keymint::KeyPurpose::KeyPurpose }
+#[cfg(feature = "hal_v5")]
+enum_convert! { wire::keymint::MlDsaVariant => keymint::MlDsaVariant::MlDsaVariant }
 enum_convert! { wire::keymint::PaddingMode => keymint::PaddingMode::PaddingMode }
 enum_convert! { wire::keymint::SecurityLevel => keymint::SecurityLevel::SecurityLevel }
 enum_convert! { wire::keymint::Tag => keymint::Tag::Tag }

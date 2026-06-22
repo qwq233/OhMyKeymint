@@ -15,6 +15,7 @@
 use super::*;
 use crate::expect_err;
 use kmr_wire::{keymint::KeyParam, KeySizeInBits};
+use std::vec;
 
 #[test]
 fn test_characteristics_invalid() {
@@ -69,47 +70,12 @@ fn test_legacy_serialization() {
 }
 
 #[test]
-fn test_check_begin_params_fail() {
-    let chars = vec![
-        KeyParam::NoAuthRequired,
-        KeyParam::Algorithm(Algorithm::Hmac),
-        KeyParam::KeySize(KeySizeInBits(128)),
-        KeyParam::Digest(Digest::Sha256),
-        KeyParam::Purpose(KeyPurpose::Sign),
-        KeyParam::Purpose(KeyPurpose::Verify),
-        KeyParam::MinMacLength(160),
-    ];
-
-    let tests = vec![
-        (
-            KeyPurpose::Encrypt,
-            vec![KeyParam::Digest(Digest::Sha256), KeyParam::MacLength(160)],
-            "invalid purpose Encrypt",
-        ),
-        (
-            KeyPurpose::Sign,
-            vec![KeyParam::Digest(Digest::Sha256)],
-            "MissingMacLength",
-        ),
-        (
-            KeyPurpose::Sign,
-            vec![KeyParam::Digest(Digest::Sha512), KeyParam::MacLength(160)],
-            "not in key characteristics",
-        ),
-    ];
-    for (purpose, params, msg) in tests {
-        expect_err!(check_begin_params(&chars, purpose, &params), msg);
-    }
-}
-
-#[test]
 fn test_copyable_tags() {
     for tag in UNPOLICED_COPYABLE_TAGS {
         let info = info(*tag).unwrap();
         assert!(
             info.user_can_specify.0,
-            "tag {:?} not listed as user-specifiable",
-            tag
+            "tag {tag:?} not listed as user-specifiable"
         );
         assert!(
             info.characteristic == info::Characteristic::KeyMintEnforced
@@ -132,7 +98,7 @@ fn test_luhn_checksum() {
     ];
     for (input, want) in tests {
         let got = luhn_checksum(input);
-        assert_eq!(got, want, "mismatch for input {}", input);
+        assert_eq!(got, want, "mismatch for input {input}");
     }
 }
 
@@ -144,7 +110,8 @@ fn test_increment_imei() {
         ("01", ""),
         ("01", ""),
         ("7576", ""),
-        ("c328", ""), // Invalid UTF-8
+        ("c328", ""),                 // Invalid UTF-8
+        ("18446844073709551613", ""), // 20-digit and bigger than u64::MAX == 18_446_744_073_709_551_615
         // 721367498765404 => 721367498765412
         (
             "373231333637343938373635343034",
@@ -155,6 +122,6 @@ fn test_increment_imei() {
     for (input, want) in tests {
         let input_data = hex::decode(input).unwrap();
         let got = increment_imei(&input_data);
-        assert_eq!(hex::encode(got), want, "mismatch for input IMEI {}", input);
+        assert_eq!(hex::encode(got), want, "mismatch for input IMEI {input}");
     }
 }

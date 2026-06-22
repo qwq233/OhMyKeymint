@@ -54,14 +54,17 @@
 //! - Other TAs (e.g. Gatekeeper, ConfirmationUI) running in the secure environment.
 //! - Provisioning tools.
 
+// TODO(b/468831165): remove when rust-lang #147648 is fixed
+#![allow(unused_assignments)]
+
 use crate::{
     keymint::{Algorithm, ErrorCode, VerifiedBootState},
     try_from_n,
 };
 use enumn::N;
 use kmr_derive::LegacySerialize;
+use std::vec::Vec;
 use zeroize::ZeroizeOnDrop;
-use Vec;
 
 /// This bit is set in the `u32` command value for response messages.
 const TRUSTY_RESPONSE_BITMASK: u32 = 0x01;
@@ -191,7 +194,7 @@ fn serialize_trusty_response_message<T: TrustySerialize>(
     let cmd = result.cmd();
     // None of the supported response messages are large enough to require fragmentation, so always
     // mark this as the final response.
-    let raw_cmd = cmd << TRUSTY_CMD_SHIFT | TRUSTY_RESPONSE_BITMASK | TRUSTY_STOP_BITMASK;
+    let raw_cmd = (cmd << TRUSTY_CMD_SHIFT) | TRUSTY_RESPONSE_BITMASK | TRUSTY_STOP_BITMASK;
     let mut buf = Vec::new();
     buf.try_reserve(LEGACY_NON_SEC_RSP_HEADER_SIZE)
         .map_err(|_e| Error::AllocationFailed)?;
@@ -217,7 +220,7 @@ pub fn serialize_trusty_rsp(rsp: TrustyPerformOpRsp) -> Result<Vec<u8>, Error> {
 
 /// Serialize raw data as a Trusty response message without length prefix.
 fn serialize_trusty_raw_rsp(cmd: u32, raw_data: &[u8]) -> Result<Vec<u8>, Error> {
-    let raw_cmd = cmd << TRUSTY_CMD_SHIFT | TRUSTY_RESPONSE_BITMASK | TRUSTY_STOP_BITMASK;
+    let raw_cmd = (cmd << TRUSTY_CMD_SHIFT) | TRUSTY_RESPONSE_BITMASK | TRUSTY_STOP_BITMASK;
     let mut buf = Vec::new();
     buf.try_reserve(CMD_SIZE + raw_data.len())
         .map_err(|_e| Error::AllocationFailed)?;
@@ -739,6 +742,7 @@ pub fn is_trusty_provisioning_req(req: &TrustyPerformOpReq) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec;
     #[test]
     fn test_inner_serialize() {
         let msg = SetBootParamsRequest {
@@ -804,6 +808,7 @@ mod tests {
     }
     #[test]
     fn test_trusty_serialize_rsp() {
+        use std::vec;
         let msg = TrustyPerformSecureOpRsp::GetAuthTokenKey(GetAuthTokenKeyResponse {
             key_material: vec![1, 2, 3],
         });

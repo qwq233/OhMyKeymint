@@ -22,7 +22,8 @@ use log::error;
 /// Map an OpenSSL `Error` into a KeyMint `ErrorCode` value.
 pub(crate) fn map_openssl_err(err: &openssl::error::Error) -> ErrorCode {
     let code = err.code();
-    let reason = err.reason_code();
+    // Safety: no pointers involved.
+    let reason = unsafe { ffi::ERR_GET_REASON(code) };
 
     // Global error reasons.
     match reason {
@@ -34,7 +35,8 @@ pub(crate) fn map_openssl_err(err: &openssl::error::Error) -> ErrorCode {
         _ => {}
     }
 
-    match err.library_code() as u32 {
+    // SAFETY: `ERR_GET_LIB` is safe for all inputs.
+    match unsafe { ffi::ERR_GET_LIB(code) as u32 } {
         ffi::ERR_LIB_USER => ErrorCode::try_from(reason).unwrap_or(ErrorCode::BoringSslError),
         ffi::ERR_LIB_EVP => translate_evp_error(reason),
         ffi::ERR_LIB_ASN1 => translate_asn1_error(reason),
@@ -43,7 +45,7 @@ pub(crate) fn map_openssl_err(err: &openssl::error::Error) -> ErrorCode {
         ffi::ERR_LIB_X509V3 => translate_x509v3_error(reason),
         ffi::ERR_LIB_RSA => translate_rsa_error(reason),
         _ => {
-            error!("unknown BoringSSL error code {}", code);
+            error!("unknown BoringSSL error code {code}");
             ErrorCode::BoringSslError
         }
     }

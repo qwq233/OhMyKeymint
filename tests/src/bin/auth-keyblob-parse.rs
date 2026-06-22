@@ -15,7 +15,6 @@
 //! Utility program to parse a legacy authenticated keyblob.
 
 // Explicitly include alloc because macros from `kmr_common` assume it.
-extern crate alloc;
 
 use kmr_common::{
     crypto::*,
@@ -80,7 +79,7 @@ fn process(filename: &str, hex: bool) {
     let keyblob = match KeyBlob::deserialize(&hmac, &data, &hidden, BoringEq) {
         Ok(k) => k,
         Err(e) => {
-            eprintln!("{}: Failed to parse: {:?}", filename, e);
+            eprintln!("{filename}: Failed to parse: {e:?}");
             return;
         }
     };
@@ -145,6 +144,7 @@ fn process(filename: &str, hex: bool) {
             }
         }
         Algorithm::Rsa => KeyMaterial::Rsa(rsa::Key(raw_key).into()),
+        Algorithm::MlDsa => panic!("ML-DSA unsupported"),
     };
 
     // Test the `tag::extract_key_characteristics()` entrypoint by comparing what it
@@ -193,5 +193,5 @@ fn process(filename: &str, hex: bool) {
         ],
         key_material,
     };
-    println!("{}:  => {:?}", filename, plaintext_keyblob);
+    println!("{filename}:  => {plaintext_keyblob:?}");
 }

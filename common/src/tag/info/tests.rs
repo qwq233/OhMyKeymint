@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
-
 use super::*;
+use std::collections::BTreeSet;
+use std::vec;
 
 #[test]
 fn test_auto_added_const() {
@@ -63,7 +63,7 @@ fn test_keymint_enforced_const() {
 
 #[test]
 fn test_tag_bit_index_unique() {
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
     for (tag, info) in INFO.iter() {
         assert!(
             !seen.contains(&info.bit_index),

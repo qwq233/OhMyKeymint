@@ -16,7 +16,6 @@
 #![cfg(soong)]
 
 // Explicitly include alloc because macros from `kmr_common` assume it.
-extern crate alloc;
 
 use kmr_common::{crypto, crypto::Rng, expect_err, keyblob, keyblob::legacy::KeyBlob};
 use kmr_crypto_boring::aes::BoringAes;

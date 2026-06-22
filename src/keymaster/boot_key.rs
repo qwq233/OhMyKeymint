@@ -29,6 +29,9 @@ use kmr_crypto_boring::zvec::ZVec;
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
+pub struct BootLevel(pub usize);
+
 /// Strategies used to prevent later boot stages from using the KM key that protects the level 0
 /// key
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -231,16 +234,16 @@ impl BootLevelKeyCache {
     }
 
     /// Report whether the key for the given level can be inferred.
-    pub fn level_accessible(&self, boot_level: usize) -> bool {
+    pub fn level_accessible(&self, boot_level: BootLevel) -> bool {
         // If the requested boot level is lower than the current boot level
         // or if we have reached the end (`cache.empty()`) we can't retrieve
         // the boot key.
-        boot_level >= self.current && !self.cache.is_empty()
+        boot_level.0 >= self.current && !self.cache.is_empty()
     }
 
     /// Get the HKDF key for boot level `boot_level`. The key for level *i*+1
     /// is calculated from the level *i* key using `hkdf_expand`.
-    fn get_hkdf_key(&mut self, boot_level: usize) -> Result<Option<&ZVec>> {
+    fn get_hkdf_key(&mut self, boot_level: BootLevel) -> Result<Option<&ZVec>> {
         if !self.level_accessible(boot_level) {
             return Ok(None);
         }
@@ -249,7 +252,7 @@ impl BootLevelKeyCache {
         let first_not_cached = self.current + self.cache.len();
 
         // Grow the cache forwards until it contains the desired boot level.
-        for _level in first_not_cached..=boot_level {
+        for _level in first_not_cached..=boot_level.0 {
             // We check at the start that cache is non-empty and future iterations only push,
             // so this must unwrap.
             let highest_key = self.cache.back().unwrap();
@@ -259,16 +262,16 @@ impl BootLevelKeyCache {
         }
 
         // If we reach this point, we should have a key at index boot_level - current.
-        Ok(Some(self.cache.get(boot_level - self.current).unwrap()))
+        Ok(Some(self.cache.get(boot_level.0 - self.current).unwrap()))
     }
 
     /// Drop keys prior to the given boot level, while retaining the ability to generate keys for
     /// that level and later.
-    pub fn advance_boot_level(&mut self, new_boot_level: usize) -> Result<()> {
+    pub fn advance_boot_level(&mut self, new_boot_level: BootLevel) -> Result<()> {
         if !self.level_accessible(new_boot_level) {
             log::error!(
                 "Failed to advance boot level to {}, current is {}, cache size {}",
-                new_boot_level,
+                new_boot_level.0,
                 self.current,
                 self.cache.len()
             );
@@ -282,11 +285,11 @@ impl BootLevelKeyCache {
 
         // Then we split the queue at the index of the new boot level and discard the front,
         // keeping only the keys with the current boot level or higher.
-        self.cache = self.cache.split_off(new_boot_level - self.current);
+        self.cache = self.cache.split_off(new_boot_level.0 - self.current);
 
         // The new cache has the new boot level at index 0, so we set `current` to
         // `new_boot_level`.
-        self.current = new_boot_level;
+        self.current = new_boot_level.0;
 
         Ok(())
     }
@@ -299,7 +302,7 @@ impl BootLevelKeyCache {
 
     fn expand_key(
         &mut self,
-        boot_level: usize,
+        boot_level: BootLevel,
         out_len: usize,
         info: &[u8],
     ) -> Result<Option<ZVec>> {
@@ -311,7 +314,7 @@ impl BootLevelKeyCache {
     }
 
     /// Return the AES-256-GCM key for the current boot level.
-    pub fn aes_key(&mut self, boot_level: usize) -> Result<Option<ZVec>> {
+    pub fn aes_key(&mut self, boot_level: BootLevel) -> Result<Option<ZVec>> {
         self.expand_key(boot_level, AES_256_KEY_LENGTH, BootLevelKeyCache::HKDF_AES)
             .context(err!("expand_key failed"))
     }

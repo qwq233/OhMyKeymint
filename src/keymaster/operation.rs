@@ -126,32 +126,36 @@
 //! or it transitions to its end-of-life, which means we may get a free slot.
 //! Either way, we have to revaluate the pruning scores.
 
-use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
-use crate::android::system::keystore2::ResponseCode::ResponseCode;
-use crate::keymaster::enforcements::AuthInfo;
-
-use crate::keymaster::error::{
-    error_to_serialized_error, into_binder, into_logged_binder, map_km_error, KsError as Error,
-    SerializedError,
-};
-
 use crate::android::hardware::security::keymint::{
     IKeyMintOperation::IKeyMintOperation, KeyParameter::KeyParameter, KeyPurpose::KeyPurpose,
     SecurityLevel::SecurityLevel,
 };
+use crate::android::security::metrics::{
+    Algorithm::Algorithm as MetricsAlgorithm, OperationType::OperationType,
+};
 use crate::android::system::keystore2::{
     IKeystoreOperation::BnKeystoreOperation, IKeystoreOperation::IKeystoreOperation,
 };
-use crate::err;
-use crate::keymaster::metrics_store::log_key_operation_event_stats;
+use crate::err as ks_err;
+use crate::keymaster::enforcements::AuthInfo;
+use crate::keymaster::error::{
+    error_to_serialized_error, into_binder, into_logged_binder, map_km_error, Error, ErrorCode,
+    ResponseCode, SerializedError,
+};
+use crate::keymaster::metrics_store::{
+    log_key_operation_event_stats, log_key_operation_streaming_stats, log_operation_latency,
+};
+use crate::keymaster::utils::AppUid;
+use crate::log_client_err;
 use crate::watchdog as wd;
 use anyhow::{anyhow, Context, Result};
-use rsbinder::{BinderFeatures, Status, Strong};
+use log::{error, warn};
+use rsbinder as binder;
+use rsbinder::{Status, Strong};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard, Weak},
-    time::Duration,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// Operations have `Outcome::Unknown` as long as they are active. They transition
@@ -182,10 +186,18 @@ pub struct Operation {
     km_op: Strong<dyn IKeyMintOperation>,
     last_usage: Mutex<Instant>,
     outcome: Mutex<Outcome>,
-    owner: u32, // Uid of the operation's owner.
+    owner: AppUid, // Uid of the operation's owner.
     auth_info: Mutex<AuthInfo>,
     forced: bool,
     logging_info: LoggingInfo,
+    operation_metrics: Mutex<OperationMetrics>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct OperationMetrics {
+    total_duration: Duration,
+    call_count: i32,
+    total_input_bytes: u64,
 }
 
 /// Keeps track of the information required for logging operations.
@@ -193,8 +205,10 @@ pub struct Operation {
 pub struct LoggingInfo {
     sec_level: SecurityLevel,
     purpose: KeyPurpose,
+    algorithm: MetricsAlgorithm,
     op_params: Vec<KeyParameter>,
     key_upgraded: bool,
+    is_attested: bool,
 }
 
 impl LoggingInfo {
@@ -202,21 +216,25 @@ impl LoggingInfo {
     pub fn new(
         sec_level: SecurityLevel,
         purpose: KeyPurpose,
+        algorithm: MetricsAlgorithm,
         op_params: Vec<KeyParameter>,
         key_upgraded: bool,
+        is_attested: bool,
     ) -> LoggingInfo {
         Self {
             sec_level,
             purpose,
+            algorithm,
             op_params,
             key_upgraded,
+            is_attested,
         }
     }
 }
 
 struct PruningInfo {
     last_usage: Instant,
-    owner: u32,
+    owner: AppUid,
     index: usize,
     forced: bool,
 }
@@ -228,8 +246,8 @@ impl Operation {
     /// Constructor
     pub fn new(
         index: usize,
-        km_op: rsbinder::Strong<dyn IKeyMintOperation>,
-        owner: u32,
+        km_op: binder::Strong<dyn IKeyMintOperation>,
+        owner: AppUid,
         auth_info: AuthInfo,
         forced: bool,
         logging_info: LoggingInfo,
@@ -243,7 +261,13 @@ impl Operation {
             auth_info: Mutex::new(auth_info),
             forced,
             logging_info,
+            operation_metrics: Mutex::new(OperationMetrics::default()),
         }
+    }
+
+    fn watch(&self, id: &'static str) -> Option<wd::WatchPoint> {
+        let sec_level = self.logging_info.sec_level;
+        wd::watch_millis_with(id, wd::DEFAULT_TIMEOUT_MS, sec_level)
     }
 
     fn get_pruning_info(&self) -> Option<PruningInfo> {
@@ -296,11 +320,11 @@ impl Operation {
         }
         *locked_outcome = Outcome::Pruned;
 
-        let _wp = wd::watch("Operation::prune: calling IKeyMintOperation::abort()");
+        let _wp = self.watch("Operation::prune: calling IKeyMintOperation::abort()");
 
         // We abort the operation. If there was an error we log it but ignore it.
         if let Err(e) = map_km_error(self.km_op.abort()) {
-            log::warn!("In prune: KeyMint::abort failed with {:?}.", e);
+            warn!("In prune: KeyMint::abort failed: {e:?}.");
         }
 
         Ok(())
@@ -332,7 +356,7 @@ impl Operation {
         let guard = self.outcome.lock().expect("In check_active.");
         match *guard {
             Outcome::Unknown => Ok(guard),
-            _ => Err(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE)).context(err!(
+            _ => Err(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE)).context(ks_err!(
                 "Call on finalized operation with outcome: {:?}.",
                 *guard
             )),
@@ -370,13 +394,13 @@ impl Operation {
             .lock()
             .unwrap()
             .before_update()
-            .context(err!("Trying to get auth tokens."))?;
+            .context(ks_err!("Trying to get auth tokens for {:?}", self.owner))?;
 
         self.update_outcome(&mut outcome, {
-            let _wp = wd::watch("Operation::update_aad: calling IKeyMintOperation::updateAad");
+            let _wp = self.watch("Operation::update_aad: calling IKeyMintOperation::updateAad");
             map_km_error(self.km_op.updateAad(aad_input, hat.as_ref(), tst.as_ref()))
         })
-        .context(err!("Update failed."))?;
+        .context(ks_err!("Update failed for {:?}", self.owner))?;
 
         Ok(())
     }
@@ -393,14 +417,14 @@ impl Operation {
             .lock()
             .unwrap()
             .before_update()
-            .context(err!("Trying to get auth tokens."))?;
+            .context(ks_err!("Trying to get auth tokens for {:?}", self.owner))?;
 
         let output = self
             .update_outcome(&mut outcome, {
-                let _wp = wd::watch("Operation::update: calling IKeyMintOperation::update");
+                let _wp = self.watch("Operation::update: calling IKeyMintOperation::update");
                 map_km_error(self.km_op.update(input, hat.as_ref(), tst.as_ref()))
             })
-            .context(err!("Update failed."))?;
+            .context(ks_err!("Update failed for {:?}", self.owner))?;
 
         if output.is_empty() {
             Ok(None)
@@ -423,11 +447,11 @@ impl Operation {
             .lock()
             .unwrap()
             .before_finish()
-            .context(err!("Trying to get auth tokens."))?;
+            .context(ks_err!("Trying to get auth tokens for {:?}", self.owner))?;
 
         let output = self
             .update_outcome(&mut outcome, {
-                let _wp = wd::watch("Operation::finish: calling IKeyMintOperation::finish");
+                let _wp = self.watch("Operation::finish: calling IKeyMintOperation::finish");
                 map_km_error(self.km_op.finish(
                     input,
                     signature,
@@ -436,7 +460,7 @@ impl Operation {
                     confirmation_token.as_deref(),
                 ))
             })
-            .context(err!("Finish failed."))?;
+            .context(ks_err!("Finish failed for {:?}", self.owner))?;
 
         self.auth_info
             .lock()
@@ -462,8 +486,36 @@ impl Operation {
         *locked_outcome = outcome;
 
         {
-            let _wp = wd::watch("Operation::abort: calling IKeyMintOperation::abort");
-            map_km_error(self.km_op.abort()).context(err!("KeyMint::abort failed."))
+            let _wp = self.watch("Operation::abort: calling IKeyMintOperation::abort");
+            map_km_error(self.km_op.abort()).context(ks_err!("KeyMint::abort failed."))
+        }
+    }
+
+    /// Update operation processing metrics (update/finish), with latency.
+    fn update_metrics(&self, latency: Duration, input_bytes: usize) {
+        let mut metrics = self.operation_metrics.lock().unwrap();
+        metrics.total_duration += latency;
+        metrics.call_count += 1;
+        metrics.total_input_bytes = metrics.total_input_bytes.saturating_add(input_bytes as u64);
+    }
+
+    /// Log latency for the cumulative operation data processing.
+    fn log_metrics(&self, is_success: bool) {
+        let metrics = self.operation_metrics.lock().unwrap();
+        if metrics.call_count > 0 {
+            log_operation_latency(
+                OperationType::ENTIRE_OPERATION,
+                self.logging_info.sec_level,
+                &self.logging_info.op_params,
+                is_success,
+                metrics.total_duration,
+            );
+            log_key_operation_streaming_stats(
+                self.logging_info.algorithm,
+                is_success,
+                metrics.call_count,
+                metrics.total_input_bytes,
+            );
         }
     }
 }
@@ -472,18 +524,22 @@ impl Drop for Operation {
     fn drop(&mut self) {
         let guard = self.outcome.lock().expect("In drop.");
         log_key_operation_event_stats(
+            self.owner.0 as i32,
             self.logging_info.sec_level,
             self.logging_info.purpose,
             &(self.logging_info.op_params),
             &guard,
             self.logging_info.key_upgraded,
+            self.logging_info.is_attested,
         );
+        self.log_metrics(matches!(*guard, Outcome::Success));
+
         if let Outcome::Unknown = *guard {
             drop(guard);
             // If the operation was still active we call abort, setting
             // the outcome to `Outcome::Dropped`
             if let Err(e) = self.abort(Outcome::Dropped) {
-                log::error!("While dropping Operation: abort failed:\n    {:?}", e);
+                error!("While dropping Operation: abort failed: {e:?}");
             }
         }
     }
@@ -511,8 +567,8 @@ impl OperationDb {
     /// owner uid and returns a new Operation wrapped in a `std::sync::Arc`.
     pub fn create_operation(
         &self,
-        km_op: rsbinder::Strong<dyn IKeyMintOperation>,
-        owner: u32,
+        km_op: binder::Strong<dyn IKeyMintOperation>,
+        owner: AppUid,
         auth_info: AuthInfo,
         forced: bool,
         logging_info: LoggingInfo,
@@ -634,13 +690,13 @@ impl OperationDb {
     /// ## Update
     /// We also allow callers to cannibalize their own sibling operations if no other
     /// slot can be found. In this case the least recently used sibling is pruned.
-    pub fn prune(&self, caller: u32, forced: bool) -> Result<(), Error> {
+    pub fn prune(&self, caller: AppUid, forced: bool) -> Result<(), Error> {
         loop {
             // Maps the uid of the owner to the number of operations that owner has
             // (running_siblings). More operations per owner lowers the pruning
             // resistance of the operations of that owner. Whereas the number of
             // ongoing operations of the caller lowers the pruning power of the caller.
-            let mut owners: HashMap<u32, u64> = HashMap::new();
+            let mut owners: HashMap<AppUid, u64> = HashMap::new();
             let mut pruning_info: Vec<PruningInfo> = Vec::new();
 
             let now = Instant::now();
@@ -836,24 +892,19 @@ impl KeystoreOperation {
     /// BnKeystoreOperation proxy object. It also enables
     /// `BinderFeatures::set_requesting_sid` on the new interface, because
     /// we need it for checking Keystore permissions.
-    pub fn new_native_binder(
-        operation: Arc<Operation>,
-    ) -> rsbinder::Strong<dyn IKeystoreOperation> {
-        let mut features = BinderFeatures::default();
-        features.set_requesting_sid = true;
-
+    pub fn new_native_binder(operation: Arc<Operation>) -> binder::Strong<dyn IKeystoreOperation> {
         BnKeystoreOperation::new_binder_with_features(
             Self {
                 operation: Mutex::new(Some(operation)),
             },
-            features,
+            crate::sid_features(),
         )
     }
 
     /// Grabs the outer operation mutex and calls `f` on the locked operation.
     /// The function also deletes the operation if it returns with an error or if
     /// `delete_op` is true.
-    fn with_locked_operation<T, F>(&self, f: F, delete_op: bool) -> Result<T>
+    fn with_locked_operation<T, F>(&self, f: F, delete_op: bool, input_len: usize) -> Result<T>
     where
         for<'a> F: FnOnce(&'a Operation) -> Result<T>,
     {
@@ -862,7 +913,8 @@ impl KeystoreOperation {
             Ok(mut mutex_guard) => {
                 let result = match &*mutex_guard {
                     Some(op) => {
-                        let result = f(op);
+                        let (latency, result) = crate::timed_call!(f(op));
+                        op.update_metrics(latency, input_len);
                         // Any error here means we can discard the operation.
                         if result.is_err() {
                             delete_op = true;
@@ -870,7 +922,7 @@ impl KeystoreOperation {
                         result
                     }
                     None => Err(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE))
-                        .context(err!("KeystoreOperation::with_locked_operation")),
+                        .context(ks_err!("KeystoreOperation::with_locked_operation")),
                 };
 
                 if delete_op {
@@ -883,32 +935,36 @@ impl KeystoreOperation {
                 result
             }
             Err(_) => Err(Error::Rc(ResponseCode::OPERATION_BUSY))
-                .context(err!("KeystoreOperation::with_locked_operation")),
+                .context(ks_err!("KeystoreOperation::with_locked_operation")),
         }
     }
 }
 
-impl rsbinder::Interface for KeystoreOperation {}
+impl binder::Interface for KeystoreOperation {}
 
-#[allow(non_snake_case)]
 impl IKeystoreOperation for KeystoreOperation {
     fn updateAad(&self, aad_input: &[u8]) -> Result<(), Status> {
         let _wp = wd::watch("IKeystoreOperation::updateAad");
         self.with_locked_operation(
             |op| {
                 op.update_aad(aad_input)
-                    .context(err!("KeystoreOperation::updateAad"))
+                    .context(ks_err!("KeystoreOperation::updateAad"))
             },
             false,
+            aad_input.len(),
         )
         .map_err(into_logged_binder)
     }
 
-    fn update(&self, input: &[u8]) -> Result<std::option::Option<Vec<u8>>, Status> {
+    fn update(&self, input: &[u8]) -> Result<Option<Vec<u8>>, Status> {
         let _wp = wd::watch("IKeystoreOperation::update");
         self.with_locked_operation(
-            |op| op.update(input).context(err!("KeystoreOperation::update")),
+            |op| {
+                op.update(input)
+                    .context(ks_err!("KeystoreOperation::update"))
+            },
             false,
+            input.len(),
         )
         .map_err(into_logged_binder)
     }
@@ -916,14 +972,15 @@ impl IKeystoreOperation for KeystoreOperation {
         &self,
         input: Option<&[u8]>,
         signature: Option<&[u8]>,
-    ) -> Result<std::option::Option<Vec<u8>>, Status> {
+    ) -> Result<Option<Vec<u8>>, Status> {
         let _wp = wd::watch("IKeystoreOperation::finish");
         self.with_locked_operation(
             |op| {
                 op.finish(input, signature)
-                    .context(err!("KeystoreOperation::finish"))
+                    .context(ks_err!("KeystoreOperation::finish"))
             },
             true,
+            input.map_or(0, |v| v.len()),
         )
         .map_err(into_logged_binder)
     }
@@ -933,9 +990,10 @@ impl IKeystoreOperation for KeystoreOperation {
         let result = self.with_locked_operation(
             |op| {
                 op.abort(Outcome::Abort)
-                    .context(err!("KeystoreOperation::abort"))
+                    .context(ks_err!("KeystoreOperation::abort"))
             },
             true,
+            0,
         );
         result.map_err(|e| {
             match e.root_cause().downcast_ref::<Error>() {
@@ -943,7 +1001,7 @@ impl IKeystoreOperation for KeystoreOperation {
                 // There is no reason to clutter the log with it. It is never the cause
                 // for a true problem.
                 Some(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE)) => {}
-                _ => log::error!("{:?}", e),
+                _ => log_client_err!(e),
             };
             into_binder(e)
         })

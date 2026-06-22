@@ -22,6 +22,11 @@ use crate::sharedsecret::SharedSecretParameters;
 use crate::{cbor, cbor_type_error, vec_try, AsCborValue, CborError};
 use enumn::N;
 use kmr_derive::AsCborValue;
+use std::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 /// Key size in bits.
 #[repr(transparent)]
@@ -51,6 +56,7 @@ pub enum ValueNotRecognized {
     HardwareAuthenticatorType,
     KeyFormat,
     KeyOrigin,
+    MlDsaVariant,
     SecurityLevel,
     Tag,
     TagType,
@@ -501,10 +507,12 @@ macro_rules! declare_req_rsp_enums {
             fn to_cbor_value(self) -> Result<$crate::cbor::value::Value, crate::CborError> {
                 Ok($crate::cbor::value::Value::Integer((self as i64).into()))
             }
-            fn cddl_typename() -> Option<String> {
+            fn cddl_typename() -> Option<std::string::String> {
+                use std::string::ToString;
                 Some(stringify!($cenum).to_string())
             }
-            fn cddl_schema() -> Option<String> {
+            fn cddl_schema() -> Option<std::string::String> {
+                use std::string::ToString;
                 Some( concat!("&(\n",
                               $( "    ", stringify!($cname), ": ", stringify!($cvalue), ",\n", )*
                               ")").to_string() )
@@ -556,6 +564,7 @@ macro_rules! declare_req_rsp_enums {
             }
 
             fn cddl_typename() -> Option<String> {
+                use std::string::ToString;
                 Some(stringify!($reqenum).to_string())
             }
 
@@ -593,6 +602,7 @@ macro_rules! declare_req_rsp_enums {
             }
 
             fn cddl_typename() -> Option<String> {
+                use std::string::ToString;
                 Some(stringify!($rspenum).to_string())
             }
 

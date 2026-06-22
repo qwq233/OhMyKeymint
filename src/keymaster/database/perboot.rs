@@ -15,27 +15,28 @@
 //! This module implements a per-boot, shared, in-memory storage of auth tokens
 //! for the main Keystore 2.0 database module.
 
+use crate::android::hardware::security::keymint::{
+    HardwareAuthToken::HardwareAuthToken, HardwareAuthenticatorType::HardwareAuthenticatorType,
+};
+use crate::keymaster::db::AuthTokenEntry;
+use crate::keymaster::utils::SecureUserId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
 
-use crate::android::hardware::security::keymint::HardwareAuthToken::HardwareAuthToken;
-use crate::android::hardware::security::keymint::HardwareAuthenticatorType::HardwareAuthenticatorType;
-use crate::keymaster::db::AuthTokenEntry;
-
 #[derive(PartialEq, PartialOrd, Ord, Eq, Hash)]
 struct AuthTokenId {
-    user_id: i64,
-    auth_id: i64,
+    user_id: SecureUserId,
+    auth_id: SecureUserId,
     authenticator_type: HardwareAuthenticatorType,
 }
 
 impl AuthTokenId {
     fn from_auth_token(tok: &HardwareAuthToken) -> Self {
         AuthTokenId {
-            user_id: tok.userId,
-            auth_id: tok.authenticatorId,
+            user_id: SecureUserId(tok.userId),
+            auth_id: SecureUserId(tok.authenticatorId),
             authenticator_type: tok.authenticatorType,
         }
     }
@@ -48,14 +49,14 @@ struct AuthTokenEntryWrap(AuthTokenEntry);
 
 impl std::hash::Hash for AuthTokenEntryWrap {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        AuthTokenId::from_auth_token(&self.0.auth_token).hash(state)
+        AuthTokenId::from_auth_token(self.0.auth_token()).hash(state)
     }
 }
 
 impl PartialEq<AuthTokenEntryWrap> for AuthTokenEntryWrap {
     fn eq(&self, other: &AuthTokenEntryWrap) -> bool {
-        AuthTokenId::from_auth_token(&self.0.auth_token)
-            == AuthTokenId::from_auth_token(&other.0.auth_token)
+        AuthTokenId::from_auth_token(self.0.auth_token())
+            == AuthTokenId::from_auth_token(other.0.auth_token())
     }
 }
 
@@ -95,7 +96,7 @@ impl PerbootDB {
     ) -> Option<AuthTokenEntry> {
         let reader = self.auth_tokens.read().unwrap();
         let mut matches: Vec<_> = reader.iter().filter(|x| p(&x.0)).collect();
-        matches.sort_by_key(|x| x.0.time_received);
+        matches.sort_by_key(|x| x.0.time_received());
         matches.last().map(|x| x.0.clone())
     }
     /// Return how many auth tokens are currently tracked.

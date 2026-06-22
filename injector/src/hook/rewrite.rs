@@ -513,6 +513,25 @@ fn route_for_security_level_request(
     }
 }
 
+fn security_level_request_has_empty_blob_descriptor(request: &ParsedSecurityLevelRequest) -> bool {
+    match request {
+        ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral { storage_key }
+        | ParsedSecurityLevelRequest::DeleteKey { key: storage_key } => {
+            storage_key.domain == Domain::BLOB && matches!(storage_key.blob.as_deref(), Some([]))
+        }
+        _ => false,
+    }
+}
+
+fn is_android_app_uid(uid: u32) -> bool {
+    const AID_APP_START: u32 = 10_000;
+    const AID_APP_END: u32 = 19_999;
+    const AID_USER_OFFSET: u32 = 100_000;
+
+    let app_id = uid % AID_USER_OFFSET;
+    (AID_APP_START..=AID_APP_END).contains(&app_id)
+}
+
 fn mirror_state_dirty(kind: MirrorStateKind) -> bool {
     kind.dirty().load(Ordering::SeqCst)
 }
@@ -1737,6 +1756,25 @@ fn synthetic_reply_from_outbound(reply: Option<OutboundReply>) -> SyntheticReply
     }
 }
 
+fn synthetic_security_level_empty_blob_reply(
+    request: &ParsedSecurityLevelRequest,
+    method: SecurityLevelMethod,
+    caller: &CallerIdentity,
+) -> anyhow::Result<Option<SyntheticReply>> {
+    if !is_android_app_uid(caller.uid) || !security_level_request_has_empty_blob_descriptor(request)
+    {
+        return Ok(None);
+    }
+
+    debug!(
+        "[Injector][Synthetic] returning PERMISSION_DENIED for security-level {:?} empty BLOB descriptor; OMK AIDL transport cannot preserve empty nullable byte arrays",
+        method
+    );
+    Ok(Some(synthetic_parcel_reply(build_service_specific_reply(
+        ResponseCode::PERMISSION_DENIED.0,
+    )?)))
+}
+
 fn synthetic_unknown_transaction_reply_for(
     kind: SyntheticTargetKind,
     code: u32,
@@ -2215,6 +2253,11 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
                 return Ok(synthetic_parcel_reply(build_service_specific_reply(
                     ResponseCode::PERMISSION_DENIED.0,
                 )?));
+            }
+            if let Some(reply) =
+                synthetic_security_level_empty_blob_reply(&request, method, &caller)?
+            {
+                return Ok(reply);
             }
 
             info!(
@@ -2804,6 +2847,14 @@ unsafe fn build_security_level_reply_rewrite(
         return Ok(None);
     }
 
+    if security_level_request_has_empty_blob_descriptor(&pending.request) {
+        debug!(
+            "[Injector][Reply] preserving system {:?} reply for empty BLOB descriptor; OMK AIDL transport cannot preserve empty nullable byte arrays",
+            pending.method
+        );
+        return Ok(None);
+    }
+
     let caller = pending.caller.to_caller_info();
     let _guard = BypassGuard::enter();
     let omk_level =
@@ -3216,6 +3267,15 @@ mod tests {
         }
     }
 
+    fn blob_key_descriptor(blob: Option<Vec<u8>>) -> KeyDescriptor {
+        KeyDescriptor {
+            domain: Domain::BLOB,
+            nspace: 0,
+            alias: None,
+            blob,
+        }
+    }
+
     fn sample_service_requests() -> Vec<ParsedServiceRequest> {
         vec![
             ParsedServiceRequest::GetSecurityLevel {
@@ -3363,6 +3423,20 @@ mod tests {
         let (data, _, _, _) = raw_parts(&mut reply);
         let value = unsafe { std::ptr::read_unaligned(data as *const i32) };
         assert_eq!(value, expected);
+    }
+
+    fn synthetic_service_specific_error(reply: SyntheticReply) -> i32 {
+        let SyntheticReply::Parcel(mut reply) = reply else {
+            panic!("service-specific error should be a parcel");
+        };
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let status = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("status reply should parse");
+        assert_eq!(
+            status.exception_code(),
+            rsbinder::ExceptionCode::ServiceSpecific
+        );
+        status.service_specific_error()
     }
 
     fn carrier_target(carrier: &parcel::ReplyBinderCarrier) -> LocalBinderTarget {
@@ -4140,6 +4214,99 @@ mod tests {
             panic!("malformed createOperation should return a binder status, not a service reply");
         };
         assert_eq!(status, i32::from(StatusCode::BadValue));
+    }
+
+    #[test]
+    fn security_level_empty_blob_descriptor_detection_is_narrow() {
+        let empty_blob = blob_key_descriptor(Some(Vec::new()));
+        let null_blob = blob_key_descriptor(None);
+        let non_empty_blob = blob_key_descriptor(Some(vec![1]));
+        let app_empty_blob = KeyDescriptor {
+            domain: Domain::APP,
+            nspace: 0,
+            alias: None,
+            blob: Some(Vec::new()),
+        };
+
+        assert!(security_level_request_has_empty_blob_descriptor(
+            &ParsedSecurityLevelRequest::DeleteKey {
+                key: empty_blob.clone(),
+            }
+        ));
+        assert!(security_level_request_has_empty_blob_descriptor(
+            &ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral {
+                storage_key: empty_blob.clone(),
+            }
+        ));
+        assert!(!security_level_request_has_empty_blob_descriptor(
+            &ParsedSecurityLevelRequest::DeleteKey { key: null_blob }
+        ));
+        assert!(!security_level_request_has_empty_blob_descriptor(
+            &ParsedSecurityLevelRequest::DeleteKey {
+                key: non_empty_blob,
+            }
+        ));
+        assert!(!security_level_request_has_empty_blob_descriptor(
+            &ParsedSecurityLevelRequest::DeleteKey {
+                key: app_empty_blob,
+            }
+        ));
+        assert!(!security_level_request_has_empty_blob_descriptor(
+            &ParsedSecurityLevelRequest::CreateOperation {
+                key: empty_blob,
+                operation_parameters: vec![],
+                forced: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn synthetic_empty_blob_reply_is_limited_to_app_uids() {
+        let request = ParsedSecurityLevelRequest::DeleteKey {
+            key: blob_key_descriptor(Some(Vec::new())),
+        };
+        let app_caller =
+            CallerIdentity::new(110_002, 2000).with_sid("u:r:untrusted_app:s0:c123,c456");
+        let system_caller = CallerIdentity::new(1000, 2000).with_sid("u:r:system_server:s0");
+
+        let reply = synthetic_security_level_empty_blob_reply(
+            &request,
+            SecurityLevelMethod::DeleteKey,
+            &app_caller,
+        )
+        .expect("empty blob app reply should build")
+        .expect("app uid empty blob should get a synthetic reply");
+        assert_eq!(
+            synthetic_service_specific_error(reply),
+            ResponseCode::PERMISSION_DENIED.0
+        );
+        assert!(synthetic_security_level_empty_blob_reply(
+            &request,
+            SecurityLevelMethod::DeleteKey,
+            &system_caller,
+        )
+        .expect("system caller should not fail")
+        .is_none());
+    }
+
+    #[test]
+    fn omk_security_level_empty_blob_rewrite_preserves_system_reply() {
+        let pending = PendingSecurityLevelCall {
+            request: ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral {
+                storage_key: blob_key_descriptor(Some(Vec::new())),
+            },
+            method: SecurityLevelMethod::ConvertStorageKeyToEphemeral,
+            caller: CallerIdentity::new(10002, 2000),
+            packages: vec!["com.example".to_string()],
+            route: RouteTarget::Omk,
+            security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
+        };
+        let tr: binder_transaction_data = unsafe { std::mem::zeroed() };
+
+        let reply = unsafe { build_security_level_reply_rewrite(&tr, &pending) }
+            .expect("empty blob rewrite should not fail");
+
+        assert!(reply.is_none());
     }
 
     #[test]

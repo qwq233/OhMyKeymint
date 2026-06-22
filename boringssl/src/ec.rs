@@ -13,57 +13,36 @@
 // limitations under the License.
 
 //! BoringSSL-based implementation of elliptic curve functionality.
-use crate::{digest_into_openssl, openssl_err, ossl};
+use crate::types::{EvpMdCtx, EvpPkeyCtx};
+use crate::{cvt, cvt_p, digest_into_openssl, openssl_err, openssl_last_err, ossl};
 #[cfg(soong)]
 use bssl_sys as ffi;
 use core::ops::DerefMut;
+use core::ptr;
 use foreign_types::ForeignType;
-#[cfg(soong)]
-use kmr_common::vec_try;
 use kmr_common::{
     crypto,
     crypto::{ec, ec::Key, AccumulatingOperation, CurveType, OpaqueOr},
-    explicit, km_err, Error, FallibleAllocExt,
+    explicit, km_err, vec_try, Error, FallibleAllocExt,
 };
 use kmr_wire::{
     keymint,
     keymint::{Digest, EcCurve},
 };
 use openssl::hash::MessageDigest;
-use Box;
-use Vec;
+use std::boxed::Box;
+use std::vec::Vec;
 
-#[cfg(target_os = "android")]
+#[cfg(soong)]
 fn private_key_from_der_for_group(
     der: &[u8],
     group: &openssl::ec::EcGroupRef,
 ) -> Result<openssl::ec::EcKey<openssl::pkey::Private>, openssl::error::ErrorStack> {
     // This method is an Android modification to the rust-openssl crate.
-    ossl_private_key_from_der_for_group(der, group)
+    openssl::ec::EcKey::private_key_from_der_for_group(der, group)
 }
 
-#[cfg(target_os = "android")]
-fn ossl_private_key_from_der_for_group(
-    der: &[u8],
-    group: &openssl::ec::EcGroupRef,
-) -> Result<openssl::ec::EcKey<openssl::pkey::Private>, openssl::error::ErrorStack> {
-    use foreign_types::ForeignTypeRef;
-
-    unsafe {
-        let mut cbs = ffi::CBS {
-            data: der.as_ptr(),
-            len: der.len(),
-        };
-
-        crate::ocvt_p(ffi::EC_KEY_parse_private_key(
-            &mut cbs as *mut ffi::CBS,
-            group.as_ptr(),
-        ))
-        .map(|p| openssl::ec::EcKey::from_ptr(p))
-    }
-}
-
-#[cfg(not(target_os = "android"))]
+#[cfg(not(soong))]
 fn private_key_from_der_for_group(
     der: &[u8],
     _group: &openssl::ec::EcGroupRef,
@@ -320,28 +299,98 @@ impl crypto::AccumulatingOperation for BoringEcAgreeOperation {
 }
 
 /// ECDSA signing operation based on BoringSSL, when an external digest is used.
-pub struct BoringEcDigestSignOperation<'a> {
-    signer: openssl::sign::Signer<'a>,
+pub struct BoringEcDigestSignOperation {
+    // Safety: `pkey` internally holds a pointer to BoringSSL-allocated data (`EVP_PKEY`),
+    // as do both of the raw pointers.  This means that this item stays valid under moves,
+    // because the FFI-allocated data doesn't move.
+    pkey: openssl::pkey::PKey<openssl::pkey::Private>,
+
+    // Safety invariant: both `pctx` and `md_ctx` are non-`nullptr` and valid once item is
+    // constructed.
+    md_ctx: EvpMdCtx,
+    pctx: EvpPkeyCtx,
 }
 
-impl BoringEcDigestSignOperation<'_> {
+impl Drop for BoringEcDigestSignOperation {
+    fn drop(&mut self) {
+        // Safety: `EVP_MD_CTX_free()` handles `nullptr`, so it's fine to drop a partly-constructed
+        // item.  `pctx` is owned by the `md_ctx`, so no need to explicitly free it.
+        unsafe {
+            ffi::EVP_MD_CTX_free(self.md_ctx.0);
+        }
+    }
+}
+
+impl BoringEcDigestSignOperation {
     fn new(key: ec::NistKey, curve: ec::NistCurve, digest: MessageDigest) -> Result<Self, Error> {
         let group = nist_curve_to_group(curve)?;
         let ec_key = ossl!(private_key_from_der_for_group(&key.0, group.as_ref()))?;
         let pkey = ossl!(openssl::pkey::PKey::from_ec_key(ec_key))?;
-        let signer = ossl!(openssl::sign::Signer::new(digest, &pkey))?;
-        Ok(Self { signer })
+
+        // Safety: each of the raw pointers have to be non-nullptr (and thus valid, as BoringSSL
+        // emits only valid pointers or nullptr) to get to the point where they're used.
+        unsafe {
+            let mut op = BoringEcDigestSignOperation {
+                pkey,
+                md_ctx: EvpMdCtx(cvt_p(ffi::EVP_MD_CTX_new())?),
+                pctx: EvpPkeyCtx(ptr::null_mut()),
+            };
+
+            let r = ffi::EVP_DigestSignInit(
+                op.md_ctx.0,
+                &mut op.pctx.0,
+                digest.as_ptr(),
+                ptr::null_mut(),
+                op.pkey.as_ptr(),
+            );
+            if r != 1 {
+                return Err(openssl_last_err());
+            }
+            if op.pctx.0.is_null() {
+                return Err(km_err!(BoringSslError, "no PCTX!"));
+            }
+            // Safety invariant: both `pctx` and `md_ctx` are non-`nullptr` and valid on success.
+            Ok(op)
+        }
     }
 }
 
-impl crypto::AccumulatingOperation for BoringEcDigestSignOperation<'_> {
+impl crypto::AccumulatingOperation for BoringEcDigestSignOperation {
     fn update(&mut self, data: &[u8]) -> Result<(), Error> {
-        ossl!(self.signer.update(data))?;
+        // Safety: `data` is a valid slice, and `self.md_ctx` is non-`nullptr` and valid.
+        unsafe {
+            cvt(ffi::EVP_DigestUpdate(
+                self.md_ctx.0,
+                data.as_ptr() as *const _,
+                data.len(),
+            ))?;
+        }
         Ok(())
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Error> {
-        Ok(ossl!(self.signer.sign_to_vec())?)
+        let mut max_siglen = 0;
+        // Safety: `self.md_ctx` is non-`nullptr` and valid.
+        unsafe {
+            cvt(ffi::EVP_DigestSignFinal(
+                self.md_ctx.0,
+                ptr::null_mut(),
+                &mut max_siglen,
+            ))?;
+        }
+        let mut buf = vec_try![0; max_siglen]?;
+        let mut actual_siglen = max_siglen;
+        // Safety: `self.md_ctx` is non-`nullptr` and valid, and `buf` does have `actual_siglen`
+        // bytes.
+        unsafe {
+            cvt(ffi::EVP_DigestSignFinal(
+                self.md_ctx.0,
+                buf.as_mut_ptr() as *mut _,
+                &mut actual_siglen,
+            ))?;
+        }
+        buf.truncate(actual_siglen);
+        Ok(buf)
     }
 }
 

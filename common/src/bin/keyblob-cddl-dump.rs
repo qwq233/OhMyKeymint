@@ -48,7 +48,7 @@ impl AccumulatedSchema {
         // EncryptedKeyBlob encoding)
         #[cfg(feature = "cddl-cat")]
         for (name, data) in &self.samples {
-            if let Err(e) = cddl_cat::validate_cbor_bytes(name, &self.schema, data) {
+            if let Err(e) = cddl_cat::validate_cbor_bytes(&name, &self.schema, &data) {
                 eprintln!(
                     "Failed to validate sample data for {} against CDDL: {:?}",
                     name, e
@@ -136,6 +136,7 @@ fn main() {
     schema.add(keymint::KeyOrigin::Generated);
     schema.add(keymint::KeyPurpose::Sign);
     schema.add(keymint::HardwareAuthenticatorType::Fingerprint);
+    schema.add(keymint::MlDsaVariant::MlDsa65);
     schema.add(keymint::PaddingMode::None);
 
     schema.add(keymint::DateTime {

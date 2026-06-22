@@ -14,6 +14,7 @@
 
 use super::*;
 use crate::cbor::value::Value;
+use std::vec;
 
 #[test]
 fn test_read_to_value_ok() {
@@ -25,7 +26,7 @@ fn test_read_to_value_ok() {
     for (hexdata, want) in tests {
         let data = hex::decode(hexdata).unwrap();
         let got = read_to_value(&data).unwrap();
-        assert_eq!(got, want, "failed for {}", hexdata);
+        assert_eq!(got, want, "failed for {hexdata}");
     }
 }
 
@@ -43,7 +44,7 @@ fn test_read_to_value_fail() {
         let data = hex::decode(hexdata).unwrap();
         let got_err = read_to_value(&data).expect_err("decoding expected to fail");
         assert_eq!(
-            format!("{:?}", got_err),
+            format!("{got_err:?}"),
             format!("{:?}", want_err),
             "failed for {}",
             hexdata

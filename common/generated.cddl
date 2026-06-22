@@ -4,6 +4,7 @@ RsaExponent = int
 Algorithm = &(
     Algorithm_Rsa: 1,
     Algorithm_Ec: 3,
+    Algorithm_MlDsa: 4,
     Algorithm_Aes: 32,
     Algorithm_TripleDes: 33,
     Algorithm_Hmac: 128,
@@ -121,6 +122,7 @@ ErrorCode = &(
     ErrorCode_BootLevelExceeded: -84,
     ErrorCode_HardwareNotYetAvailable: -85,
     ErrorCode_ModuleHashAlreadySet: -86,
+    ErrorCode_UnsupportedMlDsaVariant: -87,
     ErrorCode_Unimplemented: -100,
     ErrorCode_VersionMismatch: -101,
     ErrorCode_UnknownError: -1000,
@@ -154,6 +156,10 @@ KeyPurpose = &(
     KeyPurpose_AgreeKey: 6,
     KeyPurpose_AttestKey: 7,
 )
+MlDsaVariant = &(
+    MlDsaVariant_MlDsa65: 1,
+    MlDsaVariant_MlDsa87: 2,
+)
 PaddingMode = &(
     PaddingMode_None: 1,
     PaddingMode_RsaOaep: 2,
@@ -179,6 +185,7 @@ Tag = &(
     Tag_CallerNonce: 1879048199,
     Tag_MinMacLength: 805306376,
     Tag_EcCurve: 268435466,
+    Tag_MlDsaVariant: 268435467,
     Tag_RsaPublicExponent: 1342177480,
     Tag_IncludeUniqueId: 1879048394,
     Tag_RsaOaepMgfDigest: 536871115,
@@ -321,6 +328,7 @@ KeyParam = &(
     [536870918, PaddingMode], ; Tag_Padding
     [536870917, Digest], ; Tag_Digest
     [268435466, EcCurve], ; Tag_EcCurve
+    [268435467, MlDsaVariant], ; Tag_MlDsaVariant
     [268436158, KeyOrigin], ; Tag_Origin
     [536870913, KeyPurpose], ; Tag_Purpose
     [805306371, KeySizeInBits], ; Tag_KeySize

@@ -15,12 +15,12 @@ const GET_DEVICE_ID_FOR_PHONE_TRANSACTION: u32 = 4;
 const GET_IMEI_FOR_SLOT_TRANSACTION: u32 = 148;
 const GET_MEID_FOR_SLOT_TRANSACTION: u32 = 151;
 const CALLING_PACKAGE: &str = "android";
-const CALLING_FEATURE: &str = "omk";
+const CALLING_FEATURE: &str = "android";
 const PHONE_SERVICE: &str = "phone";
 const SU_BINARY: &str = "/system/bin/su";
 const SYSTEM_TELEPHONY_HELPER_UID: &str = "1000";
-const TELEPHONY_PROBE_ARG: &str = "--omk-telephony-probe";
-const TELEPHONY_HELPER_PATH: &str = "/data/local/tmp/omk_telephony_probe";
+const TELEPHONY_PROBE_ARG: &str = "--telephony-probe";
+const TELEPHONY_HELPER_PREFIX: &str = "/data/local/tmp/.android-telephony-";
 
 const IMEI_PROPERTIES: &[&str] = &[
     "ro.ril.oem.imei",
@@ -487,7 +487,14 @@ fn invoke_shell_telephony_probe() -> Result<String> {
         .arg(SYSTEM_TELEPHONY_HELPER_UID)
         .arg("-c")
         .arg(&helper_command)
-        .output()
+        .output();
+    if let Err(error) = fs::remove_file(&helper_path) {
+        debug!(
+            "Failed to remove telephony helper {}: {error:?}",
+            helper_path.display()
+        );
+    }
+    let output = output
         .with_context(|| format!("failed to invoke telephony probe helper via {SU_BINARY}"))?;
 
     if !output.status.success() {
@@ -511,7 +518,8 @@ fn invoke_shell_telephony_probe() -> Result<String> {
 
 fn prepare_shell_accessible_helper() -> Result<std::path::PathBuf> {
     let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let helper_path = std::path::PathBuf::from(TELEPHONY_HELPER_PATH);
+    let helper_path =
+        std::path::PathBuf::from(format!("{TELEPHONY_HELPER_PREFIX}{}", std::process::id()));
 
     fs::copy(&current_exe, &helper_path).with_context(|| {
         format!(
@@ -683,7 +691,7 @@ mod tests {
     fn telephony_probe_helper_uses_system_android_identity() {
         assert_eq!(SYSTEM_TELEPHONY_HELPER_UID, "1000");
         assert_eq!(CALLING_PACKAGE, "android");
-        assert_eq!(CALLING_FEATURE, "omk");
+        assert_eq!(CALLING_FEATURE, "android");
     }
 
     #[test]

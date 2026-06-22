@@ -9,13 +9,13 @@ use std::{ffi::CString, os::unix::fs::PermissionsExt, path::Path};
 use kmr_common::rpc;
 use log::{debug, error, info, warn};
 use rsbinder::rpc::{PeerIdentity, RpcServer};
-use rsbinder::{hub, BinderFeatures};
+use rsbinder::BinderFeatures;
 
 use crate::{
-    android::system::keystore2::IKeystoreService::BnKeystoreService,
-    config::{config, Backend},
     keymaster::service::KeystoreService,
-    keymaster::{authorization::AuthorizationManager, maintenance::MaintenanceManager},
+    keymaster::{
+        authorization::AuthorizationManager, maintenance::MaintenanceManager, metrics::Metrics,
+    },
     top::qwq2333::ohmykeymint::IOhMyKsService::BnOhMyKsService,
 };
 
@@ -30,6 +30,7 @@ pub mod logging;
 pub mod macros;
 pub mod plat;
 pub mod proto;
+pub mod selinux;
 pub mod utils;
 pub mod watchdog;
 
@@ -45,16 +46,6 @@ fn sid_features() -> BinderFeatures {
 
 const KEYSTORE_UID: libc::uid_t = 1017;
 const KEYSTORE_GID: libc::gid_t = 1017;
-const OMK_ROOT_DIR: &str = "/data/misc/keystore/omk";
-const OMK_DATA_DIR: &str = "/data/misc/keystore/omk/data";
-const OMK_CONFIG_PATH: &str = "/data/misc/keystore/omk/config.toml";
-const OMK_KEYBOX_PATH: &str = "/data/misc/keystore/omk/keybox.xml";
-const OMK_KEYMINT_LOG_PATH: &str = "/data/misc/keystore/omk/keymint.log";
-const OMK_KEYMINT_LOG_ROTATED_PATH: &str = "/data/misc/keystore/omk/keymint.log.1";
-const OMK_INJECTOR_LOG_PATH: &str = "/data/misc/keystore/omk/injector.log";
-const OMK_INJECTOR_LOG_ROTATED_PATH: &str = "/data/misc/keystore/omk/injector.log.1";
-const OMK_KEYMINT_LEGACY_LOCK_PATH: &str = "/data/misc/keystore/omk/keymint.log.lock";
-const OMK_INJECTOR_LEGACY_LOCK_PATH: &str = "/data/misc/keystore/omk/injector.log.lock";
 
 fn storage_warn(message: String) {
     if log::log_enabled!(log::Level::Warn) {
@@ -74,8 +65,50 @@ fn chown_path(path: &str, uid: libc::uid_t, gid: libc::gid_t) -> std::io::Result
     }
 }
 
+fn repair_omk_data_files() {
+    let entries = match std::fs::read_dir(root_path!("data")) {
+        Ok(entries) => entries,
+        Err(e) => {
+            storage_warn(format!("Failed to list OMK data directory: {e:?}"));
+            return;
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                storage_warn(format!("Failed to read OMK data directory entry: {e:?}"));
+                continue;
+            }
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(e) => {
+                storage_warn(format!("Failed to stat OMK data file {path:?}: {e:?}"));
+                continue;
+            }
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            storage_warn(format!("Failed to chmod OMK data file {path:?}: {e:?}"));
+        }
+        let Some(path) = path.to_str() else {
+            storage_warn(format!("Skipping non-UTF8 OMK data file path {path:?}"));
+            continue;
+        };
+        if let Err(e) = chown_path(path, KEYSTORE_UID, KEYSTORE_GID) {
+            storage_warn(format!("Failed to chown OMK data file {path}: {e:?}"));
+        }
+    }
+}
+
 fn prepare_android_storage() {
-    for dir in [OMK_ROOT_DIR, OMK_DATA_DIR] {
+    for dir in [root_path!(), root_path!("data")] {
         if let Err(e) = std::fs::create_dir_all(dir) {
             storage_warn(format!("Failed to create OMK directory {dir}: {e:?}"));
             continue;
@@ -90,13 +123,17 @@ fn prepare_android_storage() {
         }
     }
 
-    if let Err(e) = crate::keybox::ensure_keybox_file(OMK_KEYBOX_PATH) {
+    if let Err(e) = crate::keybox::ensure_keybox_file(root_path!("keybox.xml")) {
         storage_warn(format!(
-            "Failed to seed OMK keybox {OMK_KEYBOX_PATH}: {e:?}"
+            "Failed to seed OMK keybox {}: {e:?}",
+            root_path!("keybox.xml")
         ));
     }
 
-    for file in [OMK_KEYMINT_LEGACY_LOCK_PATH, OMK_INJECTOR_LEGACY_LOCK_PATH] {
+    for file in [
+        root_path!("keymint.log.lock"),
+        root_path!("injector.log.lock"),
+    ] {
         match std::fs::remove_file(file) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -107,13 +144,14 @@ fn prepare_android_storage() {
     }
 
     for file in [
-        OMK_CONFIG_PATH,
-        "/data/misc/keystore/omk/config.toml.bak",
-        OMK_KEYBOX_PATH,
-        OMK_KEYMINT_LOG_PATH,
-        OMK_KEYMINT_LOG_ROTATED_PATH,
-        OMK_INJECTOR_LOG_PATH,
-        OMK_INJECTOR_LOG_ROTATED_PATH,
+        root_path!("config.toml"),
+        root_path!("config.toml.bak"),
+        root_path!("keybox.xml"),
+        root_path!("crash_count"),
+        root_path!("keymint.log"),
+        root_path!("keymint.log.1"),
+        root_path!("injector.log"),
+        root_path!("injector.log.1"),
     ] {
         if !Path::new(file).exists() {
             continue;
@@ -150,6 +188,37 @@ fn create_rpc_server() -> Result<Arc<RpcServer>> {
     Ok(server)
 }
 
+fn should_resolve_module_info_bundle(android_major_version: Option<i32>) -> bool {
+    !matches!(android_major_version, Some(version) if version < 16)
+}
+
+fn install_module_info_bundle_if_available() -> Result<()> {
+    if !should_resolve_module_info_bundle(kmr_common::android_version::android_major_version()) {
+        info!("Skipping moduleHash input on pre-Android 16 system");
+        return Ok(());
+    }
+
+    // We can no longer resolve module info after dropping privileges.
+    debug!("Resolving APEX module info with root privileges");
+    match crate::keymaster::apex::resolve_module_info_bundle() {
+        Ok(bundle) => {
+            let source = bundle.source.as_str();
+            let module_count = bundle.modules.len();
+            let sha256 = hex::encode(&bundle.sha256);
+            global::install_module_info_bundle(bundle)
+                .context("failed to install APEX module info bundle")?;
+            info!(
+                "Initialized moduleHash input from {source} with {module_count} active modules (sha256={sha256})"
+            );
+        }
+        Err(error) => {
+            warn!("APEX module info unavailable; moduleHash attestation disabled: {error:#}");
+        }
+    }
+
+    Ok(())
+}
+
 fn main() {
     match plat::device_ids::maybe_run_telephony_probe_command() {
         Ok(true) => return,
@@ -174,6 +243,7 @@ fn main() {
 
 fn run() -> Result<()> {
     info!("Hello, OhMyKeymint!");
+    crate::keymaster::permission::initialize_runtime_service_context();
 
     info!("Initial process state");
     let _ = rsbinder::ProcessState::init_default();
@@ -192,112 +262,86 @@ fn run() -> Result<()> {
     config::install_runtime_config(config_file, resolved_trust)
         .context("failed to install runtime config")?;
 
-    let backend = {
-        config()
-            .read()
-            .map_err(|_| anyhow::anyhow!("config lock poisoned while reading backend"))?
-            .main
-            .backend
-            .clone()
-    };
+    install_module_info_bundle_if_available().context("failed to initialize moduleHash input")?;
 
-    // We can no longer resolve module info after dropping privileges.
-    debug!("Resolving APEX module info with root privileges");
-    match crate::keymaster::apex::resolve_module_info_bundle() {
-        Ok(bundle) => {
-            let source = bundle.source.as_str();
-            let module_count = bundle.modules.len();
-            let sha256 = hex::encode(&bundle.sha256);
-            global::install_module_info_bundle(bundle)
-                .context("failed to install APEX module info bundle")?;
-            info!(
-                "Initialized moduleHash input from {source} with {module_count} active modules (sha256={sha256})"
-            );
-        }
-        Err(e) => {
-            warn!("Failed to resolve APEX module info before dropping privileges: {e:#}");
-        }
-    }
+    std::thread::spawn(global::await_boot_completed);
+    crate::keymaster::entropy::register_feeder();
+    global::DB
+        .with(|db| {
+            crate::keymaster::super_key::SuperKeyManager::set_up_boot_level_cache(
+                &global::SUPER_KEY,
+                &mut db.borrow_mut(),
+            )
+        })
+        .context("failed to initialize boot-level key cache")?;
+    repair_omk_data_files();
 
     keybox::initialize().context("failed to initialize keybox runtime")?;
 
-    let injector_rpc_server = match backend {
-        Backend::Injector => Some(create_rpc_server()?),
-        Backend::OMK => None,
-    };
+    let injector_rpc_server = create_rpc_server()?;
 
     unsafe {
         info!("Setting UID to KEYSTORE_UID (1017)");
         libc::setuid(KEYSTORE_UID); // KEYSTORE_UID
     }
 
+    crate::keymaster::metrics_store::update_keystore_crash_count();
+
     info!("Starting thread pool");
     rsbinder::ProcessState::start_thread_pool();
 
-    match backend {
-        Backend::OMK => {
-            info!("Using OhMyKeymint backend");
-            info!("Creating keystore service");
-            let dev = KeystoreService::new_native_binder()
-                .context("failed to create keystore3 service")?;
+    info!("Using Injector backend");
+    let server = injector_rpc_server;
 
-            let service = BnKeystoreService::new_binder_with_features(dev, sid_features());
-            info!("Adding keystore service to hub");
-            hub::add_service("keystore3", service.as_binder())
-                .context("failed to add keystore3 service")?;
+    info!("Creating keystore service");
+    let dev = KeystoreService::new_native_binder().context("failed to create omk service")?;
 
-            info!("Creating authorization service");
-            let auth = AuthorizationManager::new_native_binder()
-                .context("failed to create authorization service")?;
-            info!("Adding authorization service to hub");
-            hub::add_service("android.security.authorization", auth.as_binder())
-                .context("failed to add authorization service")?;
+    info!("Adding OMK service to RPC server");
+    let service = BnOhMyKsService::new_binder_with_features(dev, sid_features());
+    server
+        .add_service(rpc::SERVICE, service.as_binder())
+        .context("failed to add OMK RPC service")?;
 
-            info!("Creating maintenance service");
-            let maintenance = MaintenanceManager::new_native_binder()
-                .context("failed to create maintenance service")?;
-            info!("Adding maintenance service to hub");
-            hub::add_service("android.security.maintenance", maintenance.as_binder())
-                .context("failed to add maintenance service")?;
+    info!("Creating OMK authorization service");
+    let auth = AuthorizationManager::new_omk_binder()
+        .context("failed to create OMK authorization service")?;
+    info!("Adding OMK authorization service to RPC server");
+    server
+        .add_service(rpc::AUTHORIZATION_SERVICE, auth.as_binder())
+        .context("failed to add OMK authorization RPC service")?;
+
+    info!("Creating OMK maintenance service");
+    let maintenance =
+        MaintenanceManager::new_omk_binder().context("failed to create OMK maintenance service")?;
+    info!("Adding OMK maintenance service to RPC server");
+    server
+        .add_service(rpc::MAINTENANCE_SERVICE, maintenance.as_binder())
+        .context("failed to add OMK maintenance RPC service")?;
+
+    info!("Creating OMK metrics service");
+    let metrics = Metrics::new_native_binder().context("failed to create OMK metrics service")?;
+    info!("Adding OMK metrics service to RPC server");
+    server
+        .add_service(rpc::METRICS_SERVICE, metrics.as_binder())
+        .context("failed to add OMK metrics RPC service")?;
+
+    info!("Serving OMK RPC on {}", rpc::SOCKET);
+    server.run().context("OMK RPC server stopped")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_resolve_module_info_bundle;
+
+    #[test]
+    fn module_info_bundle_is_only_resolved_on_android_16_plus() {
+        for version in [Some(12), Some(13), Some(14), Some(15)] {
+            assert!(!should_resolve_module_info_bundle(version));
         }
-        Backend::Injector => {
-            info!("Using Injector backend");
-            let server = injector_rpc_server
-                .context("injector RPC server was not initialized before dropping privileges")?;
 
-            info!("Creating keystore service");
-            let dev =
-                KeystoreService::new_native_binder().context("failed to create omk service")?;
-
-            info!("Adding OMK service to RPC server");
-            let service = BnOhMyKsService::new_binder_with_features(dev, sid_features());
-            server
-                .add_service(rpc::SERVICE, service.as_binder())
-                .context("failed to add OMK RPC service")?;
-
-            info!("Creating OMK authorization service");
-            let auth = AuthorizationManager::new_omk_binder()
-                .context("failed to create OMK authorization service")?;
-            info!("Adding OMK authorization service to RPC server");
-            server
-                .add_service(rpc::AUTHORIZATION_SERVICE, auth.as_binder())
-                .context("failed to add OMK authorization RPC service")?;
-
-            info!("Creating OMK maintenance service");
-            let maintenance = MaintenanceManager::new_omk_binder()
-                .context("failed to create OMK maintenance service")?;
-            info!("Adding OMK maintenance service to RPC server");
-            server
-                .add_service(rpc::MAINTENANCE_SERVICE, maintenance.as_binder())
-                .context("failed to add OMK maintenance RPC service")?;
-
-            info!("Serving OMK RPC on {}", rpc::SOCKET);
-            server.run().context("OMK RPC server stopped")?;
-            return Ok(());
+        for version in [None, Some(16), Some(17)] {
+            assert!(should_resolve_module_info_bundle(version));
         }
     }
-
-    info!("Joining thread pool");
-    rsbinder::ProcessState::join_thread_pool().context("thread pool join failed")?;
-    Ok(())
 }

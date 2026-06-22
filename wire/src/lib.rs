@@ -16,6 +16,14 @@
 
 // Allow missing docs in this crate as the types here are generally 1:1 with the HAL
 // interface definitions.
+#![allow(missing_docs)]
+
+use coset::TaggedCborSerializable;
+use std::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 /// Re-export of crate used for CBOR encoding.
 pub use ciborium as cbor;
@@ -28,7 +36,6 @@ pub mod rpc;
 pub mod secureclock;
 pub mod sharedsecret;
 pub mod types;
-use coset::TaggedCborSerializable;
 pub use types::*;
 
 #[cfg(test)]
@@ -56,7 +63,7 @@ pub fn vec_try_fill_with_alloc_err<T: Clone, E>(
     len: usize,
     alloc_err: fn() -> E,
 ) -> Result<Vec<T>, E> {
-    let mut v = Vec::new();
+    let mut v = std::vec::Vec::new();
     v.try_reserve(len).map_err(|_e| alloc_err())?;
     v.resize(len, elem);
     Ok(v)
@@ -71,7 +78,7 @@ pub fn vec_try4_with_alloc_err<T: Clone, E>(
     x4: T,
     alloc_err: fn() -> E,
 ) -> Result<Vec<T>, E> {
-    let mut v = Vec::new();
+    let mut v = std::vec::Vec::new();
     match v.try_reserve(4) {
         Err(_e) => Err(alloc_err()),
         Ok(_) => {
@@ -92,7 +99,7 @@ pub fn vec_try3_with_alloc_err<T: Clone, E>(
     x3: T,
     alloc_err: fn() -> E,
 ) -> Result<Vec<T>, E> {
-    let mut v = Vec::new();
+    let mut v = std::vec::Vec::new();
     match v.try_reserve(3) {
         Err(_e) => Err(alloc_err()),
         Ok(_) => {
@@ -110,7 +117,7 @@ pub fn vec_try2_with_alloc_err<T: Clone, E>(
     x2: T,
     alloc_err: fn() -> E,
 ) -> Result<Vec<T>, E> {
-    let mut v = Vec::new();
+    let mut v = std::vec::Vec::new();
     match v.try_reserve(2) {
         Err(_e) => Err(alloc_err()),
         Ok(_) => {
@@ -123,7 +130,7 @@ pub fn vec_try2_with_alloc_err<T: Clone, E>(
 
 /// Function that mimics `vec![x1]` but which detects allocation failure with the given error.
 pub fn vec_try1_with_alloc_err<T: Clone, E>(x1: T, alloc_err: fn() -> E) -> Result<Vec<T>, E> {
-    let mut v = Vec::new();
+    let mut v = std::vec::Vec::new();
     match v.try_reserve(1) {
         Err(_e) => Err(alloc_err()),
         Ok(_) => {
@@ -256,12 +263,12 @@ impl From<coset::CoseError> for CborError {
 impl core::fmt::Debug for CborError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            CborError::DecodeFailed(de) => write!(f, "decode CBOR failure: {:?}", de),
+            CborError::DecodeFailed(de) => write!(f, "decode CBOR failure: {de:?}"),
             CborError::EncodeFailed => write!(f, "encode CBOR failure"),
             CborError::ExtraneousData => write!(f, "extraneous data in CBOR input"),
             CborError::OutOfRangeIntegerValue => write!(f, "out of range integer value"),
             CborError::NonEnumValue => write!(f, "integer not a valid enum value"),
-            CborError::UnexpectedItem(got, want) => write!(f, "got {}, expected {}", got, want),
+            CborError::UnexpectedItem(got, want) => write!(f, "got {got}, expected {want}"),
             CborError::InvalidValue => write!(f, "invalid CBOR value"),
             CborError::AllocationFailed => write!(f, "allocation failed"),
         }
@@ -359,7 +366,7 @@ impl AsCborValue for coset::CoseEncrypt0 {
     fn to_cbor_value(self) -> Result<cbor::value::Value, CborError> {
         Ok(cbor::value::Value::Tag(
             coset::CoseEncrypt0::TAG,
-            Box::new(coset::AsCborValue::to_cbor_value(self)?),
+            std::boxed::Box::new(coset::AsCborValue::to_cbor_value(self)?),
         ))
     }
     fn cddl_schema() -> Option<String> {
@@ -442,7 +449,7 @@ impl<const N: usize> AsCborValue for [u8; N] {
     }
 
     fn to_cbor_value(self) -> Result<cbor::value::Value, CborError> {
-        let mut v = Vec::new();
+        let mut v = std::vec::Vec::new();
         if v.try_reserve(self.len()).is_err() {
             return Err(CborError::AllocationFailed);
         }
@@ -451,7 +458,7 @@ impl<const N: usize> AsCborValue for [u8; N] {
     }
 
     fn cddl_typename() -> Option<String> {
-        Some(format!("bstr .size {}", N))
+        Some(format!("bstr .size {N}"))
     }
 }
 

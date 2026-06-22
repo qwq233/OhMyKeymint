@@ -14,11 +14,10 @@
 
 //! Functionality related to AES encryption
 
-use super::{nonce, Rng};
-use crate::{get_tag_value, km_err, tag, try_to_vec, Error};
+use crate::{km_err, try_to_vec, Error};
 use core::convert::TryInto;
-use kmr_wire::keymint::{BlockMode, ErrorCode, KeyParam, PaddingMode};
 use kmr_wire::KeySizeInBits;
+use std::vec::Vec;
 use zeroize::ZeroizeOnDrop;
 
 /// Size of an AES block in bytes.
@@ -135,95 +134,6 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// Determine the [`Mode`], rejecting invalid parameters. Use `caller_nonce` if provided,
-    /// otherwise generate a new nonce using the provided [`Rng`] instance.
-    pub fn new(
-        params: &[KeyParam],
-        caller_nonce: Option<&Vec<u8>>,
-        rng: &mut dyn Rng,
-    ) -> Result<Self, Error> {
-        let mode = tag::get_block_mode(params)?;
-        let padding = tag::get_padding_mode(params)?;
-        match mode {
-            BlockMode::Ecb => {
-                if caller_nonce.is_some() {
-                    return Err(km_err!(
-                        InvalidNonce,
-                        "nonce unexpectedly provided for AES-ECB"
-                    ));
-                }
-                match padding {
-                    PaddingMode::None => Ok(Mode::Cipher(CipherMode::EcbNoPadding)),
-                    PaddingMode::Pkcs7 => Ok(Mode::Cipher(CipherMode::EcbPkcs7Padding)),
-                    _ => Err(km_err!(
-                        IncompatiblePaddingMode,
-                        "expected NONE/PKCS7 padding for AES-ECB"
-                    )),
-                }
-            }
-            BlockMode::Cbc => {
-                let nonce: [u8; BLOCK_SIZE] = nonce(BLOCK_SIZE, caller_nonce, rng)?
-                    .try_into()
-                    .map_err(|_e| {
-                        km_err!(InvalidNonce, "want {} byte nonce for AES-CBC", BLOCK_SIZE)
-                    })?;
-                match padding {
-                    PaddingMode::None => Ok(Mode::Cipher(CipherMode::CbcNoPadding { nonce })),
-                    PaddingMode::Pkcs7 => Ok(Mode::Cipher(CipherMode::CbcPkcs7Padding { nonce })),
-                    _ => Err(km_err!(
-                        IncompatiblePaddingMode,
-                        "expected NONE/PKCS7 padding for AES-CBC"
-                    )),
-                }
-            }
-            BlockMode::Ctr => {
-                if padding != PaddingMode::None {
-                    return Err(km_err!(
-                        IncompatiblePaddingMode,
-                        "expected NONE padding for AES-CTR"
-                    ));
-                }
-                let nonce: [u8; BLOCK_SIZE] = nonce(BLOCK_SIZE, caller_nonce, rng)?
-                    .try_into()
-                    .map_err(|_e| {
-                        km_err!(InvalidNonce, "want {} byte nonce for AES-CTR", BLOCK_SIZE)
-                    })?;
-                Ok(Mode::Cipher(CipherMode::Ctr { nonce }))
-            }
-            BlockMode::Gcm => {
-                if padding != PaddingMode::None {
-                    return Err(km_err!(
-                        IncompatiblePaddingMode,
-                        "expected NONE padding for AES-GCM"
-                    ));
-                }
-                let nonce: [u8; GCM_NONCE_SIZE] = nonce(GCM_NONCE_SIZE, caller_nonce, rng)?
-                    .try_into()
-                    .map_err(|_e| km_err!(InvalidNonce, "want 12 byte nonce for AES-GCM"))?;
-                let tag_len = get_tag_value!(params, MacLength, ErrorCode::InvalidMacLength)?;
-                if tag_len % 8 != 0 {
-                    return Err(km_err!(
-                        InvalidMacLength,
-                        "tag length {} not a multiple of 8",
-                        tag_len
-                    ));
-                }
-                match tag_len / 8 {
-                    12 => Ok(Mode::Aead(GcmMode::GcmTag12 { nonce })),
-                    13 => Ok(Mode::Aead(GcmMode::GcmTag13 { nonce })),
-                    14 => Ok(Mode::Aead(GcmMode::GcmTag14 { nonce })),
-                    15 => Ok(Mode::Aead(GcmMode::GcmTag15 { nonce })),
-                    16 => Ok(Mode::Aead(GcmMode::GcmTag16 { nonce })),
-                    v => Err(km_err!(
-                        InvalidMacLength,
-                        "want 12-16 byte tag for AES-GCM not {} bytes",
-                        v
-                    )),
-                }
-            }
-        }
-    }
-
     /// Indicate whether the AES mode is an AEAD.
     pub fn is_aead(&self) -> bool {
         match self {

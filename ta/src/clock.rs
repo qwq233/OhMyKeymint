@@ -17,9 +17,11 @@
 use core::mem::size_of;
 use kmr_common::{km_err, vec_try_with_capacity, Error};
 use kmr_wire::secureclock::{TimeStampToken, TIME_STAMP_MAC_LABEL};
+use std::vec::Vec;
 
 impl crate::KeyMintTa {
-    pub(crate) fn generate_timestamp(&self, challenge: i64) -> Result<TimeStampToken, Error> {
+    /// Generates an authenticated timestamp.
+    pub fn generate_timestamp(&self, challenge: i64) -> Result<TimeStampToken, Error> {
         if let Some(clock) = &self.imp.clock {
             let mut ret = TimeStampToken {
                 challenge,

@@ -18,18 +18,19 @@ use crate::device::DeviceHmac;
 use kmr_common::{crypto, crypto::hmac, km_err, vec_try, Error, FallibleAllocExt};
 use kmr_wire::{keymint::Digest, sharedsecret::SharedSecretParameters};
 use log::info;
+use std::{boxed::Box, vec::Vec};
 
 impl crate::KeyMintTa {
     pub fn set_device_hmac_key(&mut self, key: &[u8]) -> Result<(), Error> {
         if key.len() != kmr_common::crypto::SHA256_DIGEST_LEN {
             return Err(km_err!(
                 InvalidArgument,
-                "device HMAC key len {} not 32",
+                "HMAC key len {} not 32",
                 key.len()
             ));
         }
-        self.device_hmac = Some(Box::new(SoftDeviceHmac {
-            key: hmac::Key::new(key.to_vec()),
+        self.set_device_hmac(Box::new(SoftDeviceHmac {
+            key: crypto::hmac::Key::new(key.to_vec()),
         }));
         Ok(())
     }
@@ -88,7 +89,7 @@ impl crate::KeyMintTa {
         )?);
 
         // Potentially hand the negotiated HMAC key off to hardware.
-        self.device_hmac = Some(self.dev.keys.hmac_key_agreed(&key).unwrap_or_else(|| {
+        self.set_device_hmac(self.dev.keys.hmac_key_agreed(&key).unwrap_or_else(|| {
             // Key not installed into hardware, so build & use a local impl.
             Box::new(SoftDeviceHmac { key })
         }));

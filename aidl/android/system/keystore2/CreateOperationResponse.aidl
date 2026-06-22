@@ -29,7 +29,7 @@ parcelable CreateOperationResponse {
     /**
      * The binder representing the newly created operation.
      */
-    @nullable IKeystoreOperation iOperation; // Actual type is NonNull, but compiler doesn't like it.
+    IKeystoreOperation iOperation;
     /**
      * A challenge associated with the newly created operation. If this field is set.
      * it indicates that the operation has yet to be authorized by the user.

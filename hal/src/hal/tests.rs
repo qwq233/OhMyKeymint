@@ -154,12 +154,10 @@ fn test_unnamed_cbor_parse_fail() {
 /// Check for an expected error.
 #[cfg(test)]
 pub fn expect_err<T, E: core::fmt::Debug>(result: Result<T, E>, err_msg: &str) {
-    assert!(result.is_err(), "unexpected success; wanted error containing '{}'", err_msg);
+    assert!(result.is_err(), "unexpected success; wanted error containing '{err_msg}'");
     let err = result.err();
     assert!(
-        format!("{:?}", err).contains(err_msg),
-        "unexpected error {:?}, doesn't contain '{}'",
-        err,
-        err_msg
+        format!("{err:?}").contains(err_msg),
+        "unexpected error {err:?}, doesn't contain '{err_msg}'"
     );
 }

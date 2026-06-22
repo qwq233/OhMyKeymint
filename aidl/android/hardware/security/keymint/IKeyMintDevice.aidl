@@ -129,6 +129,15 @@ import android.hardware.security.secureclock.TimeStampToken;
  *      - TRUSTED_ENVIRONMENT IKeyMintDevices must support MD-5, SHA1, SHA-2-224, SHA-2-256,
  *        SHA-2-384 and SHA-2-512.  STRONGBOX IKeyMintDevices must support SHA-2-256.
  *
+ * TRUSTED_ENVIRONMENT implementations of IKeyMintDevice must provide support for the following:
+ *
+ * o   ML-DSA (see FIPS 204)
+ *
+ *      - ML-DSA-65 and ML-DSA-87 must be supported.  ML-DSA-44 is not supported.
+ *      - Import of ML-DSA keys is supported in raw format (32-byte seed value), and in PKCS#8
+ *        format (RFC 9881 section 6) for 32-byte seeds.  Import of PKCS#8 format keys in
+ *        `expandedKey` or `both` format is not supported.
+ *
  * == Key Access Control ==
  *
  * Hardware-based keys that can never be extracted from the device don't provide much security if an
@@ -349,6 +358,19 @@ interface IKeyMintDevice {
      * bits (inclusive). If omitted, generateKey must return ErrorCode::MISSING_MIN_MAC_LENGTH; if
      * invalid, generateKey must return ErrorCode::UNSUPPORTED_MIN_MAC_LENGTH.
      *
+     * == ML-DSA Keys ==
+     *
+     * Tag::ML_DSA_VARIANT must be provided to generate an ML-DSA key. If it is not provided,
+     * generateKey must return ErrorCode::UNSUPPORTED_ML_DSA_VARIANT.  TEE IKeyMintDevice
+     * implementations must support ML-DSA-65 and ML-DSA-87.  StrongBox implementations do not
+     * support ML-DSA.
+     *
+     * ML-DSA keys can have purpose KeyPurpose::SIGN or KeyPurpose::ATTEST_KEY, but cannot have
+     * both.  Key generation with both SIGN and ATTEST_KEY purpose should be rejected with
+     * ErrorCode::INCOMPATIBLE_PURPOSE.
+     *
+     * ML-DSA keys only support Tag::DIGEST values of Digest::NONE.
+     *
      * @param keyParams Key generation parameters are defined as KeyMintDevice tag/value pairs,
      *        provided in params.  See above for detailed specifications of which tags are required
      *        for which types of keys.
@@ -562,15 +584,14 @@ interface IKeyMintDevice {
     void deleteAllKeys();
 
     /**
-     * Destroys knowledge of the device's ids.  This prevents all device id attestation in the
-     * future.  The destruction must be permanent so that not even a factory reset will restore the
-     * device ids.
+     * This method is deprecated. Implementations must return ErrorCode::UNIMPLEMENTED.
      *
-     * Device id attestation may be provided only if this method is fully implemented, allowing the
-     * user to permanently disable device id attestation.  If this cannot be guaranteed, the device
-     * must never attest any device ids.
+     * This method was originally intended to permanently wipe knowledge of the device's provisioned
+     * device IDs, even after a factory reset. Calling this method would cause all subsequent device
+     * ID attestation attempts to fail.
      *
-     * This is a NOP if device id attestation is not supported.
+     * This method is not useful since there is no entrypoint in the Android framework for invoking
+     * it, so it is deprecated and must return ErrorCode::UNIMPLEMENTED.
      */
     void destroyAttestationIds();
 
@@ -977,7 +998,8 @@ interface IKeyMintDevice {
      *
      * @return error ErrorCode::MODULE_HASH_ALREADY_SET if this is not the first time
      *         setAdditionalAttestationInfo is called with Tag::MODULE_HASH, and the associated
-     *         KeyParamValue of the current call doesn't match the KeyParamValue of the first call.
+     *         KeyParameterValue of the current call doesn't match the KeyParameterValue of the
+     *         first call.
      */
     void setAdditionalAttestationInfo(in KeyParameter[] info);
 }

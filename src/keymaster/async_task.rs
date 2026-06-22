@@ -27,6 +27,9 @@ use std::{
     thread,
 };
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, PartialEq, Eq)]
 enum State {
     Exiting,
@@ -94,14 +97,16 @@ impl Shelf {
 
 type QueuedFn = Box<dyn FnOnce(&mut Shelf) + Send>;
 type IdleFn = Arc<dyn Fn(&mut Shelf) + Send + Sync>;
+type QueuedFns = VecDeque<QueuedFn>;
+type IdleFns = Vec<IdleFn>;
 
 struct AsyncTaskState {
     state: State,
     thread: Option<thread::JoinHandle<()>>,
     timeout: Duration,
-    hi_prio_req: VecDeque<QueuedFn>,
-    lo_prio_req: VecDeque<QueuedFn>,
-    idle_fns: Vec<IdleFn>,
+    hi_prio_req: QueuedFns,
+    lo_prio_req: QueuedFns,
+    idle_fns: IdleFns,
     /// The store allows tasks to store state across invocations. It is passed to each invocation
     /// of each task. Tasks need to cooperate on the ids they use for storing state.
     shelf: Option<Shelf>,
@@ -177,8 +182,24 @@ impl AsyncTask {
     where
         F: for<'r> FnOnce(&'r mut Shelf) + Send + 'static,
     {
+        self.queue_if(|_state| true, f, hi_prio);
+    }
+
+    /// Add the job `f` to the specified queue, but only if the `condition`  closure returns `true`.
+    ///
+    /// Returns an indication of whether the job was queued or not.
+    fn queue_if<C, F>(&self, condition: C, f: F, hi_prio: bool) -> bool
+    where
+        C: FnOnce(&AsyncTaskState) -> bool,
+        F: for<'r> FnOnce(&'r mut Shelf) + Send + 'static,
+    {
         let (ref condvar, ref state) = *self.state;
         let mut state = state.lock().unwrap();
+
+        let add_to_queue = condition(&state);
+        if !add_to_queue {
+            return false;
+        }
 
         if hi_prio {
             state.hi_prio_req.push_back(Box::new(f));
@@ -191,6 +212,22 @@ impl AsyncTask {
         }
         drop(state);
         condvar.notify_all();
+        true
+    }
+
+    /// Add a one-off job to the high-priority queue, but only if there is already current
+    /// work (the worker thread is running or there is work queued).
+    ///
+    /// Returns an indication of whether the job was queued or not.
+    pub fn queue_hi_if_running<F>(&self, f: F) -> bool
+    where
+        F: FnOnce(&mut Shelf) + Send + 'static,
+    {
+        self.queue_if(
+            |state| state.state == State::Running || !state.hi_prio_req.is_empty(),
+            f,
+            true,
+        )
     }
 
     fn spawn_thread(&self, state: &mut MutexGuard<AsyncTaskState>) {
@@ -202,11 +239,19 @@ impl AsyncTask {
         let timeout_period = state.timeout;
 
         state.thread = Some(thread::spawn(move || {
+            // This spawned thread may inherit the priority of the thread that triggered the async
+            // work, and that triggering thread may in turn have inherited the priority of a client
+            // via a Binder transaction.  Make sure this new thread's priority is at least the
+            // default.
+            if crate::keymaster::flags::renice_async_task() {
+                crate::keymaster::utils::self_renice(0);
+            }
+
             let (ref condvar, ref state) = *cloned_state;
 
             enum Action {
                 QueuedFn(QueuedFn),
-                IdleFns(Vec<IdleFn>),
+                IdleFns(IdleFns),
             }
             let mut done_idle = false;
 

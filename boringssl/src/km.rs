@@ -1,4 +1,5 @@
 use std::vec;
+use std::vec::Vec;
 
 use crate::{error::Error, zvec::ZVec};
 use ffi::EVP_MAX_MD_SIZE;

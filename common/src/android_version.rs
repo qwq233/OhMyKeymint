@@ -1,4 +1,7 @@
-use std::sync::OnceLock;
+use std::{
+    string::{String, ToString},
+    sync::OnceLock,
+};
 
 static ANDROID_MAJOR_VERSION: OnceLock<Option<i32>> = OnceLock::new();
 
@@ -18,8 +21,10 @@ pub fn android_major_version_with(read_property: impl Fn(&str) -> Option<String>
                     33 => 13,
                     34 => 14,
                     35 => 15,
-                    value if value >= 36 => 16,
-                    _ => 16,
+                    36 => 16,
+                    37 => 17,
+                    value if value >= 37 => 17,
+                    _ => 35,
                 })
         })
 }

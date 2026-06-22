@@ -20,7 +20,7 @@ use der::{Decode, Sequence};
 use kmr_common::{
     crypto::{self, aes, rsa, KeyMaterial, OpaqueOr},
     der_err, get_bool_tag_value, get_opt_tag_value, get_tag_value, keyblob, km_err, tag,
-    try_to_vec, vec_try_with_capacity, Error, FallibleAllocExt,
+    try_to_vec, vec_try_with_capacity, Error, ErrorKind, FallibleAllocExt,
 };
 use kmr_wire::{
     keymint::{
@@ -30,10 +30,9 @@ use kmr_wire::{
     },
     *,
 };
-use log::{debug, error, warn};
-use std::collections::btree_map::Entry;
+use log::{error, warn};
+use std::{collections::btree_map::Entry, string::String, vec::Vec};
 use x509_cert::ext::pkix::KeyUsages;
-use Vec;
 
 /// Maximum size of an attestation challenge value.
 const MAX_ATTESTATION_CHALLENGE_LEN: usize = 128;
@@ -150,10 +149,8 @@ impl crate::KeyMintTa {
                         snapshot.identity_digest,
                     )?;
                     entry.insert(refreshed);
-                    entry.into_mut()
-                } else {
-                    entry.into_mut()
                 }
+                entry.into_mut()
             }
             Entry::Vacant(entry) => entry.insert(Self::build_attestation_chain_info(
                 &snapshot.cert_chain,
@@ -287,6 +284,11 @@ impl crate::KeyMintTa {
                 op.update(tbs_data)?;
                 op.finish()
             }
+            KeyMaterial::MlDsa(_variant, key) => {
+                let mut op = self.imp.mldsa.begin_sign(key)?;
+                op.update(tbs_data)?;
+                op.finish()
+            }
             _ => Err(km_err!(
                 IncompatibleAlgorithm,
                 "unexpected cert signing key type"
@@ -374,6 +376,11 @@ impl crate::KeyMintTa {
                 .imp
                 .ec
                 .generate_x25519_key(&mut *self.imp.rng, params)?,
+            crypto::KeyGenInfo::MlDsa(variant) => {
+                self.imp
+                    .mldsa
+                    .generate_key(&mut *self.imp.rng, variant, params)?
+            }
         };
         Ok((key_material, chars))
     }
@@ -428,21 +435,6 @@ impl crate::KeyMintTa {
         key_material: KeyMaterial,
         purpose: keyblob::SlotPurpose,
     ) -> Result<KeyCreationResult, Error> {
-        debug!(
-            "finish_keyblob_creation: params_count={} attest_key_present={}",
-            params.len(),
-            attestation_key.is_some()
-        );
-        debug!(
-            "key characteristics summary: {:?}",
-            chars
-                .iter()
-                .map(|c| (c.security_level, c.authorizations.len()))
-                .collect::<Vec<_>>()
-        );
-        debug!("key material: <redacted>");
-        debug!("keyblob purpose: {:?}", purpose);
-
         let keyblob = keyblob::PlaintextKeyBlob {
             // Don't include any `SecurityLevel::Keystore` characteristics in the set that is bound
             // to the key.
@@ -459,6 +451,7 @@ impl crate::KeyMintTa {
             &mut Vec::<u8>::new(),
             &*self.imp.ec,
             &*self.imp.rsa,
+            &*self.imp.mldsa,
         )? {
             // Asymmetric keys return the public key inside an X.509 certificate.
             // Need to determine:
@@ -516,11 +509,12 @@ impl crate::KeyMintTa {
                             ))
                         }
                     };
-                    // Provide an indication of what's going to be signed, to allow the
-                    // implementation to switch between EC and RSA signing keys if it so chooses.
+                    // Depending on what's going to be signed, allow the implementation to switch
+                    // between EC and RSA signing keys if it so chooses.
                     let algo_hint = match &keyblob.key_material {
                         crypto::KeyMaterial::Rsa(_) => device::SigningAlgorithm::Rsa,
                         crypto::KeyMaterial::Ec(_, _, _) => device::SigningAlgorithm::Ec,
+                        crypto::KeyMaterial::MlDsa(_, _) => device::SigningAlgorithm::Ec,
                         _ => return Err(km_err!(InvalidArgument, "unexpected key type!")),
                     };
 
@@ -794,29 +788,30 @@ impl crate::KeyMintTa {
     ) -> Result<Vec<u8>, Error> {
         let (mut keyblob, mut modified) =
             match self.keyblob_parse_decrypt_backlevel(keyblob_to_upgrade, &upgrade_params) {
-                Ok(v) => (v.0, false),
-                Err(Error::Hal(ErrorCode::KeyRequiresUpgrade, _)) => {
-                    // Because `keyblob_parse_decrypt_backlevel` explicitly allows back-level
-                    // versioned keys, a `KeyRequiresUpgrade` error indicates that the keyblob looks
-                    // to be in legacy format.  Try to convert it.
-                    let legacy_handler =
-                        self.dev.legacy_key.as_mut().ok_or_else(|| {
+                Ok(result) => (result.keyblob, result.kek_context_is_outdated),
+                Err(e) => match e.kind() {
+                    ErrorKind::Hal(ErrorCode::KeyRequiresUpgrade, _) => {
+                        // Because `keyblob_parse_decrypt_backlevel` explicitly allows back-level
+                        // versioned keys, a `KeyRequiresUpgrade` error indicates that the keyblob
+                        // looks to be in legacy format.  Try to convert it.
+                        let legacy_handler = self.dev.legacy_key.as_mut().ok_or_else(|| {
                             km_err!(KeymintNotConfigured, "no legacy key handler")
                         })?;
-                    (
-                        legacy_handler.convert_legacy_key(
-                            keyblob_to_upgrade,
-                            &upgrade_params,
-                            self.boot_info
-                                .as_ref()
-                                .ok_or_else(|| km_err!(HardwareNotYetAvailable, "no boot info"))?,
-                            self.hw_info.security_level,
-                        )?,
-                        // Force the emission of a new keyblob even if versions are the same.
-                        true,
-                    )
-                }
-                Err(e) => return Err(e),
+                        (
+                            legacy_handler.convert_legacy_key(
+                                keyblob_to_upgrade,
+                                &upgrade_params,
+                                self.boot_info.as_ref().ok_or_else(|| {
+                                    km_err!(HardwareNotYetAvailable, "no boot info")
+                                })?,
+                                self.hw_info.security_level,
+                            )?,
+                            // Force the emission of a new keyblob even if versions are the same.
+                            true,
+                        )
+                    }
+                    _ => return Err(e),
+                },
             };
 
         fn upgrade(v: &mut u32, curr: u32, name: &str) -> Result<bool, Error> {
@@ -827,7 +822,7 @@ impl crate::KeyMintTa {
                 }
                 Ordering::Equal => Ok(false),
                 Ordering::Greater => {
-                    error!("refusing to downgrade {} from {} to {}", name, v, curr);
+                    error!("refusing to downgrade {name} from {v} to {curr}");
                     Err(km_err!(
                         InvalidArgument,
                         "keyblob with future {} {} (current {})",
@@ -856,14 +851,14 @@ impl crate::KeyMintTa {
                                 modified |= upgrade(v, hal_info.os_version, "OS version")?;
                             }
                         } else {
-                            error!("OS version not available, can't upgrade from {}", v);
+                            error!("OS version not available, can't upgrade from {v}");
                         }
                     }
                     KeyParam::OsPatchlevel(v) => {
                         if let Some(hal_info) = &self.hal_info {
                             modified |= upgrade(v, hal_info.os_patchlevel, "OS patchlevel")?;
                         } else {
-                            error!("OS patchlevel not available, can't upgrade from {}", v);
+                            error!("OS patchlevel not available, can't upgrade from {v}");
                         }
                     }
                     KeyParam::VendorPatchlevel(v) => {
@@ -871,14 +866,14 @@ impl crate::KeyMintTa {
                             modified |=
                                 upgrade(v, hal_info.vendor_patchlevel, "vendor patchlevel")?;
                         } else {
-                            error!("vendor patchlevel not available, can't upgrade from {}", v);
+                            error!("vendor patchlevel not available, can't upgrade from {v}");
                         }
                     }
                     KeyParam::BootPatchlevel(v) => {
                         if let Some(boot_info) = &self.boot_info {
                             modified |= upgrade(v, boot_info.boot_patchlevel, "boot patchlevel")?;
                         } else {
-                            error!("boot patchlevel not available, can't upgrade from {}", v);
+                            error!("boot patchlevel not available, can't upgrade from {v}");
                         }
                     }
                     _ => {}
@@ -891,9 +886,9 @@ impl crate::KeyMintTa {
             return Ok(Vec::new());
         }
 
-        // Now re-build the keyblob. Use a potentially fresh key encryption key, and potentially a
-        // new secure deletion secret slot. (The old slot will be released when Keystore performs
-        // the corresponding `deleteKey` operation on the old keyblob.
+        // Now re-build the keyblob. Use a potentially fresh key encryption key and context, and
+        // potentially a new secure deletion secret slot. (The old slot will be released when
+        // Keystore performs the corresponding `deleteKey` operation on the old keyblob.)
         let kek_context = self.dev.keys.kek_context()?;
         let root_kek = self.root_kek(&kek_context)?;
         let hidden = tag::hidden(&upgrade_params, self.root_of_trust()?)?;

@@ -425,7 +425,6 @@ pub struct ConfigFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
     Injector,
-    OMK,
 }
 
 impl Serialize for Backend {
@@ -453,7 +452,6 @@ impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Backend::Injector => write!(f, "injector"),
-            Backend::OMK => write!(f, "omk"),
         }
     }
 }
@@ -463,8 +461,9 @@ impl std::str::FromStr for Backend {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            // ponytail: keep old configs booting while the OMK system-service backend is disabled.
             "injector" => Ok(Backend::Injector),
-            "omk" => Ok(Backend::OMK),
+            "omk" => Ok(Backend::Injector),
             _ => Err(()),
         }
     }
@@ -472,8 +471,7 @@ impl std::str::FromStr for Backend {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MainConfig {
-    /// default to tricky store for compatibility, we will
-    /// switch to omk later when we are sure everything works
+    /// Only the injector backend is currently enabled.
     pub backend: Backend,
     /// Insecure fallback for devices whose system TEE cannot verify biometric
     /// HATs. Only mirrored system-successful biometric auth tokens may use it.
@@ -825,12 +823,12 @@ mod tests {
     }
 
     #[test]
-    fn backend_config_accepts_only_lowercase_names() {
+    fn backend_config_accepts_injector_and_legacy_omk_alias() {
         let injector: MainConfig = toml::from_str(r#"backend = "injector""#).unwrap();
         assert_eq!(injector.backend, Backend::Injector);
 
         let omk: MainConfig = toml::from_str(r#"backend = "omk""#).unwrap();
-        assert_eq!(omk.backend, Backend::OMK);
+        assert_eq!(omk.backend, Backend::Injector);
 
         assert!(toml::from_str::<MainConfig>(r#"backend = "ts""#).is_err());
         assert!(toml::from_str::<MainConfig>(r#"backend = "Injector""#).is_err());

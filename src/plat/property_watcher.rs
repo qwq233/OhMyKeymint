@@ -27,10 +27,18 @@ impl PropertyWatcher {
             .and_then(|value| f(value.as_str()))
     }
 
-    pub fn wait(&self, _old_value: Option<&str>) -> Result<()> {
+    pub fn wait(&self, old_value: Option<&str>) -> Result<()> {
         let system_props = rsproperties::system_properties();
         let val = system_props.find(&self.name)?;
         if let Some(val) = val {
+            if let Some(old_value) = old_value {
+                let current = system_props
+                    .get_with_result(self.name.as_str())
+                    .context(anyhow!("Property '{}' not found", self.name))?;
+                if current != old_value {
+                    return Ok(());
+                }
+            }
             system_props.wait(Some(&val), None, None);
             Ok(())
         } else {

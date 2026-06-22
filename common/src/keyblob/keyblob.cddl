@@ -50,6 +50,8 @@ KeyMaterial = &(
   ; `ECPrivateKey` structure, as specified by RFC 5915 section 3.
   ; An explicit EC key for curve 25519 is the raw key bytes.
   [3, bool, [EcCurve, CurveType, bstr]], ; Algorithm_Ec
+  ; An explicit ML-DSA key is the 32-byte seed value.
+  [4, bool, [MlDsaVariant, bstr]], ; Algorithm_MlDsa
 )
 SecureDeletionSlot = int
 SecureDeletionData = [
@@ -79,6 +81,7 @@ KeyParam = &(
     [536870918, PaddingMode], ; Tag_Padding
     [536870917, Digest], ; Tag_Digest
     [268435466, EcCurve], ; Tag_EcCurve
+    [268435467, MlDsaVariant], ; Tag_MlDsaVariant
     [268436158, KeyOrigin], ; Tag_Origin
     [536870913, KeyPurpose], ; Tag_Purpose
     [805306371, KeySizeInBits], ; Tag_KeySize
@@ -146,6 +149,7 @@ Tag = &(
     Tag_CallerNonce: 1879048199,
     Tag_MinMacLength: 805306376,
     Tag_EcCurve: 268435466,
+    Tag_MlDsaVariant: 268435467,
     Tag_RsaPublicExponent: 1342177480,
     Tag_IncludeUniqueId: 1879048394,
     Tag_RsaOaepMgfDigest: 536871115,
@@ -207,6 +211,7 @@ Tag = &(
 Algorithm = &(
     Algorithm_Rsa: 1,
     Algorithm_Ec: 3,
+    Algorithm_MlDsa: 4,
     Algorithm_Aes: 32,
     Algorithm_TripleDes: 33,
     Algorithm_Hmac: 128,
@@ -259,6 +264,10 @@ HardwareAuthenticatorType = &(
     HardwareAuthenticatorType_Password: 1,
     HardwareAuthenticatorType_Fingerprint: 2,
     HardwareAuthenticatorType_Any: -1,
+)
+MlDsaVariant = &(
+    MlDsaVariant_MlDsa65: 1,
+    MlDsaVariant_MlDsa87: 2,
 )
 PaddingMode = &(
     PaddingMode_None: 1,

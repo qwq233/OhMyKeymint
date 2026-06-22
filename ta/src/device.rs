@@ -21,6 +21,7 @@ use kmr_common::{
 };
 use kmr_wire::{keymint, rpc, secureclock::TimeStampToken, CborError};
 use log::error;
+use std::{boxed::Box, vec::Vec};
 
 use crate::rkp::serialize_cbor;
 
@@ -66,7 +67,7 @@ pub struct Implementation {
 
 /// Functionality related to retrieval of device-specific key material, and its subsequent use.
 /// The caller is generally expected to drop the key material as soon as it is done with it.
-pub trait RetrieveKeyMaterial {
+pub trait RetrieveKeyMaterial: Send {
     /// Retrieve the root key used for derivation of a per-keyblob key encryption key (KEK), passing
     /// in any opaque context.
     fn root_kek(&self, context: &[u8]) -> Result<OpaqueOr<hmac::Key>, Error>;
@@ -101,10 +102,20 @@ pub trait RetrieveKeyMaterial {
     fn timestamp_token_mac_input(&self, token: &TimeStampToken) -> Result<Vec<u8>, Error> {
         crate::clock::timestamp_token_mac_input(token)
     }
+
+    /// Checks if a KEK context is outdated.
+    ///
+    /// This method inspects the provided `kek_context` to determine if the security
+    /// material it represents (e.g., a DICE policy) is older than the device's current
+    /// security state. If so, this method should return `true`, signaling that the key
+    /// needs to be re-wrapped with a new Key Encryption Key (KEK).
+    fn kek_context_is_outdated(&self, _kek_context: &[u8]) -> Result<bool, Error> {
+        Ok(false)
+    }
 }
 
 /// Device HMAC calculation.
-pub trait DeviceHmac {
+pub trait DeviceHmac: Send {
     /// Calculate the HMAC over the data using the agreed device HMAC key.
     fn hmac(&self, imp: &dyn crypto::Hmac, data: &[u8]) -> Result<Vec<u8>, Error>;
 
@@ -157,7 +168,7 @@ pub struct SigningInfoSnapshot {
 
 /// Retrieval of attestation certificate signing information.  The caller is expected to drop key
 /// material after use, but may cache public key material.
-pub trait RetrieveCertSigningInfo {
+pub trait RetrieveCertSigningInfo: Send {
     /// Return a consistent signing snapshot for the specified `key_type`.  The `algo_hint`
     /// parameter indicates what is going to be signed, to allow implementations to (optionally)
     /// use EC / RSA signing keys for EC /RSA keys respectively.
@@ -173,16 +184,24 @@ pub trait RetrieveCertSigningInfo {
 
 /// Retrieval of attestation ID information.  This information will not change (so the caller can
 /// cache this information after first invocation).
-pub trait RetrieveAttestationIds {
-    /// Return the attestation IDs associated with the device, if available.
+pub trait RetrieveAttestationIds: Send {
+    /// Return the attestation IDs associated with the device, if ID attestation is supported.
+    /// This method must return IDs, so should only be implemented if pre-provisioned IDs are
+    /// always available.
     fn get(&self) -> Result<crate::AttestationIdInfo, Error>;
+
+    /// Return the attestation IDs associated with the device, if available.  If ID attestation is
+    /// supported, but ID values are not available yet, return `Ok(None)`.
+    fn get_ids(&self) -> Result<Option<crate::AttestationIdInfo>, Error> {
+        self.get().map(Some)
+    }
 
     /// Destroy all attestation IDs associated with the device.
     fn destroy_all(&mut self) -> Result<(), Error>;
 }
 
 /// Bootloader status.
-pub trait BootloaderStatus {
+pub trait BootloaderStatus: Send {
     /// Indication of whether bootloader processing is complete
     fn done(&self) -> bool {
         // By default assume that the bootloader is done before KeyMint starts.
@@ -194,9 +213,13 @@ pub trait BootloaderStatus {
 /// implementation of IRemotelyProvisionedComponent (IRPC) HAL.
 /// Note: The devices only supporting IRPC V3+ may ignore the optional IRPC V2 specific types in
 /// the method signatures.
-pub trait RetrieveRpcArtifacts {
+pub trait RetrieveRpcArtifacts: Send {
     /// Retrieve secret bytes (of the given output length) derived from a hardware backed key.
     /// For a given context, the output is deterministic.
+    ///
+    /// This method is used by the default implementation of `compute_hmac_sha256`. It is not
+    /// needed if `compute_hmac_sha256` is provided with a non-default implementation that
+    /// uses its own key.
     fn derive_bytes_from_hbk(
         &self,
         hkdf: &dyn crypto::Hkdf,
@@ -204,13 +227,15 @@ pub trait RetrieveRpcArtifacts {
         output_len: usize,
     ) -> Result<Vec<u8>, Error>;
 
-    /// Compute HMAC_SHA256 over the given input using a key derived from hardware.
+    /// Compute HMAC_SHA256 over the given `input`, using a key that persists at least until reboot.
     fn compute_hmac_sha256(
         &self,
         hmac: &dyn crypto::Hmac,
         hkdf: &dyn crypto::Hkdf,
         input: &[u8],
     ) -> Result<Vec<u8>, Error> {
+        // Default implementation uses a key derived from hardware (which
+        // therefore persists even beyond reboot).
         let secret = self.derive_bytes_from_hbk(hkdf, RPC_HMAC_KEY_CONTEXT, RPC_HMAC_KEY_LEN)?;
         crypto::hmac_sha256(hmac, &secret, input)
     }
@@ -336,7 +361,7 @@ pub struct BootloaderDone;
 impl BootloaderStatus for BootloaderDone {}
 
 /// Trusted user presence indicator.
-pub trait TrustedUserPresence {
+pub trait TrustedUserPresence: Send {
     /// Indication of whether user presence is detected, via a mechanism in the current secure
     /// environment.
     fn available(&self) -> bool {
@@ -350,7 +375,7 @@ pub struct TrustedPresenceUnsupported;
 impl TrustedUserPresence for TrustedPresenceUnsupported {}
 
 /// Storage key wrapping.
-pub trait StorageKeyWrapper {
+pub trait StorageKeyWrapper: Send {
     /// Wrap the provided key material using an ephemeral storage key.
     fn ephemeral_wrap(&self, key_material: &KeyMaterial) -> Result<Vec<u8>, Error>;
 }

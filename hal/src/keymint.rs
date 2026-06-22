@@ -191,9 +191,21 @@ impl<T: SerializedChannel> keymint::IKeyMintDevice::IKeyMintDevice for Device<T>
         let _rsp: DeleteAllKeysResponse = self.execute(DeleteAllKeysRequest {})?;
         Ok(())
     }
+    #[cfg(not(feature = "hal_v5"))]
     fn destroyAttestationIds(&self) -> binder::Result<()> {
         let _rsp: DestroyAttestationIdsResponse = self.execute(DestroyAttestationIdsRequest {})?;
         Ok(())
+    }
+    #[cfg(feature = "hal_v5")]
+    fn destroyAttestationIds(&self) -> binder::Result<()> {
+        warn!("Deprecated method destroyAttestationIds() was called");
+        Err(binder::Status::new_service_specific_error(
+            keymint::ErrorCode::ErrorCode::UNIMPLEMENTED.0,
+            Some(
+                &CString::new("Deprecated method destroyAttestationIds() is not implemented")
+                    .unwrap(),
+            ),
+        ))
     }
     fn begin(
         &self,

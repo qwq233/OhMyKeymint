@@ -18,15 +18,12 @@
 //! optionally dispose of sensitive key material appropriately, and then delete
 //! the key entry from the database.
 
-use crate::err;
-use crate::keymaster::db::SupersededBlob;
-use crate::keymaster::{
-    async_task,
-    db::{KeymasterDb, Uuid},
-    super_key::SuperKeyManager,
-};
+use crate::keymaster::async_task::AsyncTask;
+use crate::keymaster::db::{KeystoreDB, SupersededBlob, Uuid};
+use crate::keymaster::super_key::SuperKeyManager;
+use crate::{err as ks_err, global};
 use anyhow::{Context, Result};
-use async_task::AsyncTask;
+use log::error;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc, RwLock,
@@ -48,7 +45,7 @@ impl Gc {
     /// Note: It is a logical error to initialize different Gc instances with the same `AsyncTask`.
     pub fn new_init_with<F>(async_task: Arc<AsyncTask>, init: F) -> Self
     where
-        F: FnOnce() -> (InvalidateKey, KeymasterDb, Arc<RwLock<SuperKeyManager>>) + Send + 'static,
+        F: FnOnce() -> (InvalidateKey, KeystoreDB, Arc<RwLock<SuperKeyManager>>) + Send + 'static,
     {
         let weak_at = Arc::downgrade(&async_task);
         let notified = Arc::new(AtomicU8::new(0));
@@ -91,7 +88,7 @@ struct GcInternal {
     deleted_blob_ids: Vec<i64>,
     superseded_blobs: Vec<SupersededBlob>,
     invalidate_key: InvalidateKey,
-    db: KeymasterDb,
+    db: KeystoreDB,
     async_task: std::sync::Weak<AsyncTask>,
     super_key: Arc<RwLock<SuperKeyManager>>,
     notified: Arc<AtomicU8>,
@@ -109,7 +106,7 @@ impl GcInternal {
             let blobs = self
                 .db
                 .handle_next_superseded_blobs(&self.deleted_blob_ids, 20)
-                .context(err!("Trying to handle superseded blob."))?;
+                .context(ks_err!("Trying to handle superseded blob."))?;
             self.deleted_blob_ids = vec![];
             self.superseded_blobs = blobs;
         }
@@ -135,8 +132,8 @@ impl GcInternal {
                     .read()
                     .unwrap()
                     .unwrap_key_if_required(&metadata, &blob)
-                    .context(err!("Trying to unwrap to-be-deleted blob.",))?;
-                (self.invalidate_key)(uuid, &blob).context(err!("Trying to invalidate key."))?;
+                    .context(ks_err!("Trying to unwrap to-be-deleted blob.",))?;
+                (self.invalidate_key)(uuid, &blob).context(ks_err!("Trying to invalidate key."))?;
             }
         }
         Ok(())
@@ -145,9 +142,19 @@ impl GcInternal {
     /// Processes one key and then schedules another attempt until it runs out of blobs to delete.
     fn step(&mut self) {
         self.notified.store(0, Ordering::Relaxed);
-
+        if !global::boot_completed() {
+            // Garbage collection involves a operation (`IKeyMintDevice::deleteKey()`) that cannot
+            // be rolled back in some cases (specifically, when the key is rollback-resistant), even
+            // if the Keystore database is restored to the version of an earlier userdata filesystem
+            // checkpoint.
+            //
+            // This means that we should not perform GC until boot has fully completed, and any
+            // in-progress OTA is definitely not going to be rolled back.
+            log::info!("skip GC as boot not completed");
+            return;
+        }
         if let Err(e) = self.process_one_key() {
-            log::error!("Error trying to delete blob entry. {:?}", e);
+            error!("Error trying to delete blob entry: {e:?}");
         }
         // Schedule the next step. This gives high priority requests a chance to interleave.
         if !self.deleted_blob_ids.is_empty() {

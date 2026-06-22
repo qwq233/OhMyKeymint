@@ -24,6 +24,11 @@ use kmr_wire::keymint::{
 };
 use kmr_wire::{cbor, cbor_type_error, AsCborValue, CborError};
 use log::{error, info};
+use std::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use zeroize::ZeroizeOnDrop;
 
 pub mod legacy;
@@ -91,7 +96,7 @@ impl AsCborValue for EncryptedKeyBlob {
         Ok(match self {
             EncryptedKeyBlob::V1(inner) => cbor::value::Value::Array(
                 vec_try![Version::V1.to_cbor_value()?, inner.to_cbor_value()?]
-                    .map_err(|_e: Error| CborError::AllocationFailed)?,
+                    .map_err(|_e| CborError::AllocationFailed)?,
             ),
         })
     }
@@ -106,10 +111,6 @@ impl AsCborValue for EncryptedKeyBlob {
             Version::V1 as i32,
             EncryptedKeyBlobV1::cddl_ref()
         ))
-    }
-
-    fn into_vec(self) -> Result<Vec<u8>, CborError> {
-        Ok(coset::CborSerializable::to_vec(self.to_cbor_value()?)?)
     }
 }
 
@@ -134,7 +135,7 @@ pub struct EncryptedKeyBlobV1 {
 }
 
 /// Trait to handle keyblobs in a format from a previous implementation.
-pub trait LegacyKeyHandler {
+pub trait LegacyKeyHandler: Send {
     /// Indicate whether a keyblob is a legacy key format.
     fn is_legacy_key(&self, keyblob: &[u8], params: &[KeyParam], root_of_trust: &BootInfo) -> bool {
         // The `convert_legacy_key` method includes a security level parameter so that a new
@@ -152,7 +153,7 @@ pub trait LegacyKeyHandler {
                 true
             }
             Err(e) => {
-                info!("legacy keyblob conversion attempt failed: {:?}", e);
+                info!("legacy keyblob conversion attempt failed: {e:?}");
                 false
             }
         }
@@ -187,7 +188,7 @@ pub struct SecureDeletionData {
 }
 
 /// Indication of what kind of key operation requires a secure deletion slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SlotPurpose {
     /// Secure deletion slot needed for key generation.
     KeyGeneration,
@@ -199,7 +200,7 @@ pub enum SlotPurpose {
 
 /// Manager for the mapping between secure deletion slots and the corresponding
 /// [`SecureDeletionData`] instances.
-pub trait SecureDeletionSecretManager {
+pub trait SecureDeletionSecretManager: Send {
     /// Return a [`SecureDeletionData`] that has the `factory_reset_secret` populated but which has
     /// all zeroes for the `secure_deletion_secret`. If a factory reset secret has not yet been
     /// created, do so (possibly using `rng`)
@@ -243,10 +244,7 @@ impl Drop for SlotHolder<'_> {
     fn drop(&mut self) {
         if let Some(slot) = self.slot.take() {
             if let Err(e) = self.mgr.delete_secret(slot) {
-                error!(
-                    "Failed to delete recently-acquired SDD slot {:?}: {:?}",
-                    slot, e
-                );
+                error!("Failed to delete recently-acquired SDD slot {slot:?}: {e:?}");
             }
         }
     }
@@ -289,8 +287,8 @@ pub struct RootOfTrustInfo {
 /// Derive a key encryption key used for key blob encryption. The key is an AES-256 key derived
 /// from `root_key` using HKDF (RFC 5869) with HMAC-SHA256:
 /// - input keying material = a root key held in hardware. If it contains explicit key material,
-///   perform full HKDF. If the root key is an opaque one, we assume that the key is able to be
-///   directly used on the HKDF expand step.
+///   perform full HKDF. If the root key is an opaque one, we assume that
+///   the key is able to be directly used on the HKDF expand step.
 /// - salt = absent
 /// - info = the following three or four chunks of context data concatenated:
 ///    - content of `key_derivation_input` (which is random data)
@@ -366,11 +364,6 @@ pub fn encrypt(
 ) -> Result<EncryptedKeyBlob, Error> {
     // Determine if secure deletion is required by examining the key characteristics at our
     // security level.
-    log::debug!(
-        "Encrypting keyblob with characteristics: {:?}, SecLevel={:?}",
-        plaintext_keyblob.characteristics,
-        sec_level
-    );
     let requires_sdd = plaintext_keyblob
         .characteristics_at(sec_level)?
         .iter()

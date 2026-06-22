@@ -16,15 +16,16 @@
 
 use crate::keys::SigningInfo;
 use core::time::Duration;
-use der::asn1::{ObjectIdentifier, OctetStringRef, SetOfVec};
+use der::asn1::{OctetStringRef, SetOfVec};
 use der::{asn1::Null, oid::AssociatedOid, Enumerated, Sequence};
 use der::{Decode, Encode, EncodeValue, ErrorKind, Length};
 use flagset::FlagSet;
 use kmr_common::crypto::KeyMaterial;
 use kmr_common::{
     crypto, der_err, get_tag_value, km_err, tag, try_to_vec, vec_try_with_capacity, Error,
+    ErrorKind as CommonErrorKind,
 };
-use kmr_common::{get_bool_tag_value, get_opt_tag_value, modify_tag_value, FallibleAllocExt};
+use kmr_common::{get_bool_tag_value, get_opt_tag_value, FallibleAllocExt};
 use kmr_wire::{
     keymint,
     keymint::{
@@ -33,10 +34,11 @@ use kmr_wire::{
     },
     KeySizeInBits, RsaExponent,
 };
-use std::borrow::Cow;
+use spki::ObjectIdentifier;
+use std::{borrow::Cow, vec::Vec};
 use x509_cert::der as x509_der;
 use x509_cert::der::asn1::{
-    BitString as X509BitString, GeneralizedTime as X509GeneralizedTime,
+    Any as X509Any, BitString as X509BitString, GeneralizedTime as X509GeneralizedTime,
     OctetString as X509OctetString, UtcTime as X509UtcTime,
 };
 use x509_cert::serial_number::SerialNumber;
@@ -68,7 +70,7 @@ const EMPTY_BOOT_KEY: [u8; 32] = [0u8; 32];
 
 pub(crate) fn x509_der_error(err: x509_der::Error, context: core::fmt::Arguments<'_>) -> Error {
     log::warn!("{}: {:?} at {:?}", context, err, err.position());
-    Error::Der(ErrorKind::Failed)
+    Error::from(CommonErrorKind::Der(ErrorKind::Failed))
 }
 
 /// Build an ASN.1 DER-encodable `Certificate`.
@@ -96,12 +98,19 @@ pub(crate) fn tbs_certificate<'a>(
     let not_before = get_tag_value!(params, CertificateNotBefore, ErrorCode::MissingNotBefore)?;
     let not_after = get_tag_value!(params, CertificateNotAfter, ErrorCode::MissingNotAfter)?;
 
-    // Determine the OID part of the `AlgorithmIdentifier`; we do not support any signing key
-    // types that have parameters in the `AlgorithmIdentifier`
-    let sig_alg_oid = match info {
+    // Determine the contents of the `AlgorithmIdentifier`, as an OID and parameters:
+    // - RSA: RFC 4055 section 5 requires `NULL` parameters.
+    // - ECDSA: RFC 5758 section 3.2 requires parameters be omitted.
+    // - EdDSA: RFC 8410 section 3 requires parameters be omitted.
+    // - ML-DSA: RFC 9881 section 2 requires parameters be omitted.
+    let (sig_alg_oid, parameters) = match info {
         Some(info) => match info.signing_key {
-            KeyMaterial::Rsa(_) => crypto::rsa::SHA256_PKCS1_SIGNATURE_OID,
-            KeyMaterial::Ec(curve, _, _) => crypto::ec::curve_to_signing_oid(curve),
+            KeyMaterial::Rsa(_) => (
+                crypto::rsa::SHA256_PKCS1_SIGNATURE_OID,
+                Some(X509Any::null()),
+            ),
+            KeyMaterial::Ec(curve, _, _) => (crypto::ec::curve_to_signing_oid(curve), None),
+            KeyMaterial::MlDsa(variant, _) => (crypto::mldsa::variant_to_oid(variant), None),
             _ => {
                 return Err(km_err!(
                     UnsupportedAlgorithm,
@@ -112,15 +121,22 @@ pub(crate) fn tbs_certificate<'a>(
         None => {
             // No signing key, so signature will be empty, but we still need a value here.
             match tag::get_algorithm(params)? {
-                keymint::Algorithm::Rsa => crypto::rsa::SHA256_PKCS1_SIGNATURE_OID,
-                keymint::Algorithm::Ec => {
-                    crypto::ec::curve_to_signing_oid(tag::get_ec_curve(chars)?)
+                keymint::Algorithm::Rsa => (
+                    crypto::rsa::SHA256_PKCS1_SIGNATURE_OID,
+                    Some(X509Any::null()),
+                ),
+                keymint::Algorithm::Ec => (
+                    crypto::ec::curve_to_signing_oid(tag::get_ec_curve(chars)?),
+                    None,
+                ),
+                keymint::Algorithm::MlDsa => {
+                    let variant = tag::get_mldsa_variant(chars)?;
+                    (crypto::mldsa::variant_to_oid(variant), None)
                 }
                 alg => {
                     return Err(km_err!(
                         UnsupportedAlgorithm,
-                        "unexpected algorithm for public key {:?}",
-                        alg
+                        "unexpected algorithm for public key {alg:?}",
                     ))
                 }
             }
@@ -170,12 +186,12 @@ pub(crate) fn tbs_certificate<'a>(
         serial_number: SerialNumber::new(cert_serial).map_err(|e| {
             x509_der_error(
                 e,
-                format_args!("failed to build serial number for {:?}", cert_serial),
+                format_args!("failed to build serial number for {cert_serial:?}"),
             )
         })?,
         signature: X509AlgorithmIdentifierOwned {
             oid: sig_alg_oid,
-            parameters: None,
+            parameters,
         },
         issuer: <RdnSequence as x509_der::Decode>::from_der(cert_issuer)
             .map_err(|e| x509_der_error(e, format_args!("failed to build issuer")))?,
@@ -195,22 +211,22 @@ pub(crate) fn tbs_certificate<'a>(
 /// Extract the Subject field from a `keymint::Certificate` as DER-encoded data.
 pub(crate) fn extract_subject(cert: &keymint::Certificate) -> Result<Vec<u8>, Error> {
     let cert = <x509_cert::Certificate as x509_der::Decode>::from_der(&cert.encoded_certificate)
-        .map_err(|e| km_err!(EncodingError, "failed to parse certificate: {:?}", e))?;
+        .map_err(|e| km_err!(EncodingError, "failed to parse certificate: {e:?}"))?;
     let subject_data = x509_der::Encode::to_der(&cert.tbs_certificate.subject)
-        .map_err(|e| km_err!(EncodingError, "failed to DER-encode subject: {:?}", e))?;
+        .map_err(|e| km_err!(EncodingError, "failed to DER-encode subject: {e:?}"))?;
     Ok(subject_data)
 }
 
 fn x509_oid(oid: ObjectIdentifier) -> Result<X509ObjectIdentifier, Error> {
     X509ObjectIdentifier::from_bytes(oid.as_bytes())
-        .map_err(|_| Error::Der(ErrorKind::OidMalformed))
+        .map_err(|_| Error::from(CommonErrorKind::Der(ErrorKind::OidMalformed)))
 }
 
 /// Construct x.509-cert::time::Time from `DateTime`.
 /// RFC 5280 section 4.1.2.5 requires that UtcTime is used up to 2049
 /// and GeneralizedTime from 2050 onwards
 fn validity_time_from_datetime(when: DateTime) -> Result<Time, Error> {
-    let dt_err = |_| Error::Der(ErrorKind::DateTime);
+    let dt_err = |_| Error::from(CommonErrorKind::Der(ErrorKind::DateTime));
     let secs_since_epoch: i64 = when.ms_since_epoch / 1000;
 
     if when.ms_since_epoch >= 0 {
@@ -220,16 +236,13 @@ fn validity_time_from_datetime(when: DateTime) -> Result<Time, Error> {
         if duration >= MAX_UTC_TIME {
             Ok(Time::GeneralTime(
                 X509GeneralizedTime::from_unix_duration(duration).map_err(|e| {
-                    x509_der_error(
-                        e,
-                        format_args!("failed to build GeneralTime for {:?}", when),
-                    )
+                    x509_der_error(e, format_args!("failed to build GeneralTime for {when:?}"))
                 })?,
             ))
         } else {
             Ok(Time::UtcTime(
                 X509UtcTime::from_unix_duration(duration).map_err(|e| {
-                    x509_der_error(e, format_args!("failed to build UtcTime for {:?}", when))
+                    x509_der_error(e, format_args!("failed to build UtcTime for {when:?}"))
                 })?,
             ))
         }
@@ -239,7 +252,7 @@ fn validity_time_from_datetime(when: DateTime) -> Result<Time, Error> {
             X509GeneralizedTime::from_unix_duration(Duration::from_secs(0)).map_err(|e| {
                 x509_der_error(
                     e,
-                    format_args!("failed to build GeneralizedTime(0) for {:?}", when),
+                    format_args!("failed to build GeneralizedTime(0) for {when:?}"),
                 )
             })?,
         ))
@@ -310,7 +323,7 @@ pub(crate) fn basic_constraints_ext_value(ca_required: bool) -> BasicConstraints
 /// }
 /// ```
 #[derive(Debug, Clone, Sequence, PartialEq)]
-pub struct AttestationExtension<'a> {
+pub(crate) struct AttestationExtension<'a> {
     attestation_version: i32,
     attestation_security_level: SecurityLevel,
     keymint_version: i32,
@@ -368,8 +381,7 @@ pub(crate) fn attestation_extension<'a>(
             l => {
                 return Err(km_err!(
                     InvalidTag,
-                    "found characteristics for unexpected security level {:?}",
-                    l,
+                    "found characteristics for unexpected security level {l:?}",
                 ))
             }
         }
@@ -394,13 +406,8 @@ pub(crate) fn attestation_extension<'a>(
         None,
         &[],
     )?;
-    let sec_level = SecurityLevel::try_from(security_level as u32).map_err(|_| {
-        km_err!(
-            InvalidArgument,
-            "invalid security level {:?}",
-            security_level
-        )
-    })?;
+    let sec_level = SecurityLevel::try_from(security_level as u32)
+        .map_err(|_| km_err!(InvalidArgument, "invalid security level {security_level:?}"))?;
     let ext = AttestationExtension {
         attestation_version: keymint_version,
         attestation_security_level: sec_level,
@@ -427,6 +434,7 @@ pub(crate) fn attestation_extension<'a>(
 ///     callerNonce                [7] EXPLICIT NULL OPTIONAL,  -- Symmetric keys only
 ///     minMacLength               [8] EXPLICIT INTEGER OPTIONAL,  -- Symmetric keys only
 ///     ecCurve                    [10] EXPLICIT INTEGER OPTIONAL,
+///     mlDsaVariant               [11] EXPLICIT INTEGER OPTIONAL,
 ///     rsaPublicExponent          [200] EXPLICIT INTEGER OPTIONAL,
 ///     mgfDigest                  [203] EXPLICIT SET OF INTEGER OPTIONAL,
 ///     rollbackResistance         [303] EXPLICIT NULL OPTIONAL,
@@ -468,95 +476,245 @@ pub(crate) fn attestation_extension<'a>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizationList<'a> {
     pub auths: Cow<'a, [KeyParam]>,
-    pub keygen_params: Cow<'a, [KeyParam]>,
-    pub rot_info: Option<KeyParam>,
-    pub app_id: Option<KeyParam>,
-    pub additional_attestation_info: Cow<'a, [KeyParam]>,
+    /// Whether to include `UserSecureId` value if found in `auths` when encoding.
+    pub encode_sid: bool,
+    pub ids: AttestationIds<'a>,
+    pub rot_info: Option<Vec<u8>>,
+    pub app_id: Option<Cow<'a, [u8]>>,
+    pub module_hash: Option<Cow<'a, [u8]>>,
 }
 
-/// Macro to check that a specified attestation ID matches the provisioned value.
-macro_rules! check_attestation_id {
-    {
-        $params:expr, $variant:ident, $mustmatch:expr
-    } => {
-        {
-            if let Some(val) = get_opt_tag_value!($params, $variant)? {
-                match $mustmatch {
-                    None => return Err(km_err!(CannotAttestIds,
-                                               "no attestation IDs provisioned")),
-                    Some(want)  => if val != want.as_slice() {
-                        modify_tag_value!($params, $variant, want.to_vec())?;
-                        log::info!("attestation ID mismatch for {}, reseting to {:?}", stringify!($variant), want);
-                    }
-                }
+/// Tags used in `AuthorizationList` in the schema-defined order.
+const AUTHORIZATION_LIST_TAGS: &[Tag] = &[
+    Tag::Purpose,
+    Tag::Algorithm,
+    Tag::KeySize,
+    Tag::BlockMode,
+    Tag::Digest,
+    Tag::Padding,
+    Tag::CallerNonce,
+    Tag::MinMacLength,
+    Tag::EcCurve,
+    Tag::MlDsaVariant,
+    Tag::RsaPublicExponent,
+    Tag::RsaOaepMgfDigest,
+    Tag::RollbackResistance,
+    Tag::EarlyBootOnly,
+    Tag::ActiveDatetime,
+    Tag::OriginationExpireDatetime,
+    Tag::UsageExpireDatetime,
+    Tag::UsageCountLimit,
+    Tag::UserSecureId,
+    Tag::NoAuthRequired,
+    Tag::UserAuthType,
+    Tag::AuthTimeout,
+    Tag::AllowWhileOnBody,
+    Tag::TrustedUserPresenceRequired,
+    Tag::TrustedConfirmationRequired,
+    Tag::UnlockedDeviceRequired,
+    Tag::CreationDatetime,
+    Tag::Origin,
+    Tag::RootOfTrust,
+    Tag::OsVersion,
+    Tag::OsPatchlevel,
+    Tag::AttestationApplicationId,
+    Tag::AttestationIdBrand,
+    Tag::AttestationIdDevice,
+    Tag::AttestationIdProduct,
+    Tag::AttestationIdSerial,
+    Tag::AttestationIdImei,
+    Tag::AttestationIdMeid,
+    Tag::AttestationIdManufacturer,
+    Tag::AttestationIdModel,
+    Tag::VendorPatchlevel,
+    Tag::BootPatchlevel,
+    Tag::DeviceUniqueAttestation,
+    Tag::AttestationIdSecondImei,
+    Tag::ModuleHash,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AttestationIds<'a> {
+    brand: Option<Cow<'a, [u8]>>,
+    device: Option<Cow<'a, [u8]>>,
+    product: Option<Cow<'a, [u8]>>,
+    serial: Option<Cow<'a, [u8]>>,
+    imei: Option<Cow<'a, [u8]>>,
+    imei2: Option<Cow<'a, [u8]>>,
+    meid: Option<Cow<'a, [u8]>>,
+    manufacturer: Option<Cow<'a, [u8]>>,
+    model: Option<Cow<'a, [u8]>>,
+}
+
+impl AttestationIds<'_> {
+    fn new_from_key_params<'a>(keygen_params: &'a [KeyParam]) -> Result<AttestationIds<'a>, Error> {
+        let mut ids = AttestationIds::default();
+        for param in keygen_params {
+            match param {
+                KeyParam::AttestationIdBrand(v) => match ids.brand {
+                    Some(_) => return Err(km_err!(InvalidTag, "duplicate tag brand")),
+                    None => ids.brand = Some(v.into()),
+                },
+                KeyParam::AttestationIdDevice(v) => match ids.device {
+                    Some(_) => return Err(km_err!(InvalidTag, "duplicate tag device")),
+                    None => ids.device = Some(v.into()),
+                },
+                KeyParam::AttestationIdProduct(v) => match ids.product {
+                    Some(_) => return Err(km_err!(InvalidTag, "duplicate tag product")),
+                    None => ids.product = Some(v.into()),
+                },
+                KeyParam::AttestationIdSerial(v) => match ids.serial {
+                    Some(_) => return Err(km_err!(InvalidTag, "duplicate tag serial")),
+                    None => ids.serial = Some(v.into()),
+                },
+                KeyParam::AttestationIdImei(v) => match ids.imei {
+                    Some(_) => return Err(km_err!(InvalidTag, "duplicate tag imei")),
+                    None => ids.imei = Some(v.into()),
+                },
+                KeyParam::AttestationIdSecondImei(v) => match ids.imei2 {
+                    Some(_) => return Err(km_err!(InvalidTag, "duplicate tag imei2")),
+                    None => ids.imei2 = Some(v.into()),
+                },
+                KeyParam::AttestationIdMeid(v) => match ids.meid {
+                    Some(_) => return Err(km_err!(InvalidTag, "duplicate tag meid")),
+                    None => ids.meid = Some(v.into()),
+                },
+                KeyParam::AttestationIdManufacturer(v) => match ids.manufacturer {
+                    Some(_) => return Err(km_err!(InvalidTag, "duplicate tag manufacturer")),
+                    None => ids.manufacturer = Some(v.into()),
+                },
+                KeyParam::AttestationIdModel(v) => match ids.model {
+                    Some(_) => return Err(km_err!(InvalidTag, "duplicate tag model")),
+                    None => ids.model = Some(v.into()),
+                },
+                // Ignore all others.
+                _ => (),
             }
         }
+        Ok(ids)
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == AttestationIds::default()
+    }
+
+    fn check_match(&mut self, wanted: &crate::AttestationIdInfo) -> Result<(), Error> {
+        if self
+            .brand
+            .as_ref()
+            .is_some_and(|brand| *brand != wanted.brand)
+        {
+            self.brand = Some(wanted.brand.clone().into());
+            log::info!(
+                "attestation ID mismatch for AttestationIdBrand, reseting to {:?}",
+                wanted.brand
+            );
+        }
+        if self
+            .device
+            .as_ref()
+            .is_some_and(|device| *device != wanted.device)
+        {
+            self.device = Some(wanted.device.clone().into());
+            log::info!(
+                "attestation ID mismatch for AttestationIdDevice, reseting to {:?}",
+                wanted.device
+            );
+        }
+        if self
+            .product
+            .as_ref()
+            .is_some_and(|product| *product != wanted.product)
+        {
+            self.product = Some(wanted.product.clone().into());
+            log::info!(
+                "attestation ID mismatch for AttestationIdProduct, reseting to {:?}",
+                wanted.product
+            );
+        }
+        if self
+            .serial
+            .as_ref()
+            .is_some_and(|serial| *serial != wanted.serial)
+        {
+            self.serial = Some(wanted.serial.clone().into());
+            log::info!(
+                "attestation ID mismatch for AttestationIdSerial, reseting to {:?}",
+                wanted.serial
+            );
+        }
+        if self.imei.as_ref().is_some_and(|imei| *imei != wanted.imei) {
+            self.imei = Some(wanted.imei.clone().into());
+            log::info!(
+                "attestation ID mismatch for AttestationIdImei, reseting to {:?}",
+                wanted.imei
+            );
+        }
+        if wanted.imei2.is_empty() {
+            self.imei2 = None;
+        } else if self
+            .imei2
+            .as_ref()
+            .is_some_and(|imei2| *imei2 != wanted.imei2)
+        {
+            self.imei2 = Some(wanted.imei2.clone().into());
+            log::info!(
+                "attestation ID mismatch for AttestationIdSecondImei, reseting to {:?}",
+                wanted.imei2
+            );
+        }
+        if self.meid.as_ref().is_some_and(|meid| *meid != wanted.meid) {
+            self.meid = Some(wanted.meid.clone().into());
+            log::info!(
+                "attestation ID mismatch for AttestationIdMeid, reseting to {:?}",
+                wanted.meid
+            );
+        }
+        if self
+            .manufacturer
+            .as_ref()
+            .is_some_and(|mfr| *mfr != wanted.manufacturer)
+        {
+            self.manufacturer = Some(wanted.manufacturer.clone().into());
+            log::info!(
+                "attestation ID mismatch for AttestationIdManufacturer, reseting to {:?}",
+                wanted.manufacturer
+            );
+        }
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| *model != wanted.model)
+        {
+            self.model = Some(wanted.model.clone().into());
+            log::info!(
+                "attestation ID mismatch for AttestationIdModel, reseting to {:?}",
+                wanted.model
+            );
+        }
+        Ok(())
     }
 }
 
 impl<'a> AuthorizationList<'a> {
     /// Build an `AuthorizationList` ready for serialization. This constructor will fail if device
-    /// ID attestation is required but the relevant IDs are missing or mismatched.
+    /// ID attestation is required but the relevant IDs are missing or mismatched.  Any
+    /// `UserSecureId` values included in `auths` will be ignored on encoding.
     fn new(
         auths: &'a [KeyParam],
         keygen_params: &'a [KeyParam],
-        attestation_ids: Option<&'a crate::AttestationIdInfo>,
-        rot_info: Option<RootOfTrust<'a>>,
+        attestation_ids: Option<&crate::AttestationIdInfo>,
+        rot_info: Option<RootOfTrust>,
         app_id: Option<&'a [u8]>,
         additional_attestation_info: &'a [KeyParam],
     ) -> Result<Self, Error> {
-        let mut keygen_params = keygen_params.to_vec();
-
-        check_attestation_id!(
-            &mut keygen_params,
-            AttestationIdBrand,
-            attestation_ids.map(|v| &v.brand)
-        );
-        check_attestation_id!(
-            &mut keygen_params,
-            AttestationIdDevice,
-            attestation_ids.map(|v| &v.device)
-        );
-        check_attestation_id!(
-            &mut keygen_params,
-            AttestationIdProduct,
-            attestation_ids.map(|v| &v.product)
-        );
-        check_attestation_id!(
-            &mut keygen_params,
-            AttestationIdSerial,
-            attestation_ids.map(|v| &v.serial)
-        );
-        check_attestation_id!(
-            &mut keygen_params,
-            AttestationIdImei,
-            attestation_ids.map(|v| &v.imei)
-        );
-        if attestation_ids.is_some_and(|v| v.imei2.is_empty()) {
-            keygen_params.retain(|param| !matches!(param, KeyParam::AttestationIdSecondImei(_)));
-        } else {
-            check_attestation_id!(
-                &mut keygen_params,
-                AttestationIdSecondImei,
-                attestation_ids.map(|v| &v.imei2)
-            );
+        let mut requested_ids = AttestationIds::new_from_key_params(keygen_params)?;
+        if !requested_ids.is_empty() {
+            match attestation_ids {
+                None => return Err(km_err!(CannotAttestIds, "no attestation IDs provisioned")),
+                Some(attestation_ids) => requested_ids.check_match(attestation_ids)?,
+            }
         }
-        check_attestation_id!(
-            &mut keygen_params,
-            AttestationIdMeid,
-            attestation_ids.map(|v| &v.meid)
-        );
-        check_attestation_id!(
-            &mut keygen_params,
-            AttestationIdManufacturer,
-            attestation_ids.map(|v| &v.manufacturer)
-        );
-        check_attestation_id!(
-            &mut keygen_params,
-            AttestationIdModel,
-            attestation_ids.map(|v| &v.model)
-        );
-
         let encoded_rot = if let Some(rot) = rot_info {
             Some(
                 rot.to_der()
@@ -565,61 +723,62 @@ impl<'a> AuthorizationList<'a> {
         } else {
             None
         };
+        let module_hash = get_opt_tag_value!(additional_attestation_info, ModuleHash)?;
         Ok(Self {
             auths: auths.into(),
-            keygen_params: keygen_params.into(),
-            rot_info: encoded_rot.map(KeyParam::RootOfTrust),
-            app_id: match app_id {
-                Some(app_id) => Some(KeyParam::AttestationApplicationId(try_to_vec(app_id)?)),
-                None => None,
-            },
-            additional_attestation_info: additional_attestation_info.into(),
+            encode_sid: false,
+            ids: requested_ids,
+            rot_info: encoded_rot,
+            app_id: app_id.map(Into::into),
+            module_hash: module_hash.map(Into::into),
         })
     }
 
     /// Build an `AuthorizationList` using a set of key parameters.
+    ///
     /// The checks for the attestation ids are not run here in contrast to `AuthorizationList::new`
     /// because this method is used to construct an `AuthorizationList` in the decode path rather
-    /// than in the encode path. Note: decode path is currently used only by
-    /// `KeyMintTa::import_wrapped_key` functionality, which only uses `auth` field of
-    /// `AuthorizationList`. Decoding for the whole `AuthorizationList` is added here for the
-    /// completeness and anticipating a future use case of decoding the attestation extension from
-    /// an X.509 certificate.
+    /// than in the encode path.
+    ///
+    /// Any (single) `UserSecureId` value in `key_params` will be included when the
+    /// `AuthorizationList` is DER-encoded.
+    ///
+    /// Note: decode path is currently used only by `KeyMintTa::import_wrapped_key` functionality,
+    /// which only uses `auth` field of `AuthorizationList`. Decoding for the whole
+    /// `AuthorizationList` is added here for the completeness and anticipating a future use case of
+    /// decoding the attestation extension from an X.509 certificate.
     fn new_from_key_params(key_params: Vec<KeyParam>) -> Result<Self, der::Error> {
         let mut auths = Vec::new();
-        let mut keygen_params = Vec::new();
-        let mut rot: Option<KeyParam> = None;
-        let mut attest_app_id: Option<KeyParam> = None;
-        let mut additional_attestation_info = Vec::new();
+        let mut ids = AttestationIds::default();
+        let mut rot: Option<Vec<u8>> = None;
+        let mut attest_app_id: Option<Cow<'a, [u8]>> = None;
+        let mut module_hash: Option<Cow<'a, [u8]>> = None;
 
         // Divide key parameters into key characteristics and key generation parameters.
         for param in key_params {
             match param {
-                KeyParam::RootOfTrust(_) => rot = Some(param),
-                KeyParam::AttestationApplicationId(_) => attest_app_id = Some(param),
-                KeyParam::AttestationIdBrand(_)
-                | KeyParam::AttestationIdDevice(_)
-                | KeyParam::AttestationIdProduct(_)
-                | KeyParam::AttestationIdSerial(_)
-                | KeyParam::AttestationIdImei(_)
-                | KeyParam::AttestationIdSecondImei(_)
-                | KeyParam::AttestationIdMeid(_)
-                | KeyParam::AttestationIdManufacturer(_)
-                | KeyParam::AttestationIdModel(_) => {
-                    keygen_params.try_push(param).map_err(der_alloc_err)?
-                }
-                KeyParam::ModuleHash(_) => additional_attestation_info
-                    .try_push(param)
-                    .map_err(der_alloc_err)?,
+                KeyParam::RootOfTrust(encoded_rot) => rot = Some(encoded_rot),
+                KeyParam::AttestationApplicationId(app_id) => attest_app_id = Some(app_id.into()),
+                KeyParam::AttestationIdBrand(v) => ids.brand = Some(v.into()),
+                KeyParam::AttestationIdDevice(v) => ids.device = Some(v.into()),
+                KeyParam::AttestationIdProduct(v) => ids.product = Some(v.into()),
+                KeyParam::AttestationIdSerial(v) => ids.serial = Some(v.into()),
+                KeyParam::AttestationIdImei(v) => ids.imei = Some(v.into()),
+                KeyParam::AttestationIdSecondImei(v) => ids.imei2 = Some(v.into()),
+                KeyParam::AttestationIdMeid(v) => ids.meid = Some(v.into()),
+                KeyParam::AttestationIdManufacturer(v) => ids.manufacturer = Some(v.into()),
+                KeyParam::AttestationIdModel(v) => ids.model = Some(v.into()),
+                KeyParam::ModuleHash(hash) => module_hash = Some(hash.into()),
                 _ => auths.try_push(param).map_err(der_alloc_err)?,
             }
         }
         Ok(AuthorizationList {
             auths: auths.into(),
-            keygen_params: keygen_params.into(),
+            encode_sid: true,
+            ids,
             rot_info: rot,
             app_id: attest_app_id,
-            additional_attestation_info: additional_attestation_info.into(),
+            module_hash,
         })
     }
 }
@@ -628,60 +787,6 @@ impl<'a> AuthorizationList<'a> {
 #[inline]
 fn der_alloc_err<T>(_e: T) -> der::Error {
     der::Error::new(der::ErrorKind::Overlength, der::Length::ZERO)
-}
-
-/// All the fields of AuthorizationList sequence are optional. Therefore, the expected tag and the
-/// decoded tag might be different. If they don't match, return the decoded tag to be used in a
-/// future call to this method. If the two tags match, continue to read the value,
-/// populate key parameters and return None, so that the next call to this method will
-/// decode the tag from bytes. See the implementation of [`der::DecodeValue`] trait for
-/// AuthorizationList.
-fn decode_opt_field<'a, R: der::Reader<'a>>(
-    decoder: &mut R,
-    already_read_tag: Option<keymint::Tag>,
-    expected_tag: keymint::Tag,
-    key_params: &mut Vec<KeyParam>,
-) -> Result<Option<keymint::Tag>, der::Error> {
-    // Decode the tag if no tag is provided
-    let tag = if already_read_tag.is_none() {
-        decode_tag_from_bytes(decoder)?
-    } else {
-        already_read_tag
-    };
-    match tag {
-        Some(tag) if tag == expected_tag => {
-            // Decode the length of the inner encoding
-            let inner_len = Length::decode(decoder)?;
-            if decoder.remaining_len() < inner_len {
-                return Err(der::ErrorKind::Incomplete {
-                    expected_len: inner_len,
-                    actual_len: decoder.remaining_len(),
-                }
-                .into());
-            }
-            let next_tlv = decoder.tlv_bytes()?;
-            decode_value_from_bytes(expected_tag, next_tlv, key_params)?;
-            Ok(None)
-        }
-        Some(tag) => Ok(Some(tag)), // Return the tag for which the value is unread.
-        None => Ok(None),
-    }
-}
-
-macro_rules! process_authz_list_tags {
-    {$decoder:expr, $key_params:expr, ($($tag:ident),*)} => {
-        let mut non_consumed_tag: Option<Tag> = None;
-        ($(non_consumed_tag = decode_opt_field($decoder,
-                                               non_consumed_tag,
-                                               Tag::$tag,
-                                               $key_params)?),*);
-        if non_consumed_tag.is_some(){
-            return Err($decoder.error(der::ErrorKind::Incomplete {
-                expected_len: Length::ZERO,
-                actual_len: $decoder.remaining_len(),
-            }));
-        }
-    };
 }
 
 /// Implementation of [`der::DecodeValue`] which constructs an AuthorizationList from bytes.
@@ -696,72 +801,46 @@ impl<'a> der::DecodeValue<'a> for AuthorizationList<'a> {
         if header.length().is_zero() {
             return Ok(AuthorizationList {
                 auths: Vec::new().into(),
-                keygen_params: Vec::new().into(),
+                encode_sid: true,
+                ids: AttestationIds::default(),
                 rot_info: None,
                 app_id: None,
-                additional_attestation_info: Vec::new().into(),
+                module_hash: None,
             });
         }
         if decoder.remaining_len() < header.length() {
-            Err(der::ErrorKind::Incomplete {
+            return Err(decoder.error(der::ErrorKind::Incomplete {
                 expected_len: header.length(),
                 actual_len: decoder.remaining_len(),
-            })?;
+            }));
         }
+
         let mut key_params = Vec::new();
-        process_authz_list_tags!(
-            decoder,
-            &mut key_params,
-            (
-                Purpose,
-                Algorithm,
-                KeySize,
-                BlockMode,
-                Digest,
-                Padding,
-                CallerNonce,
-                MinMacLength,
-                EcCurve,
-                RsaPublicExponent,
-                RsaOaepMgfDigest,
-                RollbackResistance,
-                EarlyBootOnly,
-                ActiveDatetime,
-                OriginationExpireDatetime,
-                UsageExpireDatetime,
-                UsageCountLimit,
-                UserSecureId,
-                NoAuthRequired,
-                UserAuthType,
-                AuthTimeout,
-                AllowWhileOnBody,
-                TrustedUserPresenceRequired,
-                TrustedConfirmationRequired,
-                UnlockedDeviceRequired,
-                CreationDatetime,
-                CreationDatetime,
-                Origin,
-                RootOfTrust,
-                OsVersion,
-                OsPatchlevel,
-                AttestationApplicationId,
-                AttestationIdBrand,
-                AttestationIdDevice,
-                AttestationIdProduct,
-                AttestationIdSerial,
-                AttestationIdSerial,
-                AttestationIdSerial,
-                AttestationIdImei,
-                AttestationIdMeid,
-                AttestationIdManufacturer,
-                AttestationIdModel,
-                VendorPatchlevel,
-                BootPatchlevel,
-                DeviceUniqueAttestation,
-                AttestationIdSecondImei,
-                ModuleHash
-            )
-        );
+        let mut non_consumed_tag: Option<Tag> = None;
+        for &tag in AUTHORIZATION_LIST_TAGS {
+            if non_consumed_tag.is_none() {
+                non_consumed_tag = decode_tag_from_bytes(decoder)?;
+            }
+            if non_consumed_tag == Some(tag) {
+                non_consumed_tag = None;
+                // Decode the length of the inner encoding
+                let inner_len = Length::decode(decoder)?;
+                if decoder.remaining_len() < inner_len {
+                    return Err(decoder.error(der::ErrorKind::Incomplete {
+                        expected_len: inner_len,
+                        actual_len: decoder.remaining_len(),
+                    }));
+                }
+                let next_tlv = decoder.tlv_bytes()?;
+                decode_value_from_bytes(tag, next_tlv, &mut key_params)?;
+            }
+        }
+        if non_consumed_tag.is_some() {
+            return Err(decoder.error(der::ErrorKind::Incomplete {
+                expected_len: Length::ZERO,
+                actual_len: decoder.remaining_len(),
+            }));
+        }
 
         // Process the key params and construct the `AuthorizationList`
         AuthorizationList::new_from_key_params(key_params)
@@ -863,6 +942,9 @@ fn decode_value_from_bytes(
         }
         Tag::EcCurve => {
             key_param_from_asn1_integer!(EcCurve, i32, tlv_bytes, key_params);
+        }
+        Tag::MlDsaVariant => {
+            key_param_from_asn1_integer!(MlDsaVariant, i32, tlv_bytes, key_params);
         }
         Tag::RsaPublicExponent => {
             key_param_from_asn1_integer_newtype!(
@@ -1002,7 +1084,13 @@ fn decode_tag_from_bytes<'a, R: der::Reader<'a>>(
         return Ok(None);
     }
     let b1 = decoder.read_byte()?;
-    let raw_tag = if b1 & 0xbfu8 == 0xbfu8 {
+    if b1 & 0b11100000 != 0b10100000 {
+        // KeyMint tags should be encoded as context-specific (0b10......) constructed
+        // (0b..1.....) ASN.1 tag values.
+        return Err(der::ErrorKind::TagNumberInvalid.into());
+    }
+    let b1 = b1 & 0b00011111u8;
+    let raw_tag = if b1 == 0b00011111u8 {
         // High tag form, read the next byte
         let b2 = decoder.read_byte()?;
         if b2 & 0x80u8 == 0x80u8 {
@@ -1014,7 +1102,7 @@ fn decode_tag_from_bytes<'a, R: der::Reader<'a>>(
             b2 as u32
         }
     } else {
-        (b1 ^ 0b10100000u8) as u32
+        b1 as u32
     };
     let tag = from_raw_tag_value(raw_tag);
     if tag == Tag::Invalid {
@@ -1058,10 +1146,7 @@ macro_rules! asn1_set_of_integer {
                     set.insert_ordered(val)?;
                     prev_val = Some(val);
                 }
-                Some(ExplicitTaggedValue {
-                    tag: raw_tag_value(Tag::$variant),
-                    val: set,
-                })
+                Some(ExplicitTaggedValue::new(Tag::$variant, set))
             } else {
                 None
             }
@@ -1074,10 +1159,7 @@ macro_rules! asn1_integer {
             log::warn!("failed to get {} value for ext", stringify!($variant));
             der::Error::new(der::ErrorKind::Failed, der::Length::ZERO)
         })? {
-            Some(ExplicitTaggedValue {
-                tag: raw_tag_value(Tag::$variant),
-                val: *val as i64
-            })
+            Some(ExplicitTaggedValue::new(Tag::$variant, *val as i64))
         } else {
             None
         }
@@ -1089,10 +1171,7 @@ macro_rules! asn1_integer_newtype {
             log::warn!("failed to get {} value for ext", stringify!($variant));
             der::Error::new(der::ErrorKind::Failed, der::Length::ZERO)
         })? {
-            Some(ExplicitTaggedValue {
-                tag: raw_tag_value(Tag::$variant),
-                val: val.0 as i64
-            })
+            Some(ExplicitTaggedValue::new(Tag::$variant, val.0 as i64))
         } else {
             None
         }
@@ -1104,10 +1183,7 @@ macro_rules! asn1_integer_datetime {
             log::warn!("failed to get {} value for ext", stringify!($variant));
             der::Error::new(der::ErrorKind::Failed, der::Length::ZERO)
         })? {
-            Some(ExplicitTaggedValue {
-                tag: raw_tag_value(Tag::$variant),
-                val: val.ms_since_epoch
-            })
+            Some(ExplicitTaggedValue::new(Tag::$variant, val.ms_since_epoch))
         } else {
             None
         }
@@ -1119,28 +1195,36 @@ macro_rules! asn1_null {
             log::warn!("failed to get {} value for ext", stringify!($variant));
             der::Error::new(der::ErrorKind::Failed, der::Length::ZERO)
         })? {
-            Some(ExplicitTaggedValue {
-                tag: raw_tag_value(Tag::$variant),
-                val: ()
-            })
+            Some(ExplicitTaggedValue::new(Tag::$variant, ()))
         } else {
             None
         }
     }
 }
-macro_rules! asn1_octet_string {
-    { $params:expr, $variant:ident } => {
-        if let Some(val) = get_opt_tag_value!($params.as_ref(), $variant).map_err(|_e| {
-            log::warn!("failed to get {} value for ext", stringify!($variant));
-            der::Error::new(der::ErrorKind::Failed, der::Length::ZERO)
-        })? {
-            Some(ExplicitTaggedValue {
-                tag: raw_tag_value(Tag::$variant),
-                val: der::asn1::OctetStringRef::new(val)?,
-            })
-        } else {
-            None
-        }
+
+fn asn1_octet_string(
+    tag: Tag,
+    val: Option<&[u8]>,
+) -> der::Result<Option<ExplicitTaggedValue<&OctetStringRef>>> {
+    match val {
+        Some(val) => Ok(Some(ExplicitTaggedValue::new(
+            tag,
+            OctetStringRef::new(val)?,
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn asn1_root_of_trust(
+    tag: Tag,
+    rot: Option<&[u8]>,
+) -> der::Result<Option<ExplicitTaggedValue<RootOfTrust<'_>>>> {
+    match rot {
+        Some(rot) => Ok(Some(ExplicitTaggedValue::new(
+            tag,
+            RootOfTrust::from_der(rot)?,
+        ))),
+        None => Ok(None),
     }
 }
 
@@ -1148,10 +1232,9 @@ fn asn1_val<T: Encode>(
     val: Option<ExplicitTaggedValue<T>>,
     writer: &mut impl der::Writer,
 ) -> der::Result<()> {
-    if let Some(val) = val {
-        val.encode(writer)
-    } else {
-        Ok(())
+    match val {
+        Some(val) => val.encode(writer),
+        None => Ok(()),
     }
 }
 
@@ -1166,7 +1249,7 @@ impl<'a> Sequence<'a> for AuthorizationList<'a> {}
 
 impl EncodeValue for AuthorizationList<'_> {
     fn value_len(&self) -> der::Result<Length> {
-        let mut length = asn1_len(asn1_set_of_integer!(self.auths, Purpose))?
+        asn1_len(asn1_set_of_integer!(self.auths, Purpose))?
             + asn1_len(asn1_integer!(self.auths, Algorithm))?
             + asn1_len(asn1_integer_newtype!(self.auths, KeySize))?
             + asn1_len(asn1_set_of_integer!(self.auths, BlockMode))?
@@ -1175,6 +1258,7 @@ impl EncodeValue for AuthorizationList<'_> {
             + asn1_len(asn1_null!(self.auths, CallerNonce))?
             + asn1_len(asn1_integer!(self.auths, MinMacLength))?
             + asn1_len(asn1_integer!(self.auths, EcCurve))?
+            + asn1_len(asn1_integer!(self.auths, MlDsaVariant))?
             + asn1_len(asn1_integer_newtype!(self.auths, RsaPublicExponent))?
             + asn1_len(asn1_set_of_integer!(self.auths, RsaOaepMgfDigest))?
             + asn1_len(asn1_null!(self.auths, RollbackResistance))?
@@ -1186,6 +1270,11 @@ impl EncodeValue for AuthorizationList<'_> {
             ))?
             + asn1_len(asn1_integer_datetime!(self.auths, UsageExpireDatetime))?
             + asn1_len(asn1_integer!(self.auths, UsageCountLimit))?
+            + if self.encode_sid {
+                asn1_len(asn1_integer!(self.auths, UserSecureId))?
+            } else {
+                Length::ZERO
+            }
             + asn1_len(asn1_null!(self.auths, NoAuthRequired))?
             + asn1_len(asn1_integer!(self.auths, UserAuthType))?
             + asn1_len(asn1_integer!(self.auths, AuthTimeout))?
@@ -1194,53 +1283,60 @@ impl EncodeValue for AuthorizationList<'_> {
             + asn1_len(asn1_null!(self.auths, TrustedConfirmationRequired))?
             + asn1_len(asn1_null!(self.auths, UnlockedDeviceRequired))?
             + asn1_len(asn1_integer_datetime!(self.auths, CreationDatetime))?
-            + asn1_len(asn1_integer!(self.auths, Origin))?;
-        if let Some(KeyParam::RootOfTrust(encoded_rot_info)) = &self.rot_info {
-            length = length
-                + ExplicitTaggedValue {
-                    tag: raw_tag_value(Tag::RootOfTrust),
-                    val: RootOfTrust::from_der(encoded_rot_info.as_slice())?,
-                }
-                .encoded_len()?;
-        }
-        length = length
+            + asn1_len(asn1_integer!(self.auths, Origin))?
+            + asn1_len(asn1_root_of_trust(
+                Tag::RootOfTrust,
+                self.rot_info.as_deref(),
+            )?)?
             + asn1_len(asn1_integer!(self.auths, OsVersion))?
-            + asn1_len(asn1_integer!(self.auths, OsPatchlevel))?;
-        if let Some(KeyParam::AttestationApplicationId(app_id)) = &self.app_id {
-            length = length
-                + ExplicitTaggedValue {
-                    tag: raw_tag_value(Tag::AttestationApplicationId),
-                    val: der::asn1::OctetStringRef::new(app_id.as_slice())?,
-                }
-                .encoded_len()?;
-        }
-        length = length
-            + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdBrand))?
-            + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdDevice))?
-            + asn1_len(asn1_octet_string!(
-                &self.keygen_params,
-                AttestationIdProduct
-            ))?
-            + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdSerial))?
-            + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdImei))?
-            + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdMeid))?
-            + asn1_len(asn1_octet_string!(
-                &self.keygen_params,
-                AttestationIdManufacturer
-            ))?
-            + asn1_len(asn1_octet_string!(&self.keygen_params, AttestationIdModel))?
+            + asn1_len(asn1_integer!(self.auths, OsPatchlevel))?
+            + asn1_len(asn1_octet_string(
+                Tag::AttestationApplicationId,
+                self.app_id.as_deref(),
+            )?)?
+            + asn1_len(asn1_octet_string(
+                Tag::AttestationIdBrand,
+                self.ids.brand.as_deref(),
+            )?)?
+            + asn1_len(asn1_octet_string(
+                Tag::AttestationIdDevice,
+                self.ids.device.as_deref(),
+            )?)?
+            + asn1_len(asn1_octet_string(
+                Tag::AttestationIdProduct,
+                self.ids.product.as_deref(),
+            )?)?
+            + asn1_len(asn1_octet_string(
+                Tag::AttestationIdSerial,
+                self.ids.serial.as_deref(),
+            )?)?
+            + asn1_len(asn1_octet_string(
+                Tag::AttestationIdImei,
+                self.ids.imei.as_deref(),
+            )?)?
+            + asn1_len(asn1_octet_string(
+                Tag::AttestationIdMeid,
+                self.ids.meid.as_deref(),
+            )?)?
+            + asn1_len(asn1_octet_string(
+                Tag::AttestationIdManufacturer,
+                self.ids.manufacturer.as_deref(),
+            )?)?
+            + asn1_len(asn1_octet_string(
+                Tag::AttestationIdModel,
+                self.ids.model.as_deref(),
+            )?)?
             + asn1_len(asn1_integer!(self.auths, VendorPatchlevel))?
             + asn1_len(asn1_integer!(self.auths, BootPatchlevel))?
             + asn1_len(asn1_null!(self.auths, DeviceUniqueAttestation))?
-            + asn1_len(asn1_octet_string!(
-                &self.keygen_params,
-                AttestationIdSecondImei
-            ))?
-            + asn1_len(asn1_octet_string!(
-                &self.additional_attestation_info,
-                ModuleHash
-            ))?;
-        length
+            + asn1_len(asn1_octet_string(
+                Tag::AttestationIdSecondImei,
+                self.ids.imei2.as_deref(),
+            )?)?
+            + asn1_len(asn1_octet_string(
+                Tag::ModuleHash,
+                self.module_hash.as_deref(),
+            )?)?
     }
 
     fn encode_value(&self, writer: &mut impl der::Writer) -> der::Result<()> {
@@ -1253,6 +1349,7 @@ impl EncodeValue for AuthorizationList<'_> {
         asn1_val(asn1_null!(self.auths, CallerNonce), writer)?;
         asn1_val(asn1_integer!(self.auths, MinMacLength), writer)?;
         asn1_val(asn1_integer!(self.auths, EcCurve), writer)?;
+        asn1_val(asn1_integer!(self.auths, MlDsaVariant), writer)?;
         asn1_val(asn1_integer_newtype!(self.auths, RsaPublicExponent), writer)?;
         asn1_val(asn1_set_of_integer!(self.auths, RsaOaepMgfDigest), writer)?;
         asn1_val(asn1_null!(self.auths, RollbackResistance), writer)?;
@@ -1267,8 +1364,11 @@ impl EncodeValue for AuthorizationList<'_> {
             writer,
         )?;
         asn1_val(asn1_integer!(self.auths, UsageCountLimit), writer)?;
-        // Skip `UserSecureId` as it's only included in the extension for
+        // Note that `UserSecureId` is only included in the extension for
         // importWrappedKey() cases.
+        if self.encode_sid {
+            asn1_val(asn1_integer!(self.auths, UserSecureId), writer)?;
+        }
         asn1_val(asn1_null!(self.auths, NoAuthRequired), writer)?;
         asn1_val(asn1_integer!(self.auths, UserAuthType), writer)?;
         asn1_val(asn1_integer!(self.auths, AuthTimeout), writer)?;
@@ -1279,65 +1379,62 @@ impl EncodeValue for AuthorizationList<'_> {
         asn1_val(asn1_integer_datetime!(self.auths, CreationDatetime), writer)?;
         asn1_val(asn1_integer!(self.auths, Origin), writer)?;
         // Root of trust info is a special case (not in key characteristics).
-        if let Some(KeyParam::RootOfTrust(encoded_rot_info)) = &self.rot_info {
-            ExplicitTaggedValue {
-                tag: raw_tag_value(Tag::RootOfTrust),
-                val: RootOfTrust::from_der(encoded_rot_info.as_slice())?,
-            }
-            .encode(writer)?;
-        }
+        asn1_val(
+            asn1_root_of_trust(Tag::RootOfTrust, self.rot_info.as_deref())?,
+            writer,
+        )?;
         asn1_val(asn1_integer!(self.auths, OsVersion), writer)?;
         asn1_val(asn1_integer!(self.auths, OsPatchlevel), writer)?;
         // Attestation application ID is a special case (not in key characteristics).
-        if let Some(KeyParam::AttestationApplicationId(app_id)) = &self.app_id {
-            ExplicitTaggedValue {
-                tag: raw_tag_value(Tag::AttestationApplicationId),
-                val: der::asn1::OctetStringRef::new(app_id.as_slice())?,
-            }
-            .encode(writer)?;
-        }
+        asn1_val(
+            asn1_octet_string(Tag::AttestationApplicationId, self.app_id.as_deref())?,
+            writer,
+        )?;
         // Accuracy of attestation IDs has already been checked, so just copy across.
         asn1_val(
-            asn1_octet_string!(&self.keygen_params, AttestationIdBrand),
+            asn1_octet_string(Tag::AttestationIdBrand, self.ids.brand.as_deref())?,
             writer,
         )?;
         asn1_val(
-            asn1_octet_string!(&self.keygen_params, AttestationIdDevice),
+            asn1_octet_string(Tag::AttestationIdDevice, self.ids.device.as_deref())?,
             writer,
         )?;
         asn1_val(
-            asn1_octet_string!(&self.keygen_params, AttestationIdProduct),
+            asn1_octet_string(Tag::AttestationIdProduct, self.ids.product.as_deref())?,
             writer,
         )?;
         asn1_val(
-            asn1_octet_string!(&self.keygen_params, AttestationIdSerial),
+            asn1_octet_string(Tag::AttestationIdSerial, self.ids.serial.as_deref())?,
             writer,
         )?;
         asn1_val(
-            asn1_octet_string!(&self.keygen_params, AttestationIdImei),
+            asn1_octet_string(Tag::AttestationIdImei, self.ids.imei.as_deref())?,
             writer,
         )?;
         asn1_val(
-            asn1_octet_string!(&self.keygen_params, AttestationIdMeid),
+            asn1_octet_string(Tag::AttestationIdMeid, self.ids.meid.as_deref())?,
             writer,
         )?;
         asn1_val(
-            asn1_octet_string!(&self.keygen_params, AttestationIdManufacturer),
+            asn1_octet_string(
+                Tag::AttestationIdManufacturer,
+                self.ids.manufacturer.as_deref(),
+            )?,
             writer,
         )?;
         asn1_val(
-            asn1_octet_string!(&self.keygen_params, AttestationIdModel),
+            asn1_octet_string(Tag::AttestationIdModel, self.ids.model.as_deref())?,
             writer,
         )?;
         asn1_val(asn1_integer!(self.auths, VendorPatchlevel), writer)?;
         asn1_val(asn1_integer!(self.auths, BootPatchlevel), writer)?;
         asn1_val(asn1_null!(self.auths, DeviceUniqueAttestation), writer)?;
         asn1_val(
-            asn1_octet_string!(&self.keygen_params, AttestationIdSecondImei),
+            asn1_octet_string(Tag::AttestationIdSecondImei, self.ids.imei2.as_deref())?,
             writer,
         )?;
         asn1_val(
-            asn1_octet_string!(&self.additional_attestation_info, ModuleHash),
+            asn1_octet_string(Tag::ModuleHash, self.module_hash.as_deref())?,
             writer,
         )?;
         Ok(())
@@ -1350,6 +1447,13 @@ struct ExplicitTaggedValue<T: Encode> {
 }
 
 impl<T: Encode> ExplicitTaggedValue<T> {
+    fn new(tag: Tag, val: T) -> ExplicitTaggedValue<T> {
+        ExplicitTaggedValue {
+            tag: raw_tag_value(tag),
+            val,
+        }
+    }
+
     fn explicit_tag_len(&self) -> der::Result<der::Length> {
         match self.tag {
             0..=0x1e => Ok(der::Length::ONE),
@@ -1467,6 +1571,24 @@ impl From<keymint::VerifiedBootState> for VerifiedBootState {
 mod tests {
     use super::*;
     use crate::{AttestationIdInfo, KeyMintHalVersion};
+    use std::vec;
+
+    #[test]
+    fn test_rsa_signature_algorithm_has_null_parameters() {
+        let spki_der = hex::decode("3012300d06092a864886f70d0101010500030100").unwrap();
+        let params = [
+            KeyParam::Algorithm(keymint::Algorithm::Rsa),
+            KeyParam::CertificateNotBefore(DateTime { ms_since_epoch: 0 }),
+            KeyParam::CertificateNotAfter(DateTime { ms_since_epoch: 0 }),
+        ];
+        let tbs_cert = tbs_certificate(&None, &spki_der, &[], None, None, &[], &params).unwrap();
+        assert_eq!(
+            hex::encode(
+                x509_der::Encode::to_der(tbs_cert.signature.parameters.as_ref().unwrap()).unwrap()
+            ),
+            "0500"
+        );
+    }
 
     #[test]
     fn test_attest_ext_encode_decode() {
@@ -1529,7 +1651,10 @@ mod tests {
             "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         );
         assert_eq!(hex::encode(&got), want);
-        assert_eq!(AttestationExtension::from_der(&got).unwrap(), ext);
+        let mut parsed = AttestationExtension::from_der(&got).unwrap();
+        parsed.sw_enforced.encode_sid = false;
+        parsed.hw_enforced.encode_sid = false;
+        assert_eq!(parsed, ext);
     }
 
     #[test]
@@ -1549,9 +1674,24 @@ mod tests {
     }
 
     #[test]
-    fn test_authz_list_encode_decode() {
+    fn test_authorization_list_tags_ordered_by_raw_value() {
+        assert!(AUTHORIZATION_LIST_TAGS
+            .iter()
+            .map(|tag| raw_tag_value(*tag))
+            .is_sorted());
+    }
+
+    #[test]
+    fn test_authorization_list_tags_are_unique() {
+        let mut deduped = AUTHORIZATION_LIST_TAGS.to_vec();
+        deduped.dedup();
+        assert_eq!(AUTHORIZATION_LIST_TAGS.len(), deduped.len())
+    }
+
+    #[test]
+    fn test_authorization_list_encode_decode() {
         let additional_attestation_info = [KeyParam::ModuleHash(vec![0xaa; 32])];
-        let authz_list = AuthorizationList::new(
+        let authorization_list = AuthorizationList::new(
             &[KeyParam::Algorithm(keymint::Algorithm::Ec)],
             &[],
             None,
@@ -1565,7 +1705,7 @@ mod tests {
             &additional_attestation_info,
         )
         .unwrap();
-        let got = authz_list.to_der().unwrap();
+        let got = authorization_list.to_der().unwrap();
         let want: &str = concat!(
             "307b", // SEQUENCE len 123
             "a203", // EXPLICIT [2]
@@ -1593,16 +1733,15 @@ mod tests {
         // encode
         assert_eq!(hex::encode(&got), want);
         // decode from encoded
-        assert_eq!(
-            AuthorizationList::from_der(got.as_slice()).unwrap(),
-            authz_list
-        );
+        let mut parsed = AuthorizationList::from_der(got.as_slice()).unwrap();
+        parsed.encode_sid = false;
+        assert_eq!(parsed, authorization_list);
     }
 
     #[test]
-    fn test_authz_list_user_secure_id_encode() {
+    fn test_authorization_list_user_secure_id_encode() {
         // Create an authorization list that includes multiple values for SecureUserId.
-        let authz_list = AuthorizationList::new(
+        let authorization_list = AuthorizationList::new(
             &[
                 KeyParam::Algorithm(keymint::Algorithm::Ec),
                 KeyParam::UserSecureId(42),
@@ -1621,7 +1760,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        let got = authz_list.to_der().unwrap();
+        let got = authorization_list.to_der().unwrap();
         // The `SecureUserId` values are *not* included in the generated output.
         let want: &str = concat!(
             "3055", // SEQUENCE len 55
@@ -1647,7 +1786,7 @@ mod tests {
     }
 
     #[test]
-    fn test_authz_list_user_secure_id_decode() {
+    fn test_authorization_list_user_secure_id_decode() {
         // Create a DER-encoded `AuthorizationList` that includes a `UserSecureId` value.
         let input = hex::decode(concat!(
             "305c",   // SEQUENCE
@@ -1673,7 +1812,8 @@ mod tests {
             "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         ))
         .unwrap();
-        let got = AuthorizationList::from_der(&input).unwrap();
+        let mut got = AuthorizationList::from_der(&input).unwrap();
+        got.encode_sid = false;
 
         let want = AuthorizationList::new(
             &[
@@ -1697,6 +1837,31 @@ mod tests {
     }
 
     #[test]
+    fn test_authz_list_resets_mismatched_attestation_id() {
+        let attestation_ids = AttestationIdInfo {
+            brand: b"good".to_vec(),
+            device: vec![],
+            product: vec![],
+            serial: vec![],
+            imei: vec![],
+            imei2: vec![],
+            meid: vec![],
+            manufacturer: vec![],
+            model: vec![],
+        };
+        let keygen_params = [KeyParam::AttestationIdBrand(b"bad".to_vec())];
+        let authz_list =
+            AuthorizationList::new(&[], &keygen_params, Some(&attestation_ids), None, None, &[])
+                .unwrap();
+
+        assert_eq!(authz_list.ids.brand.as_deref(), Some(b"good".as_slice()));
+        assert_eq!(
+            hex::encode(authz_list.to_der().unwrap()),
+            "300abf8546060404676f6f64"
+        );
+    }
+
+    #[test]
     fn test_authz_list_omits_empty_second_imei() {
         let attestation_ids = AttestationIdInfo {
             brand: vec![],
@@ -1714,17 +1879,14 @@ mod tests {
             AuthorizationList::new(&[], &keygen_params, Some(&attestation_ids), None, None, &[])
                 .unwrap();
 
-        assert!(!authz_list
-            .keygen_params
-            .iter()
-            .any(|param| matches!(param, KeyParam::AttestationIdSecondImei(_))));
+        assert!(authz_list.ids.imei2.is_none());
         assert_eq!(hex::encode(authz_list.to_der().unwrap()), "3000");
     }
 
     #[test]
-    fn test_authz_list_dup_encode() {
+    fn test_authorization_list_dup_encode() {
         use kmr_wire::keymint::Digest;
-        let authz_list = AuthorizationList::new(
+        let authorization_list = AuthorizationList::new(
             &[
                 KeyParam::Digest(Digest::None),
                 KeyParam::Digest(Digest::Sha1),
@@ -1742,14 +1904,14 @@ mod tests {
             &[],
         )
         .unwrap();
-        let got = authz_list.to_der().unwrap();
+        let got = authorization_list.to_der().unwrap();
         assert!(AuthorizationList::from_der(got.as_slice()).is_ok());
     }
 
     #[test]
-    fn test_authz_list_order_fail() {
+    fn test_authorization_list_order_fail() {
         use kmr_wire::keymint::Digest;
-        let authz_list = AuthorizationList::new(
+        let authorization_list = AuthorizationList::new(
             &[
                 KeyParam::Digest(Digest::Sha1),
                 KeyParam::Digest(Digest::None),
@@ -1766,6 +1928,58 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(authz_list.to_der().is_err());
+        assert!(authorization_list.to_der().is_err());
+    }
+
+    #[test]
+    fn test_decode_tag_from_bytes() {
+        use der::Reader;
+        let tests = [
+            (
+                "a2", // context-specific constructed tag=2
+                Ok(Some(Tag::Algorithm)),
+            ),
+            (
+                "be", // context-specific constructed tag=30 (not a KeyMint tag value)
+                Err(der::ErrorKind::TagNumberInvalid.into()),
+            ),
+            (
+                "bf1f", // context-specific constructed tag=31 (not a KeyMint tag value)
+                Err(der::ErrorKind::TagNumberInvalid.into()),
+            ),
+            (
+                "bf8377", // context-specific constructed tag=503=0x1F7
+                Ok(Some(Tag::NoAuthRequired)),
+            ),
+            (
+                "9f8377", // context-specific *primitive* tag=503=0x1F7
+                Err(der::ErrorKind::TagNumberInvalid.into()),
+            ),
+            (
+                "7f8377", // *application* constructed tag=503=0x1F7
+                Err(der::ErrorKind::TagNumberInvalid.into()),
+            ),
+            (
+                "bfc000", // context-specific constructed tag=16384=0x4000
+                Err(der::ErrorKind::TagNumberInvalid.into()),
+            ),
+            (
+                "bf8148", // context-specific constructed tag=200=0xC8
+                Ok(Some(Tag::RsaPublicExponent)),
+            ),
+            (
+                "68", // application constructed tag=16
+                Err(der::ErrorKind::TagNumberInvalid.into()),
+            ),
+        ];
+        for (input_hex, want) in tests {
+            let input = hex::decode(input_hex).unwrap();
+            let mut reader = der::SliceReader::new(&input).unwrap();
+            let got = decode_tag_from_bytes(&mut reader);
+            assert_eq!(got, want, "for {input_hex}");
+            if got.is_ok() {
+                assert_eq!(reader.remaining_len(), der::Length::ZERO, "for {input_hex}");
+            }
+        }
     }
 }

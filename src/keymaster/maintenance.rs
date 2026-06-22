@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rsbinder::{Interface, Strong};
+use rsbinder::{Interface, Status, Strong};
 
 use crate::android::hardware::security::keymint::{
     ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice, SecurityLevel::SecurityLevel,
@@ -12,13 +12,14 @@ use crate::android::system::keystore2::{
 };
 use crate::err;
 use crate::global::{DB, SUPER_KEY};
-use crate::keymaster::db::KeyType;
+use crate::keymaster::db::{KeyEntryLoadBits, KeyType};
 use crate::keymaster::error::{into_logged_binder, map_km_error, KsError};
 use crate::keymaster::keymint_device::{get_keymint_wrapper, KeyMintWrapper};
 use crate::keymaster::permission::{
     check_forwarded_context, check_key_permission, check_keystore_permission,
-    check_manage_users_permission, CallerCtx, KeyPerm, KeystorePerm,
+    check_manage_users_permission, require_forwarded_context, CallerCtx, KeyPerm, KeystorePerm,
 };
+use crate::keymaster::utils::{AndroidUserId, AppUid, SecureUserId};
 use crate::top::qwq2333::ohmykeymint::{
     CallerInfo::CallerInfo,
     IOhMyMaintenanceService::{BnOhMyMaintenanceService, IOhMyMaintenanceService},
@@ -58,17 +59,17 @@ impl MaintenanceManager {
     ) -> Result<()> {
         check_maintenance_permission(KeystorePerm::ChangeUser, ctx, "initUserSuperKeys")
             .context(err!("caller missing change_user permission"))?;
-        let user_id_u32 = checked_user_id(user_id)?;
+        let user_id = checked_user_id(user_id)?;
         let password = password.into();
         DB.with(|db| {
             SUPER_KEY.write().unwrap().initialize_user(
                 &mut db.borrow_mut(),
-                user_id_u32,
+                user_id,
                 &password,
                 allow_existing,
             )
         })
-        .context(err!("initializing user {user_id} super keys"))
+        .context(err!("initializing user {user_id:?} super keys"))
     }
 
     fn on_user_removed(&self, ctx: Option<&CallerInfo>, user_id: i32) -> Result<()> {
@@ -81,13 +82,13 @@ impl MaintenanceManager {
     fn on_user_lskf_removed(&self, ctx: Option<&CallerInfo>, user_id: i32) -> Result<()> {
         check_maintenance_permission(KeystorePerm::ChangePassword, ctx, "onUserLskfRemoved")
             .context(err!("caller missing change_password permission"))?;
-        let user_id_u32 = checked_user_id(user_id)?;
-        DB.with(|db| db.borrow_mut().unbind_auth_bound_keys_for_user(user_id_u32))
-            .context(err!("unbinding auth-bound keys for user {user_id}"))
+        let user_id = checked_user_id(user_id)?;
+        DB.with(|db| db.borrow_mut().unbind_auth_bound_keys_for_user(user_id))
+            .context(err!("unbinding auth-bound keys for user {user_id:?}"))
     }
 
     fn clear_namespace(&self, ctx: Option<&CallerInfo>, domain: Domain, nspace: i64) -> Result<()> {
-        check_maintenance_permission(KeystorePerm::ClearUid, ctx, "clearNamespace")
+        check_maintenance_permission(KeystorePerm::ClearUID, ctx, "clearNamespace")
             .context(err!("caller missing clear_uid permission"))?;
         DB.with(|db| db.borrow_mut().unbind_keys_for_namespace(domain, nspace))
             .context(err!("clearing namespace domain={domain:?} nspace={nspace}"))
@@ -96,6 +97,13 @@ impl MaintenanceManager {
     fn early_boot_ended(&self, ctx: Option<&CallerInfo>) -> Result<()> {
         check_maintenance_permission(KeystorePerm::EarlyBootEnded, ctx, "earlyBootEnded")
             .context(err!("caller missing early_boot_ended permission"))?;
+        DB.with(|db| {
+            crate::keymaster::super_key::SuperKeyManager::set_up_boot_level_cache(
+                &SUPER_KEY,
+                &mut db.borrow_mut(),
+            )
+        })
+        .context(err!("setting up boot-level key cache"))?;
         call_keymint_wrappers("earlyBootEnded", |keymint| keymint.earlyBootEnded())?;
         Ok(())
     }
@@ -107,45 +115,69 @@ impl MaintenanceManager {
         destination: &KeyDescriptor,
     ) -> Result<()> {
         check_forwarded_context(ctx, "migrateKeyNamespace")?;
+
+        match source.domain {
+            Domain::SELINUX | Domain::KEY_ID | Domain::APP => (),
+            _ => {
+                return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!(
+                    "Source domain must be one of APP, SELINUX, or KEY_ID."
+                ));
+            }
+        };
+
         let caller = CallerCtx::from_caller_info(ctx);
         let destination = normalize_migration_destination(destination, caller.uid)?;
 
-        let resolved = DB
+        let caller_uid = AppUid(caller.uid as i64);
+        let key_id_guard = DB
             .with(|db| {
                 db.borrow_mut()
-                    .resolve_key_permission(source, KeyType::Client, caller.uid)
+                    .load_key_entry(
+                        source,
+                        KeyType::Client,
+                        KeyEntryLoadBits::NONE,
+                        caller_uid,
+                        |descriptor, access_vector| {
+                            check_key_permission(
+                                KeyPerm::Use,
+                                descriptor,
+                                access_vector.as_ref(),
+                                ctx,
+                            )
+                            .context(err!("caller missing use permission for migration source"))?;
+                            check_key_permission(
+                                KeyPerm::Delete,
+                                descriptor,
+                                access_vector.as_ref(),
+                                ctx,
+                            )
+                            .context(err!(
+                                "caller missing delete permission for migration source"
+                            ))?;
+                            check_key_permission(
+                                KeyPerm::Grant,
+                                descriptor,
+                                access_vector.as_ref(),
+                                ctx,
+                            )
+                            .context(err!("caller missing grant permission for migration source"))
+                        },
+                    )
+                    .map(|(key_id_guard, _)| key_id_guard)
             })
             .context(err!("resolving source key permissions for migration"))?;
-        check_key_permission(
-            KeyPerm::Use,
-            &resolved.descriptor,
-            resolved.access_vector.as_ref(),
-            ctx,
-        )
-        .context(err!("caller missing use permission for migration source"))?;
-        check_key_permission(
-            KeyPerm::Delete,
-            &resolved.descriptor,
-            resolved.access_vector.as_ref(),
-            ctx,
-        )
-        .context(err!(
-            "caller missing delete permission for migration source"
-        ))?;
-        check_key_permission(
-            KeyPerm::Grant,
-            &resolved.descriptor,
-            resolved.access_vector.as_ref(),
-            ctx,
-        )
-        .context(err!("caller missing grant permission for migration source"))?;
-        check_key_permission(KeyPerm::Rebind, &destination, None, ctx).context(err!(
-            "caller missing rebind permission for migration destination"
-        ))?;
 
         DB.with(|db| {
-            db.borrow_mut()
-                .migrate_key_namespace(source, &destination, caller.uid)
+            db.borrow_mut().migrate_key_namespace(
+                key_id_guard,
+                &destination,
+                caller_uid,
+                |descriptor| {
+                    check_key_permission(KeyPerm::Rebind, descriptor, None, ctx).context(err!(
+                        "caller missing rebind permission for migration destination"
+                    ))
+                },
+            )
         })
         .context(err!("migrating key namespace"))
     }
@@ -169,18 +201,22 @@ impl MaintenanceManager {
         check_forwarded_context(ctx, "getAppUidsAffectedBySid")?;
         check_manage_users_permission(ctx).context(err!("caller missing MANAGE_USERS"))?;
         let user_id = checked_user_id(user_id)?;
-        DB.with(|db| db.borrow_mut().app_uids_affected_by_sid(user_id, sid))
-            .context(err!("querying app UIDs affected by SID"))
+        DB.with(|db| {
+            db.borrow_mut()
+                .get_app_uids_affected_by_sid(user_id, SecureUserId(sid))
+        })
+        .map(|uids| uids.into_iter().map(|uid| uid.0).collect())
+        .context(err!("querying app UIDs affected by SID"))
     }
 
-    fn remove_user_state(&self, user_id: u32) -> Result<()> {
+    fn remove_user_state(&self, user_id: AndroidUserId) -> Result<()> {
         DB.with(|db| {
             SUPER_KEY
                 .write()
                 .unwrap()
                 .remove_user(&mut db.borrow_mut(), user_id)
         })
-        .context(err!("removing user {user_id} keys"))
+        .context(err!("removing user {user_id:?} keys"))
     }
 }
 
@@ -193,10 +229,19 @@ fn check_maintenance_permission(
     check_keystore_permission(permission, ctx)
 }
 
-fn checked_user_id(user_id: i32) -> Result<u32> {
-    u32::try_from(user_id)
-        .map_err(|_| KsError::Rc(ResponseCode::INVALID_ARGUMENT))
-        .context(err!("user_id must be non-negative"))
+fn require_omk_ctx<'a>(
+    ctx: Option<&'a CallerInfo>,
+    label: &str,
+) -> std::result::Result<&'a CallerInfo, Status> {
+    require_forwarded_context(ctx, label).map_err(into_logged_binder)
+}
+
+fn checked_user_id(user_id: i32) -> Result<AndroidUserId> {
+    if user_id < 0 {
+        return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
+            .context(err!("user_id must be non-negative"));
+    }
+    Ok(AndroidUserId(user_id))
 }
 
 fn normalize_migration_destination(
@@ -333,6 +378,10 @@ impl IKeystoreMaintenance for MaintenanceManager {
 impl IOhMyMaintenanceService for MaintenanceManager {
     fn onUserAdded(&self, ctx: Option<&CallerInfo>, user_id: i32) -> rsbinder::status::Result<()> {
         let _wp = wd::watch("IOhMyMaintenanceService::onUserAdded");
+        let ctx = Some(require_omk_ctx(
+            ctx,
+            "IOhMyMaintenanceService::onUserAdded",
+        )?);
         self.on_user_added(ctx, user_id).map_err(into_logged_binder)
     }
 
@@ -344,6 +393,10 @@ impl IOhMyMaintenanceService for MaintenanceManager {
         allow_existing: bool,
     ) -> rsbinder::status::Result<()> {
         let _wp = wd::watch("IOhMyMaintenanceService::initUserSuperKeys");
+        let ctx = Some(require_omk_ctx(
+            ctx,
+            "IOhMyMaintenanceService::initUserSuperKeys",
+        )?);
         self.init_user_super_keys(ctx, user_id, password, allow_existing)
             .map_err(into_logged_binder)
     }
@@ -354,6 +407,10 @@ impl IOhMyMaintenanceService for MaintenanceManager {
         user_id: i32,
     ) -> rsbinder::status::Result<()> {
         let _wp = wd::watch("IOhMyMaintenanceService::onUserRemoved");
+        let ctx = Some(require_omk_ctx(
+            ctx,
+            "IOhMyMaintenanceService::onUserRemoved",
+        )?);
         self.on_user_removed(ctx, user_id)
             .map_err(into_logged_binder)
     }
@@ -364,6 +421,10 @@ impl IOhMyMaintenanceService for MaintenanceManager {
         user_id: i32,
     ) -> rsbinder::status::Result<()> {
         let _wp = wd::watch("IOhMyMaintenanceService::onUserLskfRemoved");
+        let ctx = Some(require_omk_ctx(
+            ctx,
+            "IOhMyMaintenanceService::onUserLskfRemoved",
+        )?);
         self.on_user_lskf_removed(ctx, user_id)
             .map_err(into_logged_binder)
     }
@@ -375,12 +436,20 @@ impl IOhMyMaintenanceService for MaintenanceManager {
         nspace: i64,
     ) -> rsbinder::status::Result<()> {
         let _wp = wd::watch("IOhMyMaintenanceService::clearNamespace");
+        let ctx = Some(require_omk_ctx(
+            ctx,
+            "IOhMyMaintenanceService::clearNamespace",
+        )?);
         self.clear_namespace(ctx, domain, nspace)
             .map_err(into_logged_binder)
     }
 
     fn earlyBootEnded(&self, ctx: Option<&CallerInfo>) -> rsbinder::status::Result<()> {
         let _wp = wd::watch("IOhMyMaintenanceService::earlyBootEnded");
+        let ctx = Some(require_omk_ctx(
+            ctx,
+            "IOhMyMaintenanceService::earlyBootEnded",
+        )?);
         self.early_boot_ended(ctx).map_err(into_logged_binder)
     }
 
@@ -391,12 +460,20 @@ impl IOhMyMaintenanceService for MaintenanceManager {
         destination: &KeyDescriptor,
     ) -> rsbinder::status::Result<()> {
         let _wp = wd::watch("IOhMyMaintenanceService::migrateKeyNamespace");
+        let ctx = Some(require_omk_ctx(
+            ctx,
+            "IOhMyMaintenanceService::migrateKeyNamespace",
+        )?);
         self.migrate_key_namespace(ctx, source, destination)
             .map_err(into_logged_binder)
     }
 
     fn deleteAllKeys(&self, ctx: Option<&CallerInfo>) -> rsbinder::status::Result<()> {
         let _wp = wd::watch("IOhMyMaintenanceService::deleteAllKeys");
+        let ctx = Some(require_omk_ctx(
+            ctx,
+            "IOhMyMaintenanceService::deleteAllKeys",
+        )?);
         self.delete_all_keys(ctx).map_err(into_logged_binder)
     }
 
@@ -407,6 +484,10 @@ impl IOhMyMaintenanceService for MaintenanceManager {
         sid: i64,
     ) -> rsbinder::status::Result<Vec<i64>> {
         let _wp = wd::watch("IOhMyMaintenanceService::getAppUidsAffectedBySid");
+        let ctx = Some(require_omk_ctx(
+            ctx,
+            "IOhMyMaintenanceService::getAppUidsAffectedBySid",
+        )?);
         self.get_app_uids_affected_by_sid(ctx, user_id, sid)
             .map_err(into_logged_binder)
     }

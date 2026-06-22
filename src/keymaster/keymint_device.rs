@@ -31,7 +31,7 @@ use crate::consts::AID_KEYSTORE;
 use crate::global::DB;
 use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_km_error, map_ks_error, map_ks_result};
-use crate::keymaster::utils::{key_creation_result_to_aidl, key_params_to_aidl};
+use crate::keymaster::utils::{key_creation_result_to_aidl, key_params_to_aidl, AppUid};
 use crate::keymint::{clock, sdd, soft};
 use crate::{
     android::hardware::security::keymint::ErrorCode::ErrorCode,
@@ -40,7 +40,7 @@ use crate::{
         db::{
             BlobInfo, BlobMetaData, BlobMetaEntry, CertificateInfo, DateTime, KeyEntry,
             KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType,
-            KeymasterDb as KeystoreDB, StoreNewKeyParams, SubComponentType,
+            KeymasterDb as KeystoreDB, SubComponentType,
         },
         error::KsError as Error,
         super_key::KeyBlob,
@@ -53,7 +53,7 @@ use kmr_crypto_boring::hmac::BoringHmac;
 use kmr_crypto_boring::rng::BoringRng;
 use kmr_crypto_boring::rsa::BoringRsa;
 use kmr_ta::device::CsrSigningAlgorithm;
-use kmr_ta::{HardwareInfo, KeyMintTa, RpcInfo, RpcInfoV3};
+use kmr_ta::{HardwareInfo, KeyMintHalVersion, KeyMintTa, RpcInfo, RpcInfoV3};
 use kmr_wire::keymint::{AttestationKey, KeyParam};
 use kmr_wire::rpc::MINIMUM_SUPPORTED_KEYS_IN_CSR;
 use kmr_wire::*;
@@ -168,18 +168,17 @@ impl KeyMintDevice {
         let mut key_metadata = KeyMetaData::new();
         key_metadata.add(KeyMetaEntry::CreationDate(creation_date));
         let mut blob_metadata = BlobMetaData::new();
-        blob_metadata.add(BlobMetaEntry::KmUuid(*self.km_uuid.read().unwrap()));
+        let km_uuid = *self.km_uuid.read().unwrap();
+        blob_metadata.add(BlobMetaEntry::KmUuid(km_uuid));
 
         db.store_new_key(
             key_desc,
-            StoreNewKeyParams {
-                key_type,
-                params: &key_parameters,
-                blob_info: &BlobInfo::new(&creation_result.keyBlob, &blob_metadata),
-                cert_info: &CertificateInfo::new(None, None),
-                metadata: &key_metadata,
-                km_uuid: &self.km_uuid.read().unwrap(),
-            },
+            key_type,
+            &key_parameters,
+            &BlobInfo::new(&creation_result.keyBlob, &blob_metadata),
+            &CertificateInfo::new(None, None),
+            &key_metadata,
+            &km_uuid,
         )
         .context(err!("store_new_key failed"))?;
         Ok(())
@@ -201,8 +200,14 @@ impl KeyMintDevice {
         key_desc: &KeyDescriptor,
         key_type: KeyType,
     ) -> Result<(KeyIdGuard, KeyEntry)> {
-        db.load_key_entry(key_desc, key_type, KeyEntryLoadBits::KM, AID_KEYSTORE)
-            .context(err!("load_key_entry failed."))
+        db.load_key_entry(
+            key_desc,
+            key_type,
+            KeyEntryLoadBits::KM,
+            AppUid(AID_KEYSTORE as i64),
+            |_, _| Ok(()),
+        )
+        .context(err!("load_key_entry failed."))
     }
 
     /// Look up the key in the database, and return None if it is absent.
@@ -311,7 +316,7 @@ impl KeyMintDevice {
         F: Fn(&[u8]) -> Result<T, Error>,
     {
         let (f_result, upgraded_blob) = crate::keymaster::utils::upgrade_keyblob_if_required_with(
-            self.security_level,
+            &self.km_dev,
             self.version(),
             &key_blob,
             &[],
@@ -1153,6 +1158,10 @@ pub fn get_keymaster_security_level(
     }
 }
 
+fn supports_module_hash_attestation(version_number: i32) -> bool {
+    version_number >= KeyMintDevice::KEY_MINT_V4
+}
+
 #[derive(Clone, Copy)]
 struct ResolvedHardwareProfile {
     version_number: i32,
@@ -1281,6 +1290,7 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
         ckdf: Box::new(kmr_crypto_boring::aes_cmac::BoringAesCmac),
         hkdf,
         sha256: Box::new(kmr_crypto_boring::sha256::BoringSha256),
+        mldsa: Box::new(kmr_crypto_boring::mldsa::BoringMlDsa),
     };
 
     let keys: Box<dyn kmr_ta::device::RetrieveKeyMaterial> = Box::new(soft::Keys::new(
@@ -1309,7 +1319,22 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
         rpc,
     };
 
-    let mut ta = KeyMintTa::new(hw_info, RpcInfo::V3(rpc_info_v3), imp, dev);
+    let allowed_aidl_versions = match profile.version_number {
+        100 => vec![KeyMintHalVersion::V1],
+        200 => vec![KeyMintHalVersion::V2],
+        300 => vec![KeyMintHalVersion::V3],
+        400 => vec![KeyMintHalVersion::V4],
+        500 => vec![KeyMintHalVersion::V5],
+        _ => Vec::new(),
+    };
+
+    let mut ta = KeyMintTa::new_allowing_versions(
+        hw_info,
+        RpcInfo::V3(rpc_info_v3),
+        imp,
+        dev,
+        allowed_aidl_versions,
+    );
     bootstrap_auth_token_hmac(&mut ta, &config.crypto)?;
 
     let patch_level = parse_security_patch_level(&config.trust.security_patch).unwrap_or(20250605);
@@ -1350,20 +1375,27 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
         return Err(Error::Km(ErrorCode::UNKNOWN_ERROR)).context(err!("Failed to set HAL version"));
     }
 
-    if let Some(bundle) = crate::global::module_info_bundle() {
-        let module_hash = KeyParam::ModuleHash(bundle.sha256.clone());
-        let req = PerformOpReq::SetAdditionalAttestationInfo(
-            kmr_wire::SetAdditionalAttestationInfoRequest {
-                info: vec![module_hash],
-            },
-        );
-        let resp = ta.process_req(req);
-        if resp.error_code != 0 {
-            return Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
-                .context(err!("Failed to set additional attestation info"));
+    if supports_module_hash_attestation(profile.version_number) {
+        if let Some(bundle) = crate::global::module_info_bundle() {
+            let module_hash = KeyParam::ModuleHash(bundle.sha256.clone());
+            let req = PerformOpReq::SetAdditionalAttestationInfo(
+                kmr_wire::SetAdditionalAttestationInfoRequest {
+                    info: vec![module_hash],
+                },
+            );
+            let resp = ta.process_req(req);
+            if resp.error_code != 0 {
+                return Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
+                    .context(err!("Failed to set additional attestation info"));
+            }
+        } else {
+            warn!("APEX module info bundle unavailable; skipping moduleHash attestation bootstrap");
         }
     } else {
-        warn!("APEX module info bundle unavailable; skipping moduleHash attestation bootstrap");
+        info!(
+            "Skipping moduleHash attestation bootstrap for KeyMint version {}",
+            profile.version_number
+        );
     }
 
     Ok(ta)
@@ -1439,5 +1471,25 @@ fn shared_keymint_wrapper_inner(security_level: SecurityLevel) -> Result<Arc<Key
             .context(err!("Software KeyMint not supported")),
         _ => Err(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
             .context(err!("Unknown security level")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{supports_module_hash_attestation, KeyMintDevice};
+
+    #[test]
+    fn module_hash_attestation_starts_at_keymint_v4() {
+        for version in [
+            KeyMintDevice::KEY_MINT_V1,
+            KeyMintDevice::KEY_MINT_V2,
+            KeyMintDevice::KEY_MINT_V3,
+        ] {
+            assert!(!supports_module_hash_attestation(version));
+        }
+
+        for version in [KeyMintDevice::KEY_MINT_V4, KeyMintDevice::KEY_MINT_V5] {
+            assert!(supports_module_hash_attestation(version));
+        }
     }
 }

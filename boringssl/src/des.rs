@@ -16,8 +16,8 @@
 use crate::{openssl_err, ossl};
 use kmr_common::{crypto, crypto::OpaqueOr, explicit, vec_try, Error};
 use openssl::symm::{Cipher, Crypter};
-use Box;
-use Vec;
+use std::boxed::Box;
+use std::vec::Vec;
 
 /// [`crypto::Des`] implementation based on BoringSSL.
 pub struct BoringDes;

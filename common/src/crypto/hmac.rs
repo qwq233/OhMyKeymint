@@ -16,6 +16,7 @@
 
 use crate::{km_err, try_to_vec, Error};
 use kmr_wire::KeySizeInBits;
+use std::vec::Vec;
 use zeroize::ZeroizeOnDrop;
 
 /// Minimum size of an HMAC key in bits.

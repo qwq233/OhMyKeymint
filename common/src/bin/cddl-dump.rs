@@ -20,7 +20,7 @@ use kmr_wire::{keymint::*, secureclock::*, sharedsecret::*};
 
 fn show_schema<T: kmr_wire::AsCborValue>() {
     if let (Some(n), Some(s)) = (<T>::cddl_typename(), <T>::cddl_schema()) {
-        println!("{} = {}", n, s);
+        println!("{n} = {s}");
     }
 }
 
@@ -43,6 +43,7 @@ fn main() {
     show_schema::<KeyFormat>();
     show_schema::<KeyOrigin>();
     show_schema::<KeyPurpose>();
+    show_schema::<MlDsaVariant>();
     show_schema::<PaddingMode>();
     show_schema::<SecurityLevel>();
     show_schema::<Tag>();

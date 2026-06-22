@@ -8,6 +8,12 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+default = []
+# `nightly` enables the use of nightly-only standard library functionality,
+# specifically fallible allocation. This requires nightly Rust.
+nightly = []
+
 [dependencies]
 foreign-types = "0.3.2"
 kmr-common = { path = "../common", version = "0.1.0" }
@@ -20,11 +26,12 @@ nix = { version = "0.31.2", features = ["mman"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = "0.10.76"
-ffi = { package = "openssl-sys", version = "0.9.112", features = ["bindgen"]  }
+ffi = { package = "openssl-sys", version = "0.9.112", features = ["bindgen"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 openssl = { package = "openssl", version = "0.10.76", features = ["unstable_boringssl", "bindgen"] }
-ffi = { package = "openssl-sys", version = "0.9.112", features = ["bindgen"]  }
+ffi = { package = "openssl-sys", version = "0.9.112", features = ["bindgen"] }
+bssl_sys = { package = "bssl-sys", version = "0.1.0" }
 
 [dev-dependencies]
 kmr-tests = { path = "../tests", version = "0.1.0" }

@@ -157,7 +157,11 @@ pub fn encode_module_info(module_info: &[ApexModuleInfo]) -> Result<Vec<u8>, der
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_active_modules_xml, ApexModuleInfo, ModuleInfoBundle, ModuleInfoSource};
+    use super::{
+        encode_module_info, parse_active_modules_xml, ApexModuleInfo, ModuleInfoBundle,
+        ModuleInfoSource,
+    };
+    use der::ErrorKind;
     use kmr_common::crypto::Sha256;
     use kmr_crypto_boring::sha256::BoringSha256;
 
@@ -233,5 +237,65 @@ mod tests {
         let expected_hash = BoringSha256 {}.hash(&bundle.encoded_der).unwrap();
         assert_eq!(bundle.sha256, expected_hash.to_vec());
         assert_eq!(bundle.source, ModuleInfoSource::ApexInfoList);
+    }
+
+    #[test]
+    fn encode_module_info_empty() {
+        assert_eq!(vec![0x31, 0x00], encode_module_info(&[]).unwrap());
+    }
+
+    #[test]
+    fn encode_module_info_rejects_same_name() {
+        let modules = vec![
+            test_module("com.android.os.statsd", 25),
+            test_module("com.android.os.statsd", 789),
+        ];
+        let actual = encode_module_info(&modules);
+
+        assert!(actual.is_err());
+        assert_eq!(ErrorKind::SetDuplicate, actual.unwrap_err().kind());
+    }
+
+    #[test]
+    fn encode_module_info_orders_by_der() {
+        let modules = vec![
+            test_module("com.android.main", 8),
+            test_module("com.android.extservices", 1),
+            test_module("com.android.crashrecovery", 3),
+            test_module("com.android.wifi", 2),
+            test_module("com.android.virt", 1),
+            test_module("com.android.adbd", 14),
+        ];
+        let actual = encode_module_info(&modules).unwrap();
+        let expected = hex::decode(concat!(
+            "31819a",
+            "3015",
+            "0410",
+            "636f6d2e616e64726f69642e61646264",
+            "02010e",
+            "3015",
+            "0410",
+            "636f6d2e616e64726f69642e6d61696e",
+            "020108",
+            "3015",
+            "0410",
+            "636f6d2e616e64726f69642e76697274",
+            "020101",
+            "3015",
+            "0410",
+            "636f6d2e616e64726f69642e77696669",
+            "020102",
+            "301c",
+            "0417",
+            "636f6d2e616e64726f69642e6578747365727669636573",
+            "020101",
+            "301e",
+            "0419",
+            "636f6d2e616e64726f69642e63726173687265636f76657279",
+            "020103",
+        ))
+        .unwrap();
+
+        assert_eq!(expected, actual);
     }
 }

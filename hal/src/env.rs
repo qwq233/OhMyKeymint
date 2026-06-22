@@ -37,7 +37,7 @@ fn extract_u32(value: Option<regex::Match>) -> Result<u32, Error> {
             let s = m.as_str();
             match s.parse::<u32>() {
                 Ok(v) => Ok(v),
-                Err(e) => Err(format!("failed to parse integer: {:?}", e)),
+                Err(e) => Err(format!("failed to parse integer: {e:?}")),
             }
         }
         None => Err("failed to find match".to_string()),
@@ -46,17 +46,17 @@ fn extract_u32(value: Option<regex::Match>) -> Result<u32, Error> {
 
 /// Retrieve the value of a property identified by `name`.
 pub fn get_property(name: &str) -> Result<String, Error> {
-    match rustutils::system_properties::read(name) {
+    match rustutils::android::system_properties::read(name) {
         Ok(Some(value)) => Ok(value),
-        Ok(None) => Err(format!("no value for property {}", name)),
-        Err(e) => Err(format!("failed to get property {}: {:?}", name, e)),
+        Ok(None) => Err(format!("no value for property {name}")),
+        Err(e) => Err(format!("failed to get property {name}: {e:?}")),
     }
 }
 
 /// Extract a patchlevel in form YYYYMM from a "YYYY-MM-DD" property value.
 pub fn extract_truncated_patchlevel(prop_value: &str) -> Result<u32, Error> {
     let patchlevel_regex = Regex::new(PATCHLEVEL_REGEX)
-        .map_err(|e| format!("failed to compile patchlevel regexp: {:?}", e))?;
+        .map_err(|e| format!("failed to compile patchlevel regexp: {e:?}"))?;
 
     let captures = patchlevel_regex
         .captures(prop_value)
@@ -64,7 +64,7 @@ pub fn extract_truncated_patchlevel(prop_value: &str) -> Result<u32, Error> {
     let year = extract_u32(captures.name("year"))?;
     let month = extract_u32(captures.name("month"))?;
     if !(1..=12).contains(&month) {
-        return Err(format!("month out of range: {}", month));
+        return Err(format!("month out of range: {month}"));
     }
     // no day
     Ok(year * 100 + month)
@@ -73,7 +73,7 @@ pub fn extract_truncated_patchlevel(prop_value: &str) -> Result<u32, Error> {
 /// Extract a patchlevel in form YYYYMMDD from a "YYYY-MM-DD" property value.
 pub fn extract_patchlevel(prop_value: &str) -> Result<u32, Error> {
     let patchlevel_regex = Regex::new(PATCHLEVEL_REGEX)
-        .map_err(|e| format!("failed to compile patchlevel regexp: {:?}", e))?;
+        .map_err(|e| format!("failed to compile patchlevel regexp: {e:?}"))?;
 
     let captures = patchlevel_regex
         .captures(prop_value)
@@ -81,11 +81,11 @@ pub fn extract_patchlevel(prop_value: &str) -> Result<u32, Error> {
     let year = extract_u32(captures.name("year"))?;
     let month = extract_u32(captures.name("month"))?;
     if !(1..=12).contains(&month) {
-        return Err(format!("month out of range: {}", month));
+        return Err(format!("month out of range: {month}"));
     }
     let day = extract_u32(captures.name("day"))?;
     if !(1..=31).contains(&day) {
-        return Err(format!("day out of range: {}", day));
+        return Err(format!("day out of range: {day}"));
     }
     Ok(year * 10000 + month * 100 + day)
 }
@@ -97,7 +97,7 @@ fn populate_hal_info_from(
     vendor_patchlevel_prop: &str,
 ) -> Result<SetHalInfoRequest, Error> {
     let os_version_regex = Regex::new(OS_VERSION_REGEX)
-        .map_err(|e| format!("failed to compile version regexp: {:?}", e))?;
+        .map_err(|e| format!("failed to compile version regexp: {e:?}"))?;
     let captures = os_version_regex
         .captures(os_version_prop)
         .ok_or_else(|| "failed to match OS version regex".to_string())?;
@@ -116,11 +116,11 @@ fn populate_hal_info_from(
 /// Populate a [`SetHalInfoRequest`] based on property values read from the environment.
 pub fn populate_hal_info() -> Result<SetHalInfoRequest, Error> {
     let os_version_prop = get_property(OS_VERSION_PROPERTY)
-        .map_err(|e| format!("failed to retrieve property: {:?}", e))?;
+        .map_err(|e| format!("failed to retrieve property: {e:?}"))?;
     let os_patchlevel_prop = get_property(OS_PATCHLEVEL_PROPERTY)
-        .map_err(|e| format!("failed to retrieve property: {:?}", e))?;
+        .map_err(|e| format!("failed to retrieve property: {e:?}"))?;
     let vendor_patchlevel_prop = get_property(VENDOR_PATCHLEVEL_PROPERTY)
-        .map_err(|e| format!("failed to retrieve property: {:?}", e))?;
+        .map_err(|e| format!("failed to retrieve property: {e:?}"))?;
 
     populate_hal_info_from(&os_version_prop, &os_patchlevel_prop, &vendor_patchlevel_prop)
 }
@@ -165,11 +165,7 @@ mod tests {
         ];
         for (os_version, os_patch, vendor_patch, want) in tests {
             let got = populate_hal_info_from(os_version, os_patch, vendor_patch).unwrap();
-            assert_eq!(
-                got, want,
-                "Mismatch for input ({}, {}, {})",
-                os_version, os_patch, vendor_patch
-            );
+            assert_eq!(got, want, "Mismatch for input ({os_version}, {os_patch}, {vendor_patch})");
         }
     }
 
@@ -192,12 +188,7 @@ mod tests {
             let err = result.unwrap_err();
             assert!(
                 err.contains(want_err),
-                "Mismatch for input ({}, {}, {}), got error '{}', want '{}'",
-                os_version,
-                os_patch,
-                vendor_patch,
-                err,
-                want_err
+                "Mismatch for input ({os_version}, {os_patch}, {vendor_patch}), got error '{err}', want '{want_err}'"
             );
         }
     }

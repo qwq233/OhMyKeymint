@@ -22,11 +22,13 @@ use crate::{
 use kmr_wire::{
     keymint::{
         Algorithm, BlockMode, Digest, EcCurve, ErrorCode, KeyCharacteristics, KeyFormat, KeyParam,
-        KeyPurpose, PaddingMode, SecurityLevel, Tag, DEFAULT_CERT_SERIAL, DEFAULT_CERT_SUBJECT,
+        KeyPurpose, MlDsaVariant, PaddingMode, SecurityLevel, Tag, DEFAULT_CERT_SERIAL,
+        DEFAULT_CERT_SUBJECT,
     },
     KeySizeInBits,
 };
 use log::{info, warn};
+use std::vec::Vec;
 
 mod info;
 pub use info::*;
@@ -106,32 +108,6 @@ macro_rules! get_opt_tag_value {
             }
         }
     }
-}
-
-#[macro_export]
-macro_rules! modify_tag_value {
-    { $params:expr, $variant:ident, $new_value:expr } => {
-        modify_tag_value!($params, $variant, $new_value, InvalidTag)
-    };
-    { $params:expr, $variant:ident, $new_value:expr, $dup_error:ident  } => {
-        {
-            let mut found = false;
-            for param in $params.iter_mut() {
-                if let kmr_wire::keymint::KeyParam::$variant(v) = param {
-                    if (found) {
-                        return Err($crate::km_err!(InvalidTag, "duplicate tag {}", stringify!($variant)));
-                    }
-                    *v = $new_value;
-                    found = true;
-                }
-            }
-            if found {
-                Ok(())
-            } else {
-                Err($crate::km_err!(InvalidTag, "missing tag {}", stringify!($variant)))
-            }
-        }
-    };
 }
 
 /// Macro to retrieve a `bool` tag value, returning `false` if the tag is absent
@@ -232,6 +208,11 @@ pub fn get_ec_curve(params: &[KeyParam]) -> Result<EcCurve, Error> {
     get_tag_value!(params, EcCurve, ErrorCode::UnsupportedKeySize)
 }
 
+/// Get the configured ML-DSA variant from a set of parameters.
+pub fn get_mldsa_variant(params: &[KeyParam]) -> Result<MlDsaVariant, Error> {
+    get_tag_value!(params, MlDsaVariant, ErrorCode::UnsupportedMlDsaVariant)
+}
+
 /// Get the configured MGF digest from a set of parameters.  If no MGF digest is specified,
 /// a default value of SHA1 is returned.
 pub fn get_mgf_digest(params: &[KeyParam]) -> Result<Digest, Error> {
@@ -307,15 +288,17 @@ pub fn extract_key_gen_characteristics(
     params: &[KeyParam],
     sec_level: SecurityLevel,
 ) -> Result<(Vec<KeyCharacteristics>, KeyGenInfo), Error> {
-    let keygen_info = match get_algorithm(params)? {
+    let algorithm = get_algorithm(params)?;
+    let keygen_info = match algorithm {
         Algorithm::Rsa => check_rsa_gen_params(params, sec_level),
         Algorithm::Ec => check_ec_gen_params(params, sec_level),
+        Algorithm::MlDsa => check_mldsa_gen_params(params, sec_level),
         Algorithm::Aes => check_aes_gen_params(params, sec_level),
         Algorithm::TripleDes => check_3des_gen_params(params),
         Algorithm::Hmac => check_hmac_gen_params(params, sec_level),
     }?;
     Ok((
-        extract_key_characteristics(secure_storage, params, &[], sec_level)?,
+        extract_key_characteristics(secure_storage, algorithm, params, &[], sec_level)?,
         keygen_info,
     ))
 }
@@ -330,11 +313,15 @@ pub fn extract_key_import_characteristics(
     key_format: KeyFormat,
     key_data: &[u8],
 ) -> Result<(Vec<KeyCharacteristics>, KeyMaterial), Error> {
-    let (deduced_params, key_material) = match get_algorithm(params)? {
+    let algorithm = get_algorithm(params)?;
+    let (deduced_params, key_material) = match algorithm {
         Algorithm::Rsa => {
             check_rsa_import_params(&*imp.rsa, params, sec_level, key_format, key_data)
         }
         Algorithm::Ec => check_ec_import_params(&*imp.ec, params, sec_level, key_format, key_data),
+        Algorithm::MlDsa => {
+            check_mldsa_import_params(&*imp.mldsa, params, sec_level, key_format, key_data)
+        }
         Algorithm::Aes => {
             check_aes_import_params(&*imp.aes, params, sec_level, key_format, key_data)
         }
@@ -344,7 +331,13 @@ pub fn extract_key_import_characteristics(
         }
     }?;
     Ok((
-        extract_key_characteristics(secure_storage, params, &deduced_params, sec_level)?,
+        extract_key_characteristics(
+            secure_storage,
+            algorithm,
+            params,
+            &deduced_params,
+            sec_level,
+        )?,
         key_material,
     ))
 }
@@ -354,6 +347,7 @@ pub fn extract_key_import_characteristics(
 /// parameters on top of `params`, such as those deduced from imported key material.
 fn extract_key_characteristics(
     secure_storage: SecureStorage,
+    algorithm: Algorithm,
     params: &[KeyParam],
     extra_params: &[KeyParam],
     sec_level: SecurityLevel,
@@ -383,18 +377,27 @@ fn extract_key_characteristics(
             ));
         }
 
-        // UsageCountLimit is peculiar. If its value is > 1, it should be Keystore-enforced.
-        // If its value is = 1, then it is KeyMint-enforced if secure storage is available,
-        // and Keystore-enforced otherwise.
-        if let KeyParam::UsageCountLimit(use_limit) = param {
-            match (use_limit, secure_storage) {
+        match param {
+            // ML-DSA keys should not have key size parameter since it's not
+            // used and should not appear as a key authorization.
+            KeyParam::KeySize(_) => {
+                if algorithm == Algorithm::MlDsa {
+                    continue;
+                }
+            }
+            // UsageCountLimit is peculiar. If its value is > 1, it should be
+            // Keystore-enforced. If its value is = 1, then it is
+            // KeyMint-enforced if secure storage is available, and
+            // Keystore-enforced otherwise.
+            KeyParam::UsageCountLimit(use_limit) => match (use_limit, secure_storage) {
                 (1, SecureStorage::Available) => {
                     chars.try_push(KeyParam::UsageCountLimit(*use_limit))?
                 }
                 (1, SecureStorage::Unavailable) | (_, _) => {
                     keystore_chars.try_push(KeyParam::UsageCountLimit(*use_limit))?
                 }
-            }
+            },
+            _ => {}
         }
 
         if KEYMINT_ENFORCED_CHARACTERISTICS.contains(&tag) {
@@ -524,7 +527,7 @@ fn check_rsa_params(params: &[KeyParam]) -> Result<(), Error> {
                 KeyPurpose::AttestKey => seen_attest = true,
                 KeyPurpose::Verify | KeyPurpose::Encrypt => {} // public key operations
                 KeyPurpose::AgreeKey => {
-                    warn!("Generating RSA key with invalid purpose {:?}", purpose)
+                    warn!("Generating RSA key with invalid purpose {purpose:?}")
                 }
             }
         }
@@ -561,6 +564,18 @@ fn check_ec_gen_params(params: &[KeyParam], sec_level: SecurityLevel) -> Result<
         (EcCurve::P521, _) => KeyGenInfo::NistEc(ec::NistCurve::P521),
     };
     Ok(keygen_info)
+}
+
+/// Check ML-DSA key generation parameter validity.
+fn check_mldsa_gen_params(
+    params: &[KeyParam],
+    sec_level: SecurityLevel,
+) -> Result<KeyGenInfo, Error> {
+    // For key generation, the variant must be explicitly specified.
+    let variant = get_mldsa_variant(params)?;
+
+    check_mldsa_params(params, sec_level)?;
+    Ok(KeyGenInfo::MlDsa(variant))
 }
 
 /// Find the first purpose value in the parameters.
@@ -728,7 +743,7 @@ fn check_ec_params(
                 KeyPurpose::AgreeKey => seen_agree = true,
                 KeyPurpose::AttestKey => seen_attest = true,
                 KeyPurpose::Verify => {}
-                _ => warn!("Generating EC key with invalid purpose {:?}", purpose),
+                _ => warn!("Generating EC key with invalid purpose {purpose:?}"),
             }
             if primary_purpose.is_none() {
                 primary_purpose = Some(*purpose);
@@ -752,6 +767,94 @@ fn check_ec_params(
     }
 
     Ok(primary_purpose)
+}
+
+/// Check ML-DSA key import parameter validity. Return the key material along with any key generation
+/// parameters that have been deduced from the key material (but which are not present in the input
+/// key parameters).
+fn check_mldsa_import_params(
+    mldsa: &dyn MlDsa,
+    params: &[KeyParam],
+    sec_level: SecurityLevel,
+    key_format: KeyFormat,
+    key_data: &[u8],
+) -> Result<(Vec<KeyParam>, KeyMaterial), Error> {
+    let specified_variant = get_opt_tag_value!(params, MlDsaVariant)?;
+    let mut deduced_chars = Vec::new();
+    let key = match key_format {
+        KeyFormat::Raw => {
+            let Some(variant) = specified_variant else {
+                // Raw key material needs an explicitly specified variant.
+                return Err(km_err!(InvalidArgument, "missing MlDsaVariant"));
+            };
+            mldsa.import_raw_key(key_data, *variant, params)?
+        }
+        KeyFormat::Pkcs8 => {
+            let key = mldsa.import_pkcs8_key(key_data, params)?;
+            let actual_variant = match &key {
+                KeyMaterial::MlDsa(MlDsaVariant::MlDsa65, _) => MlDsaVariant::MlDsa65,
+                KeyMaterial::MlDsa(MlDsaVariant::MlDsa87, _) => MlDsaVariant::MlDsa87,
+                _ => {
+                    return Err(km_err!(
+                        ImportParameterMismatch,
+                        "unexpected key type from ML-DSA import"
+                    ))
+                }
+            };
+            // If the ML-DSA variant was explicitly specified, it must match.
+            if let Some(specified_variant) = specified_variant {
+                if *specified_variant != actual_variant {
+                    return Err(km_err!(ImportParameterMismatch,
+                                       "imported ML-DSA key claimed {specified_variant:?} but is {actual_variant:?}"));
+                }
+            }
+            // The variant must be populated in the key characteristics.
+            deduced_chars.try_push(KeyParam::MlDsaVariant(actual_variant))?;
+            key
+        }
+        _ => {
+            return Err(km_err!(
+                UnsupportedKeyFormat,
+                "unsupported import format {key_format:?}, expect RAW or PKCS8",
+            ));
+        }
+    };
+
+    check_mldsa_params(params, sec_level)?;
+    Ok((deduced_chars, key))
+}
+
+/// Check the parameter validity for an ML-DSA key that is about to be generated or imported.
+fn check_mldsa_params(params: &[KeyParam], sec_level: SecurityLevel) -> Result<(), Error> {
+    if sec_level == SecurityLevel::Strongbox {
+        return Err(km_err!(
+            UnsupportedAlgorithm,
+            "ML-DSA not supported for StrongBox"
+        ));
+    }
+
+    let mut seen_attest = false;
+    let mut seen_sign = false;
+    for param in params {
+        if let KeyParam::Purpose(purpose) = param {
+            match purpose {
+                KeyPurpose::Sign => seen_sign = true,
+                KeyPurpose::AttestKey => seen_attest = true,
+                KeyPurpose::Verify => {}
+                _ => warn!("Generating ML-DSA key with invalid purpose {purpose:?}"),
+            }
+        }
+    }
+
+    // Keys with Purpose::ATTEST_KEY must have no other purpose.
+    if seen_attest && seen_sign {
+        return Err(km_err!(
+            IncompatiblePurpose,
+            "keys with ATTEST_KEY must have no other purpose"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Check AES key generation parameter validity.
@@ -946,36 +1049,6 @@ fn require_matching_key_size(
     Ok(deduced_chars)
 }
 
-/// Return an error if any of the `exclude` tags are found in `params`.
-fn reject_tags(params: &[KeyParam], exclude: &[Tag]) -> Result<(), Error> {
-    for param in params {
-        if exclude.contains(&param.tag()) {
-            return Err(km_err!(InvalidTag, "tag {:?} not allowed", param.tag()));
-        }
-    }
-    Ok(())
-}
-
-/// Return an error if non-None padding found.
-fn reject_some_padding(params: &[KeyParam]) -> Result<(), Error> {
-    if let Some(padding) = get_opt_tag_value!(params, Padding)? {
-        if *padding != PaddingMode::None {
-            return Err(km_err!(InvalidTag, "padding {:?} not allowed", padding));
-        }
-    }
-    Ok(())
-}
-
-/// Return an error if non-None digest found.
-fn reject_some_digest(params: &[KeyParam]) -> Result<(), Error> {
-    if let Some(digest) = get_opt_tag_value!(params, Digest)? {
-        if *digest != Digest::None {
-            return Err(km_err!(InvalidTag, "digest {:?} not allowed", digest));
-        }
-    }
-    Ok(())
-}
-
 /// Reject incompatible combinations of authentication tags.
 fn reject_incompatible_auth(params: &[KeyParam]) -> Result<(), Error> {
     let mut seen_user_secure_id = false;
@@ -1012,417 +1085,6 @@ fn reject_incompatible_auth(params: &[KeyParam]) -> Result<(), Error> {
         ));
     }
     Ok(())
-}
-
-/// Indication of which parameters on a `begin` need to be checked against key authorizations.
-struct BeginParamsToCheck {
-    block_mode: bool,
-    padding: bool,
-    digest: bool,
-    mgf_digest: bool,
-}
-
-/// Check that an operation with the given `purpose` and `params` can validly be started
-/// using a key with characteristics `chars`.
-pub fn check_begin_params(
-    chars: &[KeyParam],
-    purpose: KeyPurpose,
-    params: &[KeyParam],
-) -> Result<(), Error> {
-    // General checks for all algorithms.
-    let algo = get_algorithm(chars)?;
-    let valid_purpose = matches!(
-        (algo, purpose),
-        (Algorithm::Aes, KeyPurpose::Encrypt)
-            | (Algorithm::Aes, KeyPurpose::Decrypt)
-            | (Algorithm::TripleDes, KeyPurpose::Encrypt)
-            | (Algorithm::TripleDes, KeyPurpose::Decrypt)
-            | (Algorithm::Hmac, KeyPurpose::Sign)
-            | (Algorithm::Hmac, KeyPurpose::Verify)
-            | (Algorithm::Ec, KeyPurpose::Sign)
-            | (Algorithm::Ec, KeyPurpose::AttestKey)
-            | (Algorithm::Ec, KeyPurpose::AgreeKey)
-            | (Algorithm::Rsa, KeyPurpose::Sign)
-            | (Algorithm::Rsa, KeyPurpose::Decrypt)
-            | (Algorithm::Rsa, KeyPurpose::AttestKey)
-    );
-    if !valid_purpose {
-        return Err(km_err!(
-            UnsupportedPurpose,
-            "invalid purpose {:?} for {:?} key",
-            purpose,
-            algo
-        ));
-    }
-    if !contains_tag_value!(chars, Purpose, purpose) {
-        return Err(km_err!(
-            IncompatiblePurpose,
-            "purpose {:?} not in key characteristics",
-            purpose
-        ));
-    }
-    if get_bool_tag_value!(chars, StorageKey)? {
-        return Err(km_err!(StorageKeyUnsupported, "attempt to use storage key",));
-    }
-    let nonce = get_opt_tag_value!(params, Nonce)?;
-    if get_bool_tag_value!(chars, CallerNonce)? {
-        // Caller-provided nonces are allowed.
-    } else if nonce.is_some() && purpose == KeyPurpose::Encrypt {
-        return Err(km_err!(
-            CallerNonceProhibited,
-            "caller nonce not allowed for encryption"
-        ));
-    }
-
-    // Further algorithm-specific checks.
-    let check = match algo {
-        Algorithm::Rsa => check_begin_rsa_params(chars, purpose, params),
-        Algorithm::Ec => check_begin_ec_params(chars, purpose, params),
-        Algorithm::Aes => check_begin_aes_params(chars, params, nonce.map(|v| v.as_ref())),
-        Algorithm::TripleDes => check_begin_3des_params(params, nonce.map(|v| v.as_ref())),
-        Algorithm::Hmac => check_begin_hmac_params(chars, purpose, params),
-    }?;
-
-    // For various parameters, if they are specified in the begin parameters and they
-    // are relevant for the algorithm, then the same value must also exist in the key
-    // characteristics. Also, there can be only one distinct value in the parameters.
-    if check.block_mode {
-        if let Some(bmode) = get_opt_tag_value!(params, BlockMode, UnsupportedBlockMode)? {
-            if !contains_tag_value!(chars, BlockMode, *bmode) {
-                return Err(km_err!(
-                    IncompatibleBlockMode,
-                    "block mode {:?} not in key characteristics {:?}",
-                    bmode,
-                    chars,
-                ));
-            }
-        }
-    }
-    if check.padding {
-        if let Some(pmode) = get_opt_tag_value!(params, Padding, UnsupportedPaddingMode)? {
-            if !contains_tag_value!(chars, Padding, *pmode) {
-                return Err(km_err!(
-                    IncompatiblePaddingMode,
-                    "padding mode {:?} not in key characteristics {:?}",
-                    pmode,
-                    chars,
-                ));
-            }
-        }
-    }
-    if check.digest {
-        if let Some(digest) = get_opt_tag_value!(params, Digest, UnsupportedDigest)? {
-            if !contains_tag_value!(chars, Digest, *digest) {
-                return Err(km_err!(
-                    IncompatibleDigest,
-                    "digest {:?} not in key characteristics",
-                    digest,
-                ));
-            }
-        }
-    }
-    if check.mgf_digest {
-        let mut mgf_digest_to_find =
-            get_opt_tag_value!(params, RsaOaepMgfDigest, UnsupportedMgfDigest)?;
-
-        let chars_have_mgf_digest = chars
-            .iter()
-            .any(|param| matches!(param, KeyParam::RsaOaepMgfDigest(_)));
-        if chars_have_mgf_digest && mgf_digest_to_find.is_none() {
-            // The key characteristics include an explicit set of MGF digests, but the begin()
-            // operation is using the default SHA1.  Check that this default is in the
-            // characteristics.
-            mgf_digest_to_find = Some(&Digest::Sha1);
-        }
-
-        if let Some(mgf_digest) = mgf_digest_to_find {
-            if !contains_tag_value!(chars, RsaOaepMgfDigest, *mgf_digest) {
-                return Err(km_err!(
-                    IncompatibleMgfDigest,
-                    "MGF digest {:?} not in key characteristics",
-                    mgf_digest,
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Indicate whether a [`KeyPurpose`] is for encryption/decryption.
-fn for_encryption(purpose: KeyPurpose) -> bool {
-    purpose == KeyPurpose::Encrypt
-        || purpose == KeyPurpose::Decrypt
-        || purpose == KeyPurpose::WrapKey
-}
-
-/// Indicate whether a [`KeyPurpose`] is for signing.
-fn for_signing(purpose: KeyPurpose) -> bool {
-    purpose == KeyPurpose::Sign
-}
-
-/// Check that an RSA operation with the given `purpose` and `params` can validly be started
-/// using a key with characteristics `chars`.
-fn check_begin_rsa_params(
-    chars: &[KeyParam],
-    purpose: KeyPurpose,
-    params: &[KeyParam],
-) -> Result<BeginParamsToCheck, Error> {
-    let padding = get_padding_mode(params)?;
-    let mut digest = None;
-    if for_signing(purpose) || (for_encryption(purpose) && padding == PaddingMode::RsaOaep) {
-        digest = Some(get_digest(params)?);
-    }
-    if for_signing(purpose) && padding == PaddingMode::None && digest != Some(Digest::None) {
-        return Err(km_err!(
-            IncompatibleDigest,
-            "unpadded RSA sign requires Digest::None not {:?}",
-            digest
-        ));
-    }
-    match padding {
-        PaddingMode::None => {}
-        PaddingMode::RsaOaep if for_encryption(purpose) => {
-            if digest.is_none() || digest == Some(Digest::None) {
-                return Err(km_err!(IncompatibleDigest, "digest required for RSA-OAEP"));
-            }
-            let mgf_digest = get_mgf_digest(params)?;
-            if mgf_digest == Digest::None {
-                return Err(km_err!(
-                    UnsupportedMgfDigest,
-                    "MGF digest cannot be NONE for RSA-OAEP"
-                ));
-            }
-        }
-        PaddingMode::RsaPss if for_signing(purpose) => {
-            if let Some(digest) = digest {
-                let key_size_bits = get_tag_value!(chars, KeySize, ErrorCode::InvalidArgument)?;
-                let d = digest_len(digest)?;
-                if key_size_bits < KeySizeInBits(2 * d + 9) {
-                    return Err(km_err!(
-                        IncompatibleDigest,
-                        "key size {:?} < 2*8*D={} + 9",
-                        key_size_bits,
-                        d
-                    ));
-                }
-            } else {
-                return Err(km_err!(IncompatibleDigest, "digest required for RSA-PSS"));
-            }
-        }
-        PaddingMode::RsaPkcs115Encrypt if for_encryption(purpose) => {
-            if digest.is_some() && digest != Some(Digest::None) {
-                warn!(
-                    "ignoring digest {:?} provided for PKCS#1 v1.5 encryption/decryption",
-                    digest
-                );
-            }
-        }
-        PaddingMode::RsaPkcs115Sign if for_signing(purpose) => {
-            if digest.is_none() {
-                return Err(km_err!(
-                    IncompatibleDigest,
-                    "digest required for RSA-PKCS_1_5_SIGN"
-                ));
-            }
-        }
-        _ => {
-            return Err(km_err!(
-                UnsupportedPaddingMode,
-                "purpose {:?} incompatible with padding {:?}",
-                purpose,
-                padding
-            ))
-        }
-    }
-
-    Ok(BeginParamsToCheck {
-        block_mode: false,
-        padding: true,
-        digest: true,
-        mgf_digest: true,
-    })
-}
-
-/// Check that an EC operation with the given `purpose` and `params` can validly be started
-/// using a key with characteristics `chars`.
-fn check_begin_ec_params(
-    chars: &[KeyParam],
-    purpose: KeyPurpose,
-    params: &[KeyParam],
-) -> Result<BeginParamsToCheck, Error> {
-    let curve = get_ec_curve(chars)?;
-    if purpose == KeyPurpose::Sign {
-        let digest = get_digest(params)?;
-        if digest == Digest::Md5 {
-            return Err(km_err!(
-                UnsupportedDigest,
-                "Digest::MD5 unsupported for EC signing"
-            ));
-        }
-        if curve == EcCurve::Curve25519 && digest != Digest::None {
-            return Err(km_err!(
-                UnsupportedDigest,
-                "Ed25519 only supports Digest::None not {:?}",
-                digest
-            ));
-        }
-    }
-    Ok(BeginParamsToCheck {
-        block_mode: false,
-        padding: false,
-        digest: true,
-        mgf_digest: false,
-    })
-}
-
-/// Check that an AES operation with the given `purpose` and `params` can validly be started
-/// using a key with characteristics `chars`.
-fn check_begin_aes_params(
-    chars: &[KeyParam],
-    params: &[KeyParam],
-    caller_nonce: Option<&[u8]>,
-) -> Result<BeginParamsToCheck, Error> {
-    reject_tags(params, &[Tag::RsaOaepMgfDigest])?;
-    reject_some_digest(params)?;
-    let bmode = get_block_mode(params)?;
-    let padding = get_padding_mode(params)?;
-
-    if bmode == BlockMode::Gcm {
-        let mac_len = get_tag_value!(params, MacLength, ErrorCode::MissingMacLength)?;
-        if mac_len % 8 != 0 || mac_len > 128 {
-            return Err(km_err!(UnsupportedMacLength, "invalid mac len {}", mac_len));
-        }
-        let min_mac_len = get_tag_value!(chars, MinMacLength, ErrorCode::MissingMinMacLength)?;
-        if mac_len < min_mac_len {
-            return Err(km_err!(
-                InvalidMacLength,
-                "mac len {} less than min {}",
-                mac_len,
-                min_mac_len
-            ));
-        }
-    }
-    match bmode {
-        BlockMode::Gcm | BlockMode::Ctr => match padding {
-            PaddingMode::None => {}
-            _ => {
-                return Err(km_err!(
-                    IncompatiblePaddingMode,
-                    "padding {:?} not valid for AES GCM/CTR",
-                    padding
-                ))
-            }
-        },
-        BlockMode::Ecb | BlockMode::Cbc => match padding {
-            PaddingMode::None | PaddingMode::Pkcs7 => {}
-            _ => {
-                return Err(km_err!(
-                    IncompatiblePaddingMode,
-                    "padding {:?} not valid for AES GCM/CTR",
-                    padding
-                ))
-            }
-        },
-    }
-
-    if let Some(nonce) = caller_nonce {
-        match bmode {
-            BlockMode::Cbc if nonce.len() == 16 => {}
-            BlockMode::Ctr if nonce.len() == 16 => {}
-            BlockMode::Gcm if nonce.len() == 12 => {}
-            _ => {
-                return Err(km_err!(
-                    InvalidNonce,
-                    "invalid caller nonce len {} for {:?}",
-                    nonce.len(),
-                    bmode
-                ))
-            }
-        }
-    }
-    Ok(BeginParamsToCheck {
-        block_mode: true,
-        padding: true,
-        digest: false,
-        mgf_digest: false,
-    })
-}
-
-/// Check that a 3-DES operation with the given `purpose` and `params` can validly be started
-/// using a key with characteristics `chars`.
-fn check_begin_3des_params(
-    params: &[KeyParam],
-    caller_nonce: Option<&[u8]>,
-) -> Result<BeginParamsToCheck, Error> {
-    reject_tags(params, &[Tag::RsaOaepMgfDigest])?;
-    reject_some_digest(params)?;
-    let bmode = get_block_mode(params)?;
-    let _padding = get_padding_mode(params)?;
-
-    match bmode {
-        BlockMode::Cbc | BlockMode::Ecb => {}
-        _ => {
-            return Err(km_err!(
-                UnsupportedBlockMode,
-                "block mode {:?} not valid for 3-DES",
-                bmode
-            ))
-        }
-    }
-
-    if let Some(nonce) = caller_nonce {
-        match bmode {
-            BlockMode::Cbc if nonce.len() == 8 => {}
-            _ => {
-                return Err(km_err!(
-                    InvalidNonce,
-                    "invalid caller nonce len {} for {:?}",
-                    nonce.len(),
-                    bmode
-                ))
-            }
-        }
-    }
-    Ok(BeginParamsToCheck {
-        block_mode: true,
-        padding: true,
-        digest: false,
-        mgf_digest: false,
-    })
-}
-
-/// Check that an HMAC operation with the given `purpose` and `params` can validly be started
-/// using a key with characteristics `chars`.
-fn check_begin_hmac_params(
-    chars: &[KeyParam],
-    purpose: KeyPurpose,
-    params: &[KeyParam],
-) -> Result<BeginParamsToCheck, Error> {
-    reject_tags(params, &[Tag::BlockMode, Tag::RsaOaepMgfDigest])?;
-    reject_some_padding(params)?;
-    let digest = get_digest(params)?;
-    if purpose == KeyPurpose::Sign {
-        let mac_len = get_tag_value!(params, MacLength, ErrorCode::MissingMacLength)?;
-        if mac_len % 8 != 0 || mac_len > digest_len(digest)? {
-            return Err(km_err!(UnsupportedMacLength, "invalid mac len {}", mac_len));
-        }
-        let min_mac_len = get_tag_value!(chars, MinMacLength, ErrorCode::MissingMinMacLength)?;
-        if mac_len < min_mac_len {
-            return Err(km_err!(
-                InvalidMacLength,
-                "mac len {} less than min {}",
-                mac_len,
-                min_mac_len
-            ));
-        }
-    }
-
-    Ok(BeginParamsToCheck {
-        block_mode: false,
-        padding: false,
-        digest: true,
-        mgf_digest: false,
-    })
 }
 
 /// Return the length in bits of a [`Digest`] function.
@@ -1543,6 +1205,7 @@ pub fn increment_imei(imei: &[u8]) -> Vec<u8> {
             return Vec::new();
         }
     };
+    // Expect that the 15 or 16 digits of the IMEI parse within a `u64`.
     let imei: u64 = match imei.parse() {
         Ok(v) => v,
         Err(_) => {
@@ -1553,8 +1216,15 @@ pub fn increment_imei(imei: &[u8]) -> Vec<u8> {
 
     // Drop trailing checksum digit, increment, and restore checksum.
     let imei2 = (imei / 10) + 1;
-    let imei2 = (imei2 * 10) + luhn_checksum(imei2);
+    let imei2_without_checksum = match imei2.checked_mul(10) {
+        Some(v) => v,
+        None => {
+            warn!("IMEI overflow");
+            return Vec::new();
+        }
+    };
+    let imei2 = imei2_without_checksum + luhn_checksum(imei2);
 
     // Convert back to bytes.
-    std::format!("{}", imei2).into_bytes()
+    std::format!("{imei2}").into_bytes()
 }

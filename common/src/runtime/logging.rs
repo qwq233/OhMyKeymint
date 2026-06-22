@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::boxed::Box;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(unix)]
@@ -20,6 +21,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::{eprintln, format, vec::Vec};
 
 use anyhow::{anyhow, Context as _};
 use log::{LevelFilter, Record};

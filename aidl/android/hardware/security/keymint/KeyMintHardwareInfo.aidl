@@ -32,21 +32,27 @@ parcelable KeyMintHardwareInfo {
      */
     int versionNumber;
 
-    /* securityLevel is the security level of the IKeyMintDevice implementation accessed
-     * through this aidl package.  */
+    /**
+     * securityLevel is the security level of the IKeyMintDevice implementation accessed
+     * through this aidl package.
+     */
     SecurityLevel securityLevel = SecurityLevel.SOFTWARE;
 
-    /* keyMintName is the name of the IKeyMintDevice implementation.  */
+    /**
+     * keyMintName is the name of the IKeyMintDevice implementation. The name must not be empty.
+     */
     @utf8InCpp String keyMintName;
 
-    /* keyMintAuthorName is the name of the author of the IKeyMintDevice implementation
-     *         (organization name, not individual). This name is implementation defined,
-     *         so it can be used to distinguish between different implementations from the
-     *         same author.
+    /**
+     * keyMintAuthorName is the name of the author of the IKeyMintDevice implementation
+     * (organization name, not individual). This name is implementation defined, so it can be used
+     * to distinguish between different implementations from the same author. The name must not be
+     * empty.
      */
     @utf8InCpp String keyMintAuthorName;
 
-    /* The timestampTokenRequired is a boolean flag, which when true reflects that IKeyMintDevice
+    /**
+     * The timestampTokenRequired is a boolean flag, which when true reflects that IKeyMintDevice
      * instance will expect a valid TimeStampToken with various operations. This will typically
      * required by the StrongBox implementations that generally don't have secure clock hardware to
      * generate timestamp tokens.

@@ -27,9 +27,11 @@ enum Algorithm {
 
     /** Asymmetric algorithms. */
     RSA = 1,
-
     /** 2 removed, do not reuse. */
     EC = 3,
+    /** 4 removed, do not reuse. */
+    ML_DSA_65 = 5,
+    ML_DSA_87 = 6,
 
     /** Block cipher algorithms. */
     AES = 32,

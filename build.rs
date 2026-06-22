@@ -36,6 +36,8 @@ fn main() {
         .include_dir(PathBuf::from("aidl/android/hardware/security/secureclock"))
         .include_dir(PathBuf::from("aidl/android/security/authorization"))
         .include_dir(PathBuf::from("aidl/android/security/maintenance"))
+        .include_dir(PathBuf::from("aidl/android/content/pm"))
+        .include_dir(PathBuf::from("aidl/android/os"))
         .output(PathBuf::from("aidl.rs"));
 
     let dirs = vec![
@@ -47,6 +49,8 @@ fn main() {
         "aidl/android/security/metrics",
         "aidl/android/security/keystore",
         "aidl/android/apex",
+        "aidl/android/content/pm",
+        "aidl/android/os",
         "aidl/top/qwq2333/ohmykeymint",
     ];
     for dir in dirs {

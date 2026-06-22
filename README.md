@@ -20,7 +20,7 @@ Configuration file is located at `/data/misc/keystore/omk/config.toml` and `/dat
 
 ```toml
 [main]
-# Accepted values: "injector" or "omk".
+# Only "injector" is currently enabled.
 backend = "injector"
 # Insecure fallback for broken system TEE biometric HAT verification.
 force_skip_system_biometric_hat_verification = false
@@ -38,7 +38,7 @@ shared_secret_nonce = "884ae5e90744bc1c590c4a9959a9c11d1989a9f2b7cc31a50a31c9fc4
 # auth_token_hmac_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 [trust]
-os_version = 15
+os_version = 17
 # Accepted values:
 # - "auto": read and preserve the original build.prop patch level
 # - "latest": use the 5th day of the current month
