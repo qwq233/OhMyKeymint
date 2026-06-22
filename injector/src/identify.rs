@@ -28,6 +28,7 @@ pub enum AidlMetadataMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorizationMethod {
     AddAuthToken,
+    LegacyOnLockScreenEvent,
     OnDeviceUnlocked,
     OnDeviceLocked,
     OnUserStorageLocked,
@@ -43,8 +44,11 @@ pub enum MaintenanceMethod {
     InitUserSuperKeys,
     OnUserRemoved,
     OnUserLskfRemoved,
+    OnUserPasswordChanged,
     ClearNamespace,
+    GetState,
     EarlyBootEnded,
+    OnDeviceOffBody,
     MigrateKeyNamespace,
     DeleteAllKeys,
     GetAppUidsAffectedBySid,
@@ -90,7 +94,40 @@ pub fn aidl_metadata_method_from_code(code: u32) -> Option<AidlMetadataMethod> {
     }
 }
 
+fn transaction_offset(code: u32) -> Option<u32> {
+    code.checked_sub(rsbinder::FIRST_CALL_TRANSACTION)
+}
+
+pub fn authorization_method_from_code_for(
+    android_major_version: Option<i32>,
+    code: u32,
+) -> Option<AuthorizationMethod> {
+    match android_major_version {
+        Some(version) if version <= 14 => match transaction_offset(code)? {
+            0 => Some(AuthorizationMethod::AddAuthToken),
+            1 => Some(AuthorizationMethod::LegacyOnLockScreenEvent),
+            2 => Some(AuthorizationMethod::GetAuthTokensForCredStore),
+            _ => None,
+        },
+        Some(15 | 16) => match transaction_offset(code)? {
+            0 => Some(AuthorizationMethod::AddAuthToken),
+            1 => Some(AuthorizationMethod::OnDeviceUnlocked),
+            2 => Some(AuthorizationMethod::OnDeviceLocked),
+            3 => Some(AuthorizationMethod::OnWeakUnlockMethodsExpired),
+            4 => Some(AuthorizationMethod::OnNonLskfUnlockMethodsExpired),
+            5 => Some(AuthorizationMethod::GetAuthTokensForCredStore),
+            6 => Some(AuthorizationMethod::GetLastAuthTime),
+            _ => None,
+        },
+        _ => current_authorization_method_from_code(code),
+    }
+}
+
 pub fn authorization_method_from_code(code: u32) -> Option<AuthorizationMethod> {
+    authorization_method_from_code_for(kmr_common::android_version::android_major_version(), code)
+}
+
+fn current_authorization_method_from_code(code: u32) -> Option<AuthorizationMethod> {
     match code {
         authorization_tx::r#addAuthToken => Some(AuthorizationMethod::AddAuthToken),
         authorization_tx::r#onDeviceUnlocked => Some(AuthorizationMethod::OnDeviceUnlocked),
@@ -110,7 +147,45 @@ pub fn authorization_method_from_code(code: u32) -> Option<AuthorizationMethod> 
     }
 }
 
+pub fn maintenance_method_from_code_for(
+    android_major_version: Option<i32>,
+    code: u32,
+) -> Option<MaintenanceMethod> {
+    match android_major_version {
+        Some(version) if version <= 14 => match transaction_offset(code)? {
+            0 => Some(MaintenanceMethod::OnUserAdded),
+            1 => Some(MaintenanceMethod::OnUserRemoved),
+            2 => Some(MaintenanceMethod::OnUserPasswordChanged),
+            3 => Some(MaintenanceMethod::ClearNamespace),
+            4 => Some(MaintenanceMethod::GetState),
+            5 => Some(MaintenanceMethod::EarlyBootEnded),
+            6 => Some(MaintenanceMethod::OnDeviceOffBody),
+            7 => Some(MaintenanceMethod::MigrateKeyNamespace),
+            8 => Some(MaintenanceMethod::DeleteAllKeys),
+            _ => None,
+        },
+        Some(15) => match transaction_offset(code)? {
+            0 => Some(MaintenanceMethod::OnUserAdded),
+            1 => Some(MaintenanceMethod::InitUserSuperKeys),
+            2 => Some(MaintenanceMethod::OnUserRemoved),
+            3 => Some(MaintenanceMethod::OnUserLskfRemoved),
+            4 => Some(MaintenanceMethod::OnUserPasswordChanged),
+            5 => Some(MaintenanceMethod::ClearNamespace),
+            6 => Some(MaintenanceMethod::EarlyBootEnded),
+            7 => Some(MaintenanceMethod::MigrateKeyNamespace),
+            8 => Some(MaintenanceMethod::DeleteAllKeys),
+            9 => Some(MaintenanceMethod::GetAppUidsAffectedBySid),
+            _ => None,
+        },
+        _ => current_maintenance_method_from_code(code),
+    }
+}
+
 pub fn maintenance_method_from_code(code: u32) -> Option<MaintenanceMethod> {
+    maintenance_method_from_code_for(kmr_common::android_version::android_major_version(), code)
+}
+
+fn current_maintenance_method_from_code(code: u32) -> Option<MaintenanceMethod> {
     match code {
         maintenance_tx::r#onUserAdded => Some(MaintenanceMethod::OnUserAdded),
         maintenance_tx::r#initUserSuperKeys => Some(MaintenanceMethod::InitUserSuperKeys),
@@ -190,8 +265,12 @@ pub fn is_omk_service_route_enabled(method: ServiceMethod, intercept: &Intercept
 mod tests {
     use super::*;
 
+    fn tx(offset: u32) -> u32 {
+        rsbinder::FIRST_CALL_TRANSACTION + offset
+    }
+
     #[test]
-    fn authorization_method_codes_follow_generated_aidl_constants() {
+    fn authorization_method_codes_follow_current_generated_aidl_constants() {
         let cases = [
             (
                 authorization_tx::r#addAuthToken,
@@ -228,10 +307,160 @@ mod tests {
         ];
 
         for (code, expected) in cases {
-            assert_eq!(authorization_method_from_code(code), Some(expected));
+            assert_eq!(
+                authorization_method_from_code_for(Some(17), code),
+                Some(expected)
+            );
+            assert_eq!(
+                authorization_method_from_code_for(None, code),
+                Some(expected)
+            );
         }
 
-        assert_eq!(authorization_method_from_code(u32::MAX), None);
+        assert_eq!(authorization_method_from_code_for(Some(17), u32::MAX), None);
+    }
+
+    #[test]
+    fn authorization_method_codes_follow_android_12_to_14_layout() {
+        let cases = [
+            (0, AuthorizationMethod::AddAuthToken),
+            (1, AuthorizationMethod::LegacyOnLockScreenEvent),
+            (2, AuthorizationMethod::GetAuthTokensForCredStore),
+        ];
+
+        for version in [Some(12), Some(13), Some(14)] {
+            for (offset, expected) in cases {
+                assert_eq!(
+                    authorization_method_from_code_for(version, tx(offset)),
+                    Some(expected)
+                );
+            }
+            assert_eq!(authorization_method_from_code_for(version, tx(3)), None);
+        }
+    }
+
+    #[test]
+    fn authorization_method_codes_follow_android_15_to_16_layout() {
+        let cases = [
+            (0, AuthorizationMethod::AddAuthToken),
+            (1, AuthorizationMethod::OnDeviceUnlocked),
+            (2, AuthorizationMethod::OnDeviceLocked),
+            (3, AuthorizationMethod::OnWeakUnlockMethodsExpired),
+            (4, AuthorizationMethod::OnNonLskfUnlockMethodsExpired),
+            (5, AuthorizationMethod::GetAuthTokensForCredStore),
+            (6, AuthorizationMethod::GetLastAuthTime),
+        ];
+
+        for version in [Some(15), Some(16)] {
+            for (offset, expected) in cases {
+                assert_eq!(
+                    authorization_method_from_code_for(version, tx(offset)),
+                    Some(expected)
+                );
+            }
+            assert_eq!(authorization_method_from_code_for(version, tx(7)), None);
+        }
+    }
+
+    #[test]
+    fn maintenance_method_codes_follow_current_generated_aidl_constants() {
+        let cases = [
+            (
+                maintenance_tx::r#onUserAdded,
+                MaintenanceMethod::OnUserAdded,
+            ),
+            (
+                maintenance_tx::r#initUserSuperKeys,
+                MaintenanceMethod::InitUserSuperKeys,
+            ),
+            (
+                maintenance_tx::r#onUserRemoved,
+                MaintenanceMethod::OnUserRemoved,
+            ),
+            (
+                maintenance_tx::r#onUserLskfRemoved,
+                MaintenanceMethod::OnUserLskfRemoved,
+            ),
+            (
+                maintenance_tx::r#clearNamespace,
+                MaintenanceMethod::ClearNamespace,
+            ),
+            (
+                maintenance_tx::r#earlyBootEnded,
+                MaintenanceMethod::EarlyBootEnded,
+            ),
+            (
+                maintenance_tx::r#migrateKeyNamespace,
+                MaintenanceMethod::MigrateKeyNamespace,
+            ),
+            (
+                maintenance_tx::r#deleteAllKeys,
+                MaintenanceMethod::DeleteAllKeys,
+            ),
+            (
+                maintenance_tx::r#getAppUidsAffectedBySid,
+                MaintenanceMethod::GetAppUidsAffectedBySid,
+            ),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(
+                maintenance_method_from_code_for(Some(17), code),
+                Some(expected)
+            );
+            assert_eq!(maintenance_method_from_code_for(None, code), Some(expected));
+        }
+
+        assert_eq!(maintenance_method_from_code_for(Some(17), u32::MAX), None);
+    }
+
+    #[test]
+    fn maintenance_method_codes_follow_android_12_to_14_layout() {
+        let cases = [
+            (0, MaintenanceMethod::OnUserAdded),
+            (1, MaintenanceMethod::OnUserRemoved),
+            (2, MaintenanceMethod::OnUserPasswordChanged),
+            (3, MaintenanceMethod::ClearNamespace),
+            (4, MaintenanceMethod::GetState),
+            (5, MaintenanceMethod::EarlyBootEnded),
+            (6, MaintenanceMethod::OnDeviceOffBody),
+            (7, MaintenanceMethod::MigrateKeyNamespace),
+            (8, MaintenanceMethod::DeleteAllKeys),
+        ];
+
+        for version in [Some(12), Some(13), Some(14)] {
+            for (offset, expected) in cases {
+                assert_eq!(
+                    maintenance_method_from_code_for(version, tx(offset)),
+                    Some(expected)
+                );
+            }
+            assert_eq!(maintenance_method_from_code_for(version, tx(9)), None);
+        }
+    }
+
+    #[test]
+    fn maintenance_method_codes_follow_android_15_layout() {
+        let cases = [
+            (0, MaintenanceMethod::OnUserAdded),
+            (1, MaintenanceMethod::InitUserSuperKeys),
+            (2, MaintenanceMethod::OnUserRemoved),
+            (3, MaintenanceMethod::OnUserLskfRemoved),
+            (4, MaintenanceMethod::OnUserPasswordChanged),
+            (5, MaintenanceMethod::ClearNamespace),
+            (6, MaintenanceMethod::EarlyBootEnded),
+            (7, MaintenanceMethod::MigrateKeyNamespace),
+            (8, MaintenanceMethod::DeleteAllKeys),
+            (9, MaintenanceMethod::GetAppUidsAffectedBySid),
+        ];
+
+        for (offset, expected) in cases {
+            assert_eq!(
+                maintenance_method_from_code_for(Some(15), tx(offset)),
+                Some(expected)
+            );
+        }
+        assert_eq!(maintenance_method_from_code_for(Some(15), tx(10)), None);
     }
 
     #[test]

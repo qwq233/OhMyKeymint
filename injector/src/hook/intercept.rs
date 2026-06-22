@@ -379,8 +379,7 @@ unsafe fn submit_synthetic_transaction_reply(
     push_unaligned(&mut write, &free_buffer);
 
     let has_reply = !matches!(reply, SyntheticReply::NoReply);
-    let status_storage: i32;
-    match reply {
+    let submitted = match reply {
         SyntheticReply::Parcel(reply) => {
             let mut reply_tr = *tr;
             reply_tr.target.handle = 0;
@@ -399,9 +398,10 @@ unsafe fn submit_synthetic_transaction_reply(
             };
             push_unaligned(&mut write, &BC_REPLY_CMD);
             push_unaligned(&mut write, &reply_tr);
+            submit_write_buffer(fd, old_ioctl_fn, &mut write, "synthetic BC_REPLY")
         }
         SyntheticReply::Status(status) => {
-            status_storage = status;
+            let status_storage = status;
             let mut reply_tr = *tr;
             reply_tr.target.handle = 0;
             reply_tr.cookie = 0;
@@ -415,11 +415,13 @@ unsafe fn submit_synthetic_transaction_reply(
             reply_tr.data.ptr.offsets = 0;
             push_unaligned(&mut write, &BC_REPLY_CMD);
             push_unaligned(&mut write, &reply_tr);
+            submit_write_buffer(fd, old_ioctl_fn, &mut write, "synthetic BC_REPLY")
         }
-        SyntheticReply::NoReply => {}
-    }
+        SyntheticReply::NoReply => {
+            submit_write_buffer(fd, old_ioctl_fn, &mut write, "synthetic BC_REPLY")
+        }
+    };
 
-    let submitted = submit_write_buffer(fd, old_ioctl_fn, &mut write, "synthetic BC_REPLY");
     if submitted && has_reply {
         record_synthetic_transaction_complete(fd);
     }
@@ -527,4 +529,86 @@ fn consume_synthetic_transaction_complete(fd: c_int) -> bool {
         key.fd, key.thread_id, remaining
     );
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parcel;
+
+    static CAPTURED_REPLY_DATA: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+    unsafe extern "C" fn capture_reply_ioctl(
+        _fd: c_int,
+        request: c_int,
+        arg: *mut c_void,
+    ) -> c_int {
+        if request != BINDER_WRITE_READ as c_int || arg.is_null() {
+            return -1;
+        }
+
+        let bwr = &mut *(arg as *mut binder_write_read);
+        let write = std::slice::from_raw_parts(bwr.write_buffer as *const u8, bwr.write_size);
+        let mut offset = 0usize;
+        let mut captured = None;
+        while offset + size_of::<u32>() <= write.len() {
+            let cmd = std::ptr::read_unaligned(write.as_ptr().add(offset) as *const u32);
+            offset += size_of::<u32>();
+            match cmd {
+                BC_FREE_BUFFER_CMD => {
+                    offset = offset.saturating_add(size_of::<libc::c_ulong>());
+                }
+                BC_REPLY_CMD => {
+                    if offset + size_of::<binder_transaction_data>() > write.len() {
+                        return -1;
+                    }
+                    let tr = std::ptr::read_unaligned(
+                        write.as_ptr().add(offset) as *const binder_transaction_data
+                    );
+                    offset += size_of::<binder_transaction_data>();
+                    captured = Some(
+                        std::slice::from_raw_parts(tr.data.ptr.buffer as *const u8, tr.data_size)
+                            .to_vec(),
+                    );
+                }
+                _ => return -1,
+            }
+        }
+
+        *CAPTURED_REPLY_DATA
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = captured;
+        bwr.write_consumed = bwr.write_size;
+        0
+    }
+
+    #[test]
+    fn synthetic_parcel_reply_storage_lives_until_ioctl() {
+        *CAPTURED_REPLY_DATA
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
+        tr.data.ptr.buffer = 0x1000;
+        let reply = parcel::build_raw_i32_reply(0x1234_5678)
+            .expect("raw i32 synthetic reply should serialize");
+
+        let submitted = unsafe {
+            submit_synthetic_transaction_reply(
+                1,
+                capture_reply_ioctl,
+                &tr,
+                SyntheticReply::Parcel(Box::new(reply)),
+            )
+        };
+
+        assert!(submitted);
+        let captured = CAPTURED_REPLY_DATA
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .expect("fake ioctl should capture BC_REPLY payload");
+        assert_eq!(captured.len(), size_of::<i32>());
+        let value = unsafe { std::ptr::read_unaligned(captured.as_ptr() as *const i32) };
+        assert_eq!(value, 0x1234_5678);
+    }
 }

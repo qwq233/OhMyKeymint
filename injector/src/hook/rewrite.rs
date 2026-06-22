@@ -16,7 +16,6 @@ use super::binder::{
     parse_local_binder_target_from_parcel_bytes, LocalBinderTarget,
 };
 use crate::android::system::keystore2::Domain::Domain;
-use crate::android::system::keystore2::IKeystoreService::transactions as service_tx;
 use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
 use crate::android::system::keystore2::KeyMetadata::KeyMetadata;
@@ -109,8 +108,7 @@ enum PendingCall {
 thread_local! {
     static PENDING_REPLY_QUEUE: RefCell<VecDeque<Option<PendingCall>>> = RefCell::default();
     static OUTBOUND_REPLY_BUFFERS: RefCell<Vec<parcel::OwnedReply>> = RefCell::default();
-    static OUTBOUND_STATUS_BUFFERS: RefCell<Vec<i32>> = RefCell::default();
-    static INBOUND_REQUEST_BUFFERS: RefCell<Vec<parcel::OwnedReply>> = RefCell::default();
+    static OUTBOUND_STATUS_BUFFERS: RefCell<Vec<StableStatusReply>> = RefCell::default();
 }
 
 #[derive(Clone)]
@@ -136,6 +134,18 @@ pub(super) enum SyntheticReply {
 enum OutboundReply {
     Parcel(Box<parcel::OwnedReply>),
     Status(i32),
+}
+
+struct StableStatusReply(Box<i32>);
+
+impl StableStatusReply {
+    fn new(status: i32) -> Self {
+        Self(Box::new(status))
+    }
+
+    fn as_ptr(&self) -> *const i32 {
+        self.0.as_ref()
+    }
 }
 
 impl From<parcel::OwnedReply> for OutboundReply {
@@ -605,7 +615,13 @@ fn authorization_mirror_mutates(method: AuthorizationMethod) -> bool {
 }
 
 fn maintenance_mirror_mutates(method: MaintenanceMethod) -> bool {
-    !matches!(method, MaintenanceMethod::GetAppUidsAffectedBySid)
+    !matches!(
+        method,
+        MaintenanceMethod::OnUserPasswordChanged
+            | MaintenanceMethod::GetState
+            | MaintenanceMethod::OnDeviceOffBody
+            | MaintenanceMethod::GetAppUidsAffectedBySid
+    )
 }
 
 fn operation_targets() -> &'static Mutex<HashMap<LocalBinderTarget, OperationTargetInfo>> {
@@ -1120,7 +1136,7 @@ pub(super) unsafe fn handle_br_transaction(
         } else {
             route_for_service_request(&request, &cfg.intercept)
         };
-        let mut placeholder_applied = false;
+        let mut request_rewritten = false;
         let mut precomputed_service_reply = None;
         if route == RouteTarget::Omk
             && matches!(method, ServiceMethod::Grant | ServiceMethod::Ungrant)
@@ -1138,19 +1154,8 @@ pub(super) unsafe fn handle_br_transaction(
                 }
             }
 
-            match install_omk_grant_placeholder_request(tr) {
-                Ok(()) => {
-                    placeholder_applied = true;
-                }
-                Err(error) => {
-                    warn!(
-                        "[Injector][Route] failed to install generated OMK grant placeholder for {:?} uid={} pid={}: {:#}; using unknown transaction to fail closed",
-                        method, caller.uid, caller.pid, error
-                    );
-                    tr.code = u32::MAX;
-                    placeholder_applied = true;
-                }
-            }
+            block_omk_grant_system_request(tr);
+            request_rewritten = true;
         }
 
         info!(
@@ -1184,7 +1189,7 @@ pub(super) unsafe fn handle_br_transaction(
                 replace_top_pending(PendingCall::Service(pending));
             }
         }
-        return placeholder_applied;
+        return request_rewritten;
     }
 
     let Some(target) = target_from_transaction(tr) else {
@@ -1576,37 +1581,41 @@ fn build_omk_status_reply(status: &Status) -> anyhow::Result<OutboundReply> {
     Ok(parcel::build_status_reply(status)?.into())
 }
 
-fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<OutboundReply> {
-    if let Some(status) = error
+fn error_status(error: &anyhow::Error) -> Option<&Status> {
+    error
         .chain()
         .find_map(|cause| cause.downcast_ref::<Status>())
-    {
+}
+
+fn error_status_code(error: &anyhow::Error) -> Option<StatusCode> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<StatusCode>().copied())
+}
+
+fn synthetic_parse_error_status_code(error: &anyhow::Error) -> StatusCode {
+    error_status_code(error).unwrap_or(StatusCode::BadValue)
+}
+
+fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<OutboundReply> {
+    if let Some(status) = error_status(error) {
         return build_omk_status_reply(status);
     }
 
-    if let Some(status) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<StatusCode>())
-    {
-        return Ok(OutboundReply::Status((*status).into()));
+    if let Some(status) = error_status_code(error) {
+        return Ok(OutboundReply::Status(status.into()));
     }
 
     Ok(synthetic_fallback_reply().into())
 }
 
 fn precomputed_omk_error_reply(error: &anyhow::Error) -> PrecomputedErrorReply {
-    if let Some(status) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<Status>())
-    {
+    if let Some(status) = error_status(error) {
         return PrecomputedErrorReply::Status(status.clone());
     }
 
-    if let Some(status) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<StatusCode>())
-    {
-        return PrecomputedErrorReply::StatusCode((*status).into());
+    if let Some(status) = error_status_code(error) {
+        return PrecomputedErrorReply::StatusCode(status.into());
     }
 
     PrecomputedErrorReply::Status(Status::new_service_specific_error(
@@ -2059,6 +2068,13 @@ fn synthetic_transaction_current_caller(
     CallerIdentity::new(uid, pid).with_sid(sid)
 }
 
+fn can_execute_synthetic_one_way(kind: SyntheticTargetKind, code: u32) -> bool {
+    matches!(
+        (kind, identify::operation_method_from_code(code)),
+        (SyntheticTargetKind::Operation, Some(OperationMethod::Abort))
+    )
+}
+
 pub(super) unsafe fn handle_synthetic_br_transaction(
     tr: &binder_transaction_data,
     caller_sid: Option<String>,
@@ -2124,6 +2140,10 @@ unsafe fn build_synthetic_br_transaction_reply(
     command_name: &str,
 ) -> anyhow::Result<SyntheticReply> {
     let expects_reply = (tr.flags & super::binder::TF_ONE_WAY) == 0;
+    if !expects_reply && !can_execute_synthetic_one_way(info.kind, tr.code) {
+        return Ok(SyntheticReply::NoReply);
+    }
+
     let reply =
         build_synthetic_br_transaction_reply_inner(tr, target, info, caller_sid, command_name)?;
     if expects_reply {
@@ -2147,7 +2167,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
 
     if let Some(method) = identify::aidl_metadata_method_from_code(tr.code) {
         let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
-        let request_interface = match parcel::parse_no_arg_request_interface(
+        let request_interface = match parcel::parse_metadata_request_interface_allow_trailing(
             data,
             data_size,
             offsets,
@@ -2235,11 +2255,12 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
             ) {
                 Ok(request) => request,
                 Err(error) => {
+                    let status = synthetic_parse_error_status_code(&error);
                     warn!(
-                        "[Injector][Synthetic] failed to parse synthetic security-level request target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning BAD_VALUE",
-                        target.ptr, target.cookie, tr.code, error
+                        "[Injector][Synthetic] failed to parse synthetic security-level request target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning {}",
+                        target.ptr, target.cookie, tr.code, error, status
                     );
-                    return Ok(SyntheticReply::Status(StatusCode::BadValue.into()));
+                    return Ok(SyntheticReply::Status(status.into()));
                 }
             };
             let method = request.method();
@@ -2303,11 +2324,12 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
             ) {
                 Ok(request) => request,
                 Err(error) => {
+                    let status = synthetic_parse_error_status_code(&error);
                     warn!(
-                        "[Injector][Synthetic] failed to parse synthetic operation request target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning BAD_VALUE",
-                        target.ptr, target.cookie, tr.code, error
+                        "[Injector][Synthetic] failed to parse synthetic operation request target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning {}",
+                        target.ptr, target.cookie, tr.code, error, status
                     );
-                    return Ok(SyntheticReply::Status(StatusCode::BadValue.into()));
+                    return Ok(SyntheticReply::Status(status.into()));
                 }
             };
             let method = request.method();
@@ -2636,6 +2658,15 @@ unsafe fn build_maintenance_reply_mirror(
         ParsedMaintenanceRequest::DeleteAllKeys => ipc::with_omk_maintenance_retry(|maintenance| {
             Ok(maintenance.r#deleteAllKeys(Some(&caller))?)
         }),
+        ParsedMaintenanceRequest::OnUserPasswordChanged { .. }
+        | ParsedMaintenanceRequest::GetState { .. }
+        | ParsedMaintenanceRequest::OnDeviceOffBody => {
+            debug!(
+                "[Injector][Maintenance] {:?} has no OMK mirror endpoint; preserving system reply",
+                call.method
+            );
+            Ok(())
+        }
         ParsedMaintenanceRequest::GetAppUidsAffectedBySid { .. } => {
             debug!(
                 "[Injector][Maintenance] {:?} is read-only; preserving system reply",
@@ -3079,49 +3110,22 @@ unsafe fn install_outbound_reply(tr: &mut binder_transaction_data, reply: Outbou
         OutboundReply::Status(status) => {
             OUTBOUND_STATUS_BUFFERS.with(|slot| {
                 let mut buffers = slot.borrow_mut();
-                buffers.push(status);
+                buffers.push(StableStatusReply::new(status));
                 let status = buffers.last().expect("outbound status buffer just pushed");
                 tr.flags |= super::binder::TF_STATUS_CODE;
                 tr.data_size = size_of::<i32>();
                 tr.offsets_size = 0;
-                tr.data.ptr.buffer = status as *const i32 as libc::c_ulong;
+                tr.data.ptr.buffer = status.as_ptr() as libc::c_ulong;
                 tr.data.ptr.offsets = 0;
             });
         }
     }
 }
 
-unsafe fn install_inbound_request(
-    tr: &mut binder_transaction_data,
-    code: rsbinder::TransactionCode,
-    request: parcel::OwnedReply,
-) {
-    INBOUND_REQUEST_BUFFERS.with(|slot| {
-        let mut buffers = slot.borrow_mut();
-        buffers.push(request);
-        let request = buffers.last().expect("inbound request buffer just pushed");
-        tr.code = code;
-        tr.data_size = request.data_size();
-        tr.offsets_size = request.offsets_size();
-        tr.data.ptr.buffer = request.data_ptr() as libc::c_ulong;
-        tr.data.ptr.offsets = if request.offsets.is_empty() {
-            0
-        } else {
-            request.offsets.as_ptr() as libc::c_ulong
-        };
-    });
-}
-
-unsafe fn install_omk_grant_placeholder_request(
-    tr: &mut binder_transaction_data,
-) -> anyhow::Result<()> {
-    let system_backend = {
-        let _guard = BypassGuard::enter();
-        ipc::get_system_keystore_service()?
-    };
-    let request = parcel::build_get_number_of_entries_request(&system_backend, Domain::APP, -1)?;
-    install_inbound_request(tr, service_tx::r#getNumberOfEntries, request);
-    Ok(())
+fn block_omk_grant_system_request(tr: &mut binder_transaction_data) {
+    // BR_TRANSACTION buffers belong to Binder; keep data pointers unchanged so
+    // libbinder can free the original receive buffer.
+    tr.code = u32::MAX;
 }
 
 fn push_pending_frame() {
@@ -3149,7 +3153,6 @@ fn pop_pending_frame() {
 pub(super) fn clear_outbound_reply_buffers() {
     OUTBOUND_REPLY_BUFFERS.with(|slot| slot.borrow_mut().clear());
     OUTBOUND_STATUS_BUFFERS.with(|slot| slot.borrow_mut().clear());
-    INBOUND_REQUEST_BUFFERS.with(|slot| slot.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -3175,6 +3178,7 @@ mod tests {
         android::system::keystore2::IKeystoreSecurityLevel::{
             BnKeystoreSecurityLevel, IKeystoreSecurityLevel as AospKeystoreSecurityLevel,
         },
+        android::system::keystore2::IKeystoreService::transactions as service_tx,
         android::system::keystore2::KeyDescriptor::KeyDescriptor,
         android::system::keystore2::KeyEntryResponse::KeyEntryResponse,
         android::system::keystore2::KeyMetadata::KeyMetadata,
@@ -3403,6 +3407,13 @@ mod tests {
         assert_eq!(status, i32::from(StatusCode::UnknownTransaction));
     }
 
+    fn assert_synthetic_status(reply: SyntheticReply, expected: StatusCode) {
+        let SyntheticReply::Status(status) = reply else {
+            panic!("expected synthetic binder status");
+        };
+        assert_eq!(status, i32::from(expected));
+    }
+
     fn assert_synthetic_ok_reply(reply: SyntheticReply, label: &str) {
         let SyntheticReply::Parcel(mut reply) = reply else {
             panic!("{label} should be a status-bearing parcel reply");
@@ -3547,12 +3558,16 @@ mod tests {
         MAINTENANCE_MIRROR_STATE_DIRTY.store(false, Ordering::SeqCst);
     }
 
-    fn route_state_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        let guard = ROUTE_STATE_TEST_LOCK
+    fn route_state_test_guard() -> (
+        std::sync::MutexGuard<'static, ()>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let tracker_guard = tracker::state_test_guard();
+        let route_guard = ROUTE_STATE_TEST_LOCK
             .lock()
-            .expect("route state test lock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         reset_route_state_for_tests();
-        guard
+        (tracker_guard, route_guard)
     }
 
     fn reset_route_state_for_tests() {
@@ -3984,31 +3999,75 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_aidl_metadata_rejects_trailing_payload() {
-        let target = LocalBinderTarget {
-            ptr: 0x7334,
-            cookie: 0xb778,
-        };
-        let mut request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
-        request.write(&0x4f4d4bi32).unwrap();
-        let tr = transaction_for_parcel(
-            target,
-            identify::AIDL_GET_INTERFACE_HASH_TRANSACTION,
-            &request,
-        );
-        let info = SyntheticTargetInfo {
-            kind: SyntheticTargetKind::Operation,
-            caller: Some(CallerIdentity::new(10002, 2000)),
-        };
+    fn synthetic_aidl_metadata_accepts_trailing_payload() {
+        let expected = keystore2_aidl_metadata().expect("keystore2 metadata should resolve");
 
-        let reply = unsafe {
-            build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+        for (index, label, kind, interface, code) in [
+            (
+                0,
+                "security-level version",
+                SyntheticTargetKind::SecurityLevel,
+                identify::KEYSTORE_SECURITY_LEVEL_INTERFACE,
+                identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION,
+            ),
+            (
+                1,
+                "security-level hash",
+                SyntheticTargetKind::SecurityLevel,
+                identify::KEYSTORE_SECURITY_LEVEL_INTERFACE,
+                identify::AIDL_GET_INTERFACE_HASH_TRANSACTION,
+            ),
+            (
+                2,
+                "operation version",
+                SyntheticTargetKind::Operation,
+                identify::KEYSTORE_OPERATION_INTERFACE,
+                identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION,
+            ),
+            (
+                3,
+                "operation hash",
+                SyntheticTargetKind::Operation,
+                identify::KEYSTORE_OPERATION_INTERFACE,
+                identify::AIDL_GET_INTERFACE_HASH_TRANSACTION,
+            ),
+        ] {
+            let target = LocalBinderTarget {
+                ptr: 0x7334 + index,
+                cookie: 0xb778 + index,
+            };
+            let mut request = request_parcel(interface);
+            request.write(&0x4f4d4bi32).unwrap();
+            let tr = transaction_for_parcel(target, code, &request);
+            let info = SyntheticTargetInfo {
+                kind,
+                caller: (kind == SyntheticTargetKind::Operation)
+                    .then(|| CallerIdentity::new(10002, 2000)),
+            };
+
+            let reply = unsafe {
+                build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+            }
+            .unwrap_or_else(|error| {
+                panic!("{label} trailing metadata should be handled: {error:#}")
+            });
+            let SyntheticReply::Parcel(mut reply) = reply else {
+                panic!("{label} trailing metadata should return a parcel reply");
+            };
+            if code == identify::AIDL_GET_INTERFACE_HASH_TRANSACTION {
+                let hash: String =
+                    parcel::parse_owned_success_reply(&mut reply).unwrap_or_else(|error| {
+                        panic!("{label} metadata hash reply should parse: {error:#}")
+                    });
+                assert_eq!(hash, expected.hash, "{label}");
+            } else {
+                let version: i32 =
+                    parcel::parse_owned_success_reply(&mut reply).unwrap_or_else(|error| {
+                        panic!("{label} metadata version reply should parse: {error:#}")
+                    });
+                assert_eq!(version, expected.version, "{label}");
+            }
         }
-        .expect("trailing metadata request should be handled");
-        let SyntheticReply::Status(status) = reply else {
-            panic!("trailing metadata request should return a binder status");
-        };
-        assert_eq!(status, i32::from(StatusCode::BadType));
     }
 
     #[test]
@@ -4076,7 +4135,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_operation_malformed_finish_returns_bad_value_status() {
+    fn synthetic_operation_missing_args_keep_not_enough_data_status() {
         let _guard = route_state_test_guard();
 
         let target = LocalBinderTarget {
@@ -4099,31 +4158,37 @@ mod tests {
             },
         );
 
-        let mut request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
-        let input: Option<Vec<u8>> = None;
-        request.write(&input).unwrap();
-        let tr = transaction_for_parcel(
-            target,
-            crate::android::system::keystore2::IKeystoreOperation::transactions::r#finish,
-            &request,
-        );
-        let info = SyntheticTargetInfo {
-            kind: SyntheticTargetKind::Operation,
-            caller: Some(CallerIdentity::new(10002, 2000)),
-        };
+        for (label, code) in [
+            (
+                "updateAad",
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#updateAad,
+            ),
+            (
+                "update",
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#update,
+            ),
+            (
+                "finish",
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#finish,
+            ),
+        ] {
+            let request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
+            let tr = transaction_for_parcel(target, code, &request);
+            let info = SyntheticTargetInfo {
+                kind: SyntheticTargetKind::Operation,
+                caller: Some(CallerIdentity::new(10002, 2000)),
+            };
 
-        let reply = unsafe {
-            build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+            let reply = unsafe {
+                build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+            }
+            .unwrap_or_else(|error| panic!("{label} missing args should be handled: {error:#}"));
+            assert_synthetic_status(reply, StatusCode::NotEnoughData);
+            assert!(
+                lookup_operation_target(target).is_some(),
+                "{label} missing args must not finalize the operation"
+            );
         }
-        .expect("malformed finish should be handled without fallback");
-        let SyntheticReply::Status(status) = reply else {
-            panic!("malformed finish should return a binder status, not a service reply");
-        };
-        assert_eq!(status, i32::from(StatusCode::BadValue));
-        assert!(
-            lookup_operation_target(target).is_some(),
-            "malformed parse must not finalize the operation"
-        );
         assert_eq!(aborts.load(Ordering::SeqCst), 0);
     }
 
@@ -4167,10 +4232,7 @@ mod tests {
             build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
         }
         .expect("trailing abort should be handled without fallback");
-        let SyntheticReply::Status(status) = reply else {
-            panic!("trailing abort should return a binder status, not a service reply");
-        };
-        assert_eq!(status, i32::from(StatusCode::BadValue));
+        assert_synthetic_status(reply, StatusCode::BadValue);
         assert!(
             lookup_operation_target(target).is_some(),
             "trailing data must not finalize the operation"
@@ -4179,7 +4241,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_security_level_malformed_request_returns_bad_value_status() {
+    fn synthetic_security_level_missing_args_keep_not_enough_data_status() {
         let _guard = route_state_test_guard();
 
         let target = LocalBinderTarget {
@@ -4195,7 +4257,74 @@ mod tests {
             },
         );
 
-        let request = request_parcel(identify::KEYSTORE_SECURITY_LEVEL_INTERFACE);
+        for (label, code) in [
+            (
+                "createOperation",
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#createOperation,
+            ),
+            (
+                "generateKey",
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#generateKey,
+            ),
+            (
+                "importKey",
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#importKey,
+            ),
+            (
+                "importWrappedKey",
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#importWrappedKey,
+            ),
+            (
+                "convertStorageKeyToEphemeral",
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#convertStorageKeyToEphemeral,
+            ),
+            (
+                "deleteKey",
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
+            ),
+        ] {
+            let request = request_parcel(identify::KEYSTORE_SECURITY_LEVEL_INTERFACE);
+            let tr = transaction_for_parcel(target, code, &request);
+            let info = SyntheticTargetInfo {
+                kind: SyntheticTargetKind::SecurityLevel,
+                caller: None,
+            };
+
+            let reply = unsafe {
+                build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+            }
+            .unwrap_or_else(|error| panic!("{label} missing args should be handled: {error:#}"));
+            assert_synthetic_status(reply, StatusCode::NotEnoughData);
+        }
+    }
+
+    #[test]
+    fn synthetic_security_level_bad_value_parse_error_stays_bad_value_status() {
+        let _guard = route_state_test_guard();
+
+        let target = LocalBinderTarget {
+            ptr: 0x2235,
+            cookie: 0x6679,
+        };
+        tracker::remember_security_level_target(
+            target,
+            SecurityLevelTargetInfo {
+                security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
+                preferred_route: RouteTarget::Omk,
+                source_method: ServiceMethod::GetKeyEntry,
+            },
+        );
+
+        let mut request = request_parcel(identify::KEYSTORE_SECURITY_LEVEL_INTERFACE);
+        request.write(&rsbinder::NON_NULL_PARCELABLE_FLAG).unwrap();
+        request
+            .sized_write(|parcel| {
+                parcel.write(&Domain::BLOB)?;
+                parcel.write(&0i64)?;
+                parcel.write(&Option::<String>::None)?;
+                parcel.write(&-2i32)
+            })
+            .unwrap();
         let tr = transaction_for_parcel(
             target,
             crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#createOperation,
@@ -4209,11 +4338,8 @@ mod tests {
         let reply = unsafe {
             build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
         }
-        .expect("malformed createOperation should be handled without fallback");
-        let SyntheticReply::Status(status) = reply else {
-            panic!("malformed createOperation should return a binder status, not a service reply");
-        };
-        assert_eq!(status, i32::from(StatusCode::BadValue));
+        .expect("bad-value createOperation should be handled without fallback");
+        assert_synthetic_status(reply, StatusCode::BadValue);
     }
 
     #[test]
@@ -4437,6 +4563,52 @@ mod tests {
     }
 
     #[test]
+    fn native_status_outbound_reply_pointer_is_stable() {
+        clear_outbound_reply_buffers();
+        let first_status = i32::from(StatusCode::UnknownTransaction);
+        let mut first: binder_transaction_data = unsafe { std::mem::zeroed() };
+
+        unsafe { install_outbound_reply(&mut first, OutboundReply::Status(first_status)) };
+        let first_ptr = unsafe { first.data.ptr.buffer } as *const i32;
+
+        for status in 0..128 {
+            let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
+            unsafe { install_outbound_reply(&mut tr, OutboundReply::Status(status)) };
+        }
+
+        OUTBOUND_STATUS_BUFFERS.with(|slot| {
+            let buffers = slot.borrow();
+            let vec_start = buffers.as_ptr() as usize;
+            let vec_end = vec_start + buffers.capacity() * size_of::<StableStatusReply>();
+            let first_addr = first_ptr as usize;
+            assert!(
+                first_addr < vec_start || first_addr >= vec_end,
+                "status reply pointer must not point into relocatable Vec storage"
+            );
+        });
+        assert_eq!(unsafe { *first_ptr }, first_status);
+        clear_outbound_reply_buffers();
+    }
+
+    #[test]
+    fn omk_grant_blocker_preserves_inbound_binder_buffer() {
+        let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
+        tr.code = service_tx::r#grant;
+        tr.data_size = 64;
+        tr.offsets_size = size_of::<usize>();
+        tr.data.ptr.buffer = 0x1000;
+        tr.data.ptr.offsets = 0x2000;
+
+        block_omk_grant_system_request(&mut tr);
+
+        assert_eq!(tr.code, u32::MAX);
+        assert_eq!(tr.data_size, 64);
+        assert_eq!(tr.offsets_size, size_of::<usize>());
+        assert_eq!(unsafe { tr.data.ptr.buffer }, 0x1000);
+        assert_eq!(unsafe { tr.data.ptr.offsets }, 0x2000);
+    }
+
+    #[test]
     fn reachable_omk_status_code_errors_keep_native_status_code() {
         for status in [
             StatusCode::RpcError,
@@ -4603,6 +4775,13 @@ mod tests {
         ));
         assert!(!maintenance_mirror_mutates(
             MaintenanceMethod::GetAppUidsAffectedBySid
+        ));
+        assert!(!maintenance_mirror_mutates(
+            MaintenanceMethod::OnUserPasswordChanged
+        ));
+        assert!(!maintenance_mirror_mutates(MaintenanceMethod::GetState));
+        assert!(!maintenance_mirror_mutates(
+            MaintenanceMethod::OnDeviceOffBody
         ));
     }
 
@@ -5751,5 +5930,62 @@ mod tests {
             lookup_operation_target(target).is_none(),
             "abort should clear the operation mapping"
         );
+    }
+
+    #[test]
+    fn one_way_synthetic_create_operation_is_ignored_before_dispatch() {
+        let _guard = route_state_test_guard();
+        clear_operation_state_for_tests();
+
+        let target = LocalBinderTarget {
+            ptr: 0x9000,
+            cookie: 0xa000,
+        };
+        let request = request_parcel(identify::KEYSTORE_SECURITY_LEVEL_INTERFACE);
+        let mut tr = transaction_for_parcel(
+            target,
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#createOperation,
+            &request,
+        );
+        tr.flags |= crate::hook::binder::TF_ONE_WAY;
+
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(
+                &tr,
+                target,
+                SyntheticTargetInfo {
+                    kind: SyntheticTargetKind::SecurityLevel,
+                    caller: None,
+                },
+                None,
+                "BR_TRANSACTION",
+            )
+        }
+        .expect("one-way createOperation should be suppressed before dispatch");
+
+        assert!(matches!(reply, SyntheticReply::NoReply));
+        assert!(
+            operation_targets()
+                .lock()
+                .expect("operation target map poisoned")
+                .is_empty(),
+            "suppressed createOperation must not allocate operation targets"
+        );
+    }
+
+    #[test]
+    fn one_way_synthetic_dispatch_policy_keeps_abort_only() {
+        assert!(can_execute_synthetic_one_way(
+            SyntheticTargetKind::Operation,
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort
+        ));
+        assert!(!can_execute_synthetic_one_way(
+            SyntheticTargetKind::Operation,
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#finish
+        ));
+        assert!(!can_execute_synthetic_one_way(
+            SyntheticTargetKind::SecurityLevel,
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#createOperation
+        ));
     }
 }

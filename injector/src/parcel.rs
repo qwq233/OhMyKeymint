@@ -2,8 +2,8 @@ use std::mem::size_of;
 
 use anyhow::{anyhow, bail, Context, Result};
 use rsbinder::{
-    Deserialize, FromIBinder, Parcel, Proxy, Serialize, SerializeOption, Status, StatusCode,
-    Strong, NON_NULL_PARCELABLE_FLAG, NULL_PARCELABLE_FLAG,
+    Deserialize, FromIBinder, Parcel, Serialize, SerializeOption, Status, StatusCode, Strong,
+    NON_NULL_PARCELABLE_FLAG, NULL_PARCELABLE_FLAG,
 };
 
 use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
@@ -17,7 +17,6 @@ use crate::android::system::keystore2::CreateOperationResponse::CreateOperationR
 use crate::android::system::keystore2::Domain::Domain;
 use crate::android::system::keystore2::IKeystoreOperation::IKeystoreOperation;
 use crate::android::system::keystore2::IKeystoreSecurityLevel::IKeystoreSecurityLevel;
-use crate::android::system::keystore2::IKeystoreService::{BpKeystoreService, IKeystoreService};
 use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
 use crate::android::system::keystore2::KeyParameters::KeyParameters;
@@ -135,11 +134,19 @@ pub enum ParsedMaintenanceRequest {
     OnUserLskfRemoved {
         user_id: i32,
     },
+    OnUserPasswordChanged {
+        user_id: i32,
+        password: Option<Vec<u8>>,
+    },
     ClearNamespace {
         domain: Domain,
         nspace: i64,
     },
+    GetState {
+        user_id: i32,
+    },
     EarlyBootEnded,
+    OnDeviceOffBody,
     MigrateKeyNamespace {
         source: KeyDescriptor,
         destination: KeyDescriptor,
@@ -158,8 +165,11 @@ impl ParsedMaintenanceRequest {
             Self::InitUserSuperKeys { .. } => MaintenanceMethod::InitUserSuperKeys,
             Self::OnUserRemoved { .. } => MaintenanceMethod::OnUserRemoved,
             Self::OnUserLskfRemoved { .. } => MaintenanceMethod::OnUserLskfRemoved,
+            Self::OnUserPasswordChanged { .. } => MaintenanceMethod::OnUserPasswordChanged,
             Self::ClearNamespace { .. } => MaintenanceMethod::ClearNamespace,
+            Self::GetState { .. } => MaintenanceMethod::GetState,
             Self::EarlyBootEnded => MaintenanceMethod::EarlyBootEnded,
+            Self::OnDeviceOffBody => MaintenanceMethod::OnDeviceOffBody,
             Self::MigrateKeyNamespace { .. } => MaintenanceMethod::MigrateKeyNamespace,
             Self::DeleteAllKeys => MaintenanceMethod::DeleteAllKeys,
             Self::GetAppUidsAffectedBySid { .. } => MaintenanceMethod::GetAppUidsAffectedBySid,
@@ -392,6 +402,24 @@ pub unsafe fn parse_authorization_request(
     offsets_size: usize,
     code: u32,
 ) -> Result<ParsedAuthorizationRequest> {
+    parse_authorization_request_with_resolver(
+        data,
+        data_size,
+        offsets,
+        offsets_size,
+        code,
+        authorization_method_from_code,
+    )
+}
+
+unsafe fn parse_authorization_request_with_resolver(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+    code: u32,
+    method_from_code: impl FnOnce(u32) -> Option<AuthorizationMethod>,
+) -> Result<ParsedAuthorizationRequest> {
     let (mut parcel, method) = parse_typed_request(
         RequestEnvelope {
             data,
@@ -402,13 +430,28 @@ pub unsafe fn parse_authorization_request(
         },
         KEYSTORE_AUTHORIZATION_INTERFACE,
         "IKeystoreAuthorization",
-        authorization_method_from_code,
+        method_from_code,
     )?;
 
     let parsed = match method {
         AuthorizationMethod::AddAuthToken => ParsedAuthorizationRequest::AddAuthToken {
             auth_token: parcel.read()?,
         },
+        AuthorizationMethod::LegacyOnLockScreenEvent => {
+            let event: i32 = parcel.read()?;
+            let user_id: i32 = parcel.read()?;
+            let password: Option<Vec<u8>> = parcel.read()?;
+            let unlocking_sids: Option<Vec<i64>> = parcel.read()?;
+            match event {
+                0 => ParsedAuthorizationRequest::OnDeviceUnlocked { user_id, password },
+                1 => ParsedAuthorizationRequest::OnDeviceLocked {
+                    user_id,
+                    unlocking_sids: unlocking_sids.unwrap_or_default(),
+                    weak_unlock_enabled: false,
+                },
+                _ => bail!("unknown IKeystoreAuthorization onLockScreenEvent event {event}"),
+            }
+        }
         AuthorizationMethod::OnDeviceUnlocked => ParsedAuthorizationRequest::OnDeviceUnlocked {
             user_id: parcel.read()?,
             password: parcel.read()?,
@@ -484,6 +527,20 @@ pub unsafe fn parse_no_arg_request_interface(
 ///
 /// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
 /// Binder transaction parcel for the duration of this call.
+pub unsafe fn parse_metadata_request_interface_allow_trailing(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+) -> Result<String> {
+    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
+    read_request_interface(&mut parcel)
+}
+
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder transaction parcel for the duration of this call.
 pub unsafe fn validate_dump_request(
     data: *mut u8,
     data_size: usize,
@@ -541,6 +598,24 @@ pub unsafe fn parse_maintenance_request(
     offsets_size: usize,
     code: u32,
 ) -> Result<ParsedMaintenanceRequest> {
+    parse_maintenance_request_with_resolver(
+        data,
+        data_size,
+        offsets,
+        offsets_size,
+        code,
+        maintenance_method_from_code,
+    )
+}
+
+unsafe fn parse_maintenance_request_with_resolver(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+    code: u32,
+    method_from_code: impl FnOnce(u32) -> Option<MaintenanceMethod>,
+) -> Result<ParsedMaintenanceRequest> {
     let (mut parcel, method) = parse_typed_request(
         RequestEnvelope {
             data,
@@ -551,7 +626,7 @@ pub unsafe fn parse_maintenance_request(
         },
         KEYSTORE_MAINTENANCE_INTERFACE,
         "IKeystoreMaintenance",
-        maintenance_method_from_code,
+        method_from_code,
     )?;
 
     let parsed = match method {
@@ -569,11 +644,21 @@ pub unsafe fn parse_maintenance_request(
         MaintenanceMethod::OnUserLskfRemoved => ParsedMaintenanceRequest::OnUserLskfRemoved {
             user_id: parcel.read()?,
         },
+        MaintenanceMethod::OnUserPasswordChanged => {
+            ParsedMaintenanceRequest::OnUserPasswordChanged {
+                user_id: parcel.read()?,
+                password: parcel.read()?,
+            }
+        }
         MaintenanceMethod::ClearNamespace => ParsedMaintenanceRequest::ClearNamespace {
             domain: parcel.read()?,
             nspace: parcel.read()?,
         },
+        MaintenanceMethod::GetState => ParsedMaintenanceRequest::GetState {
+            user_id: parcel.read()?,
+        },
         MaintenanceMethod::EarlyBootEnded => ParsedMaintenanceRequest::EarlyBootEnded,
+        MaintenanceMethod::OnDeviceOffBody => ParsedMaintenanceRequest::OnDeviceOffBody,
         MaintenanceMethod::MigrateKeyNamespace => ParsedMaintenanceRequest::MigrateKeyNamespace {
             source: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             destination: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
@@ -1091,21 +1176,6 @@ pub fn build_status_reply(status: &Status) -> Result<OwnedReply> {
     Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
 }
 
-pub fn build_get_number_of_entries_request(
-    service: &Strong<dyn IKeystoreService>,
-    domain: Domain,
-    nspace: i64,
-) -> Result<OwnedReply> {
-    let proxy =
-        <BpKeystoreService as Proxy>::from_binder(service.as_binder()).ok_or_else(|| {
-            anyhow!("system keystore service binder is not an IKeystoreService proxy")
-        })?;
-    let parcel = proxy
-        .build_parcel_getNumberOfEntries(domain, nspace)
-        .context("failed to build getNumberOfEntries request from generated AIDL proxy")?;
-    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
-}
-
 pub fn contains_keystore_authorization_interface(parcel: &[u8]) -> bool {
     contains_utf16_token(parcel, KEYSTORE_AUTHORIZATION_INTERFACE)
 }
@@ -1169,7 +1239,7 @@ unsafe fn parse_typed_request<M>(
     envelope: RequestEnvelope,
     expected_interface: &str,
     interface_name: &str,
-    method_from_code: fn(u32) -> Option<M>,
+    method_from_code: impl FnOnce(u32) -> Option<M>,
 ) -> Result<(Parcel, M)> {
     let RequestEnvelope {
         data,
@@ -1384,6 +1454,10 @@ mod tests {
         )
     }
 
+    fn tx(offset: u32) -> u32 {
+        rsbinder::FIRST_CALL_TRANSACTION + offset
+    }
+
     fn null_operation_carrier_bytes() -> Vec<u8> {
         let mut parcel = Parcel::new();
         let (start, end) =
@@ -1402,6 +1476,49 @@ mod tests {
         parcel.write(&interface.to_string()).unwrap();
         write_payload(&mut parcel);
         owned_reply_from_parcel(parcel, std::iter::empty::<usize>())
+    }
+
+    fn parse_authorization_request_for_android(
+        android_major_version: Option<i32>,
+        code: rsbinder::TransactionCode,
+        write_payload: impl FnOnce(&mut Parcel),
+    ) -> Result<ParsedAuthorizationRequest> {
+        let mut request =
+            build_request_with_payload(KEYSTORE_AUTHORIZATION_INTERFACE, write_payload);
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        unsafe {
+            parse_authorization_request_with_resolver(
+                data,
+                data_size,
+                offsets,
+                offsets_size,
+                code,
+                |code| {
+                    crate::identify::authorization_method_from_code_for(android_major_version, code)
+                },
+            )
+        }
+    }
+
+    fn parse_maintenance_request_for_android(
+        android_major_version: Option<i32>,
+        code: rsbinder::TransactionCode,
+        write_payload: impl FnOnce(&mut Parcel),
+    ) -> Result<ParsedMaintenanceRequest> {
+        let mut request = build_request_with_payload(KEYSTORE_MAINTENANCE_INTERFACE, write_payload);
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        unsafe {
+            parse_maintenance_request_with_resolver(
+                data,
+                data_size,
+                offsets,
+                offsets_size,
+                code,
+                |code| {
+                    crate::identify::maintenance_method_from_code_for(android_major_version, code)
+                },
+            )
+        }
     }
 
     fn build_request(interface: &str, payload_token: Option<&str>) -> OwnedReply {

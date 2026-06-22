@@ -220,15 +220,6 @@ fn install_module_info_bundle_if_available() -> Result<()> {
 }
 
 fn main() {
-    match plat::device_ids::maybe_run_telephony_probe_command() {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(error) => {
-            eprintln!("Telephony probe helper failed: {error:#}");
-            std::process::exit(1);
-        }
-    }
-
     prepare_android_storage();
     logging::init_logger();
     panic::set_hook(Box::new(|panic_info| {

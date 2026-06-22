@@ -16,7 +16,11 @@ const AAID_MAX_VECTOR_LEN: i32 = 1024;
 static PROVIDER: Mutex<Option<SIBinder>> = Mutex::new(None);
 
 pub fn should_use_aaid_provider() -> bool {
-    matches!(kmr_common::android_version::android_major_version(), Some(version) if version <= 12)
+    should_use_legacy_aaid_provider(kmr_common::android_version::android_major_version())
+}
+
+fn should_use_legacy_aaid_provider(android_major_version: Option<i32>) -> bool {
+    matches!(android_major_version, Some(version) if version <= 14)
 }
 
 pub fn clear_provider_cache() {
@@ -159,5 +163,24 @@ fn read_nullable_parcelable_flag(parcel: &mut Parcel, label: &str) -> Result<boo
         NULL_PARCELABLE => Ok(false),
         NONNULL_PARCELABLE => Ok(true),
         _ => bail!("invalid legacy {label} parcelable flag: {flag}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_use_legacy_aaid_provider;
+
+    #[test]
+    fn legacy_aaid_provider_covers_android_12_to_14() {
+        for version in [Some(12), Some(13), Some(14)] {
+            assert!(should_use_legacy_aaid_provider(version));
+        }
+    }
+
+    #[test]
+    fn new_aaid_provider_starts_at_android_15() {
+        for version in [None, Some(15), Some(16), Some(17)] {
+            assert!(!should_use_legacy_aaid_provider(version));
+        }
     }
 }

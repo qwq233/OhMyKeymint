@@ -25,11 +25,7 @@ use regex::Regex;
 use x509_cert::der as x509_der;
 use x509_cert::Certificate;
 
-#[cfg(target_os = "android")]
 pub const KEYBOX_PATH: &str = "/data/misc/keystore/omk/keybox.xml";
-
-#[cfg(not(target_os = "android"))]
-pub const KEYBOX_PATH: &str = "./omk/keybox.xml";
 
 const BUNDLED_KEYBOX_XML: &str = include_str!("../template/keybox.xml");
 

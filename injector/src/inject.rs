@@ -17,7 +17,6 @@ use crate::sys::wait_pid;
 use crate::{sys, utils};
 
 const ANDROID_DLEXT_USE_LIBRARY_FD: u64 = 0x10;
-const CMSG_STORAGE_WORDS: usize = 4;
 const REMOTE_PAYLOAD_STATE_PATH: &str = "/data/adb/omk/injector.payload";
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_RETRY_DELAY: Duration = Duration::from_millis(200);
@@ -48,6 +47,7 @@ struct RemoteFdHandoffAddrs {
     socket: usize,
     bind: usize,
     recvmsg: usize,
+    setsockopt: usize,
     libc_return: usize,
 }
 
@@ -139,6 +139,23 @@ fn generate_remote_payload_identifier() -> Result<String> {
     Ok(format_remote_payload_identifier(&random))
 }
 
+fn generate_fd_handoff_name() -> Result<[u8; 16]> {
+    let mut random = [0u8; 16];
+    let mut rng = rand::rngs::SysRng;
+    rng.try_fill_bytes(&mut random)
+        .context("failed to fill fd handoff socket name from SysRng")?;
+    Ok(random)
+}
+
+fn control_words(size: usize) -> usize {
+    size.div_ceil(size_of::<usize>())
+}
+
+fn cmsg_align(size: usize) -> usize {
+    let align = size_of::<usize>();
+    (size + align - 1) & !(align - 1)
+}
+
 fn remote_c_int_result(value: usize) -> i32 {
     value as u32 as i32
 }
@@ -227,6 +244,7 @@ fn validate_received_remote_fd(
     recv_res: isize,
     remote_cmsg_data: &[u8],
     remote_socket_fd: i32,
+    expected_cred: libc::ucred,
 ) -> Result<i32> {
     if recv_res != 1 {
         bail!("remote recvmsg returned {recv_res} bytes, expected 1 payload byte");
@@ -240,58 +258,78 @@ fn validate_received_remote_fd(
         );
     }
 
-    let expected_len = unsafe { libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as usize };
-    if remote_msg.msg_controllen < expected_len {
+    let min_len = unsafe { libc::CMSG_LEN(0) as usize };
+    if remote_msg.msg_controllen < min_len {
         bail!(
             "remote msg_controllen too small: got {}, expected at least {}",
             remote_msg.msg_controllen,
-            expected_len
+            min_len
         );
     }
 
-    if remote_cmsg_data.len() < size_of::<libc::cmsghdr>() {
-        bail!(
-            "remote control buffer too small: {} < {}",
-            remote_cmsg_data.len(),
-            size_of::<libc::cmsghdr>()
-        );
+    let control_len = remote_msg.msg_controllen.min(remote_cmsg_data.len());
+    let mut offset = 0usize;
+    let mut received_fd = None;
+    let mut received_cred = None;
+    while offset + size_of::<libc::cmsghdr>() <= control_len {
+        let header = unsafe {
+            std::ptr::read_unaligned(remote_cmsg_data.as_ptr().add(offset) as *const libc::cmsghdr)
+        };
+        if header.cmsg_len < min_len || offset + header.cmsg_len > control_len {
+            bail!(
+                "invalid remote cmsghdr length at offset {}: len={} control_len={}",
+                offset,
+                header.cmsg_len,
+                control_len
+            );
+        }
+
+        let data_offset = offset + min_len;
+        let data_len = header.cmsg_len - min_len;
+        let data = &remote_cmsg_data[data_offset..data_offset + data_len];
+        if header.cmsg_level != libc::SOL_SOCKET {
+            bail!(
+                "invalid remote cmsghdr level: got {}, expected {}",
+                header.cmsg_level,
+                libc::SOL_SOCKET
+            );
+        }
+
+        match header.cmsg_type {
+            libc::SCM_RIGHTS => {
+                if received_fd.is_some() {
+                    bail!("duplicate SCM_RIGHTS control message");
+                }
+                if data_len != size_of::<libc::c_int>() {
+                    bail!(
+                        "invalid SCM_RIGHTS payload length: got {}, expected {}",
+                        data_len,
+                        size_of::<libc::c_int>()
+                    );
+                }
+                received_fd = Some(i32::from_ne_bytes(data.try_into().unwrap()));
+            }
+            libc::SCM_CREDENTIALS => {
+                if received_cred.is_some() {
+                    bail!("duplicate SCM_CREDENTIALS control message");
+                }
+                if data_len != size_of::<libc::ucred>() {
+                    bail!(
+                        "invalid SCM_CREDENTIALS payload length: got {}, expected {}",
+                        data_len,
+                        size_of::<libc::ucred>()
+                    );
+                }
+                let cred = unsafe { std::ptr::read_unaligned(data.as_ptr() as *const libc::ucred) };
+                received_cred = Some(cred);
+            }
+            other => bail!("unexpected remote cmsghdr type: {}", other),
+        }
+
+        offset = cmsg_align(offset + header.cmsg_len);
     }
 
-    let header =
-        unsafe { std::ptr::read_unaligned(remote_cmsg_data.as_ptr() as *const libc::cmsghdr) };
-    if header.cmsg_len != expected_len {
-        bail!(
-            "invalid remote cmsghdr length: got {}, expected {}",
-            header.cmsg_len,
-            expected_len
-        );
-    }
-    if header.cmsg_level != libc::SOL_SOCKET {
-        bail!(
-            "invalid remote cmsghdr level: got {}, expected {}",
-            header.cmsg_level,
-            libc::SOL_SOCKET
-        );
-    }
-    if header.cmsg_type != libc::SCM_RIGHTS {
-        bail!(
-            "invalid remote cmsghdr type: got {}, expected {}",
-            header.cmsg_type,
-            libc::SCM_RIGHTS
-        );
-    }
-
-    let data_offset = unsafe { libc::CMSG_LEN(0) as usize };
-    let data_end = data_offset + size_of::<libc::c_int>();
-    if data_end > remote_cmsg_data.len() {
-        bail!(
-            "remote cmsghdr payload truncated: need {} bytes, have {}",
-            data_end,
-            remote_cmsg_data.len()
-        );
-    }
-
-    let fd = i32::from_ne_bytes(remote_cmsg_data[data_offset..data_end].try_into().unwrap());
+    let fd = received_fd.ok_or_else(|| anyhow!("missing SCM_RIGHTS fd"))?;
     if fd < 0 {
         bail!("remote payload fd is negative: {}", fd);
     }
@@ -302,7 +340,135 @@ fn validate_received_remote_fd(
         );
     }
 
+    let cred =
+        received_cred.ok_or_else(|| anyhow!("missing SCM_CREDENTIALS sender credentials"))?;
+    if cred.pid != expected_cred.pid
+        || cred.uid != expected_cred.uid
+        || cred.gid != expected_cred.gid
+    {
+        bail!(
+            "unexpected SCM_CREDENTIALS sender: pid={} uid={} gid={} expected pid={} uid={} gid={}",
+            cred.pid,
+            cred.uid,
+            cred.gid,
+            expected_cred.pid,
+            expected_cred.uid,
+            expected_cred.gid
+        );
+    }
+
     Ok(fd)
+}
+
+fn received_remote_fds_from_control_data(
+    remote_msg: &libc::msghdr,
+    remote_cmsg_data: &[u8],
+) -> Vec<i32> {
+    let min_len = unsafe { libc::CMSG_LEN(0) as usize };
+    if remote_msg.msg_controllen < min_len {
+        return Vec::new();
+    }
+
+    let control_len = remote_msg.msg_controllen.min(remote_cmsg_data.len());
+    let mut offset = 0usize;
+    let mut fds = Vec::new();
+    while offset + size_of::<libc::cmsghdr>() <= control_len {
+        let header = unsafe {
+            std::ptr::read_unaligned(remote_cmsg_data.as_ptr().add(offset) as *const libc::cmsghdr)
+        };
+        if header.cmsg_len < min_len || offset + header.cmsg_len > control_len {
+            break;
+        }
+
+        if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
+            let data_offset = offset + min_len;
+            let data_len = header.cmsg_len - min_len;
+            let data = &remote_cmsg_data[data_offset..data_offset + data_len];
+            for fd in data.chunks_exact(size_of::<libc::c_int>()) {
+                fds.push(i32::from_ne_bytes(fd.try_into().unwrap()));
+            }
+        }
+
+        offset = cmsg_align(offset + header.cmsg_len);
+    }
+    fds
+}
+
+fn close_rejected_remote_fd_handoff<H>(
+    remote_msg: &libc::msghdr,
+    remote_cmsg_data: &[u8],
+    remote_socket_fd: i32,
+    close_remote: &H,
+) -> Result<()>
+where
+    H: Fn(i32) -> Result<()>,
+{
+    let mut close_errors = Vec::new();
+    for fd in received_remote_fds_from_control_data(remote_msg, remote_cmsg_data) {
+        if fd < 0 || fd == remote_socket_fd {
+            continue;
+        }
+        if let Err(error) = close_remote(fd) {
+            close_errors.push(format!("fd {fd}: {error:#}"));
+        }
+    }
+    if let Err(error) = close_remote(remote_socket_fd) {
+        close_errors.push(format!("socket {remote_socket_fd}: {error:#}"));
+    }
+
+    if close_errors.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "failed to close rejected remote fd handoff descriptors: {}",
+            close_errors.join("; ")
+        );
+    }
+}
+
+fn expected_sender_credentials() -> libc::ucred {
+    libc::ucred {
+        pid: unsafe { libc::getpid() },
+        uid: unsafe { libc::geteuid() },
+        gid: unsafe { libc::getegid() },
+    }
+}
+
+fn enable_remote_passcred<F, G, H>(
+    pid: Pid,
+    remote_socket: i32,
+    label: &str,
+    addrs: RemoteFdHandoffAddrs,
+    push_to_remote_stack: &mut F,
+    get_remote_errno: &G,
+    close_remote: &H,
+) -> Result<()>
+where
+    F: FnMut(&[u8]) -> Result<usize>,
+    G: Fn() -> Result<i32>,
+    H: Fn(i32) -> Result<()>,
+{
+    let enable: libc::c_int = 1;
+    let remote_enable_ptr = push_to_remote_stack(&enable.to_ne_bytes())?;
+    let args = vec![
+        remote_socket as usize,
+        libc::SOL_SOCKET as usize,
+        libc::SO_PASSCRED as usize,
+        remote_enable_ptr,
+        size_of::<libc::c_int>(),
+    ];
+    let result = remote_c_int_result(sys::remote_call(
+        pid,
+        addrs.setsockopt,
+        addrs.libc_return,
+        &args,
+    )?);
+    if result == -1 {
+        let err = get_remote_errno()?;
+        close_remote(remote_socket)?;
+        bail!("Failed to enable SO_PASSCRED on remote {label} handoff socket. Remote errno: {err}");
+    }
+    Ok(())
 }
 
 fn send_fd_to_remote<F, G, H>(
@@ -344,19 +510,22 @@ where
         let err = get_remote_errno()?;
         bail!("Failed to create remote {label} handoff socket. Remote errno: {err}");
     }
+    enable_remote_passcred(
+        pid,
+        remote_socket,
+        label,
+        addrs,
+        push_to_remote_stack,
+        get_remote_errno,
+        close_remote,
+    )?;
 
-    let mut magic_bytes = Vec::with_capacity(16);
-    let time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .subsec_nanos();
-    for i in 0..16 {
-        magic_bytes.push(b'a' + ((time.wrapping_add(i) % 26) as u8));
-    }
+    let magic_bytes = generate_fd_handoff_name()?;
 
     let (addr_bytes, addr_len) = build_remote_abstract_sockaddr_bytes(&magic_bytes)?;
     debug!(
-        "Generated {label} handoff socket: @{}",
-        String::from_utf8_lossy(&magic_bytes)
+        "Generated {label} handoff socket with {} random abstract-name bytes",
+        magic_bytes.len()
     );
 
     let remote_addr_ptr = push_to_remote_stack(&addr_bytes)?;
@@ -369,10 +538,12 @@ where
         bail!("Failed to bind remote {label} handoff socket. Remote errno: {err}");
     }
 
-    let cmsg_space = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) as usize };
-    let remote_cmsg_storage = [0usize; CMSG_STORAGE_WORDS];
+    let send_cmsg_space = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) as usize };
+    let recv_cmsg_space =
+        send_cmsg_space + unsafe { libc::CMSG_SPACE(size_of::<libc::ucred>() as u32) as usize };
+    let remote_cmsg_storage = vec![0usize; control_words(recv_cmsg_space)];
     let remote_cmsg_bytes = unsafe {
-        std::slice::from_raw_parts(remote_cmsg_storage.as_ptr() as *const u8, cmsg_space)
+        std::slice::from_raw_parts(remote_cmsg_storage.as_ptr() as *const u8, recv_cmsg_space)
     };
     let remote_cmsg_ptr = push_to_remote_stack(remote_cmsg_bytes)?;
     let remote_payload_storage = push_to_remote_stack(&[0u8])?;
@@ -392,7 +563,7 @@ where
     msg.msg_iov = remote_iov_ptr as *mut libc::iovec;
     msg.msg_iovlen = 1;
     msg.msg_control = remote_cmsg_ptr as *mut c_void;
-    msg.msg_controllen = cmsg_space;
+    msg.msg_controllen = recv_cmsg_space;
 
     let msg_bytes = unsafe {
         std::slice::from_raw_parts(&msg as *const _ as *const u8, size_of::<libc::msghdr>())
@@ -411,7 +582,7 @@ where
     )?;
 
     let mut local_dest_addr = build_local_abstract_sockaddr(&magic_bytes)?;
-    let mut local_cmsg_storage = [0usize; CMSG_STORAGE_WORDS];
+    let mut local_cmsg_storage = vec![0usize; control_words(send_cmsg_space)];
     let mut payload_byte = [0x42u8];
     let mut local_iov = libc::iovec {
         iov_base: payload_byte.as_mut_ptr() as *mut c_void,
@@ -424,7 +595,7 @@ where
     local_hdr.msg_iov = &mut local_iov;
     local_hdr.msg_iovlen = 1;
     local_hdr.msg_control = local_cmsg_storage.as_mut_ptr() as *mut c_void;
-    local_hdr.msg_controllen = cmsg_space;
+    local_hdr.msg_controllen = send_cmsg_space;
 
     debug!(
         "{label} cmsg buffer ptr=0x{:x} align={} remote cmsg ptr=0x{:x} align={}",
@@ -492,7 +663,14 @@ where
     debug!("remote recvmsg for {label} completed: payload_bytes={recv_res}");
 
     let mut remote_msg_data = vec![0u8; size_of::<libc::msghdr>()];
-    sys::read_stack(pid, remote_msg_ptr, &mut remote_msg_data)?;
+    if let Err(error) = sys::read_stack(pid, remote_msg_ptr, &mut remote_msg_data) {
+        if let Err(close_error) = close_remote(remote_socket) {
+            return Err(error.context(format!(
+                "failed to read remote {label} msghdr; remote socket close also failed: {close_error:#}"
+            )));
+        }
+        return Err(error.context(format!("failed to read remote {label} msghdr")));
+    }
     let remote_msg =
         unsafe { std::ptr::read_unaligned(remote_msg_data.as_ptr() as *const libc::msghdr) };
     debug!(
@@ -500,12 +678,49 @@ where
         remote_msg.msg_controllen, remote_msg.msg_flags
     );
 
-    let mut remote_cmsg_data = vec![0u8; cmsg_space];
-    sys::read_stack(pid, remote_cmsg_ptr, &mut remote_cmsg_data)?;
-    let fd = validate_received_remote_fd(&remote_msg, recv_res, &remote_cmsg_data, remote_socket)
-        .with_context(|| format!("failed to validate remote {label} fd from SCM_RIGHTS"))?;
+    let mut remote_cmsg_data = vec![0u8; recv_cmsg_space];
+    if let Err(error) = sys::read_stack(pid, remote_cmsg_ptr, &mut remote_cmsg_data) {
+        if let Err(close_error) = close_remote(remote_socket) {
+            return Err(error.context(format!(
+                "failed to read remote {label} control data; remote socket close also failed: {close_error:#}"
+            )));
+        }
+        return Err(error.context(format!("failed to read remote {label} control data")));
+    }
+    let fd = match validate_received_remote_fd(
+        &remote_msg,
+        recv_res,
+        &remote_cmsg_data,
+        remote_socket,
+        expected_sender_credentials(),
+    ) {
+        Ok(fd) => fd,
+        Err(error) => {
+            if let Err(close_error) = close_rejected_remote_fd_handoff(
+                &remote_msg,
+                &remote_cmsg_data,
+                remote_socket,
+                close_remote,
+            ) {
+                return Err(error.context(format!(
+                    "failed to validate remote {label} fd from SCM_RIGHTS; cleanup also failed: {close_error:#}"
+                )));
+            }
+            return Err(error)
+                .with_context(|| format!("failed to validate remote {label} fd from SCM_RIGHTS"));
+        }
+    };
     debug!("Remote received {label} fd: {fd}");
-    close_remote(remote_socket)?;
+    if let Err(error) = close_remote(remote_socket) {
+        if let Err(close_error) = close_remote(fd) {
+            return Err(error.context(format!(
+                "failed to close remote {label} socket; received fd close also failed: {close_error:#}"
+            )));
+        }
+        return Err(error.context(format!(
+            "failed to close remote {label} socket after receiving fd"
+        )));
+    }
     Ok(fd)
 }
 
@@ -685,6 +900,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     let close_addr = resolve("libc.so", "close")?;
     let open_addr = resolve("libc.so", "open").or_else(|_| resolve("libc.so", "open64"))?;
     let socket_addr = resolve("libc.so", "socket")?;
+    let setsockopt_addr = resolve("libc.so", "setsockopt")?;
     let bind_addr = resolve("libc.so", "bind")?;
     let recvmsg_addr = resolve("libc.so", "recvmsg")?;
     let errno_addr = resolve("libc.so", "__errno").ok();
@@ -767,6 +983,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         socket: socket_addr,
         bind: bind_addr,
         recvmsg: recvmsg_addr,
+        setsockopt: setsockopt_addr,
         libc_return: libc_return_addr,
     };
 
@@ -928,33 +1145,67 @@ mod tests {
         msg
     }
 
-    fn scm_rights_cmsg(fd: i32) -> Vec<u8> {
-        let cmsg_space =
-            unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) as usize };
-        let cmsg_len =
-            unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as usize };
+    fn cmsg(level: i32, type_: i32, payload: &[u8]) -> Vec<u8> {
+        let cmsg_space = unsafe { libc::CMSG_SPACE(payload.len() as u32) as usize };
+        let cmsg_len = unsafe { libc::CMSG_LEN(payload.len() as u32) as usize };
         let mut data = vec![0u8; cmsg_space];
         let header = libc::cmsghdr {
             cmsg_len,
-            cmsg_level: libc::SOL_SOCKET,
-            cmsg_type: libc::SCM_RIGHTS,
+            cmsg_level: level,
+            cmsg_type: type_,
         };
 
         unsafe {
             std::ptr::write_unaligned(data.as_mut_ptr() as *mut libc::cmsghdr, header);
         }
         let data_offset = unsafe { libc::CMSG_LEN(0) as usize };
-        data[data_offset..data_offset + std::mem::size_of::<libc::c_int>()]
-            .copy_from_slice(&fd.to_ne_bytes());
+        data[data_offset..data_offset + payload.len()].copy_from_slice(payload);
         data
+    }
+
+    fn scm_rights_cmsg(fd: i32) -> Vec<u8> {
+        cmsg(libc::SOL_SOCKET, libc::SCM_RIGHTS, &fd.to_ne_bytes())
+    }
+
+    fn scm_rights_multi_cmsg(fds: &[i32]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(std::mem::size_of_val(fds));
+        for fd in fds {
+            payload.extend_from_slice(&fd.to_ne_bytes());
+        }
+        cmsg(libc::SOL_SOCKET, libc::SCM_RIGHTS, &payload)
+    }
+
+    fn scm_credentials_cmsg(cred: libc::ucred) -> Vec<u8> {
+        let payload = unsafe {
+            std::slice::from_raw_parts(
+                &cred as *const libc::ucred as *const u8,
+                size_of::<libc::ucred>(),
+            )
+        };
+        cmsg(libc::SOL_SOCKET, libc::SCM_CREDENTIALS, payload)
+    }
+
+    fn valid_test_cred() -> libc::ucred {
+        libc::ucred {
+            pid: 1234,
+            uid: 1000,
+            gid: 1000,
+        }
+    }
+
+    fn valid_control_message(fd: i32) -> (Vec<u8>, libc::ucred) {
+        let cred = valid_test_cred();
+        let mut data = scm_rights_cmsg(fd);
+        data.extend_from_slice(&scm_credentials_cmsg(cred));
+        (data, cred)
     }
 
     #[test]
     fn scm_rights_validation_accepts_complete_payload() {
-        let data = scm_rights_cmsg(42);
+        let (data, cred) = valid_control_message(42);
         let msg = remote_msg_with_control(0, data.len());
 
-        let fd = validate_received_remote_fd(&msg, 1, &data, 7)
+        let fd = validate_received_remote_fd(&msg, 1, &data, 7, cred)
             .expect("complete SCM_RIGHTS message should validate");
 
         assert_eq!(fd, 42);
@@ -962,10 +1213,10 @@ mod tests {
 
     #[test]
     fn scm_rights_validation_rejects_unexpected_payload_length() {
-        let data = scm_rights_cmsg(42);
+        let (data, cred) = valid_control_message(42);
         let msg = remote_msg_with_control(0, data.len());
 
-        let error = validate_received_remote_fd(&msg, 0, &data, 7)
+        let error = validate_received_remote_fd(&msg, 0, &data, 7, cred)
             .expect_err("recvmsg payload length must be exactly one byte");
 
         assert!(format!("{error:#}").contains("expected 1 payload byte"));
@@ -973,10 +1224,10 @@ mod tests {
 
     #[test]
     fn scm_rights_validation_rejects_truncation_flags() {
-        let data = scm_rights_cmsg(42);
+        let (data, cred) = valid_control_message(42);
         let msg = remote_msg_with_control(libc::MSG_CTRUNC | libc::MSG_TRUNC, data.len());
 
-        let error = validate_received_remote_fd(&msg, 1, &data, 7)
+        let error = validate_received_remote_fd(&msg, 1, &data, 7, cred)
             .expect_err("truncated SCM_RIGHTS message must be rejected");
 
         assert!(format!("{error:#}").contains("truncated"));
@@ -984,12 +1235,47 @@ mod tests {
 
     #[test]
     fn scm_rights_validation_rejects_short_control_length() {
-        let data = scm_rights_cmsg(42);
-        let msg = remote_msg_with_control(0, unsafe { libc::CMSG_LEN(0) as usize });
+        let (data, cred) = valid_control_message(42);
+        let msg = remote_msg_with_control(0, unsafe { libc::CMSG_LEN(0) as usize - 1 });
 
-        let error = validate_received_remote_fd(&msg, 1, &data, 7)
+        let error = validate_received_remote_fd(&msg, 1, &data, 7, cred)
             .expect_err("short control length must be rejected");
 
         assert!(format!("{error:#}").contains("msg_controllen too small"));
+    }
+
+    #[test]
+    fn scm_rights_validation_rejects_missing_credentials() {
+        let data = scm_rights_cmsg(42);
+        let msg = remote_msg_with_control(0, data.len());
+
+        let error = validate_received_remote_fd(&msg, 1, &data, 7, valid_test_cred())
+            .expect_err("sender credentials must be present");
+
+        assert!(format!("{error:#}").contains("missing SCM_CREDENTIALS"));
+    }
+
+    #[test]
+    fn scm_rights_validation_rejects_wrong_credentials() {
+        let (data, mut cred) = valid_control_message(42);
+        cred.uid += 1;
+        let msg = remote_msg_with_control(0, data.len());
+
+        let error = validate_received_remote_fd(&msg, 1, &data, 7, cred)
+            .expect_err("sender credentials must match");
+
+        assert!(format!("{error:#}").contains("unexpected SCM_CREDENTIALS sender"));
+    }
+
+    #[test]
+    fn rejected_handoff_cleanup_finds_received_rights_fds() {
+        let mut data = scm_rights_multi_cmsg(&[42, 43]);
+        data.extend_from_slice(&scm_credentials_cmsg(valid_test_cred()));
+        let msg = remote_msg_with_control(0, data.len());
+
+        assert_eq!(
+            received_remote_fds_from_control_data(&msg, &data),
+            vec![42, 43]
+        );
     }
 }

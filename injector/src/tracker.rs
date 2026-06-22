@@ -22,6 +22,8 @@ static KEY_DESCRIPTOR_ROUTE_TARGETS: OnceLock<Mutex<HashMap<String, RouteTarget>
     OnceLock::new();
 static GRANT_DESCRIPTORS_BY_TARGET: OnceLock<Mutex<HashMap<String, KeyDescriptor>>> =
     OnceLock::new();
+#[cfg(test)]
+static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn security_level_targets() -> &'static Mutex<HashMap<LocalBinderTarget, SecurityLevelTargetInfo>> {
     SECURITY_LEVEL_TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -163,6 +165,15 @@ pub fn clear_state_for_tests() {
 }
 
 #[cfg(test)]
+pub fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    let guard = STATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_state_for_tests();
+    guard
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -177,7 +188,7 @@ mod tests {
 
     #[test]
     fn tracks_key_id_and_grant_descriptors() {
-        clear_state_for_tests();
+        let _guard = state_test_guard();
         let key_id = descriptor(Domain::KEY_ID, 11);
         let grant = descriptor(Domain::GRANT, 22);
         let app = descriptor(Domain::APP, 33);
@@ -193,7 +204,7 @@ mod tests {
 
     #[test]
     fn forget_removes_grant_descriptor_route() {
-        clear_state_for_tests();
+        let _guard = state_test_guard();
         let surfaced = descriptor(Domain::GRANT, 1);
 
         remember_key_descriptor_route(&surfaced, RouteTarget::Omk);
@@ -204,7 +215,7 @@ mod tests {
 
     #[test]
     fn ungrant_target_retires_remembered_grant_descriptor() {
-        clear_state_for_tests();
+        let _guard = state_test_guard();
         let target = KeyDescriptor {
             domain: Domain::APP,
             nspace: 10001,

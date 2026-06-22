@@ -42,9 +42,7 @@ pub mod rsa;
 pub mod sha256;
 pub mod zvec;
 
-#[cfg(target_os = "android")]
 mod err;
-#[cfg(target_os = "android")]
 use err::map_openssl_err;
 
 #[cfg(test)]
@@ -83,12 +81,6 @@ pub(crate) fn map_openssl_errstack(errs: &openssl::error::ErrorStack) -> ErrorCo
     }
     let err = &errors[0]; // safe: length checked above
     map_openssl_err(err)
-}
-
-/// Stub function for mapping an OpenSSL `ErrorStack` into a KeyMint [`ErrorCode`] value.
-#[cfg(not(target_os = "android"))]
-fn map_openssl_err(_err: &openssl::error::Error) -> ErrorCode {
-    ErrorCode::BoringSslError
 }
 
 /// Macro to auto-generate error mapping around invocations of `openssl` methods.

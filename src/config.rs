@@ -19,11 +19,7 @@ use serde::{ser::SerializeStruct, Deserialize, Serialize};
 pub static CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
 static CONFIG_WATCHER_STARTED: OnceLock<()> = OnceLock::new();
 
-#[cfg(target_os = "android")]
 const CONFIG_PATH: &str = "/data/misc/keystore/omk/config.toml";
-
-#[cfg(not(target_os = "android"))]
-const CONFIG_PATH: &str = "./omk/config.toml";
 
 const REPLACE_SAVE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 const REPLACE_SAVE_RETRY_LIMIT: usize = 10;

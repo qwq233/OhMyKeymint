@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(target_os = "android")]
 use std::io;
 use std::path::{Path, PathBuf};
 use std::string::ToString;
@@ -101,20 +100,14 @@ fn watch_loop<F>(path: PathBuf, callback: Arc<F>)
 where
     F: Fn(WatchTrigger) + Send + Sync + 'static,
 {
-    #[cfg(target_os = "android")]
-    {
-        if let Err(error) = watch_loop_inotify(&path, callback.as_ref()) {
-            log::error!(
-                "inotify watcher failed for {}: {}; falling back to polling",
-                path.display(),
-                error
-            );
-            watch_loop_polling(&path, callback.as_ref());
-        }
+    if let Err(error) = watch_loop_inotify(&path, callback.as_ref()) {
+        log::error!(
+            "inotify watcher failed for {}: {}; falling back to polling",
+            path.display(),
+            error
+        );
+        watch_loop_polling(&path, callback.as_ref());
     }
-
-    #[cfg(not(target_os = "android"))]
-    watch_loop_polling(&path, callback.as_ref());
 }
 
 fn watch_loop_polling<F>(path: &Path, callback: &F)
@@ -134,7 +127,6 @@ where
     }
 }
 
-#[cfg(target_os = "android")]
 fn watch_loop_inotify<F>(path: &Path, callback: &F) -> io::Result<()>
 where
     F: Fn(WatchTrigger) + Send + Sync + 'static,

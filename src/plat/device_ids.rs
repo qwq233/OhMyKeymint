@@ -4,23 +4,20 @@ use crate::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use log::{debug, error};
 use rsbinder::{hub, Status};
-use std::fs;
-use std::process::Command;
 
 const PHONE_SUB_INFO_SERVICE: &str = "iphonesubinfo";
-const GET_DEVICE_ID_FOR_PHONE_TRANSACTION: u32 = 4;
-// AOSP ITelephony.aidl currently places these methods at 148 and 151.
-const GET_IMEI_FOR_SLOT_TRANSACTION: u32 = 148;
-const GET_MEID_FOR_SLOT_TRANSACTION: u32 = 151;
+const GET_DEVICE_ID_FOR_PHONE_TRANSACTION: rsbinder::TransactionCode =
+    rsbinder::FIRST_CALL_TRANSACTION + 3;
 const CALLING_PACKAGE: &str = "android";
 const CALLING_FEATURE: &str = "android";
 const PHONE_SERVICE: &str = "phone";
-const SU_BINARY: &str = "/system/bin/su";
-const SYSTEM_TELEPHONY_HELPER_UID: &str = "1000";
-const TELEPHONY_PROBE_ARG: &str = "--telephony-probe";
-const TELEPHONY_HELPER_PREFIX: &str = "/data/local/tmp/.android-telephony-";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TelephonyTransactions {
+    get_imei_for_slot: rsbinder::TransactionCode,
+    get_meid_for_slot: Option<rsbinder::TransactionCode>,
+}
 
 const IMEI_PROPERTIES: &[&str] = &[
     "ro.ril.oem.imei",
@@ -59,35 +56,6 @@ struct BackfillEvent {
     field: &'static str,
     source: String,
     value: String,
-}
-
-pub fn maybe_run_telephony_probe_command() -> Result<bool> {
-    let Some(arg) = std::env::args().nth(1) else {
-        return Ok(false);
-    };
-    if arg != TELEPHONY_PROBE_ARG {
-        return Ok(false);
-    }
-
-    let _ = rsbinder::ProcessState::init_default();
-
-    for slot in [0_i32, 1_i32] {
-        emit_telephony_probe_result("imei", slot, GET_IMEI_FOR_SLOT_TRANSACTION);
-    }
-
-    for slot in [0_i32, 1_i32] {
-        emit_telephony_probe_result("meid", slot, GET_MEID_FOR_SLOT_TRANSACTION);
-    }
-
-    Ok(true)
-}
-
-fn emit_telephony_probe_result(kind: &str, slot: i32, transaction: u32) {
-    match probe_phone_identifier_via_binder(slot, transaction, CALLING_PACKAGE) {
-        Ok(Some(value)) => debug!("{kind}\t{slot}\t{}", value.trim()),
-        Ok(None) => debug!("Telephony probe returned no {kind} for slot {slot}"),
-        Err(error) => error!("Telephony probe skipped {kind} for slot {slot}: {error:#}"),
-    }
 }
 
 pub fn bootstrap_device_ids(config_file: &mut ConfigFile) {
@@ -364,23 +332,46 @@ fn log_device_id_state(device: &DeviceProperty, label: &str) {
     );
 }
 
-#[cfg(target_os = "android")]
 fn probe_telephony_api_candidates() -> Vec<IdentifierCandidate> {
-    match invoke_shell_telephony_probe() {
-        Ok(output) => parse_shell_telephony_probe_output(&output),
-        Err(error) => {
-            log::warn!("Telephony API probe helper failed: {error:#}");
-            Vec::new()
+    let mut candidates = Vec::new();
+
+    for slot in [0_i32, 1_i32] {
+        match probe_imei_slot(slot) {
+            Ok(Some(value)) => {
+                let source = format!("telephony api imei slot {slot}");
+                match normalize_imei_candidate(&value, source.clone()) {
+                    Some(candidate) => candidates.push(candidate),
+                    None => log::warn!(
+                        "Ignoring invalid telephony IMEI from {source}: {}",
+                        mask_identifier(value.trim())
+                    ),
+                }
+            }
+            Ok(None) => log::debug!("Telephony API IMEI slot {slot} returned no identifier"),
+            Err(error) => log::warn!("Telephony API IMEI slot {slot} probe failed: {error:#}"),
         }
     }
+
+    for slot in [0_i32, 1_i32] {
+        match probe_meid_slot(slot) {
+            Ok(Some(value)) => {
+                let source = format!("telephony api meid slot {slot}");
+                match normalize_meid_candidate(&value, source.clone()) {
+                    Some(candidate) => candidates.push(candidate),
+                    None => log::warn!(
+                        "Ignoring invalid telephony MEID from {source}: {}",
+                        mask_identifier(value.trim())
+                    ),
+                }
+            }
+            Ok(None) => log::debug!("Telephony API MEID slot {slot} returned no identifier"),
+            Err(error) => log::warn!("Telephony API MEID slot {slot} probe failed: {error:#}"),
+        }
+    }
+
+    candidates
 }
 
-#[cfg(not(target_os = "android"))]
-fn probe_telephony_api_candidates() -> Vec<IdentifierCandidate> {
-    Vec::new()
-}
-
-#[cfg(target_os = "android")]
 fn probe_device_id_candidates() -> Vec<IdentifierCandidate> {
     let mut candidates = Vec::new();
 
@@ -404,33 +395,38 @@ fn probe_device_id_candidates() -> Vec<IdentifierCandidate> {
     candidates
 }
 
-#[cfg(not(target_os = "android"))]
-fn probe_device_id_candidates() -> Vec<IdentifierCandidate> {
-    Vec::new()
-}
-
 fn probe_device_id_slot(slot: i32) -> Result<Option<String>> {
     probe_phone_string_via_binder(
         PHONE_SUB_INFO_SERVICE,
         GET_DEVICE_ID_FOR_PHONE_TRANSACTION,
         slot,
-        CALLING_PACKAGE,
         "iphonesubinfo",
         "phoneId",
         "device id",
     )
 }
 
-fn probe_phone_identifier_via_binder(
-    slot: i32,
-    transaction: u32,
-    calling_package: &str,
-) -> Result<Option<String>> {
+fn probe_imei_slot(slot: i32) -> Result<Option<String>> {
+    probe_phone_string_via_binder(
+        PHONE_SERVICE,
+        telephony_transactions().get_imei_for_slot,
+        slot,
+        "phone",
+        "slot",
+        "identifier",
+    )
+}
+
+fn probe_meid_slot(slot: i32) -> Result<Option<String>> {
+    let Some(transaction) = telephony_transactions().get_meid_for_slot else {
+        log::debug!("phone getMeidForSlot is not present on Android 17");
+        return Ok(None);
+    };
+
     probe_phone_string_via_binder(
         PHONE_SERVICE,
         transaction,
         slot,
-        calling_package,
         "phone",
         "slot",
         "identifier",
@@ -439,9 +435,8 @@ fn probe_phone_identifier_via_binder(
 
 fn probe_phone_string_via_binder(
     service: &str,
-    transaction: u32,
+    transaction: rsbinder::TransactionCode,
     slot: i32,
-    calling_package: &str,
     label: &str,
     slot_label: &str,
     value_label: &str,
@@ -456,7 +451,7 @@ fn probe_phone_string_via_binder(
         .with_context(|| format!("failed to prepare {label} transaction"))?;
     data.write(&slot)
         .with_context(|| format!("failed to write {slot_label} for {label}"))?;
-    data.write(&calling_package.to_string())
+    data.write(&CALLING_PACKAGE.to_string())
         .with_context(|| format!("failed to write calling package for {label}"))?;
     data.write(&CALLING_FEATURE.to_string())
         .with_context(|| format!("failed to write calling feature for {label}"))?;
@@ -477,121 +472,27 @@ fn probe_phone_string_via_binder(
     let value: Option<String> = reply
         .read()
         .with_context(|| format!("failed to decode {label} {value_label} string"))?;
-    Ok(value)
+    Ok(value.filter(|value| !value.trim().is_empty()))
 }
 
-fn invoke_shell_telephony_probe() -> Result<String> {
-    let helper_path = prepare_shell_accessible_helper()?;
-    let helper_command = format!("{} {}", helper_path.display(), TELEPHONY_PROBE_ARG);
-    let output = Command::new(SU_BINARY)
-        .arg(SYSTEM_TELEPHONY_HELPER_UID)
-        .arg("-c")
-        .arg(&helper_command)
-        .output();
-    if let Err(error) = fs::remove_file(&helper_path) {
-        debug!(
-            "Failed to remove telephony helper {}: {error:?}",
-            helper_path.display()
-        );
-    }
-    let output = output
-        .with_context(|| format!("failed to invoke telephony probe helper via {SU_BINARY}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "{SU_BINARY} exited with {} while running telephony probe helper: {}",
-            output.status,
-            stderr.trim()
-        );
-    }
-
-    if !output.stderr.is_empty() {
-        log::debug!(
-            "Telephony probe helper stderr: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+fn telephony_transactions() -> TelephonyTransactions {
+    telephony_transactions_for(kmr_common::android_version::android_major_version())
 }
 
-fn prepare_shell_accessible_helper() -> Result<std::path::PathBuf> {
-    let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let helper_path =
-        std::path::PathBuf::from(format!("{TELEPHONY_HELPER_PREFIX}{}", std::process::id()));
+fn telephony_transactions_for(android_major: Option<i32>) -> TelephonyTransactions {
+    let (imei_offset, meid_offset) = match android_major {
+        Some(version) if version <= 12 => (149, Some(151)),
+        Some(13) => (145, Some(147)),
+        Some(14) => (148, Some(151)),
+        Some(15 | 16) | None => (147, Some(150)),
+        Some(version) if version >= 17 => (132, None),
+        _ => (147, Some(150)),
+    };
 
-    fs::copy(&current_exe, &helper_path).with_context(|| {
-        format!(
-            "failed to copy telephony helper from {} to {}",
-            current_exe.display(),
-            helper_path.display()
-        )
-    })?;
-
-    #[cfg(target_os = "android")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let permissions = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(&helper_path, permissions).with_context(|| {
-            format!("failed to chmod telephony helper {}", helper_path.display())
-        })?;
+    TelephonyTransactions {
+        get_imei_for_slot: rsbinder::FIRST_CALL_TRANSACTION + imei_offset,
+        get_meid_for_slot: meid_offset.map(|offset| rsbinder::FIRST_CALL_TRANSACTION + offset),
     }
-
-    Ok(helper_path)
-}
-
-fn parse_shell_telephony_probe_output(output: &str) -> Vec<IdentifierCandidate> {
-    let mut candidates = Vec::new();
-
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let mut parts = trimmed.splitn(3, '\t');
-        let Some(kind) = parts.next() else {
-            continue;
-        };
-        let Some(slot_raw) = parts.next() else {
-            log::warn!("Ignoring malformed telephony probe line: {trimmed}");
-            continue;
-        };
-        let Some(value) = parts.next() else {
-            log::warn!("Ignoring malformed telephony probe line: {trimmed}");
-            continue;
-        };
-
-        let slot: i32 = match slot_raw.parse() {
-            Ok(slot) => slot,
-            Err(error) => {
-                log::warn!("Ignoring telephony probe line with invalid slot {slot_raw}: {error}");
-                continue;
-            }
-        };
-
-        let source = format!("telephony api {kind} slot {slot}");
-        let candidate = match kind {
-            "imei" => normalize_imei_candidate(value, source.clone()),
-            "meid" => normalize_meid_candidate(value, source.clone()),
-            _ => {
-                log::warn!("Ignoring telephony probe line with unknown kind {kind}");
-                continue;
-            }
-        };
-
-        match candidate {
-            Some(candidate) => candidates.push(candidate),
-            None => log::warn!(
-                "Ignoring invalid telephony probe value from {source}: {}",
-                mask_identifier(value.trim())
-            ),
-        }
-    }
-
-    candidates
 }
 
 fn normalize_imei_candidate(raw: &str, source: String) -> Option<IdentifierCandidate> {
@@ -688,10 +589,57 @@ mod tests {
     }
 
     #[test]
-    fn telephony_probe_helper_uses_system_android_identity() {
-        assert_eq!(SYSTEM_TELEPHONY_HELPER_UID, "1000");
+    fn telephony_api_uses_android_request_metadata() {
         assert_eq!(CALLING_PACKAGE, "android");
         assert_eq!(CALLING_FEATURE, "android");
+    }
+
+    #[test]
+    fn telephony_transaction_table_matches_supported_android_versions() {
+        use rsbinder::FIRST_CALL_TRANSACTION;
+
+        let android_12 = telephony_transactions_for(Some(12));
+        assert_eq!(android_12.get_imei_for_slot, FIRST_CALL_TRANSACTION + 149);
+        assert_eq!(
+            android_12.get_meid_for_slot,
+            Some(FIRST_CALL_TRANSACTION + 151)
+        );
+
+        let android_13 = telephony_transactions_for(Some(13));
+        assert_eq!(android_13.get_imei_for_slot, FIRST_CALL_TRANSACTION + 145);
+        assert_eq!(
+            android_13.get_meid_for_slot,
+            Some(FIRST_CALL_TRANSACTION + 147)
+        );
+
+        let android_14 = telephony_transactions_for(Some(14));
+        assert_eq!(android_14.get_imei_for_slot, FIRST_CALL_TRANSACTION + 148);
+        assert_eq!(
+            android_14.get_meid_for_slot,
+            Some(FIRST_CALL_TRANSACTION + 151)
+        );
+
+        let android_15 = telephony_transactions_for(Some(15));
+        assert_eq!(android_15.get_imei_for_slot, FIRST_CALL_TRANSACTION + 147);
+        assert_eq!(
+            android_15.get_meid_for_slot,
+            Some(FIRST_CALL_TRANSACTION + 150)
+        );
+
+        let android_16 = telephony_transactions_for(Some(16));
+        assert_eq!(android_16.get_imei_for_slot, FIRST_CALL_TRANSACTION + 147);
+        assert_eq!(
+            android_16.get_meid_for_slot,
+            Some(FIRST_CALL_TRANSACTION + 150)
+        );
+
+        let android_17 = telephony_transactions_for(Some(17));
+        assert_eq!(android_17.get_imei_for_slot, FIRST_CALL_TRANSACTION + 132);
+        assert_eq!(android_17.get_meid_for_slot, None);
+        assert_eq!(
+            GET_DEVICE_ID_FOR_PHONE_TRANSACTION,
+            FIRST_CALL_TRANSACTION + 3
+        );
     }
 
     #[test]
@@ -829,26 +777,6 @@ mod tests {
             &[],
         );
         assert_eq!(meid.unwrap().value, "A100000927F62B");
-    }
-
-    #[test]
-    fn parse_shell_probe_output_accepts_expected_lines() {
-        let candidates = parse_shell_telephony_probe_output(
-            "imei\t0\t355231937352445\nmeid\t1\ta100000927f62b\n",
-        );
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].source, "telephony api imei slot 0");
-        assert_eq!(candidates[0].value, "355231937352445");
-        assert_eq!(candidates[1].source, "telephony api meid slot 1");
-        assert_eq!(candidates[1].value, "A100000927F62B");
-    }
-
-    #[test]
-    fn parse_shell_probe_output_ignores_malformed_lines() {
-        let candidates = parse_shell_telephony_probe_output(
-            "imei\tzero\t355231937352445\nbadline\nunknown\t0\t123\n",
-        );
-        assert!(candidates.is_empty());
     }
 
     #[test]

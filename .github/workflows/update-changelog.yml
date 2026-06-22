@@ -78,11 +78,23 @@ jobs:
           git fetch --force --tags origin
           version_code=$(git rev-list --count "$tag_name")
 
-          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
-          echo "release_zip_url=$release_zip_url" >> "$GITHUB_OUTPUT"
-          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
-          echo "source_release_json=$RELEASE_JSON" >> "$GITHUB_OUTPUT"
-          echo "asset_dir=$ASSET_DIR" >> "$GITHUB_OUTPUT"
+          write_output() {
+            local name="$1"
+            local value="$2"
+            local delimiter
+            delimiter="omk_output_$(uuidgen)"
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          write_output "tag_name" "$tag_name"
+          write_output "release_zip_url" "$release_zip_url"
+          write_output "version_code" "$version_code"
+          write_output "source_release_json" "$RELEASE_JSON"
+          write_output "asset_dir" "$ASSET_DIR"
 
           jq -c '.assets[] | {name, url, size, digest}' "$RELEASE_JSON" | while read -r asset; do
             name=$(jq -r '.name' <<< "$asset")
@@ -116,6 +128,11 @@ jobs:
 
       - name: Update changelog branch
         id: changelog
+        env:
+          SOURCE_RELEASE_JSON: ${{ steps.release_info.outputs.source_release_json }}
+          TAG_NAME: ${{ steps.release_info.outputs.tag_name }}
+          VERSION_CODE: ${{ steps.release_info.outputs.version_code }}
+          RELEASE_ZIP_URL: ${{ steps.release_info.outputs.release_zip_url }}
         run: |
           set -euo pipefail
 
@@ -123,12 +140,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          jq -r '.body // ""' "${{ steps.release_info.outputs.source_release_json }}" > changelog.md
+          jq -r '.body // ""' "$SOURCE_RELEASE_JSON" > changelog.md
 
           jq -n \
-            --arg version "${{ steps.release_info.outputs.tag_name }}" \
-            --argjson versionCode "${{ steps.release_info.outputs.version_code }}" \
-            --arg zipUrl "${{ steps.release_info.outputs.release_zip_url }}" \
+            --arg version "$TAG_NAME" \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg zipUrl "$RELEASE_ZIP_URL" \
             --arg changelog "https://raw.githubusercontent.com/qwq233/OhMyKeymint/changelog/changelog.md" \
             '{
               version: $version,
@@ -141,21 +158,24 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changelog changes to commit."
           else
-            git commit -m "Update ${{ steps.release_info.outputs.tag_name }}"
+            git commit -m "Update $TAG_NAME"
           fi
 
           sync_commit=$(git rev-parse HEAD)
           git push origin "HEAD:changelog" --force
-          echo "sync_commit=$sync_commit" >> "$GITHUB_OUTPUT"
+          printf 'sync_commit=%s\n' "$sync_commit" >> "$GITHUB_OUTPUT"
 
       - name: Sync target branch and tag
+        env:
+          SYNC_COMMIT: ${{ steps.changelog.outputs.sync_commit }}
+          TAG_NAME: ${{ steps.release_info.outputs.tag_name }}
         run: |
           set -euo pipefail
 
           cd changelog-branch
           target_url="https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git"
-          sync_commit="${{ steps.changelog.outputs.sync_commit }}"
-          tag_name="${{ steps.release_info.outputs.tag_name }}"
+          sync_commit="$SYNC_COMMIT"
+          tag_name="$TAG_NAME"
 
           git remote remove target 2>/dev/null || true
           git remote add target "$target_url"
@@ -166,7 +186,7 @@ jobs:
             local output="$1"
             local tmp_output="$output.tmp"
             if ! gh api --paginate "repos/$TARGET_REPO/releases" \
-              --jq ".[] | select(.tag_name == \"$tag_name\")" > "$tmp_output"; then
+              | jq --arg tag_name "$tag_name" '.[] | select(.tag_name == $tag_name)' > "$tmp_output"; then
               echo "::error::Failed to list target releases."
               exit 1
             fi
@@ -194,12 +214,16 @@ jobs:
           fi
 
       - name: Sync target release and assets
+        env:
+          SOURCE_RELEASE_JSON: ${{ steps.release_info.outputs.source_release_json }}
+          ASSET_DIR: ${{ steps.release_info.outputs.asset_dir }}
+          TAG_NAME: ${{ steps.release_info.outputs.tag_name }}
         run: |
           set -euo pipefail
 
-          source_release_json="${{ steps.release_info.outputs.source_release_json }}"
-          asset_dir="${{ steps.release_info.outputs.asset_dir }}"
-          tag_name="${{ steps.release_info.outputs.tag_name }}"
+          source_release_json="$SOURCE_RELEASE_JSON"
+          asset_dir="$ASSET_DIR"
+          tag_name="$TAG_NAME"
           target_release_json="$RUNNER_TEMP/target-release.json"
           create_release_payload="$RUNNER_TEMP/create-target-release-payload.json"
           update_release_payload="$RUNNER_TEMP/update-target-release-payload.json"
@@ -214,7 +238,7 @@ jobs:
             local output="$1"
             local tmp_output="$output.tmp"
             if ! gh api --paginate "repos/$TARGET_REPO/releases" \
-              --jq ".[] | select(.tag_name == \"$tag_name\")" > "$tmp_output"; then
+              | jq --arg tag_name "$tag_name" '.[] | select(.tag_name == $tag_name)' > "$tmp_output"; then
               echo "::error::Failed to list target releases."
               exit 1
             fi
