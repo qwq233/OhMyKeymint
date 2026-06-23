@@ -1174,6 +1174,23 @@ pub(super) unsafe fn handle_br_transaction(
             method, caller.uid, caller.pid, route
         );
 
+        if !expects_reply
+            && route == RouteTarget::Omk
+            && matches!(
+                method,
+                ServiceMethod::UpdateSubcomponent | ServiceMethod::DeleteKey
+            )
+        {
+            let pending = PendingServiceCall {
+                request,
+                method,
+                caller,
+                packages: decision.packages,
+                route,
+            };
+            return handle_omk_one_way_service_request(tr, &pending);
+        }
+
         if expects_reply {
             let pending = PendingServiceCall {
                 request,
@@ -1354,6 +1371,27 @@ pub(super) unsafe fn handle_br_transaction(
     }
 
     false
+}
+
+unsafe fn handle_omk_one_way_service_request(
+    tr: &mut binder_transaction_data,
+    pending: &PendingServiceCall,
+) -> bool {
+    match build_service_reply_rewrite(tr, pending) {
+        Ok(Some(_)) => {
+            block_omk_grant_system_request(tr);
+            true
+        }
+        Ok(None) => false,
+        Err(error) => {
+            warn!(
+                "[Injector][Route] failed to execute one-way OMK service {:?} for uid={} pid={}: {:#}; consuming original system request",
+                pending.method, pending.caller.uid, pending.caller.pid, error
+            );
+            block_omk_grant_system_request(tr);
+            true
+        }
+    }
 }
 
 pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
@@ -2052,10 +2090,16 @@ fn synthetic_transaction_current_caller(
 }
 
 fn can_execute_synthetic_one_way(kind: SyntheticTargetKind, code: u32) -> bool {
-    matches!(
-        (kind, identify::operation_method_from_code(code)),
-        (SyntheticTargetKind::Operation, Some(OperationMethod::Abort))
-    )
+    match kind {
+        SyntheticTargetKind::SecurityLevel => matches!(
+            identify::security_level_method_from_code(code),
+            Some(SecurityLevelMethod::ImportKey)
+        ),
+        SyntheticTargetKind::Operation => matches!(
+            identify::operation_method_from_code(code),
+            Some(OperationMethod::Update | OperationMethod::Finish | OperationMethod::Abort)
+        ),
+    }
 }
 
 pub(super) unsafe fn handle_synthetic_br_transaction(
@@ -4711,6 +4755,35 @@ mod tests {
     }
 
     #[test]
+    fn one_way_omk_service_preserves_system_when_omk_unavailable() {
+        let _guard = route_state_test_guard();
+        let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
+        tr.code = service_tx::r#deleteKey;
+        tr.data_size = 64;
+        tr.offsets_size = size_of::<usize>();
+        tr.data.ptr.buffer = 0x1000;
+        tr.data.ptr.offsets = 0x2000;
+        let pending = PendingServiceCall {
+            request: ParsedServiceRequest::DeleteKey {
+                key: sample_key_descriptor(),
+            },
+            method: ServiceMethod::DeleteKey,
+            caller: CallerIdentity::new(1000, 2000),
+            packages: vec!["com.example".to_string()],
+            route: RouteTarget::Omk,
+        };
+
+        let consumed = unsafe { handle_omk_one_way_service_request(&mut tr, &pending) };
+
+        assert!(!consumed);
+        assert_eq!(tr.code, service_tx::r#deleteKey);
+        assert_eq!(tr.data_size, 64);
+        assert_eq!(tr.offsets_size, size_of::<usize>());
+        assert_eq!(unsafe { tr.data.ptr.buffer }, 0x1000);
+        assert_eq!(unsafe { tr.data.ptr.offsets }, 0x2000);
+    }
+
+    #[test]
     fn reachable_omk_status_code_errors_keep_native_status_code() {
         for status in [
             StatusCode::RpcError,
@@ -6076,18 +6149,34 @@ mod tests {
     }
 
     #[test]
-    fn one_way_synthetic_dispatch_policy_keeps_abort_only() {
+    fn one_way_synthetic_dispatch_policy_allows_side_effects() {
+        assert!(can_execute_synthetic_one_way(
+            SyntheticTargetKind::SecurityLevel,
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#importKey
+        ));
+        assert!(can_execute_synthetic_one_way(
+            SyntheticTargetKind::Operation,
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#update
+        ));
+        assert!(can_execute_synthetic_one_way(
+            SyntheticTargetKind::Operation,
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#finish
+        ));
         assert!(can_execute_synthetic_one_way(
             SyntheticTargetKind::Operation,
             crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort
         ));
         assert!(!can_execute_synthetic_one_way(
             SyntheticTargetKind::Operation,
-            crate::android::system::keystore2::IKeystoreOperation::transactions::r#finish
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#updateAad
         ));
         assert!(!can_execute_synthetic_one_way(
             SyntheticTargetKind::SecurityLevel,
             crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#createOperation
+        ));
+        assert!(!can_execute_synthetic_one_way(
+            SyntheticTargetKind::SecurityLevel,
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#generateKey
         ));
     }
 }
