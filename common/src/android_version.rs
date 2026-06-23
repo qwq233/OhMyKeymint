@@ -24,7 +24,7 @@ pub fn android_major_version_with(read_property: impl Fn(&str) -> Option<String>
                     36 => 16,
                     37 => 17,
                     value if value >= 37 => 17,
-                    _ => 35,
+                    _ => panic!("unrecognized or unsupported SDK version: {}", sdk),
                 })
         })
 }

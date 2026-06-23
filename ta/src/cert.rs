@@ -598,99 +598,87 @@ impl AttestationIds<'_> {
         *self == AttestationIds::default()
     }
 
-    fn check_match(&mut self, wanted: &crate::AttestationIdInfo) -> Result<(), Error> {
+    fn check_match(&self, wanted: &crate::AttestationIdInfo) -> Result<(), Error> {
         if self
             .brand
             .as_ref()
             .is_some_and(|brand| *brand != wanted.brand)
         {
-            self.brand = Some(wanted.brand.clone().into());
-            log::info!(
-                "attestation ID mismatch for AttestationIdBrand, reseting to {:?}",
-                wanted.brand
-            );
+            return Err(km_err!(
+                CannotAttestIds,
+                "attestation ID mismatch for brand"
+            ));
         }
         if self
             .device
             .as_ref()
             .is_some_and(|device| *device != wanted.device)
         {
-            self.device = Some(wanted.device.clone().into());
-            log::info!(
-                "attestation ID mismatch for AttestationIdDevice, reseting to {:?}",
-                wanted.device
-            );
+            return Err(km_err!(
+                CannotAttestIds,
+                "attestation ID mismatch for device"
+            ));
         }
         if self
             .product
             .as_ref()
             .is_some_and(|product| *product != wanted.product)
         {
-            self.product = Some(wanted.product.clone().into());
-            log::info!(
-                "attestation ID mismatch for AttestationIdProduct, reseting to {:?}",
-                wanted.product
-            );
+            return Err(km_err!(
+                CannotAttestIds,
+                "attestation ID mismatch for product"
+            ));
         }
         if self
             .serial
             .as_ref()
             .is_some_and(|serial| *serial != wanted.serial)
         {
-            self.serial = Some(wanted.serial.clone().into());
-            log::info!(
-                "attestation ID mismatch for AttestationIdSerial, reseting to {:?}",
-                wanted.serial
-            );
+            return Err(km_err!(
+                CannotAttestIds,
+                "attestation ID mismatch for serial"
+            ));
         }
-        if self.imei.as_ref().is_some_and(|imei| *imei != wanted.imei) {
-            self.imei = Some(wanted.imei.clone().into());
-            log::info!(
-                "attestation ID mismatch for AttestationIdImei, reseting to {:?}",
-                wanted.imei
-            );
+        // The IMEI fields can match any valid IMEI value.
+        if self
+            .imei
+            .as_ref()
+            .is_some_and(|imei| *imei != wanted.imei && *imei != wanted.imei2)
+        {
+            return Err(km_err!(CannotAttestIds, "attestation ID mismatch for imei"));
         }
-        if wanted.imei2.is_empty() {
-            self.imei2 = None;
-        } else if self
+        if self
             .imei2
             .as_ref()
-            .is_some_and(|imei2| *imei2 != wanted.imei2)
+            .is_some_and(|imei2| *imei2 != wanted.imei2 && *imei2 != wanted.imei)
         {
-            self.imei2 = Some(wanted.imei2.clone().into());
-            log::info!(
-                "attestation ID mismatch for AttestationIdSecondImei, reseting to {:?}",
-                wanted.imei2
-            );
+            return Err(km_err!(
+                CannotAttestIds,
+                "attestation ID mismatch for imei2"
+            ));
         }
         if self.meid.as_ref().is_some_and(|meid| *meid != wanted.meid) {
-            self.meid = Some(wanted.meid.clone().into());
-            log::info!(
-                "attestation ID mismatch for AttestationIdMeid, reseting to {:?}",
-                wanted.meid
-            );
+            return Err(km_err!(CannotAttestIds, "attestation ID mismatch for meid"));
         }
         if self
             .manufacturer
             .as_ref()
             .is_some_and(|mfr| *mfr != wanted.manufacturer)
         {
-            self.manufacturer = Some(wanted.manufacturer.clone().into());
-            log::info!(
-                "attestation ID mismatch for AttestationIdManufacturer, reseting to {:?}",
-                wanted.manufacturer
-            );
+            return Err(km_err!(
+                CannotAttestIds,
+                "attestation ID mismatch for manufacturer"
+            ));
         }
         if self
             .model
             .as_ref()
             .is_some_and(|model| *model != wanted.model)
         {
-            self.model = Some(wanted.model.clone().into());
-            log::info!(
-                "attestation ID mismatch for AttestationIdModel, reseting to {:?}",
-                wanted.model
-            );
+            return Err(km_err!(
+                CannotAttestIds,
+                "attestation ID mismatch for model"
+            ));
         }
         Ok(())
     }
@@ -708,7 +696,7 @@ impl<'a> AuthorizationList<'a> {
         app_id: Option<&'a [u8]>,
         additional_attestation_info: &'a [KeyParam],
     ) -> Result<Self, Error> {
-        let mut requested_ids = AttestationIds::new_from_key_params(keygen_params)?;
+        let requested_ids = AttestationIds::new_from_key_params(keygen_params)?;
         if !requested_ids.is_empty() {
             match attestation_ids {
                 None => return Err(km_err!(CannotAttestIds, "no attestation IDs provisioned")),
@@ -1837,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn test_authz_list_resets_mismatched_attestation_id() {
+    fn test_authz_list_rejects_mismatched_attestation_id() {
         let attestation_ids = AttestationIdInfo {
             brand: b"good".to_vec(),
             device: vec![],
@@ -1850,19 +1838,45 @@ mod tests {
             model: vec![],
         };
         let keygen_params = [KeyParam::AttestationIdBrand(b"bad".to_vec())];
+        let error =
+            AuthorizationList::new(&[], &keygen_params, Some(&attestation_ids), None, None, &[])
+                .unwrap_err();
+
+        assert!(matches!(
+            error.kind(),
+            CommonErrorKind::Hal(ErrorCode::CannotAttestIds, _)
+        ));
+    }
+
+    #[test]
+    fn test_authz_list_preserves_swapped_dual_imei() {
+        let primary = b"primary-imei".to_vec();
+        let secondary = b"secondary-imei".to_vec();
+        let attestation_ids = AttestationIdInfo {
+            brand: vec![],
+            device: vec![],
+            product: vec![],
+            serial: vec![],
+            imei: primary.clone(),
+            imei2: secondary.clone(),
+            meid: vec![],
+            manufacturer: vec![],
+            model: vec![],
+        };
+        let keygen_params = [
+            KeyParam::AttestationIdImei(secondary.clone()),
+            KeyParam::AttestationIdSecondImei(primary.clone()),
+        ];
         let authz_list =
             AuthorizationList::new(&[], &keygen_params, Some(&attestation_ids), None, None, &[])
                 .unwrap();
 
-        assert_eq!(authz_list.ids.brand.as_deref(), Some(b"good".as_slice()));
-        assert_eq!(
-            hex::encode(authz_list.to_der().unwrap()),
-            "300abf8546060404676f6f64"
-        );
+        assert_eq!(authz_list.ids.imei.as_deref(), Some(secondary.as_slice()));
+        assert_eq!(authz_list.ids.imei2.as_deref(), Some(primary.as_slice()));
     }
 
     #[test]
-    fn test_authz_list_omits_empty_second_imei() {
+    fn test_authz_list_encodes_empty_second_imei() {
         let attestation_ids = AttestationIdInfo {
             brand: vec![],
             device: vec![],
@@ -1879,8 +1893,11 @@ mod tests {
             AuthorizationList::new(&[], &keygen_params, Some(&attestation_ids), None, None, &[])
                 .unwrap();
 
-        assert!(authz_list.ids.imei2.is_none());
-        assert_eq!(hex::encode(authz_list.to_der().unwrap()), "3000");
+        assert_eq!(authz_list.ids.imei2.as_deref(), Some([].as_slice()));
+        assert_eq!(
+            hex::encode(authz_list.to_der().unwrap()),
+            "3006bf8553020400"
+        );
     }
 
     #[test]

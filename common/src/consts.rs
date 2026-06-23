@@ -50,6 +50,7 @@ pub fn android_system_keystore2_aidl_version_for_android_major(android_major: i3
         14 => Some(3),
         15 => Some(4),
         16 => Some(5),
+        17 => Some(6),
         value if value >= 17 => Some(ANDROID_SYSTEM_KEYSTORE2_LATEST_AIDL_VERSION),
         _ => None,
     }

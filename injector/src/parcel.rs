@@ -744,7 +744,6 @@ pub unsafe fn parse_service_request(
         }
     };
 
-    ensure_no_request_trailing_data(&parcel, "IKeystoreService")?;
     Ok(parsed)
 }
 
@@ -809,7 +808,6 @@ pub unsafe fn parse_security_level_request(
         },
     };
 
-    ensure_no_request_trailing_data(&parcel, "IKeystoreSecurityLevel")?;
     Ok(parsed)
 }
 
@@ -851,7 +849,6 @@ pub unsafe fn parse_operation_request(
         OperationMethod::Abort => ParsedOperationRequest::Abort,
     };
 
-    ensure_no_request_trailing_data(&parcel, "IKeystoreOperation")?;
     Ok(parsed)
 }
 
@@ -1538,6 +1535,72 @@ mod tests {
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
         unsafe { parse_security_level_request(data, data_size, offsets, offsets_size, code) }
             .expect("security-level key request should parse")
+    }
+
+    #[test]
+    fn keystore2_business_requests_accept_trailing_payload() {
+        let app_key = KeyDescriptor {
+            domain: crate::android::system::keystore2::Domain::Domain::APP,
+            nspace: 0,
+            alias: Some("alias".to_string()),
+            blob: None,
+        };
+        let mut request = build_request_with_payload(KEYSTORE_SERVICE_INTERFACE, |parcel| {
+            parcel.write(&app_key).unwrap();
+            parcel.write(&0x4f4d4bi32).unwrap();
+        });
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        let parsed = unsafe {
+            parse_service_request(
+                data,
+                data_size,
+                offsets,
+                offsets_size,
+                crate::android::system::keystore2::IKeystoreService::transactions::r#getKeyEntry,
+            )
+        }
+        .expect("service request with trailing payload should parse");
+        let ParsedServiceRequest::GetKeyEntry { key } = parsed else {
+            panic!("getKeyEntry request should parse as GetKeyEntry");
+        };
+        assert_eq!(key.alias.as_deref(), Some("alias"));
+
+        let blob_key = blob_key_descriptor(None);
+        let mut request = build_request_with_payload(KEYSTORE_SECURITY_LEVEL_INTERFACE, |parcel| {
+            parcel.write(&blob_key).unwrap();
+            parcel.write(&0x4f4d4bi32).unwrap();
+        });
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        let parsed = unsafe {
+            parse_security_level_request(
+                data,
+                data_size,
+                offsets,
+                offsets_size,
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
+            )
+        }
+        .expect("security-level request with trailing payload should parse");
+        let ParsedSecurityLevelRequest::DeleteKey { key } = parsed else {
+            panic!("deleteKey request should parse as DeleteKey");
+        };
+        assert_eq!(key.blob, None);
+
+        let mut request = build_request_with_payload(KEYSTORE_OPERATION_INTERFACE, |parcel| {
+            parcel.write(&0x4f4d4bi32).unwrap();
+        });
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        let parsed = unsafe {
+            parse_operation_request(
+                data,
+                data_size,
+                offsets,
+                offsets_size,
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
+            )
+        }
+        .expect("operation request with trailing payload should parse");
+        assert!(matches!(parsed, ParsedOperationRequest::Abort));
     }
 
     #[test]

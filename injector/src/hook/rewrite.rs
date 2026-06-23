@@ -1316,22 +1316,6 @@ pub(super) unsafe fn handle_br_transaction(
         };
 
         let method = request.method();
-        if !decision.allowed {
-            info!(
-                "[Injector][Decision] command={} operation_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?} target=ptr:0x{:x}/cookie:0x{:x}; leaving original request untouched",
-                command_name,
-                method,
-                tr.code,
-                caller.uid,
-                caller.pid,
-                caller.sid,
-                decision.packages,
-                decision.reason,
-                target.ptr,
-                target.cookie,
-            );
-            return false;
-        }
 
         info!(
             "[Injector][Decision] command={} operation_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} target=ptr:0x{:x}/cookie:0x{:x}",
@@ -2332,15 +2316,6 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
                 }
             };
             let method = request.method();
-            if !decision.allowed {
-                warn!(
-                    "[Injector][Synthetic] denied operation {:?} for uid={} pid={} packages={:?} reason={:?}; returning PERMISSION_DENIED",
-                    method, caller.uid, caller.pid, decision.packages, decision.reason
-                );
-                return Ok(synthetic_parcel_reply(build_service_specific_reply(
-                    ResponseCode::PERMISSION_DENIED.0,
-                )?));
-            }
 
             info!(
                 "[Injector][Synthetic] handling {} operation {:?} uid={} pid={} target=ptr:0x{:x}/cookie:0x{:x} packages={:?}",
@@ -4199,7 +4174,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_operation_trailing_abort_returns_bad_value_status() {
+    fn synthetic_operation_trailing_abort_finalizes_operation() {
         let _guard = route_state_test_guard();
 
         let target = LocalBinderTarget {
@@ -4238,12 +4213,133 @@ mod tests {
             build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
         }
         .expect("trailing abort should be handled without fallback");
-        assert_synthetic_status(reply, StatusCode::BadValue);
+        assert_synthetic_ok_reply(reply, "trailing abort");
         assert!(
-            lookup_operation_target(target).is_some(),
-            "trailing data must not finalize the operation"
+            lookup_operation_target(target).is_none(),
+            "trailing abort must finalize the operation"
         );
-        assert_eq!(aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(aborts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn synthetic_operation_calls_do_not_reauthorize_current_uid() {
+        let _guard = route_state_test_guard();
+
+        for (index, label, code) in [
+            (
+                0,
+                "updateAad",
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#updateAad,
+            ),
+            (
+                1,
+                "update",
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#update,
+            ),
+            (
+                2,
+                "finish",
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#finish,
+            ),
+            (
+                3,
+                "abort",
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
+            ),
+        ] {
+            let target = LocalBinderTarget {
+                ptr: 0x1434 + index,
+                cookie: 0x5878 + index,
+            };
+            let aborts = Arc::new(AtomicUsize::new(0));
+            let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
+                update_output: vec![5, 6, 7],
+                aborts: aborts.clone(),
+                update_aad_status: None,
+            });
+            remember_operation_target(
+                target,
+                OperationTargetInfo {
+                    route: RouteTarget::Omk,
+                    aad_allowed: true,
+                    backend: Some(backend),
+                    finalized: false,
+                },
+            );
+
+            let mut request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
+            match label {
+                "updateAad" | "update" => request.write(&vec![1u8]).unwrap(),
+                "finish" => {
+                    request.write(&None::<Vec<u8>>).unwrap();
+                    request.write(&None::<Vec<u8>>).unwrap();
+                }
+                "abort" => {}
+                _ => unreachable!("covered operation test method"),
+            }
+            let mut tr = transaction_for_parcel(target, code, &request);
+            tr.sender_euid = 99999;
+            tr.sender_pid = 3456;
+            let info = SyntheticTargetInfo {
+                kind: SyntheticTargetKind::Operation,
+                caller: Some(CallerIdentity::new(10002, 2000)),
+            };
+
+            let reply = unsafe {
+                build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+            }
+            .unwrap_or_else(|error| panic!("{label} should be handled: {error:#}"));
+            assert_synthetic_ok_reply(reply, label);
+
+            if label == "abort" {
+                assert_eq!(aborts.load(Ordering::SeqCst), 1);
+                assert!(
+                    lookup_operation_target(target).is_none(),
+                    "abort should clear the operation mapping"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tracked_operation_transaction_does_not_reauthorize_current_uid() {
+        let _guard = route_state_test_guard();
+
+        let target = LocalBinderTarget {
+            ptr: 0x1534,
+            cookie: 0x5978,
+        };
+        remember_operation_target(
+            target,
+            OperationTargetInfo {
+                route: RouteTarget::Omk,
+                aad_allowed: true,
+                backend: None,
+                finalized: false,
+            },
+        );
+
+        let mut request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
+        request.write(&vec![1u8]).unwrap();
+        let mut tr = transaction_for_parcel(
+            target,
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#update,
+            &request,
+        );
+        tr.sender_euid = 99999;
+        tr.sender_pid = 3456;
+
+        let rewritten = unsafe { handle_br_transaction(&mut tr, None, "BR_TRANSACTION") };
+        assert!(!rewritten);
+        let Some(Some(PendingCall::Operation(pending))) = take_top_pending() else {
+            panic!("tracked operation should still enqueue a pending operation call");
+        };
+        assert_eq!(pending.target, target);
+        assert_eq!(pending.caller.uid, 99999);
+        assert!(matches!(
+            pending.request,
+            ParsedOperationRequest::Update { .. }
+        ));
     }
 
     #[test]
