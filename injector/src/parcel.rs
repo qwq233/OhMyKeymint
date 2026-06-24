@@ -350,6 +350,27 @@ fn read_nullable_byte_array_preserving_empty(
     Ok(Some(bytes))
 }
 
+fn read_non_null_byte_array_preserving_empty(parcel: &mut Parcel) -> rsbinder::Result<Vec<u8>> {
+    read_nullable_byte_array_preserving_empty(parcel)?.ok_or(StatusCode::UnexpectedNull)
+}
+
+fn read_non_null_array<T: Deserialize>(parcel: &mut Parcel) -> rsbinder::Result<Vec<T>> {
+    let len: i32 = parcel.read()?;
+    if len < -1 {
+        return Err(StatusCode::BadValue);
+    }
+    if len == -1 {
+        return Err(StatusCode::UnexpectedNull);
+    }
+
+    let len = usize::try_from(len).map_err(|_| StatusCode::BadValue)?;
+    let mut result = Vec::with_capacity(len.min(parcel.data_avail()));
+    for _ in 0..len {
+        result.push(parcel.read()?);
+    }
+    Ok(result)
+}
+
 impl ParsedSecurityLevelRequest {
     pub fn method(&self) -> SecurityLevelMethod {
         match self {
@@ -458,7 +479,7 @@ unsafe fn parse_authorization_request_with_resolver(
         },
         AuthorizationMethod::OnDeviceLocked => ParsedAuthorizationRequest::OnDeviceLocked {
             user_id: parcel.read()?,
-            unlocking_sids: parcel.read()?,
+            unlocking_sids: read_non_null_array(&mut parcel)?,
             weak_unlock_enabled: parcel.read()?,
         },
         AuthorizationMethod::OnUserStorageLocked => {
@@ -485,7 +506,7 @@ unsafe fn parse_authorization_request_with_resolver(
         }
         AuthorizationMethod::GetLastAuthTime => ParsedAuthorizationRequest::GetLastAuthTime {
             secure_user_id: parcel.read()?,
-            auth_types: parcel.read()?,
+            auth_types: read_non_null_array(&mut parcel)?,
         },
     };
 
@@ -635,7 +656,7 @@ unsafe fn parse_maintenance_request_with_resolver(
         },
         MaintenanceMethod::InitUserSuperKeys => ParsedMaintenanceRequest::InitUserSuperKeys {
             user_id: parcel.read()?,
-            password: parcel.read()?,
+            password: read_non_null_byte_array_preserving_empty(&mut parcel)?,
             allow_existing: parcel.read()?,
         },
         MaintenanceMethod::OnUserRemoved => ParsedMaintenanceRequest::OnUserRemoved {
@@ -774,29 +795,29 @@ pub unsafe fn parse_security_level_request(
     let parsed = match method {
         SecurityLevelMethod::CreateOperation => ParsedSecurityLevelRequest::CreateOperation {
             key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            operation_parameters: parcel.read()?,
+            operation_parameters: read_non_null_array(&mut parcel)?,
             forced: parcel.read()?,
         },
         SecurityLevelMethod::GenerateKey => ParsedSecurityLevelRequest::GenerateKey {
             key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             attestation_key: read_optional_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            params: parcel.read()?,
+            params: read_non_null_array(&mut parcel)?,
             flags: parcel.read()?,
-            entropy: parcel.read()?,
+            entropy: read_non_null_byte_array_preserving_empty(&mut parcel)?,
         },
         SecurityLevelMethod::ImportKey => ParsedSecurityLevelRequest::ImportKey {
             key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             attestation_key: read_optional_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            params: parcel.read()?,
+            params: read_non_null_array(&mut parcel)?,
             flags: parcel.read()?,
-            key_data: parcel.read()?,
+            key_data: read_non_null_byte_array_preserving_empty(&mut parcel)?,
         },
         SecurityLevelMethod::ImportWrappedKey => ParsedSecurityLevelRequest::ImportWrappedKey {
             key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             wrapping_key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
             masking_key: parcel.read()?,
-            params: parcel.read()?,
-            authenticators: parcel.read()?,
+            params: read_non_null_array(&mut parcel)?,
+            authenticators: read_non_null_array(&mut parcel)?,
         },
         SecurityLevelMethod::ConvertStorageKeyToEphemeral => {
             ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral {
@@ -837,10 +858,10 @@ pub unsafe fn parse_operation_request(
 
     let parsed = match method {
         OperationMethod::UpdateAad => ParsedOperationRequest::UpdateAad {
-            aad_input: parcel.read()?,
+            aad_input: read_non_null_byte_array_preserving_empty(&mut parcel)?,
         },
         OperationMethod::Update => ParsedOperationRequest::Update {
-            input: parcel.read()?,
+            input: read_non_null_byte_array_preserving_empty(&mut parcel)?,
         },
         OperationMethod::Finish => ParsedOperationRequest::Finish {
             input: parcel.read()?,
@@ -1428,9 +1449,10 @@ fn contains_utf16_token(parcel: &[u8], token: &str) -> bool {
 mod tests {
     use super::*;
     use crate::android::hardware::security::keymint::{
-        KeyParameter::KeyParameter, KeyParameterValue::KeyParameterValue,
-        SecurityLevel::SecurityLevel, Tag::Tag,
+        HardwareAuthenticatorType::HardwareAuthenticatorType, KeyParameter::KeyParameter,
+        KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
     };
+    use crate::android::system::keystore2::AuthenticatorSpec::AuthenticatorSpec;
     use crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse;
     use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
     use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
@@ -1496,6 +1518,43 @@ mod tests {
         }
     }
 
+    fn parse_authorization_request_as_method(
+        method: AuthorizationMethod,
+        write_payload: impl FnOnce(&mut Parcel),
+    ) -> Result<ParsedAuthorizationRequest> {
+        let mut request =
+            build_request_with_payload(KEYSTORE_AUTHORIZATION_INTERFACE, write_payload);
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        unsafe {
+            parse_authorization_request_with_resolver(
+                data,
+                data_size,
+                offsets,
+                offsets_size,
+                rsbinder::FIRST_CALL_TRANSACTION,
+                |_| Some(method),
+            )
+        }
+    }
+
+    fn parse_maintenance_request_as_method(
+        method: MaintenanceMethod,
+        write_payload: impl FnOnce(&mut Parcel),
+    ) -> Result<ParsedMaintenanceRequest> {
+        let mut request = build_request_with_payload(KEYSTORE_MAINTENANCE_INTERFACE, write_payload);
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        unsafe {
+            parse_maintenance_request_with_resolver(
+                data,
+                data_size,
+                offsets,
+                offsets_size,
+                rsbinder::FIRST_CALL_TRANSACTION,
+                |_| Some(method),
+            )
+        }
+    }
+
     fn build_request(interface: &str, payload_token: Option<&str>) -> OwnedReply {
         build_request_with_payload(interface, |parcel| {
             if let Some(payload_token) = payload_token {
@@ -1535,6 +1594,310 @@ mod tests {
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
         unsafe { parse_security_level_request(data, data_size, offsets, offsets_size, code) }
             .expect("security-level key request should parse")
+    }
+
+    fn parse_security_level_request_with_payload(
+        code: rsbinder::TransactionCode,
+        write_payload: impl FnOnce(&mut Parcel),
+    ) -> Result<ParsedSecurityLevelRequest> {
+        let mut request =
+            build_request_with_payload(KEYSTORE_SECURITY_LEVEL_INTERFACE, write_payload);
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        unsafe { parse_security_level_request(data, data_size, offsets, offsets_size, code) }
+    }
+
+    fn parse_operation_request_with_payload(
+        code: rsbinder::TransactionCode,
+        write_payload: impl FnOnce(&mut Parcel),
+    ) -> Result<ParsedOperationRequest> {
+        let mut request = build_request_with_payload(KEYSTORE_OPERATION_INTERFACE, write_payload);
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+        unsafe { parse_operation_request(data, data_size, offsets, offsets_size, code) }
+    }
+
+    fn assert_status_code<T>(result: Result<T>, expected: StatusCode) {
+        let error = match result {
+            Ok(_) => panic!("request should fail"),
+            Err(error) => error,
+        };
+        let status = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<StatusCode>().copied());
+        assert_eq!(status, Some(expected));
+    }
+
+    #[test]
+    fn keystore_non_null_arrays_reject_null() {
+        let key = blob_key_descriptor(None);
+        let empty_params = Vec::<KeyParameter>::new();
+
+        assert_status_code(
+            parse_authorization_request_as_method(AuthorizationMethod::OnDeviceLocked, |parcel| {
+                parcel.write(&0i32).unwrap();
+                parcel.write(&-1i32).unwrap();
+                parcel.write(&false).unwrap();
+            }),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_authorization_request_as_method(AuthorizationMethod::GetLastAuthTime, |parcel| {
+                parcel.write(&0i64).unwrap();
+                parcel.write(&-1i32).unwrap();
+            }),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_maintenance_request_as_method(MaintenanceMethod::InitUserSuperKeys, |parcel| {
+                parcel.write(&0i32).unwrap();
+                parcel.write(&-1i32).unwrap();
+                parcel.write(&false).unwrap();
+            }),
+            StatusCode::UnexpectedNull,
+        );
+
+        assert_status_code(
+            parse_security_level_request_with_payload(
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#createOperation,
+                |parcel| {
+                    parcel.write(&key).unwrap();
+                    parcel.write(&-1i32).unwrap();
+                    parcel.write(&false).unwrap();
+                },
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_security_level_request_with_payload(
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#generateKey,
+                |parcel| {
+                    parcel.write(&key).unwrap();
+                    parcel.write(&Option::<KeyDescriptor>::None).unwrap();
+                    parcel.write(&-1i32).unwrap();
+                },
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_security_level_request_with_payload(
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#generateKey,
+                |parcel| {
+                    parcel.write(&key).unwrap();
+                    parcel.write(&Option::<KeyDescriptor>::None).unwrap();
+                    parcel.write(&empty_params).unwrap();
+                    parcel.write(&0i32).unwrap();
+                    parcel.write(&-1i32).unwrap();
+                },
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_security_level_request_with_payload(
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#importKey,
+                |parcel| {
+                    parcel.write(&key).unwrap();
+                    parcel.write(&Option::<KeyDescriptor>::None).unwrap();
+                    parcel.write(&-1i32).unwrap();
+                },
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_security_level_request_with_payload(
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#importKey,
+                |parcel| {
+                    parcel.write(&key).unwrap();
+                    parcel.write(&Option::<KeyDescriptor>::None).unwrap();
+                    parcel.write(&empty_params).unwrap();
+                    parcel.write(&0i32).unwrap();
+                    parcel.write(&-1i32).unwrap();
+                },
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_security_level_request_with_payload(
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#importWrappedKey,
+                |parcel| {
+                    parcel.write(&key).unwrap();
+                    parcel.write(&key).unwrap();
+                    parcel.write(&Option::<Vec<u8>>::None).unwrap();
+                    parcel.write(&-1i32).unwrap();
+                },
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_security_level_request_with_payload(
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#importWrappedKey,
+                |parcel| {
+                    parcel.write(&key).unwrap();
+                    parcel.write(&key).unwrap();
+                    parcel.write(&Option::<Vec<u8>>::None).unwrap();
+                    parcel.write(&empty_params).unwrap();
+                    parcel.write(&-1i32).unwrap();
+                },
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_operation_request_with_payload(
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#updateAad,
+                |parcel| parcel.write(&-1i32).unwrap(),
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_operation_request_with_payload(
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#update,
+                |parcel| parcel.write(&-1i32).unwrap(),
+            ),
+            StatusCode::UnexpectedNull,
+        );
+    }
+
+    #[test]
+    fn keystore_non_null_arrays_preserve_empty() {
+        let key = blob_key_descriptor(None);
+        let empty_sids = Vec::<i64>::new();
+        let empty_auth_types = Vec::<HardwareAuthenticatorType>::new();
+        let empty_params = Vec::<KeyParameter>::new();
+        let empty_authenticators = Vec::<AuthenticatorSpec>::new();
+        let empty_bytes = Vec::<u8>::new();
+
+        let parsed =
+            parse_authorization_request_as_method(AuthorizationMethod::OnDeviceLocked, |parcel| {
+                parcel.write(&0i32).unwrap();
+                parcel.write(&empty_sids).unwrap();
+                parcel.write(&false).unwrap();
+            })
+            .expect("empty onDeviceLocked unlockingSids should parse");
+        let ParsedAuthorizationRequest::OnDeviceLocked { unlocking_sids, .. } = parsed else {
+            panic!("onDeviceLocked request should parse");
+        };
+        assert!(unlocking_sids.is_empty());
+
+        let parsed =
+            parse_authorization_request_as_method(AuthorizationMethod::GetLastAuthTime, |parcel| {
+                parcel.write(&0i64).unwrap();
+                parcel.write(&empty_auth_types).unwrap();
+            })
+            .expect("empty getLastAuthTime authTypes should parse");
+        let ParsedAuthorizationRequest::GetLastAuthTime { auth_types, .. } = parsed else {
+            panic!("getLastAuthTime request should parse");
+        };
+        assert!(auth_types.is_empty());
+
+        let parsed =
+            parse_maintenance_request_as_method(MaintenanceMethod::InitUserSuperKeys, |parcel| {
+                parcel.write(&0i32).unwrap();
+                parcel.write(&empty_bytes).unwrap();
+                parcel.write(&false).unwrap();
+            })
+            .expect("empty initUserSuperKeys password should parse");
+        let ParsedMaintenanceRequest::InitUserSuperKeys { password, .. } = parsed else {
+            panic!("initUserSuperKeys request should parse");
+        };
+        assert!(password.is_empty());
+
+        let parsed = parse_security_level_request_with_payload(
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#createOperation,
+            |parcel| {
+                parcel.write(&key).unwrap();
+                parcel.write(&empty_params).unwrap();
+                parcel.write(&false).unwrap();
+            },
+        )
+        .expect("empty createOperation params should parse");
+        let ParsedSecurityLevelRequest::CreateOperation {
+            operation_parameters,
+            ..
+        } = parsed
+        else {
+            panic!("createOperation request should parse");
+        };
+        assert!(operation_parameters.is_empty());
+
+        let parsed = parse_security_level_request_with_payload(
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#generateKey,
+            |parcel| {
+                parcel.write(&key).unwrap();
+                parcel.write(&Option::<KeyDescriptor>::None).unwrap();
+                parcel.write(&empty_params).unwrap();
+                parcel.write(&0i32).unwrap();
+                parcel.write(&empty_bytes).unwrap();
+            },
+        )
+        .expect("empty generateKey params should parse");
+        let ParsedSecurityLevelRequest::GenerateKey {
+            params, entropy, ..
+        } = parsed
+        else {
+            panic!("generateKey request should parse");
+        };
+        assert!(params.is_empty());
+        assert!(entropy.is_empty());
+
+        let parsed = parse_security_level_request_with_payload(
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#importKey,
+            |parcel| {
+                parcel.write(&key).unwrap();
+                parcel.write(&Option::<KeyDescriptor>::None).unwrap();
+                parcel.write(&empty_params).unwrap();
+                parcel.write(&0i32).unwrap();
+                parcel.write(&empty_bytes).unwrap();
+            },
+        )
+        .expect("empty importKey params should parse");
+        let ParsedSecurityLevelRequest::ImportKey {
+            params, key_data, ..
+        } = parsed
+        else {
+            panic!("importKey request should parse");
+        };
+        assert!(params.is_empty());
+        assert!(key_data.is_empty());
+
+        let parsed = parse_security_level_request_with_payload(
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#importWrappedKey,
+            |parcel| {
+                parcel.write(&key).unwrap();
+                parcel.write(&key).unwrap();
+                parcel.write(&Option::<Vec<u8>>::None).unwrap();
+                parcel.write(&empty_params).unwrap();
+                parcel.write(&empty_authenticators).unwrap();
+            },
+        )
+        .expect("empty importWrappedKey arrays should parse");
+        let ParsedSecurityLevelRequest::ImportWrappedKey {
+            params,
+            authenticators,
+            ..
+        } = parsed
+        else {
+            panic!("importWrappedKey request should parse");
+        };
+        assert!(params.is_empty());
+        assert!(authenticators.is_empty());
+
+        let parsed = parse_operation_request_with_payload(
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#updateAad,
+            |parcel| parcel.write(&empty_bytes).unwrap(),
+        )
+        .expect("empty updateAad input should parse");
+        let ParsedOperationRequest::UpdateAad { aad_input } = parsed else {
+            panic!("updateAad request should parse");
+        };
+        assert!(aad_input.is_empty());
+
+        let parsed = parse_operation_request_with_payload(
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#update,
+            |parcel| parcel.write(&empty_bytes).unwrap(),
+        )
+        .expect("empty update input should parse");
+        let ParsedOperationRequest::Update { input } = parsed else {
+            panic!("update request should parse");
+        };
+        assert!(input.is_empty());
     }
 
     #[test]

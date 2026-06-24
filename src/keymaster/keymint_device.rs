@@ -31,7 +31,10 @@ use crate::consts::AID_KEYSTORE;
 use crate::global::DB;
 use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_km_error, map_ks_error, map_ks_result};
-use crate::keymaster::utils::{key_creation_result_to_aidl, key_params_to_aidl, AppUid};
+use crate::keymaster::utils::{
+    key_creation_result_to_aidl, key_parameter_conversion_error_code, key_parameters_to_km,
+    key_params_to_aidl, AppUid,
+};
 use crate::keymint::{clock, sdd, soft};
 use crate::{
     android::hardware::security::keymint::ErrorCode::ErrorCode,
@@ -403,6 +406,14 @@ struct KeyMintWrapperInner {
 
 impl Interface for KeyMintWrapper {}
 
+fn map_key_parameter_conversion_error(error: ValueNotRecognized) -> Error {
+    Error::Km(key_parameter_conversion_error_code(error))
+}
+
+fn key_parameter_conversion_status(error: ValueNotRecognized) -> Status {
+    map_ks_error(map_key_parameter_conversion_error(error))
+}
+
 #[allow(non_snake_case)]
 impl IKeyMintDevice for KeyMintWrapper {
     fn begin(
@@ -412,14 +423,12 @@ impl IKeyMintDevice for KeyMintWrapper {
         params: &[KeyParameter],
         auth_token: Option<&HardwareAuthToken>,
     ) -> Result<crate::android::hardware::security::keymint::BeginResult::BeginResult, Status> {
-        let km_params: Result<Vec<KeyParam>> = params.iter().cloned().map(|p| p.to_km()).collect();
-        let km_params = km_params.map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT));
+        let km_params = key_parameters_to_km(params).map_err(map_key_parameter_conversion_error);
         let km_params = map_ks_result(km_params)?;
 
         let req = PerformOpReq::DeviceBegin(BeginRequest {
-            purpose: kmr_wire::keymint::KeyPurpose::try_from(purpose.0).map_err(|_| {
-                Status::new_service_specific_error(ErrorCode::INVALID_ARGUMENT.0, None)
-            })?,
+            purpose: kmr_wire::keymint::KeyPurpose::try_from(purpose.0)
+                .map_err(key_parameter_conversion_status)?,
             key_blob: key_blob.to_vec(),
             params: km_params.clone(),
             auth_token: auth_token.map(|at| at.to_km()).transpose().map_err(|_| {
@@ -514,21 +523,12 @@ impl IKeyMintDevice for KeyMintWrapper {
     ) -> rsbinder::status::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
-        let key_parameters: Result<Vec<KeyParam>> =
-            keyParams.iter().cloned().map(|p| p.to_km()).collect();
-        let key_parameters = key_parameters
-            .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+        let key_parameters = key_parameters_to_km(keyParams)
+            .map_err(map_key_parameter_conversion_error)
             .map_err(map_ks_error)?;
         let attestation_key = if let Some(ak) = attestation_key {
-            let key_parameters: Result<Vec<KeyParam>> = ak
-                .attestKeyParams
-                .iter()
-                .cloned()
-                .map(|p| p.to_km())
-                .collect();
-
-            let key_parameters = key_parameters
-                .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+            let key_parameters = key_parameters_to_km(&ak.attestKeyParams)
+                .map_err(map_key_parameter_conversion_error)
                 .map_err(map_ks_error)?;
             Some(AttestationKey {
                 key_blob: ak.keyBlob.clone(),
@@ -568,21 +568,12 @@ impl IKeyMintDevice for KeyMintWrapper {
     ) -> rsbinder::status::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
-        let key_parameters: Result<Vec<KeyParam>> =
-            key_params.iter().cloned().map(|p| p.to_km()).collect();
-        let key_parameters = key_parameters
-            .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+        let key_parameters = key_parameters_to_km(key_params)
+            .map_err(map_key_parameter_conversion_error)
             .map_err(map_ks_error)?;
         let attestation_key = if let Some(ak) = attestation_key {
-            let key_parameters: Result<Vec<KeyParam>> = ak
-                .attestKeyParams
-                .iter()
-                .cloned()
-                .map(|p| p.to_km())
-                .collect();
-
-            let key_parameters = key_parameters
-                .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+            let key_parameters = key_parameters_to_km(&ak.attestKeyParams)
+                .map_err(map_key_parameter_conversion_error)
                 .map_err(map_ks_error)?;
             Some(AttestationKey {
                 key_blob: ak.keyBlob.clone(),
@@ -594,7 +585,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         };
 
         let key_format = kmr_wire::keymint::KeyFormat::try_from(key_format.0)
-            .map_err(|_| Status::new_service_specific_error(ErrorCode::INVALID_ARGUMENT.0, None))?;
+            .map_err(key_parameter_conversion_status)?;
 
         let req = PerformOpReq::DeviceImportKey(ImportKeyRequest {
             key_params: key_parameters,
@@ -627,13 +618,8 @@ impl IKeyMintDevice for KeyMintWrapper {
     ) -> rsbinder::status::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
-        let unwrapping_params: Result<Vec<KeyParam>> = unwrapping_params
-            .iter()
-            .cloned()
-            .map(|p| p.to_km())
-            .collect();
-        let unwrapping_params = unwrapping_params
-            .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+        let unwrapping_params = key_parameters_to_km(unwrapping_params)
+            .map_err(map_key_parameter_conversion_error)
             .map_err(map_ks_error)?;
 
         let req = PerformOpReq::DeviceImportWrappedKey(ImportWrappedKeyRequest {
@@ -669,10 +655,8 @@ impl IKeyMintDevice for KeyMintWrapper {
         key_blob_to_upgrade: &[u8],
         upgrade_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
     ) -> rsbinder::status::Result<Vec<u8>> {
-        let upgrade_params: Result<Vec<KeyParam>> =
-            upgrade_params.iter().cloned().map(|p| p.to_km()).collect();
-        let upgrade_params = upgrade_params
-            .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+        let upgrade_params = key_parameters_to_km(upgrade_params)
+            .map_err(map_key_parameter_conversion_error)
             .map_err(map_ks_error)?;
 
         let req = PerformOpReq::DeviceUpgradeKey(UpgradeKeyRequest {
@@ -879,10 +863,8 @@ impl IKeyMintDevice for KeyMintWrapper {
         &self,
         info: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
     ) -> rsbinder::status::Result<()> {
-        let additional_info: Result<Vec<KeyParam>> =
-            info.iter().cloned().map(|p| p.to_km()).collect();
-        let additional_info = additional_info
-            .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
+        let additional_info = key_parameters_to_km(info)
+            .map_err(map_key_parameter_conversion_error)
             .map_err(map_ks_error)?;
 
         let req = PerformOpReq::SetAdditionalAttestationInfo(SetAdditionalAttestationInfoRequest {

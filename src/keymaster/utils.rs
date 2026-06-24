@@ -45,7 +45,7 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Result};
 use kmr_wire::keymint::{self, KeyParam};
-use kmr_wire::KeySizeInBits;
+use kmr_wire::{KeySizeInBits, ValueNotRecognized};
 use log::{debug, error, info, warn};
 use rsbinder::{
     get_calling_uid, hub, FromIBinder, ProcessState, SIBinder, Status, StatusCode, Strong,
@@ -453,6 +453,34 @@ pub fn key_parameters_to_authorizations(parameters: Vec<KeyParameter>) -> Vec<Au
         .collect()
 }
 
+macro_rules! check_bool {
+    {
+        $val:expr
+    } => {
+        if let KeyParameterValue::BoolValue(true) = $val {
+            Ok(())
+        } else {
+            Err(ValueNotRecognized::Bool)
+        }
+    }
+}
+
+pub fn key_parameter_conversion_error_code(error: ValueNotRecognized) -> ErrorCode {
+    match error {
+        ValueNotRecognized::KeyPurpose => ErrorCode::UNSUPPORTED_PURPOSE,
+        ValueNotRecognized::Algorithm => ErrorCode::UNSUPPORTED_ALGORITHM,
+        ValueNotRecognized::BlockMode => ErrorCode::UNSUPPORTED_BLOCK_MODE,
+        ValueNotRecognized::PaddingMode => ErrorCode::UNSUPPORTED_PADDING_MODE,
+        ValueNotRecognized::Digest => ErrorCode::UNSUPPORTED_DIGEST,
+        ValueNotRecognized::KeyFormat => ErrorCode::UNSUPPORTED_KEY_FORMAT,
+        ValueNotRecognized::EcCurve => ErrorCode::UNSUPPORTED_EC_CURVE,
+        ValueNotRecognized::MlDsaVariant => {
+            ErrorCode(kmr_wire::keymint::ErrorCode::UnsupportedMlDsaVariant as i32)
+        }
+        _ => ErrorCode::INVALID_ARGUMENT,
+    }
+}
+
 impl HardwareAuthToken {
     pub fn to_km(&self) -> Result<kmr_wire::keymint::HardwareAuthToken, Error> {
         Ok(kmr_wire::keymint::HardwareAuthToken {
@@ -473,251 +501,306 @@ impl HardwareAuthToken {
 
 impl KmKeyParameter {
     pub fn to_km(self) -> Result<KeyParam> {
-        let tag = keymint::Tag::try_from(self.tag.0).unwrap_or(keymint::Tag::Invalid);
+        self.to_km_optional()
+            .map_err(|error| anyhow!("Failed to convert key parameter: {error:?}"))?
+            .ok_or_else(|| anyhow!(ks_err!("Invalid tag")))
+    }
+
+    pub fn to_km_optional(self) -> std::result::Result<Option<KeyParam>, ValueNotRecognized> {
+        let tag = match keymint::Tag::try_from(self.tag.0) {
+            Ok(tag) => tag,
+            Err(_) => return Ok(None),
+        };
         let value = self.value;
 
-        match tag {
-            keymint::Tag::Invalid => Err(anyhow!(ks_err!("Invalid tag"))),
+        Ok(match tag {
+            keymint::Tag::Invalid => None,
             keymint::Tag::Purpose => match value {
-                KeyParameterValue::KeyPurpose(v) => Ok(KeyParam::Purpose(
-                    kmr_wire::keymint::KeyPurpose::try_from(v.0)
-                        .map_err(|e| anyhow!("Failed to convert key purpose: {:?}", e))?,
+                KeyParameterValue::KeyPurpose(v) => Some(KeyParam::Purpose(
+                    kmr_wire::keymint::KeyPurpose::try_from(v.0)?,
                 )),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::KeyPurpose),
             },
             keymint::Tag::Algorithm => match value {
-                KeyParameterValue::Algorithm(v) => Ok(KeyParam::Algorithm(
-                    kmr_wire::keymint::Algorithm::try_from(v.0)
-                        .map_err(|e| anyhow!("Failed to convert algorithm: {:?}", e))?,
+                KeyParameterValue::Algorithm(v) => Some(KeyParam::Algorithm(
+                    kmr_wire::keymint::Algorithm::try_from(v.0)?,
                 )),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::Algorithm),
             },
             keymint::Tag::KeySize => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::KeySize(KeySizeInBits(v as u32))),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::KeySize(KeySizeInBits(v as u32))),
+                _ => return Err(ValueNotRecognized::Integer),
             },
             keymint::Tag::BlockMode => match value {
-                KeyParameterValue::BlockMode(v) => Ok(KeyParam::BlockMode(
-                    kmr_wire::keymint::BlockMode::try_from(v.0)
-                        .map_err(|e| anyhow!("Failed to convert block mode: {:?}", e))?,
+                KeyParameterValue::BlockMode(v) => Some(KeyParam::BlockMode(
+                    kmr_wire::keymint::BlockMode::try_from(v.0)?,
                 )),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::BlockMode),
             },
             keymint::Tag::Digest => match value {
-                KeyParameterValue::Digest(v) => Ok(KeyParam::Digest(
-                    kmr_wire::keymint::Digest::try_from(v.0)
-                        .map_err(|e| anyhow!("Failed to convert digest: {:?}", e))?,
-                )),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Digest(v) => {
+                    Some(KeyParam::Digest(kmr_wire::keymint::Digest::try_from(v.0)?))
+                }
+                _ => return Err(ValueNotRecognized::Digest),
             },
             keymint::Tag::Padding => match value {
-                KeyParameterValue::PaddingMode(v) => Ok(KeyParam::Padding(
-                    kmr_wire::keymint::PaddingMode::try_from(v.0)
-                        .map_err(|e| anyhow!("Failed to convert padding mode: {:?}", e))?,
+                KeyParameterValue::PaddingMode(v) => Some(KeyParam::Padding(
+                    kmr_wire::keymint::PaddingMode::try_from(v.0)?,
                 )),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::PaddingMode),
             },
-            keymint::Tag::CallerNonce => Ok(KeyParam::CallerNonce),
+            keymint::Tag::CallerNonce => {
+                check_bool!(value)?;
+                Some(KeyParam::CallerNonce)
+            }
             keymint::Tag::MinMacLength => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::MinMacLength(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::MinMacLength(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
             keymint::Tag::EcCurve => match value {
-                KeyParameterValue::EcCurve(v) => Ok(KeyParam::EcCurve(
-                    kmr_wire::keymint::EcCurve::try_from(v.0)
-                        .map_err(|e| anyhow!("Failed to convert EC curve: {:?}", e))?,
+                KeyParameterValue::EcCurve(v) => Some(KeyParam::EcCurve(
+                    kmr_wire::keymint::EcCurve::try_from(v.0)?,
                 )),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::EcCurve),
             },
             keymint::Tag::MlDsaVariant => match value {
-                KeyParameterValue::MlDsaVariant(v) => Ok(KeyParam::MlDsaVariant(
-                    kmr_wire::keymint::MlDsaVariant::try_from(v.0)
-                        .map_err(|e| anyhow!("Failed to convert ML-DSA variant: {:?}", e))?,
+                KeyParameterValue::MlDsaVariant(v) => Some(KeyParam::MlDsaVariant(
+                    kmr_wire::keymint::MlDsaVariant::try_from(v.0)?,
                 )),
-                KeyParameterValue::Integer(v) => Ok(KeyParam::MlDsaVariant(
-                    kmr_wire::keymint::MlDsaVariant::try_from(v)
-                        .map_err(|e| anyhow!("Failed to convert ML-DSA variant: {:?}", e))?,
-                )),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::MlDsaVariant),
             },
             keymint::Tag::RsaPublicExponent => match value {
                 KeyParameterValue::LongInteger(v) => {
-                    Ok(KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(v as u64)))
+                    Some(KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(v as u64)))
                 }
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::LongInteger),
             },
-            keymint::Tag::IncludeUniqueId => Ok(KeyParam::IncludeUniqueId),
+            keymint::Tag::IncludeUniqueId => {
+                check_bool!(value)?;
+                Some(KeyParam::IncludeUniqueId)
+            }
             keymint::Tag::RsaOaepMgfDigest => match value {
-                KeyParameterValue::Digest(v) => Ok(KeyParam::RsaOaepMgfDigest(
-                    kmr_wire::keymint::Digest::try_from(v.0)
-                        .map_err(|e| anyhow!("Failed to convert digest: {:?}", e))?,
+                KeyParameterValue::Digest(v) => Some(KeyParam::RsaOaepMgfDigest(
+                    kmr_wire::keymint::Digest::try_from(v.0)?,
                 )),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::Digest),
             },
-            keymint::Tag::BootloaderOnly => Ok(KeyParam::BootloaderOnly),
-            keymint::Tag::RollbackResistance => Ok(KeyParam::RollbackResistance),
-            keymint::Tag::HardwareType => Err(anyhow!(ks_err!("unavailable"))),
-            keymint::Tag::EarlyBootOnly => Ok(KeyParam::EarlyBootOnly),
+            keymint::Tag::BootloaderOnly => {
+                check_bool!(value)?;
+                Some(KeyParam::BootloaderOnly)
+            }
+            keymint::Tag::RollbackResistance => {
+                check_bool!(value)?;
+                Some(KeyParam::RollbackResistance)
+            }
+            keymint::Tag::HardwareType => return Err(ValueNotRecognized::Tag),
+            keymint::Tag::EarlyBootOnly => {
+                check_bool!(value)?;
+                Some(KeyParam::EarlyBootOnly)
+            }
             keymint::Tag::ActiveDatetime => match value {
                 KeyParameterValue::DateTime(ms_since_epoch) => {
-                    Ok(KeyParam::ActiveDatetime(keymint::DateTime {
+                    Some(KeyParam::ActiveDatetime(keymint::DateTime {
                         ms_since_epoch,
                     }))
                 }
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::DateTime),
             },
             keymint::Tag::OriginationExpireDatetime => match value {
                 KeyParameterValue::DateTime(ms_since_epoch) => {
-                    Ok(KeyParam::OriginationExpireDatetime(keymint::DateTime {
+                    Some(KeyParam::OriginationExpireDatetime(keymint::DateTime {
                         ms_since_epoch,
                     }))
                 }
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::DateTime),
             },
             keymint::Tag::UsageExpireDatetime => match value {
                 KeyParameterValue::DateTime(ms_since_epoch) => {
-                    Ok(KeyParam::UsageExpireDatetime(keymint::DateTime {
+                    Some(KeyParam::UsageExpireDatetime(keymint::DateTime {
                         ms_since_epoch,
                     }))
                 }
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::DateTime),
             },
-            keymint::Tag::MinSecondsBetweenOps => Err(anyhow!(ks_err!("Not implemented"))),
+            keymint::Tag::MinSecondsBetweenOps => return Err(ValueNotRecognized::Tag),
             keymint::Tag::MaxUsesPerBoot => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::MaxUsesPerBoot(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::MaxUsesPerBoot(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
             keymint::Tag::UsageCountLimit => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::UsageCountLimit(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::UsageCountLimit(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
             keymint::Tag::UserId => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::UserId(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::UserId(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
             keymint::Tag::UserSecureId => match value {
-                KeyParameterValue::LongInteger(v) => Ok(KeyParam::UserSecureId(v as u64)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::LongInteger(v) => Some(KeyParam::UserSecureId(v as u64)),
+                _ => return Err(ValueNotRecognized::LongInteger),
             },
-            keymint::Tag::NoAuthRequired => Ok(KeyParam::NoAuthRequired),
+            keymint::Tag::NoAuthRequired => {
+                check_bool!(value)?;
+                Some(KeyParam::NoAuthRequired)
+            }
             keymint::Tag::UserAuthType => match value {
                 KeyParameterValue::HardwareAuthenticatorType(v) => {
-                    Ok(KeyParam::UserAuthType(v.0 as u32))
+                    Some(KeyParam::UserAuthType(v.0 as u32))
                 }
-                KeyParameterValue::Integer(v) => Ok(KeyParam::UserAuthType(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::HardwareAuthenticatorType),
             },
             keymint::Tag::AuthTimeout => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::AuthTimeout(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::AuthTimeout(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
-            keymint::Tag::AllowWhileOnBody => Ok(KeyParam::AllowWhileOnBody),
-            keymint::Tag::TrustedUserPresenceRequired => Ok(KeyParam::TrustedUserPresenceRequired),
-            keymint::Tag::TrustedConfirmationRequired => Ok(KeyParam::TrustedConfirmationRequired),
-            keymint::Tag::UnlockedDeviceRequired => Ok(KeyParam::UnlockedDeviceRequired),
+            keymint::Tag::AllowWhileOnBody => {
+                check_bool!(value)?;
+                Some(KeyParam::AllowWhileOnBody)
+            }
+            keymint::Tag::TrustedUserPresenceRequired => {
+                check_bool!(value)?;
+                Some(KeyParam::TrustedUserPresenceRequired)
+            }
+            keymint::Tag::TrustedConfirmationRequired => {
+                check_bool!(value)?;
+                Some(KeyParam::TrustedConfirmationRequired)
+            }
+            keymint::Tag::UnlockedDeviceRequired => {
+                check_bool!(value)?;
+                Some(KeyParam::UnlockedDeviceRequired)
+            }
             keymint::Tag::ApplicationId => match value {
-                KeyParameterValue::Blob(v) => Ok(KeyParam::ApplicationId(v)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Blob(v) => Some(KeyParam::ApplicationId(v)),
+                _ => return Err(ValueNotRecognized::Blob),
             },
             keymint::Tag::ApplicationData => match value {
-                KeyParameterValue::Blob(v) => Ok(KeyParam::ApplicationData(v)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Blob(v) => Some(KeyParam::ApplicationData(v)),
+                _ => return Err(ValueNotRecognized::Blob),
             },
             keymint::Tag::CreationDatetime => match value {
                 KeyParameterValue::DateTime(ms_since_epoch) => {
-                    Ok(KeyParam::CreationDatetime(keymint::DateTime {
+                    Some(KeyParam::CreationDatetime(keymint::DateTime {
                         ms_since_epoch,
                     }))
                 }
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::DateTime),
             },
             keymint::Tag::Origin => match value {
-                KeyParameterValue::Origin(v) => Ok(KeyParam::Origin(
-                    kmr_wire::keymint::KeyOrigin::try_from(v.0)
-                        .map_err(|e| anyhow!("Failed to convert origin: {:?}", e))?,
+                KeyParameterValue::Origin(v) => Some(KeyParam::Origin(
+                    kmr_wire::keymint::KeyOrigin::try_from(v.0)?,
                 )),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::KeyOrigin),
             },
             keymint::Tag::RootOfTrust => match value {
-                KeyParameterValue::Blob(v) => Ok(KeyParam::RootOfTrust(v)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Blob(v) => Some(KeyParam::RootOfTrust(v)),
+                _ => return Err(ValueNotRecognized::Blob),
             },
             keymint::Tag::OsVersion => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::OsVersion(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::OsVersion(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
             keymint::Tag::OsPatchlevel => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::OsPatchlevel(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::OsPatchlevel(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
-            keymint::Tag::UniqueId => Err(anyhow!("Not implemented")),
-            keymint::Tag::AttestationChallenge => blob_param(value, KeyParam::AttestationChallenge),
+            keymint::Tag::UniqueId => return Err(ValueNotRecognized::Tag),
+            keymint::Tag::AttestationChallenge => {
+                blob_param(value, KeyParam::AttestationChallenge)?
+            }
             keymint::Tag::AttestationApplicationId => {
-                blob_param(value, KeyParam::AttestationApplicationId)
+                blob_param(value, KeyParam::AttestationApplicationId)?
             }
-            keymint::Tag::AttestationIdBrand => blob_param(value, KeyParam::AttestationIdBrand),
-            keymint::Tag::AttestationIdDevice => blob_param(value, KeyParam::AttestationIdDevice),
-            keymint::Tag::AttestationIdProduct => blob_param(value, KeyParam::AttestationIdProduct),
-            keymint::Tag::AttestationIdSerial => blob_param(value, KeyParam::AttestationIdSerial),
-            keymint::Tag::AttestationIdImei => blob_param(value, KeyParam::AttestationIdImei),
-            keymint::Tag::AttestationIdMeid => blob_param(value, KeyParam::AttestationIdMeid),
+            keymint::Tag::AttestationIdBrand => blob_param(value, KeyParam::AttestationIdBrand)?,
+            keymint::Tag::AttestationIdDevice => blob_param(value, KeyParam::AttestationIdDevice)?,
+            keymint::Tag::AttestationIdProduct => {
+                blob_param(value, KeyParam::AttestationIdProduct)?
+            }
+            keymint::Tag::AttestationIdSerial => blob_param(value, KeyParam::AttestationIdSerial)?,
+            keymint::Tag::AttestationIdImei => blob_param(value, KeyParam::AttestationIdImei)?,
+            keymint::Tag::AttestationIdMeid => blob_param(value, KeyParam::AttestationIdMeid)?,
             keymint::Tag::AttestationIdManufacturer => {
-                blob_param(value, KeyParam::AttestationIdManufacturer)
+                blob_param(value, KeyParam::AttestationIdManufacturer)?
             }
-            keymint::Tag::AttestationIdModel => blob_param(value, KeyParam::AttestationIdModel),
+            keymint::Tag::AttestationIdModel => blob_param(value, KeyParam::AttestationIdModel)?,
             keymint::Tag::VendorPatchlevel => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::VendorPatchlevel(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::VendorPatchlevel(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
             keymint::Tag::BootPatchlevel => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::BootPatchlevel(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::BootPatchlevel(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
-            keymint::Tag::DeviceUniqueAttestation => Ok(KeyParam::DeviceUniqueAttestation),
-            keymint::Tag::IdentityCredentialKey => Err(anyhow!(ks_err!("Not implemented"))),
-            keymint::Tag::StorageKey => Ok(KeyParam::StorageKey),
-            keymint::Tag::AttestationIdSecondImei => {
-                blob_param(value, KeyParam::AttestationIdSecondImei)
+            keymint::Tag::DeviceUniqueAttestation => {
+                check_bool!(value)?;
+                Some(KeyParam::DeviceUniqueAttestation)
             }
-            keymint::Tag::AssociatedData => Err(anyhow!(ks_err!("Not implemented"))),
-            keymint::Tag::Nonce => blob_param(value, KeyParam::Nonce),
+            keymint::Tag::IdentityCredentialKey => return Err(ValueNotRecognized::Tag),
+            keymint::Tag::StorageKey => {
+                check_bool!(value)?;
+                Some(KeyParam::StorageKey)
+            }
+            keymint::Tag::AttestationIdSecondImei => {
+                blob_param(value, KeyParam::AttestationIdSecondImei)?
+            }
+            keymint::Tag::AssociatedData => return Err(ValueNotRecognized::Tag),
+            keymint::Tag::Nonce => blob_param(value, KeyParam::Nonce)?,
             keymint::Tag::MacLength => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::MacLength(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::MacLength(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
-            keymint::Tag::ResetSinceIdRotation => Ok(KeyParam::ResetSinceIdRotation),
-            keymint::Tag::ConfirmationToken => Err(anyhow!(ks_err!("Not implemented"))),
-            keymint::Tag::CertificateSerial => blob_param(value, KeyParam::CertificateSerial),
-            keymint::Tag::CertificateSubject => blob_param(value, KeyParam::CertificateSubject),
+            keymint::Tag::ResetSinceIdRotation => {
+                check_bool!(value)?;
+                Some(KeyParam::ResetSinceIdRotation)
+            }
+            keymint::Tag::ConfirmationToken => return Err(ValueNotRecognized::Tag),
+            keymint::Tag::CertificateSerial => blob_param(value, KeyParam::CertificateSerial)?,
+            keymint::Tag::CertificateSubject => blob_param(value, KeyParam::CertificateSubject)?,
             keymint::Tag::CertificateNotBefore => match value {
                 KeyParameterValue::DateTime(ms_since_epoch) => {
-                    Ok(KeyParam::CertificateNotBefore(keymint::DateTime {
+                    Some(KeyParam::CertificateNotBefore(keymint::DateTime {
                         ms_since_epoch,
                     }))
                 }
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::DateTime),
             },
             keymint::Tag::CertificateNotAfter => match value {
                 KeyParameterValue::DateTime(ms_since_epoch) => {
-                    Ok(KeyParam::CertificateNotAfter(keymint::DateTime {
+                    Some(KeyParam::CertificateNotAfter(keymint::DateTime {
                         ms_since_epoch,
                     }))
                 }
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                _ => return Err(ValueNotRecognized::DateTime),
             },
             keymint::Tag::MaxBootLevel => match value {
-                KeyParameterValue::Integer(v) => Ok(KeyParam::MaxBootLevel(v as u32)),
-                _ => Err(anyhow!("Mismatched key parameter value type")),
+                KeyParameterValue::Integer(v) => Some(KeyParam::MaxBootLevel(v as u32)),
+                _ => return Err(ValueNotRecognized::Integer),
             },
-            keymint::Tag::ModuleHash => blob_param(value, KeyParam::ModuleHash),
-        }
+            keymint::Tag::ModuleHash => blob_param(value, KeyParam::ModuleHash)?,
+        })
     }
 }
 
-fn blob_param(value: KeyParameterValue, f: impl FnOnce(Vec<u8>) -> KeyParam) -> Result<KeyParam> {
+pub fn key_parameters_to_km(
+    parameters: &[KmKeyParameter],
+) -> std::result::Result<Vec<KeyParam>, ValueNotRecognized> {
+    parameters
+        .iter()
+        .cloned()
+        .try_fold(Vec::new(), |mut result, param| {
+            if let Some(param) = param.to_km_optional()? {
+                result.push(param);
+            }
+            Ok(result)
+        })
+}
+
+fn blob_param(
+    value: KeyParameterValue,
+    f: impl FnOnce(Vec<u8>) -> KeyParam,
+) -> std::result::Result<Option<KeyParam>, ValueNotRecognized> {
     match value {
-        KeyParameterValue::Blob(v) => Ok(f(v)),
-        _ => Err(anyhow!("Mismatched key parameter value type")),
+        KeyParameterValue::Blob(v) => Ok(Some(f(v))),
+        _ => Err(ValueNotRecognized::Blob),
     }
 }
 

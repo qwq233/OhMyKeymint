@@ -1618,6 +1618,16 @@ fn synthetic_parse_error_status_code(error: &anyhow::Error) -> StatusCode {
     error_status_code(error).unwrap_or(StatusCode::BadValue)
 }
 
+fn synthetic_parse_error_reply(error: &anyhow::Error) -> anyhow::Result<SyntheticReply> {
+    let status = synthetic_parse_error_status_code(error);
+    if status == StatusCode::UnexpectedNull {
+        return Ok(synthetic_parcel_reply(parcel::build_status_reply(
+            &Status::from(status),
+        )?));
+    }
+    Ok(SyntheticReply::Status(status.into()))
+}
+
 fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<OutboundReply> {
     if let Some(status) = error_status(error) {
         return build_omk_status_reply(status);
@@ -2019,7 +2029,7 @@ unsafe fn synthetic_base_transaction_reply(
             synthetic_parcel_reply(parcel::build_raw_i32_reply(synthetic_debug_pid())?)
         }
         rsbinder::SHELL_COMMAND_TRANSACTION | rsbinder::SYSPROPS_TRANSACTION => {
-            synthetic_parcel_reply(parcel::build_void_reply()?)
+            synthetic_parcel_reply(parcel::build_empty_reply())
         }
         rsbinder::DUMP_TRANSACTION => {
             let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
@@ -2093,11 +2103,16 @@ fn can_execute_synthetic_one_way(kind: SyntheticTargetKind, code: u32) -> bool {
     match kind {
         SyntheticTargetKind::SecurityLevel => matches!(
             identify::security_level_method_from_code(code),
-            Some(SecurityLevelMethod::ImportKey)
+            Some(SecurityLevelMethod::GenerateKey | SecurityLevelMethod::ImportKey)
         ),
         SyntheticTargetKind::Operation => matches!(
             identify::operation_method_from_code(code),
-            Some(OperationMethod::Update | OperationMethod::Finish | OperationMethod::Abort)
+            Some(
+                OperationMethod::UpdateAad
+                    | OperationMethod::Update
+                    | OperationMethod::Finish
+                    | OperationMethod::Abort
+            )
         ),
     }
 }
@@ -2287,21 +2302,10 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
                         "[Injector][Synthetic] failed to parse synthetic security-level request target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning {}",
                         target.ptr, target.cookie, tr.code, error, status
                     );
-                    return Ok(SyntheticReply::Status(status.into()));
+                    return synthetic_parse_error_reply(&error);
                 }
             };
             let method = request.method();
-            let allow_unknown_omk_route =
-                should_allow_omk_grant_security_level_request(&request, &decision, &caller);
-            if !decision.allowed && !allow_unknown_omk_route {
-                warn!(
-                    "[Injector][Synthetic] denied security-level {:?} for uid={} pid={} packages={:?} reason={:?}; returning PERMISSION_DENIED",
-                    method, caller.uid, caller.pid, decision.packages, decision.reason
-                );
-                return Ok(synthetic_parcel_reply(build_service_specific_reply(
-                    ResponseCode::PERMISSION_DENIED.0,
-                )?));
-            }
             if let Some(reply) =
                 synthetic_security_level_empty_blob_reply(&request, method, &caller)?
             {
@@ -2309,7 +2313,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
             }
 
             info!(
-                "[Injector][Synthetic] handling {} security-level {:?} uid={} pid={} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} packages={:?}",
+                "[Injector][Synthetic] handling {} security-level {:?} uid={} pid={} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} packages={:?} allowed={} reason={:?}",
                 command_name,
                 method,
                 caller.uid,
@@ -2318,6 +2322,8 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
                 target.cookie,
                 target_info.security_level,
                 decision.packages,
+                decision.allowed,
+                decision.reason,
             );
 
             let pending = PendingSecurityLevelCall {
@@ -2356,7 +2362,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
                         "[Injector][Synthetic] failed to parse synthetic operation request target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning {}",
                         target.ptr, target.cookie, tr.code, error, status
                     );
-                    return Ok(SyntheticReply::Status(status.into()));
+                    return synthetic_parse_error_reply(&error);
                 }
             };
             let method = request.method();
@@ -3450,6 +3456,24 @@ mod tests {
         assert!(status.is_ok(), "{label} should be OK");
     }
 
+    fn assert_synthetic_empty_parcel_reply(reply: SyntheticReply, label: &str) {
+        let SyntheticReply::Parcel(reply) = reply else {
+            panic!("{label} should be an empty parcel reply");
+        };
+        assert_eq!(reply.data_size(), 0, "{label} data size");
+        assert_eq!(reply.offsets_size(), 0, "{label} offsets size");
+    }
+
+    fn assert_synthetic_exception_reply(reply: SyntheticReply, expected: ExceptionCode) {
+        let SyntheticReply::Parcel(mut reply) = reply else {
+            panic!("expected synthetic status parcel reply");
+        };
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let status = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("status reply should parse");
+        assert_eq!(status.exception_code(), expected);
+    }
+
     fn assert_synthetic_raw_i32_reply(reply: SyntheticReply, expected: i32) {
         let SyntheticReply::Parcel(mut reply) = reply else {
             panic!("raw i32 reply should be a parcel");
@@ -3677,13 +3701,13 @@ mod tests {
         let shell_tr = transaction_for_parcel(target, rsbinder::SHELL_COMMAND_TRANSACTION, &empty);
         let shell = unsafe { handle_synthetic_br_transaction(&shell_tr, None, "BR_TRANSACTION") }
             .expect("stale synthetic shell should be consumed");
-        assert_synthetic_ok_reply(shell, "stale synthetic shell");
+        assert_synthetic_empty_parcel_reply(shell, "stale synthetic shell");
 
         let sysprops_tr = transaction_for_parcel(target, rsbinder::SYSPROPS_TRANSACTION, &empty);
         let sysprops =
             unsafe { handle_synthetic_br_transaction(&sysprops_tr, None, "BR_TRANSACTION") }
                 .expect("stale synthetic sysprops should be consumed");
-        assert_synthetic_ok_reply(sysprops, "stale synthetic sysprops");
+        assert_synthetic_empty_parcel_reply(sysprops, "stale synthetic sysprops");
 
         let mut dump_data = dump_transaction_data(0, &[]);
         let mut offsets = [0usize];
@@ -3775,7 +3799,7 @@ mod tests {
         }
         .expect("shell handling should not fail")
         .expect("shell should produce a reply");
-        assert_synthetic_ok_reply(shell, "shell");
+        assert_synthetic_empty_parcel_reply(shell, "shell");
 
         let sysprops_tr = transaction_for_parcel(target, rsbinder::SYSPROPS_TRANSACTION, &empty);
         let sysprops = unsafe {
@@ -3787,7 +3811,7 @@ mod tests {
         }
         .expect("sysprops handling should not fail")
         .expect("sysprops should produce a reply");
-        assert_synthetic_ok_reply(sysprops, "sysprops");
+        assert_synthetic_empty_parcel_reply(sysprops, "sysprops");
 
         let start_recording_tr =
             transaction_for_parcel(target, rsbinder::START_RECORDING_TRANSACTION, &empty);
@@ -4442,6 +4466,98 @@ mod tests {
             .unwrap_or_else(|error| panic!("{label} missing args should be handled: {error:#}"));
             assert_synthetic_status(reply, StatusCode::NotEnoughData);
         }
+    }
+
+    #[test]
+    fn synthetic_unexpected_null_parse_errors_are_status_replies() {
+        let _guard = route_state_test_guard();
+
+        let security_level_target = LocalBinderTarget {
+            ptr: 0x2236,
+            cookie: 0x6680,
+        };
+        tracker::remember_security_level_target(
+            security_level_target,
+            SecurityLevelTargetInfo {
+                security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
+                preferred_route: RouteTarget::Omk,
+                source_method: ServiceMethod::GetKeyEntry,
+            },
+        );
+        let mut null_array_request = request_parcel(identify::KEYSTORE_SECURITY_LEVEL_INTERFACE);
+        null_array_request.write(&sample_key_descriptor()).unwrap();
+        null_array_request.write(&-1i32).unwrap();
+        null_array_request.write(&false).unwrap();
+        let null_array_tr = transaction_for_parcel(
+            security_level_target,
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#createOperation,
+            &null_array_request,
+        );
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(
+                &null_array_tr,
+                security_level_target,
+                SyntheticTargetInfo {
+                    kind: SyntheticTargetKind::SecurityLevel,
+                    caller: None,
+                },
+                None,
+                "BR_TRANSACTION",
+            )
+        }
+        .expect("null array createOperation should be handled");
+        assert_synthetic_exception_reply(reply, ExceptionCode::NullPointer);
+
+        let mut null_key_request = request_parcel(identify::KEYSTORE_SECURITY_LEVEL_INTERFACE);
+        null_key_request
+            .write(&rsbinder::NULL_PARCELABLE_FLAG)
+            .unwrap();
+        let null_key_tr = transaction_for_parcel(
+            security_level_target,
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
+            &null_key_request,
+        );
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(
+                &null_key_tr,
+                security_level_target,
+                SyntheticTargetInfo {
+                    kind: SyntheticTargetKind::SecurityLevel,
+                    caller: None,
+                },
+                None,
+                "BR_TRANSACTION",
+            )
+        }
+        .expect("null key deleteKey should be handled");
+        assert_synthetic_exception_reply(reply, ExceptionCode::NullPointer);
+
+        let operation_target = LocalBinderTarget {
+            ptr: 0x2237,
+            cookie: 0x6681,
+        };
+        let operation_info = SyntheticTargetInfo {
+            kind: SyntheticTargetKind::Operation,
+            caller: Some(CallerIdentity::new(10002, 2000)),
+        };
+        let mut null_input_request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
+        null_input_request.write(&-1i32).unwrap();
+        let null_input_tr = transaction_for_parcel(
+            operation_target,
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#update,
+            &null_input_request,
+        );
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(
+                &null_input_tr,
+                operation_target,
+                operation_info,
+                None,
+                "BR_TRANSACTION",
+            )
+        }
+        .expect("null operation update should be handled");
+        assert_synthetic_exception_reply(reply, ExceptionCode::NullPointer);
     }
 
     #[test]
@@ -6166,17 +6282,17 @@ mod tests {
             SyntheticTargetKind::Operation,
             crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort
         ));
-        assert!(!can_execute_synthetic_one_way(
+        assert!(can_execute_synthetic_one_way(
             SyntheticTargetKind::Operation,
             crate::android::system::keystore2::IKeystoreOperation::transactions::r#updateAad
+        ));
+        assert!(can_execute_synthetic_one_way(
+            SyntheticTargetKind::SecurityLevel,
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#generateKey
         ));
         assert!(!can_execute_synthetic_one_way(
             SyntheticTargetKind::SecurityLevel,
             crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#createOperation
-        ));
-        assert!(!can_execute_synthetic_one_way(
-            SyntheticTargetKind::SecurityLevel,
-            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#generateKey
         ));
     }
 }
