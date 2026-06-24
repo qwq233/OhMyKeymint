@@ -455,7 +455,7 @@ impl IKeyMintDevice for KeyMintWrapper {
 
         let out_params = key_params_to_aidl(&result.params);
         let out_params = out_params.map_err(|error| {
-            log::error!("Failed to convert begin out params to AIDL: {error:#}");
+            log::error!("failed to convert begin out params to AIDL: {error:#}");
             Status::new_service_specific_error(ErrorCode::UNKNOWN_ERROR.0, None)
         })?;
 
@@ -1193,7 +1193,7 @@ fn bootstrap_auth_token_hmac(ta: &mut KeyMintTa, crypto: &CryptoConfig) -> Resul
         ta.set_device_hmac_key(&key)
             .map_err(|error| anyhow::anyhow!("{error:?}"))
             .context(err!("Failed to configure auth-token HMAC key"))?;
-        info!("Initialized auth-token HMAC key from configured key material");
+        info!("initialized auth-token HMAC key from configured key material");
         return Ok(());
     }
 
@@ -1216,7 +1216,7 @@ fn bootstrap_auth_token_hmac(ta: &mut KeyMintTa, crypto: &CryptoConfig) -> Resul
     }
     match resp.rsp {
         Some(PerformOpRsp::SharedSecretComputeSharedSecret(rsp)) if rsp.ret.len() == 32 => {
-            info!("Initialized auth-token HMAC key from configured shared-secret parameters");
+            info!("initialized auth-token HMAC key from configured shared-secret parameters");
             Ok(())
         }
         _ => Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
@@ -1251,7 +1251,7 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
         match sdd::HostSddManager::new(&mut rng) {
             Result::Ok(v) => Some(Box::new(v)),
             Err(e) => {
-                error!("Failed to initialize secure deletion data manager: {:?}", e);
+                error!("failed to initialize secure deletion data manager: {:?}", e);
                 None
             }
         };
@@ -1371,7 +1371,7 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
                     .context(err!("Failed to set additional attestation info"));
             }
         } else {
-            warn!("APEX module info bundle unavailable; skipping moduleHash attestation bootstrap");
+            warn!("moduleHash attestation bootstrap skipped because APEX module info bundle is unavailable");
         }
     } else {
         info!(
@@ -1408,7 +1408,7 @@ pub fn reset_initialized_keymint_wrappers() -> Result<()> {
             inner: wrapper.clone(),
         };
         if let Err(error) = keymint.reset_keymint_ta() {
-            log::warn!("Failed to reset optional StrongBox keymint wrapper: {error:#}");
+            log::warn!("failed to reset optional StrongBox keymint wrapper: {error:#}");
         }
     }
 

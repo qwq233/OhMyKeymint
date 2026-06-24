@@ -84,7 +84,7 @@ pub fn bootstrap_privileged_helper() -> Result<()> {
         if HELPER.set(Mutex::new(client)).is_err() {
             log::debug!("resetprop helper was already installed");
         } else {
-            log::info!("Started privileged resetprop helper process pid={pid}");
+            log::info!("started privileged resetprop helper process pid={pid}");
         }
     }
 

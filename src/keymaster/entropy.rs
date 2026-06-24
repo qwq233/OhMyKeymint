@@ -34,7 +34,7 @@ pub fn register_feeder() {
             .filter_map(|level| match get_keymint_wrapper(*level) {
                 Ok(device) => Some((device, *level)),
                 Err(e) => {
-                    warn!("Failed to get KeyMint device for entropy feed: {e:#}");
+                    warn!("failed to get KeyMint device for entropy feed: {e:#}");
                     None
                 }
             })
@@ -47,7 +47,7 @@ pub fn register_feeder() {
         let data = match get_entropy(devices_to_feed.len() * ENTROPY_SIZE) {
             Ok(data) => data,
             Err(e) => {
-                error!("Failed to retrieve entropy for KeyMint device: {e:#}");
+                error!("failed to retrieve entropy for KeyMint device: {e:#}");
                 return;
             }
         };

@@ -124,7 +124,7 @@ pub fn set_sockcreate_con(context: &str) -> Result<()> {
     let context = CString::new(context).context("Invalid context string")?;
     let context = context.as_bytes_with_nul();
     if let Err(e) = std::fs::write("/proc/thread-self/attr/sockcreate", context) {
-        error!("Failed to set sockcreate context: {}", e);
+        error!("failed to set sockcreate context: {}", e);
 
         let tid = unsafe { libc::gettid() as usize };
         std::fs::write(format!("/proc/{}/attr/sockcreate", tid), context)
@@ -300,7 +300,7 @@ pub fn find_process_by_name(target_name: &str) -> Result<(i32, PathBuf)> {
         let pid = pid_str.parse::<i32>().unwrap();
         let target = std::fs::read_link(path.join("exe"))
             .unwrap_or_else(|_| PathBuf::from(format!("/proc/{pid}/exe")));
-        debug!("Found target executable: {:?} (PID {})", target, pid);
+        debug!("found target executable path={:?} pid={}", target, pid);
 
         return Ok((pid, target));
     }

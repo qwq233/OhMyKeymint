@@ -133,7 +133,7 @@ impl HostSddManager {
         rng: &mut dyn crypto::Rng,
         reason: &str,
     ) -> Result<(), Error> {
-        error!("Secure deletion data invalid, reinitializing: {reason}");
+        error!("secure deletion data is invalid; reinitializing: {reason}");
         self.data = storage::SecureDeletionData::default();
         Self::randomize_factory_secret(&mut self.data, rng);
         write_sdd_file(&self.data)
@@ -142,7 +142,7 @@ impl HostSddManager {
     fn init(&mut self, rng: &mut dyn crypto::Rng) -> Result<(), Error> {
         // Restore data from disk if it was previously saved.
         if path::Path::new(SECURE_DELETION_DATA_FILE).exists() {
-            info!("Secure deletion data file found. Parsing.");
+            info!("parsing existing secure deletion data file");
             self.data = read_sdd_file()?;
             if let Err(reason) = Self::validate_loaded_data(&mut self.data) {
                 return self.reinitialize_persisted_state(rng, &reason);
@@ -150,7 +150,7 @@ impl HostSddManager {
             return Ok(());
         }
 
-        info!("No secure deletion data file found. Creating one.");
+        info!("creating secure deletion data file");
 
         // Initialize factory reset secret.
         Self::randomize_factory_secret(&mut self.data, rng);
@@ -199,7 +199,7 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
             "ran out of slot IDs"
         ))?;
 
-        info!("Generating new secret with slot ID: {:?}", slot_id);
+        info!("generating secure deletion secret slot_id={:?}", slot_id);
 
         assert!(
             !self.data.secure_deletion_secrets.contains_key(&slot_id),
@@ -234,7 +234,7 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
         slot: keyblob::SecureDeletionSlot,
     ) -> Result<keyblob::SecureDeletionData, Error> {
         let slot_id = slot.0;
-        info!("Fetching secret with slot ID: {:?}", slot_id);
+        info!("fetching secure deletion secret slot_id={:?}", slot_id);
 
         let secret = self
             .data
@@ -249,7 +249,7 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
 
     fn delete_secret(&mut self, slot: keyblob::SecureDeletionSlot) -> Result<(), Error> {
         let slot_id = slot.0;
-        info!("Deleting secret with slot ID: {:?}", slot_id);
+        info!("deleting secure deletion secret slot_id={:?}", slot_id);
 
         let secret = self
             .data
@@ -270,7 +270,7 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
     }
 
     fn delete_all(&mut self) {
-        info!("Deleting all secrets");
+        info!("deleting all secure deletion secrets");
         self.data = storage::SecureDeletionData::default();
         if path::Path::new(SECURE_DELETION_DATA_FILE).exists() {
             // We want to guarantee that if this function returns, all secrets have been
@@ -278,7 +278,7 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
             for _ in 0..5 {
                 match fs::remove_file(SECURE_DELETION_DATA_FILE) {
                     Ok(_) => return,
-                    Err(e) => error!("Couldn't delete file: {:?}", e),
+                    Err(e) => error!("failed to delete secure deletion data file: {:?}", e),
                 }
             }
             panic!("FATAL: Failed to delete secure deletion data file.");

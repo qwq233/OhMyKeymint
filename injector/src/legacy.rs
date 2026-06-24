@@ -33,9 +33,7 @@ pub fn resolve_package_names_for_uid(uid: u32) -> Result<Vec<String>> {
         match resolve_package_names_for_uid_once(uid) {
             Ok(package_names) => return Ok(package_names),
             Err(error) if !retried && crate::ipc::is_dead_object_error(&error) => {
-                log::warn!(
-                    "[Injector][IPC] legacy provider hit DeadObject; clearing cache and retrying once"
-                );
+                log::warn!("legacy provider hit DeadObject; clearing cache and retrying once");
                 clear_provider_cache();
                 retried = true;
             }

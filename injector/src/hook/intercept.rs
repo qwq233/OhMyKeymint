@@ -81,7 +81,7 @@ unsafe fn parse_write_buffer(mut ptr: *mut c_void, size: u64) {
     while offset < total_size {
         if total_size.saturating_sub(offset) < size_of::<u32>() {
             warn!(
-                "[BinderInterceptor][pre] truncated binder command header: remaining={}",
+                "truncated binder write command header: remaining={}",
                 total_size.saturating_sub(offset)
             );
             break;
@@ -94,7 +94,7 @@ unsafe fn parse_write_buffer(mut ptr: *mut c_void, size: u64) {
         let cmd_size = _ioc_size(cmd);
         if cmd_size > total_size.saturating_sub(offset) {
             warn!(
-                "[BinderInterceptor][pre] truncated binder command payload: nr={} size={} remaining={}",
+                "truncated binder write command payload: nr={} size={} remaining={}",
                 _ioc_nr(cmd),
                 cmd_size,
                 total_size.saturating_sub(offset)
@@ -127,7 +127,7 @@ unsafe fn parse_write_buffer(mut ptr: *mut c_void, size: u64) {
                         );
                     } else {
                         warn!(
-                            "[BinderInterceptor][pre] unexpected payload size {} for binder command nr={}",
+                            "unexpected binder write command payload size {} for nr={}",
                             cmd_size, cmd_nr
                         );
                     }
@@ -152,7 +152,7 @@ unsafe fn parse_write_buffer(mut ptr: *mut c_void, size: u64) {
                         );
                     } else {
                         warn!(
-                            "[BinderInterceptor][pre] unexpected SG payload size {} for binder command nr={}",
+                            "unexpected binder write SG payload size {} for nr={}",
                             cmd_size, cmd_nr
                         );
                     }
@@ -177,7 +177,7 @@ unsafe fn parse_read_buffer(
     while offset < total_size {
         if total_size.saturating_sub(offset) < size_of::<u32>() {
             warn!(
-                "[BinderInterceptor][post] truncated binder command header: remaining={}",
+                "truncated binder read command header: remaining={}",
                 total_size.saturating_sub(offset)
             );
             break;
@@ -190,7 +190,7 @@ unsafe fn parse_read_buffer(
         let cmd_size = _ioc_size(cmd);
         if cmd_size > total_size.saturating_sub(offset) {
             warn!(
-                "[BinderInterceptor][post] truncated binder command payload: nr={} size={} remaining={}",
+                "truncated binder read command payload: nr={} size={} remaining={}",
                 _ioc_nr(cmd),
                 cmd_size,
                 total_size.saturating_sub(offset)
@@ -202,9 +202,7 @@ unsafe fn parse_read_buffer(
         let is_read = _ioc_dir(cmd) == 2;
 
         if cmd == BR_TRANSACTION_COMPLETE_CMD && consume_synthetic_transaction_complete(fd) {
-            debug!(
-                "[Injector][Synthetic] consumed hidden BR_TRANSACTION_COMPLETE for synthetic reply"
-            );
+            debug!("event=synthetic consumed hidden BR_TRANSACTION_COMPLETE for synthetic reply");
             fill_noop_command(ptr.sub(4), size_of::<u32>());
         } else if is_read {
             match cmd_nr {
@@ -243,10 +241,7 @@ unsafe fn parse_read_buffer(
                             None => {}
                         }
                     } else {
-                        warn!(
-                            "[BinderInterceptor][post] unexpected payload size {} for BR_TRANSACTION-like command",
-                            cmd_size
-                        );
+                        warn!("unexpected BR_TRANSACTION-like payload size {}", cmd_size);
                     }
                 }
                 BR_INCREFS_NR | BR_ACQUIRE_NR | BR_RELEASE_NR | BR_DECREFS_NR => {
@@ -276,13 +271,13 @@ unsafe fn parse_read_buffer(
                             };
                             if submitted {
                                 info!(
-                                    "[Injector][Synthetic] consumed binder ref command nr={} for ptr=0x{:x} cookie=0x{:x}",
+                                    "event=synthetic consumed binder ref command nr={} for ptr=0x{:x} cookie=0x{:x}",
                                     cmd_nr, target.ptr, target.cookie
                                 );
                                 fill_noop_command(ptr.sub(4), cmd_size + size_of::<u32>());
                             } else {
                                 warn!(
-                                    "[Injector][Synthetic] dropping binder ref command nr={} for ptr=0x{:x} cookie=0x{:x} after done submission failed",
+                                    "event=synthetic dropping binder ref command nr={} for ptr=0x{:x} cookie=0x{:x} after done submission failed",
                                     cmd_nr, target.ptr, target.cookie
                                 );
                                 fill_noop_command(ptr.sub(4), cmd_size + size_of::<u32>());
@@ -290,7 +285,7 @@ unsafe fn parse_read_buffer(
                         }
                     } else {
                         warn!(
-                            "[BinderInterceptor][post] unexpected payload size {} for binder ref command nr={}",
+                            "unexpected binder ref command payload size {} for nr={}",
                             cmd_size, cmd_nr
                         );
                     }
@@ -299,7 +294,7 @@ unsafe fn parse_read_buffer(
                     if cmd_size == size_of::<binder_transaction_data>() {
                         let tr = std::ptr::read_unaligned(ptr as *const binder_transaction_data);
                         debug!(
-                            ">>> [BinderInterceptor][post] BR_REPLY | target: {}, code: 0x{:x}, sender_euid: {}, sender_pid: {}, flags: 0x{:x}{}, parcel_size: {}, offsets_size: {}, parcel: {}",
+                            ">>> BR_REPLY | target: {}, code: 0x{:x}, sender_euid: {}, sender_pid: {}, flags: 0x{:x}{}, parcel_size: {}, offsets_size: {}, parcel: {}",
                             format_target(&tr),
                             tr.code,
                             tr.sender_euid,
@@ -311,10 +306,7 @@ unsafe fn parse_read_buffer(
                             preview_transaction_parcel(&tr),
                         );
                     } else {
-                        warn!(
-                            "[BinderInterceptor][post] unexpected payload size {} for BR_REPLY",
-                            cmd_size
-                        );
+                        warn!("unexpected BR_REPLY payload size {}", cmd_size);
                     }
                 }
                 _ => {}
@@ -336,7 +328,7 @@ unsafe fn handle_incoming_transaction(
     if let Some(reply) = handle_synthetic_br_transaction(tr, caller_sid.clone(), label) {
         if !submit_synthetic_transaction_reply(fd, old_ioctl_fn, tr, reply) {
             warn!(
-                "[Injector][Synthetic] dropping {} after synthetic reply submission failed",
+                "event=synthetic dropping {} after synthetic reply submission failed",
                 label
             );
         }
@@ -449,7 +441,7 @@ unsafe fn submit_write_buffer(
     );
     if ret < 0 {
         warn!(
-            "[Injector][Synthetic] failed to submit {} to binder driver: ret={} errno={}",
+            "event=synthetic failed to submit {} to binder driver: ret={} errno={}",
             label,
             ret,
             std::io::Error::last_os_error()
@@ -458,7 +450,7 @@ unsafe fn submit_write_buffer(
     }
     if bwr.write_consumed != write.len() {
         warn!(
-            "[Injector][Synthetic] incomplete {} write to binder driver: consumed={} expected={}",
+            "event=synthetic incomplete {} write to binder driver: consumed={} expected={}",
             label,
             bwr.write_consumed,
             write.len()
@@ -493,15 +485,13 @@ fn record_synthetic_transaction_complete(fd: c_int) {
     let mut pending = pending_synthetic_transaction_completions()
         .lock()
         .unwrap_or_else(|poisoned| {
-            warn!(
-                "[Injector][Synthetic] pending transaction-completion state was poisoned; recovering"
-            );
+            warn!("event=synthetic pending transaction-completion state was poisoned; recovering");
             poisoned.into_inner()
         });
     let count = pending.entry(key).or_insert(0);
     *count = count.saturating_add(1);
     debug!(
-        "[Injector][Synthetic] registered hidden BR_TRANSACTION_COMPLETE for fd={} thread={:?} pending={}",
+        "event=synthetic registered hidden BR_TRANSACTION_COMPLETE for fd={} thread={:?} pending={}",
         key.fd, key.thread_id, *count
     );
 }
@@ -511,9 +501,7 @@ fn consume_synthetic_transaction_complete(fd: c_int) -> bool {
     let mut pending = pending_synthetic_transaction_completions()
         .lock()
         .unwrap_or_else(|poisoned| {
-            warn!(
-                "[Injector][Synthetic] pending transaction-completion state was poisoned; recovering"
-            );
+            warn!("event=synthetic pending transaction-completion state was poisoned; recovering");
             poisoned.into_inner()
         });
     let Some(count) = pending.get_mut(&key) else {
@@ -525,7 +513,7 @@ fn consume_synthetic_transaction_complete(fd: c_int) -> bool {
         pending.remove(&key);
     }
     debug!(
-        "[Injector][Synthetic] consumed hidden BR_TRANSACTION_COMPLETE for fd={} thread={:?} remaining={}",
+        "event=synthetic consumed hidden BR_TRANSACTION_COMPLETE for fd={} thread={:?} remaining={}",
         key.fd, key.thread_id, remaining
     );
     true

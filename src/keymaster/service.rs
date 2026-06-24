@@ -97,7 +97,7 @@ impl KeystoreService {
             "retiring stale keybox-bound entries during service startup"
         ))?;
         if retired != 0 {
-            log::info!("Retired {retired} stale keybox-bound entries during service startup.");
+            log::info!("retired {retired} stale keybox-bound entries during service startup");
         }
 
         match result.register_security_level(SecurityLevel::TRUSTED_ENVIRONMENT) {

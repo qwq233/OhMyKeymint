@@ -68,7 +68,7 @@ pub fn bootstrap_device_ids(config_file: &mut ConfigFile) {
         telephony_field_needs_backfill(&device.meid, respect_user_telephony_override);
 
     if !imei_needs_backfill && !imei2_needs_backfill && !meid_needs_backfill {
-        log::debug!("Device identifiers already configured; skipping startup auto-fill");
+        log::debug!("device identifiers already configured; skipping telephony auto-fill");
         return;
     }
 
@@ -83,7 +83,7 @@ pub fn bootstrap_device_ids(config_file: &mut ConfigFile) {
     events.extend(apply_telephony_candidates(device, &device_id_candidates));
 
     if events.is_empty() {
-        log_device_id_state(device, "startup auto-fill left field empty");
+        log_device_id_state(device, "telephony auto-fill left fields empty");
         return;
     }
 
@@ -96,7 +96,7 @@ pub fn bootstrap_device_ids(config_file: &mut ConfigFile) {
         );
     }
 
-    log_device_id_state(device, "startup auto-fill result");
+    log_device_id_state(device, "telephony auto-fill result");
 }
 
 fn apply_telephony_candidates(
@@ -347,8 +347,8 @@ fn probe_telephony_api_candidates() -> Vec<IdentifierCandidate> {
                     ),
                 }
             }
-            Ok(None) => log::debug!("Telephony API IMEI slot {slot} returned no identifier"),
-            Err(error) => log::warn!("Telephony API IMEI slot {slot} probe failed: {error:#}"),
+            Ok(None) => log::debug!("telephony API IMEI slot {slot} returned no identifier"),
+            Err(error) => log::warn!("telephony API IMEI slot {slot} probe failed: {error:#}"),
         }
     }
 
@@ -364,8 +364,8 @@ fn probe_telephony_api_candidates() -> Vec<IdentifierCandidate> {
                     ),
                 }
             }
-            Ok(None) => log::debug!("Telephony API MEID slot {slot} returned no identifier"),
-            Err(error) => log::warn!("Telephony API MEID slot {slot} probe failed: {error:#}"),
+            Ok(None) => log::debug!("telephony API MEID slot {slot} returned no identifier"),
+            Err(error) => log::warn!("telephony API MEID slot {slot} probe failed: {error:#}"),
         }
     }
 
@@ -387,8 +387,8 @@ fn probe_device_id_candidates() -> Vec<IdentifierCandidate> {
                     ),
                 }
             }
-            Ok(None) => log::debug!("Device ID slot {slot} returned no identifier"),
-            Err(error) => log::warn!("Device ID slot {slot} probe failed: {error:#}"),
+            Ok(None) => log::debug!("device ID slot {slot} returned no identifier"),
+            Err(error) => log::warn!("device ID slot {slot} probe failed: {error:#}"),
         }
     }
 

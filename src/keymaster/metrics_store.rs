@@ -838,7 +838,7 @@ pub fn update_keystore_crash_count() {
         Ok(boot_id) => boot_id,
         Err(error) => {
             warn!(
-                "In update_keystore_crash_count: Failed to read boot ID due to: {error:?}. Therefore, keystore crashes will not be logged."
+                "failed to read boot ID while updating keystore crash count: {error:?}; keystore crashes will not be logged"
             );
             return;
         }
@@ -853,9 +853,8 @@ pub fn update_keystore_crash_count() {
         Err(error) => {
             warn!(
                 concat!(
-                    "In update_keystore_crash_count: ",
-                    "Failed to read the existing crash count due to: {:?}.",
-                    "Therefore, keystore crashes will not be logged."
+                    "failed to read existing keystore crash count: {:?}; ",
+                    "keystore crashes will not be logged"
                 ),
                 error
             );
@@ -868,10 +867,7 @@ pub fn update_keystore_crash_count() {
         format_crash_count_record(&boot_id, new_count),
     ) {
         error!(
-            concat!(
-                "In update_keystore_crash_count: ",
-                "Failed to write the crash count file due to error: {:?}"
-            ),
+            concat!("failed to write keystore crash count file: {:?}"),
             e
         );
     }

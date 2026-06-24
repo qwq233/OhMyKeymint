@@ -15,7 +15,7 @@ pub struct BypassGuard;
 impl BypassGuard {
     pub fn enter() -> Self {
         BYPASS_HOOK_DEPTH.with(|depth| depth.set(depth.get() + 1));
-        debug!("[Injector][Bypass] entered bypass scope");
+        debug!("entered bypass scope");
         Self
     }
 }
@@ -23,6 +23,6 @@ impl BypassGuard {
 impl Drop for BypassGuard {
     fn drop(&mut self) {
         BYPASS_HOOK_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-        debug!("[Injector][Bypass] exited bypass scope");
+        debug!("exited bypass scope");
     }
 }

@@ -266,7 +266,7 @@ fn evaluate_caller(
     let decision = filter::evaluate(&cfg.scoop, &cfg.filter, package_resolution);
     if decision.reason == FilterReason::Disabled {
         debug!(
-            "[Injector][Decision] package filter disabled; routing still follows per-method intercept settings"
+            "event=decision package filter disabled; routing still follows per-method intercept settings"
         );
     }
     decision
@@ -336,7 +336,7 @@ fn probe_omk_grant(caller: &CallerIdentity, grant: &KeyDescriptor) -> bool {
         Ok(false) => false,
         Err(error) => {
             debug!(
-                "[Injector][Decision] OMK grant probe failed for uid={} pid={} grant_nspace={}: {:#}",
+                "event=decision OMK grant probe failed for uid={} pid={} grant_nspace={}: {:#}",
                 caller.uid, caller.pid, grant.nspace, error
             );
             false
@@ -429,14 +429,14 @@ fn precompute_omk_grant_service_reply_with(
             }),
             Err(error) if omk_unavailable_error(&error) => {
                 warn!(
-                    "[Injector][Route] OMK grant unavailable for uid={} pid={}: {:#}; leaving original system request untouched",
+                    "event=route OMK grant unavailable for uid={} pid={}: {:#}; leaving original system request untouched",
                     caller.uid, caller.pid, error
                 );
                 OmkGrantPrecompute::PreserveSystem
             }
             Err(error) => {
                 warn!(
-                    "[Injector][Route] OMK grant failed for uid={} pid={}: {:#}; returning OMK error",
+                    "event=route OMK grant failed for uid={} pid={}: {:#}; returning OMK error",
                     caller.uid, caller.pid, error
                 );
                 OmkGrantPrecompute::Reply(PrecomputedServiceReply::Error(
@@ -452,14 +452,14 @@ fn precompute_omk_grant_service_reply_with(
                 }),
                 Err(error) if omk_unavailable_error(&error) => {
                     warn!(
-                        "[Injector][Route] OMK ungrant unavailable for uid={} pid={}: {:#}; leaving original system request untouched",
+                        "event=route OMK ungrant unavailable for uid={} pid={}: {:#}; leaving original system request untouched",
                         caller.uid, caller.pid, error
                     );
                     OmkGrantPrecompute::PreserveSystem
                 }
                 Err(error) => {
                     warn!(
-                        "[Injector][Route] OMK ungrant failed for uid={} pid={}: {:#}; returning OMK error",
+                        "event=route OMK ungrant failed for uid={} pid={}: {:#}; returning OMK error",
                         caller.uid, caller.pid, error
                     );
                     OmkGrantPrecompute::Reply(PrecomputedServiceReply::Error(
@@ -564,7 +564,7 @@ fn mark_mirror_state_dirty(
 ) {
     let was_dirty = kind.dirty().swap(true, Ordering::SeqCst);
     warn!(
-        "[Injector][Mirror] marked OMK mirror state dirty after failed {} {:?} mirror for uid={} pid={}{}",
+        "event=mirror marked OMK mirror state dirty after failed {} {:?} mirror for uid={} pid={}{}",
         kind.label(),
         method,
         caller.uid,
@@ -580,7 +580,7 @@ fn clear_mirror_state_dirty(
 ) {
     if kind.dirty().swap(false, Ordering::SeqCst) {
         debug!(
-            "[Injector][Mirror] cleared OMK {} mirror dirty state after successful {:?} mirror for uid={} pid={}",
+            "event=mirror cleared OMK {} mirror dirty state after successful {:?} mirror for uid={} pid={}",
             kind.label(),
             method,
             caller.uid,
@@ -599,7 +599,7 @@ fn log_dirty_mirror_retry(
     }
 
     warn!(
-        "[Injector][Mirror] OMK {} mirror state is dirty; retrying {:?} mirror for uid={} pid={}",
+        "event=mirror OMK {} mirror state is dirty; retrying {:?} mirror for uid={} pid={}",
         kind.label(),
         method,
         caller.uid,
@@ -701,7 +701,7 @@ fn remember_operation_target(target: LocalBinderTarget, info: OperationTargetInf
             let _guard = BypassGuard::enter();
             if let Err(status) = backend.r#abort() {
                 debug!(
-                    "[Injector][Route] previous OMK operation for carrier ptr=0x{:x} cookie=0x{:x} could not be aborted while replacing mapping: {}",
+                    "event=route previous OMK operation for carrier ptr=0x{:x} cookie=0x{:x} could not be aborted while replacing mapping: {}",
                     target.ptr, target.cookie, status
                 );
             }
@@ -734,14 +734,14 @@ fn take_operation_target(target: LocalBinderTarget) -> Option<OperationTargetInf
 fn drop_synthetic_operation_target(target: LocalBinderTarget) {
     let Some(info) = take_operation_target(target) else {
         debug!(
-            "[Injector][Synthetic] release for stale operation target ptr=0x{:x} cookie=0x{:x}",
+            "event=synthetic release for stale operation target ptr=0x{:x} cookie=0x{:x}",
             target.ptr, target.cookie
         );
         return;
     };
     if info.finalized {
         debug!(
-            "[Injector][Synthetic] release for finalized operation target ptr=0x{:x} cookie=0x{:x}",
+            "event=synthetic release for finalized operation target ptr=0x{:x} cookie=0x{:x}",
             target.ptr, target.cookie
         );
         return;
@@ -752,7 +752,7 @@ fn drop_synthetic_operation_target(target: LocalBinderTarget) {
     let _guard = BypassGuard::enter();
     if let Err(status) = backend.r#abort() {
         debug!(
-            "[Injector][Synthetic] drop abort for operation target ptr=0x{:x} cookie=0x{:x} failed: {}",
+            "event=synthetic drop abort for operation target ptr=0x{:x} cookie=0x{:x} failed: {}",
             target.ptr, target.cookie, status
         );
     }
@@ -769,7 +769,7 @@ pub(super) fn handle_synthetic_ref_command(target: LocalBinderTarget, command: u
         Some(SyntheticTargetKind::SecurityLevel) => true,
         None if is_synthetic_binder_target(target) => {
             warn!(
-                "[Injector][Synthetic] consuming stale synthetic binder ref command nr={} for ptr=0x{:x} cookie=0x{:x}",
+                "event=synthetic consuming stale synthetic binder ref command nr={} for ptr=0x{:x} cookie=0x{:x}",
                 command, target.ptr, target.cookie
             );
             true
@@ -863,7 +863,7 @@ fn register_synthetic_security_level_carrier(
     );
     remember_synthetic_target(target, SyntheticTargetKind::SecurityLevel, None);
     info!(
-        "[Injector][Synthetic] registered/reused security-level target ptr=0x{:x} cookie=0x{:x} security_level={:?} source_method={:?} uid={} pid={} sid='{}'",
+        "event=synthetic registered/reused security-level target ptr=0x{:x} cookie=0x{:x} security_level={:?} source_method={:?} uid={} pid={} sid='{}'",
         target.ptr, target.cookie, security_level, source_method, caller.uid, caller.pid, caller.sid
     );
     synthetic_binder_carrier(target)
@@ -886,7 +886,7 @@ fn register_synthetic_operation_carrier(
     );
     remember_synthetic_target(target, SyntheticTargetKind::Operation, Some(caller));
     info!(
-        "[Injector][Synthetic] registered operation target ptr=0x{:x} cookie=0x{:x} aad_allowed={} uid={} pid={} sid='{}'",
+        "event=synthetic registered operation target ptr=0x{:x} cookie=0x{:x} aad_allowed={} uid={} pid={} sid='{}'",
         target.ptr, target.cookie, aad_allowed, caller.uid, caller.pid, caller.sid
     );
     synthetic_binder_carrier(target)
@@ -933,7 +933,7 @@ unsafe fn register_operation_target_from_reply(
         },
     );
     info!(
-        "[Injector][Route] observed operation carrier ptr=0x{:x} cookie=0x{:x} preferred_route={:?} aad_allowed={}",
+        "event=route observed operation carrier ptr=0x{:x} cookie=0x{:x} preferred_route={:?} aad_allowed={}",
         target.ptr,
         target.cookie,
         route,
@@ -954,7 +954,7 @@ pub(super) unsafe fn handle_br_transaction(
 
     if forward::is_bypassed() {
         debug!(
-            "[Injector][Bypass] skipped {} code=0x{:x} uid={} pid={}",
+            "skipped {} because bypass is active: code=0x{:x} uid={} pid={}",
             command_name, tr.code, tr.sender_euid, tr.sender_pid
         );
         return false;
@@ -962,13 +962,13 @@ pub(super) unsafe fn handle_br_transaction(
 
     let cfg = config::get();
     if !cfg.main.enabled {
-        debug!("[Injector][Decision] injector disabled by config");
+        debug!("event=decision injector disabled by config");
         return false;
     }
 
     let Some(parcel_bytes) = super::binder::transaction_data_bytes(tr) else {
         warn!(
-            "[Injector][Decision] null parcel buffer for {} code=0x{:x} uid={} pid={}",
+            "event=decision null parcel buffer for {} code=0x{:x} uid={} pid={}",
             command_name, tr.code, tr.sender_euid, tr.sender_pid
         );
         return false;
@@ -977,23 +977,19 @@ pub(super) unsafe fn handle_br_transaction(
     let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
     let caller = CallerIdentity::new(tr.sender_euid.max(0) as u32, tr.sender_pid)
         .with_sid(caller_sid.unwrap_or_default());
-    let request_interface = match parcel::peek_request_interface(
-        data,
-        data_size,
-        offsets,
-        offsets_size,
-    ) {
-        Ok(interface) => interface,
-        Err(error) => {
-            if parcel::contains_known_keystore_interface(parcel_bytes) {
-                debug!(
-                    "[Injector][Decision] failed to read keystore request interface code=0x{:x}: {:#}",
-                    tr.code, error
-                );
+    let request_interface =
+        match parcel::peek_request_interface(data, data_size, offsets, offsets_size) {
+            Ok(interface) => interface,
+            Err(error) => {
+                if parcel::contains_known_keystore_interface(parcel_bytes) {
+                    debug!(
+                        "event=decision failed to read keystore interface code=0x{:x}: {:#}",
+                        tr.code, error
+                    );
+                }
+                return false;
             }
-            return false;
-        }
-    };
+        };
 
     // Authorization events are emitted by system auth components, not by the
     // app that later uses an auth-bound key. Mirror this global keystore state
@@ -1009,7 +1005,7 @@ pub(super) unsafe fn handle_br_transaction(
             Ok(request) => request,
             Err(error) => {
                 debug!(
-                    "[Injector][Decision] failed to parse IKeystoreAuthorization request code=0x{:x}: {:#}",
+                    "event=decision failed to parse IKeystoreAuthorization request code=0x{:x}: {:#}",
                     tr.code, error
                 );
                 return false;
@@ -1018,7 +1014,7 @@ pub(super) unsafe fn handle_br_transaction(
 
         let method = request.method();
         info!(
-            "[Injector][Decision] command={} authorization_method={:?} code=0x{:x} uid={} pid={} sid='{}'; mirroring auth state to OMK after system success",
+            "event=decision command={} authorization_method={:?} code=0x{:x} uid={} pid={} sid='{}'; mirroring auth state to OMK after system success",
             command_name,
             method,
             tr.code,
@@ -1051,7 +1047,7 @@ pub(super) unsafe fn handle_br_transaction(
             Ok(request) => request,
             Err(error) => {
                 debug!(
-                    "[Injector][Decision] failed to parse IKeystoreMaintenance request code=0x{:x}: {:#}",
+                    "event=decision failed to parse IKeystoreMaintenance request code=0x{:x}: {:#}",
                     tr.code, error
                 );
                 return false;
@@ -1060,7 +1056,7 @@ pub(super) unsafe fn handle_br_transaction(
 
         let method = request.method();
         info!(
-            "[Injector][Decision] command={} maintenance_method={:?} code=0x{:x} uid={} pid={} sid='{}'; mirroring maintenance state to OMK after system success",
+            "event=decision command={} maintenance_method={:?} code=0x{:x} uid={} pid={} sid='{}'; mirroring maintenance state to OMK after system success",
             command_name,
             method,
             tr.code,
@@ -1082,29 +1078,24 @@ pub(super) unsafe fn handle_br_transaction(
     let decision = evaluate_caller(&caller, &cfg);
 
     if request_interface == identify::KEYSTORE_SERVICE_INTERFACE {
-        let request = match parcel::parse_service_request(
-            data,
-            data_size,
-            offsets,
-            offsets_size,
-            tr.code,
-        ) {
-            Ok(request) => request,
-            Err(error) => {
-                debug!(
-                    "[Injector][Decision] failed to parse IKeystoreService request code=0x{:x}: {:#}",
-                    tr.code, error
-                );
-                return false;
-            }
-        };
+        let request =
+            match parcel::parse_service_request(data, data_size, offsets, offsets_size, tr.code) {
+                Ok(request) => request,
+                Err(error) => {
+                    debug!(
+                        "event=decision failed to parse IKeystoreService request code=0x{:x}: {:#}",
+                        tr.code, error
+                    );
+                    return false;
+                }
+            };
 
         let method = request.method();
         let original_code = tr.code;
         let allow_omk_grant = should_allow_omk_grant_service_request(&request, &decision, &caller);
         if !decision.allowed && !allow_omk_grant {
             info!(
-                "[Injector][Decision] command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?}; leaving original request untouched",
+                "event=decision command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?}; leaving original request untouched",
                 command_name,
                 method,
                 original_code,
@@ -1118,7 +1109,7 @@ pub(super) unsafe fn handle_br_transaction(
         }
         if allow_omk_grant {
             info!(
-                "[Injector][Decision] command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=true reason={:?} omk_grant=true",
+                "event=decision command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=true reason={:?} omk_grant=true",
                 command_name,
                 method,
                 original_code,
@@ -1146,7 +1137,7 @@ pub(super) unsafe fn handle_br_transaction(
                 }
                 OmkGrantPrecompute::PreserveSystem => {
                     info!(
-                        "[Injector][Route] method={:?} uid={} pid={} route={:?} omk_unavailable=true; preserving original system request",
+                        "event=route method={:?} uid={} pid={} route={:?} omk_unavailable=true; preserving original system request",
                         method, caller.uid, caller.pid, route
                     );
                     return false;
@@ -1158,7 +1149,7 @@ pub(super) unsafe fn handle_br_transaction(
         }
 
         info!(
-            "[Injector][Decision] command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?}",
+            "event=decision command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?}",
             command_name,
             method,
             original_code,
@@ -1170,7 +1161,7 @@ pub(super) unsafe fn handle_br_transaction(
             decision.reason,
         );
         info!(
-            "[Injector][Route] method={:?} uid={} pid={} route={:?}",
+            "event=route method={:?} uid={} pid={} route={:?}",
             method, caller.uid, caller.pid, route
         );
 
@@ -1211,7 +1202,7 @@ pub(super) unsafe fn handle_br_transaction(
     let Some(target) = target_from_transaction(tr) else {
         if is_known_keystore_interface(&request_interface) {
             debug!(
-                "[Injector][Decision] skipping keystore request without local target code=0x{:x} target={}",
+                "event=decision skipping keystore request without local target code=0x{:x} target={}",
                 tr.code,
                 format_target(tr)
             );
@@ -1222,7 +1213,7 @@ pub(super) unsafe fn handle_br_transaction(
     if request_interface == identify::KEYSTORE_SECURITY_LEVEL_INTERFACE {
         let Some(target_info) = tracker::lookup_security_level_target(target) else {
             debug!(
-                "[Injector][Decision] skipping IKeystoreSecurityLevel request for unmapped target ptr=0x{:x} cookie=0x{:x}",
+                "event=decision skipping IKeystoreSecurityLevel request for unmapped target ptr=0x{:x} cookie=0x{:x}",
                 target.ptr, target.cookie
             );
             return false;
@@ -1238,7 +1229,7 @@ pub(super) unsafe fn handle_br_transaction(
             Ok(request) => request,
             Err(error) => {
                 debug!(
-                    "[Injector][Decision] failed to parse IKeystoreSecurityLevel request code=0x{:x}: {:#}",
+                    "event=decision failed to parse IKeystoreSecurityLevel request code=0x{:x}: {:#}",
                     tr.code, error
                 );
                 return false;
@@ -1255,7 +1246,7 @@ pub(super) unsafe fn handle_br_transaction(
         };
         if !decision.allowed && !allow_unknown_omk_route {
             info!(
-                "[Injector][Decision] command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?}; leaving original request untouched",
+                "event=decision command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?}; leaving original request untouched",
                 command_name,
                 method,
                 tr.code,
@@ -1272,7 +1263,7 @@ pub(super) unsafe fn handle_br_transaction(
         }
 
         info!(
-            "[Injector][Decision] command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} source_method={:?} omk_derived_route={}",
+            "event=decision command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} source_method={:?} omk_derived_route={}",
             command_name,
             method,
             tr.code,
@@ -1289,7 +1280,7 @@ pub(super) unsafe fn handle_br_transaction(
             allow_unknown_omk_route,
         );
         info!(
-            "[Injector][Route] security_level_method={:?} uid={} pid={} route={:?} security_level={:?}",
+            "event=route security_level_method={:?} uid={} pid={} route={:?} security_level={:?}",
             method, caller.uid, caller.pid, route, target_info.security_level
         );
 
@@ -1309,7 +1300,7 @@ pub(super) unsafe fn handle_br_transaction(
     if request_interface == identify::KEYSTORE_OPERATION_INTERFACE {
         let Some(operation_target) = lookup_operation_target(target) else {
             debug!(
-                "[Injector][Decision] skipping IKeystoreOperation request for unmapped target ptr=0x{:x} cookie=0x{:x}",
+                "event=decision skipping IKeystoreOperation request for unmapped target ptr=0x{:x} cookie=0x{:x}",
                 target.ptr, target.cookie
             );
             return false;
@@ -1325,7 +1316,7 @@ pub(super) unsafe fn handle_br_transaction(
             Ok(request) => request,
             Err(error) => {
                 debug!(
-                    "[Injector][Decision] failed to parse IKeystoreOperation request code=0x{:x}: {:#}",
+                    "event=decision failed to parse IKeystoreOperation request code=0x{:x}: {:#}",
                     tr.code, error
                 );
                 return false;
@@ -1335,7 +1326,7 @@ pub(super) unsafe fn handle_br_transaction(
         let method = request.method();
 
         info!(
-            "[Injector][Decision] command={} operation_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} target=ptr:0x{:x}/cookie:0x{:x}",
+            "event=decision command={} operation_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} target=ptr:0x{:x}/cookie:0x{:x}",
             command_name,
             method,
             tr.code,
@@ -1347,7 +1338,7 @@ pub(super) unsafe fn handle_br_transaction(
             target.cookie,
         );
         info!(
-            "[Injector][Route] operation_method={:?} uid={} pid={} route={:?}",
+            "event=route operation_method={:?} uid={} pid={} route={:?}",
             method, caller.uid, caller.pid, operation_target.route
         );
 
@@ -1365,7 +1356,7 @@ pub(super) unsafe fn handle_br_transaction(
 
     if is_known_keystore_interface(&request_interface) {
         debug!(
-            "[Injector][Decision] skipping unsupported keystore interface request code=0x{:x}",
+            "event=decision skipping unsupported keystore interface request code=0x{:x}",
             tr.code
         );
     }
@@ -1385,7 +1376,7 @@ unsafe fn handle_omk_one_way_service_request(
         Ok(None) => false,
         Err(error) => {
             warn!(
-                "[Injector][Route] failed to execute one-way OMK service {:?} for uid={} pid={}: {:#}; consuming original system request",
+                "event=route failed to execute one-way OMK service {:?} for uid={} pid={}: {:#}; consuming original system request",
                 pending.method, pending.caller.uid, pending.caller.pid, error
             );
             block_omk_grant_system_request(tr);
@@ -1408,7 +1399,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
         let result = match &pending {
             PendingCall::Authorization(call) => {
                 debug!(
-                    "[Injector][Reply] handling authorization {:?} uid={} pid={}",
+                    "event=reply handling authorization {:?} uid={} pid={}",
                     call.method, call.caller.uid, call.caller.pid
                 );
                 build_authorization_reply_mirror(tr, call).map(|reply| {
@@ -1425,7 +1416,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
             }
             PendingCall::Maintenance(call) => {
                 debug!(
-                    "[Injector][Reply] handling maintenance {:?} uid={} pid={}",
+                    "event=reply handling maintenance {:?} uid={} pid={}",
                     call.method, call.caller.uid, call.caller.pid
                 );
                 build_maintenance_reply_mirror(tr, call).map(|reply| {
@@ -1442,7 +1433,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
             }
             PendingCall::Service(call) => {
                 debug!(
-                    "[Injector][Reply] handling service {:?} route={:?} uid={} pid={} packages={:?}",
+                    "event=reply handling service {:?} route={:?} uid={} pid={} packages={:?}",
                     call.method, call.route, call.caller.uid, call.caller.pid, call.packages
                 );
                 build_service_reply_rewrite(tr, call).map(|reply| {
@@ -1459,7 +1450,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
             }
             PendingCall::PrecomputedService(call, precomputed) => {
                 debug!(
-                    "[Injector][Reply] handling precomputed service {:?} route={:?} uid={} pid={} packages={:?}",
+                    "event=reply handling precomputed service {:?} route={:?} uid={} pid={} packages={:?}",
                     call.method, call.route, call.caller.uid, call.caller.pid, call.packages
                 );
                 build_precomputed_service_reply(precomputed).map(|reply| {
@@ -1474,7 +1465,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
             }
             PendingCall::SecurityLevel(call) => {
                 debug!(
-                    "[Injector][Reply] handling security-level {:?} route={:?} uid={} pid={} packages={:?} security_level={:?}",
+                    "event=reply handling security-level {:?} route={:?} uid={} pid={} packages={:?} security_level={:?}",
                     call.method, call.route, call.caller.uid, call.caller.pid, call.packages, call.security_level
                 );
                 build_security_level_reply_rewrite(tr, call).map(|reply| {
@@ -1491,7 +1482,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
             }
             PendingCall::Operation(call) => {
                 debug!(
-                    "[Injector][Reply] handling operation {:?} uid={} pid={} packages={:?} target=ptr:0x{:x}/cookie:0x{:x}",
+                    "event=reply handling operation {:?} uid={} pid={} packages={:?} target=ptr:0x{:x}/cookie:0x{:x}",
                     call.method, call.caller.uid, call.caller.pid, call.packages, call.target.ptr, call.target.cookie
                 );
                 build_operation_reply_rewrite(call).map(|reply| {
@@ -1512,7 +1503,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
             Ok(Some((kind, method, uid, pid, reply))) => {
                 install_outbound_reply(tr, reply);
                 info!(
-                    "[Injector][Reply] rewrote {} {} reply for uid={} pid={} original={{flags=0x{:x}, data_size={}, offsets_size={}, objects={}}} rewritten={{flags=0x{:x}, data_size={}, offsets_size={}, objects={}}}",
+                    "event=reply rewrote {} {} reply for uid={} pid={} original={{flags=0x{:x}, data_size={}, offsets_size={}, objects={}}} rewritten={{flags=0x{:x}, data_size={}, offsets_size={}, objects={}}}",
                     kind,
                     method,
                     uid,
@@ -1531,12 +1522,12 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
             Err(error) => {
                 if pending_preserves_system_on_rewrite_failure(&pending) {
                     warn!(
-                        "[Injector][Reply] failed to rewrite pending reply: {:#}; keeping original system reply",
+                        "event=reply failed to rewrite pending reply: {:#}; keeping original system reply",
                         error
                     );
                 } else {
                     warn!(
-                        "[Injector][Reply] failed to rewrite authoritative OMK reply: {:#}; returning SYSTEM_ERROR",
+                        "event=reply failed to rewrite authoritative OMK reply: {:#}; returning SYSTEM_ERROR",
                         error
                     );
                     install_outbound_reply(tr, synthetic_fallback_reply().into());
@@ -1567,7 +1558,7 @@ fn register_security_level_carrier(
 ) -> anyhow::Result<()> {
     if !carrier.is_object {
         warn!(
-            "[Injector][Route] system security-level carrier for {:?} was null; skipping mapping",
+            "event=route system security-level carrier for {:?} was null; skipping mapping",
             security_level
         );
         return Ok(());
@@ -1584,7 +1575,7 @@ fn register_security_level_carrier(
         },
     );
     info!(
-        "[Injector][Route] registered security-level carrier ptr=0x{:x} cookie=0x{:x} security_level={:?} preferred_route={:?} source_method={:?}",
+        "event=route registered security-level carrier ptr=0x{:x} cookie=0x{:x} security_level={:?} preferred_route={:?} source_method={:?}",
         target.ptr, target.cookie, security_level, preferred_route, source_method
     );
     Ok(())
@@ -1726,14 +1717,14 @@ fn omk_error_reply_for_method(
     match build_omk_error_reply_or_preserve_system(error)? {
         Some(reply) => {
             warn!(
-                "[Injector][Reply] OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
+                "event=reply OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
                 method, caller.uid, caller.pid, error
             );
             Ok(Some(reply))
         }
         None => {
             warn!(
-                "[Injector][Reply] OMK {} unavailable for uid={} pid={}: {:#}; preserving original system reply",
+                "event=reply OMK {} unavailable for uid={} pid={}: {:#}; preserving original system reply",
                 method, caller.uid, caller.pid, error
             );
             Ok(None)
@@ -1749,14 +1740,14 @@ fn omk_status_reply_for_method(
     match build_omk_status_reply_or_preserve_system(status)? {
         Some(reply) => {
             warn!(
-                "[Injector][Reply] OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
+                "event=reply OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
                 method, caller.uid, caller.pid, status
             );
             Ok(Some(reply))
         }
         None => {
             warn!(
-                "[Injector][Reply] OMK {} unavailable for uid={} pid={}: {:#}; preserving original system reply",
+                "event=reply OMK {} unavailable for uid={} pid={}: {:#}; preserving original system reply",
                 method, caller.uid, caller.pid, status
             );
             Ok(None)
@@ -1807,7 +1798,7 @@ fn synthetic_security_level_empty_blob_reply(
     }
 
     debug!(
-        "[Injector][Synthetic] returning PERMISSION_DENIED for security-level {:?} empty BLOB descriptor; OMK AIDL transport cannot preserve empty nullable byte arrays",
+        "event=synthetic returning PERMISSION_DENIED for security-level {:?} empty BLOB descriptor; OMK AIDL transport cannot preserve empty nullable byte arrays",
         method
     );
     Ok(Some(synthetic_parcel_reply(build_service_specific_reply(
@@ -1892,7 +1883,7 @@ fn resolve_keystore2_aidl_metadata() -> anyhow::Result<Keystore2AidlMetadata> {
     let version = probe_keystore2_aidl_version_from_vintf().unwrap_or_else(|| {
         let fallback = fallback_keystore2_aidl_version_from_android();
         warn!(
-            "[Injector][Synthetic] failed to resolve {} AIDL version from VINTF; using Android-version fallback v{}",
+            "event=synthetic failed to resolve {} AIDL version from VINTF; using Android-version fallback v{}",
             KEYSTORE2_HAL_NAME, fallback
         );
         fallback
@@ -1924,7 +1915,7 @@ fn probe_keystore2_aidl_version_from_vintf() -> Option<i32> {
             Ok(None) => {}
             Err(error) => {
                 warn!(
-                    "[Injector][Synthetic] ignoring invalid VINTF manifest {}: {error:#}",
+                    "event=synthetic ignoring invalid VINTF manifest {}: {error:#}",
                     path.display()
                 );
             }
@@ -2037,7 +2028,7 @@ unsafe fn synthetic_base_transaction_reply(
                 parcel::validate_dump_request(data, data_size, offsets, offsets_size)
             {
                 warn!(
-                    "[Injector][Synthetic] malformed DUMP_TRANSACTION for target ptr=0x{:x} cookie=0x{:x} kind={:?}: {:#}; returning BAD_TYPE",
+                    "event=synthetic malformed DUMP_TRANSACTION for target ptr=0x{:x} cookie=0x{:x} kind={:?}: {:#}; returning BAD_TYPE",
                     target.ptr, target.cookie, kind, error
                 );
                 SyntheticReply::Status(StatusCode::BadType.into())
@@ -2132,7 +2123,7 @@ pub(super) unsafe fn handle_synthetic_br_transaction(
             Ok(None) => synthetic_unknown_transaction_reply(),
             Err(error) => {
                 warn!(
-                    "[Injector][Synthetic] failed to handle stale {} target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning SYSTEM_ERROR",
+                    "event=synthetic failed to handle stale {} target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning SYSTEM_ERROR",
                     command_name, target.ptr, target.cookie, tr.code, error
                 );
                 synthetic_parcel_reply(synthetic_fallback_reply())
@@ -2144,7 +2135,7 @@ pub(super) unsafe fn handle_synthetic_br_transaction(
             reply
         };
         warn!(
-            "[Injector][Synthetic] consumed stale synthetic {} target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}",
+            "event=synthetic consumed stale synthetic {} target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}",
             command_name, target.ptr, target.cookie, tr.code
         );
         return Some(reply);
@@ -2156,7 +2147,7 @@ pub(super) unsafe fn handle_synthetic_br_transaction(
         Ok(reply) => reply,
         Err(error) => {
             warn!(
-                "[Injector][Synthetic] failed to handle {} target=ptr:0x{:x}/cookie:0x{:x} kind={:?} code=0x{:x}: {:#}; returning SYSTEM_ERROR",
+                "event=synthetic failed to handle {} target=ptr:0x{:x}/cookie:0x{:x} kind={:?} code=0x{:x}: {:#}; returning SYSTEM_ERROR",
                 command_name,
                 target.ptr,
                 target.cookie,
@@ -2218,7 +2209,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
             Ok(interface) => interface,
             Err(error) => {
                 warn!(
-                        "[Injector][Synthetic] failed to read AIDL metadata interface token for target ptr=0x{:x} cookie=0x{:x} kind={:?} code=0x{:x}: {:#}; returning BAD_TYPE",
+                        "event=synthetic failed to read AIDL metadata interface token for target ptr=0x{:x} cookie=0x{:x} kind={:?} code=0x{:x}: {:#}; returning BAD_TYPE",
                         target.ptr, target.cookie, kind, tr.code, error
                     );
                 return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
@@ -2227,7 +2218,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
         let expected_interface = synthetic_descriptor(kind);
         if request_interface != expected_interface {
             warn!(
-                "[Injector][Synthetic] synthetic {:?} target ptr=0x{:x} cookie=0x{:x} received metadata request for unexpected interface {}; returning BAD_TYPE",
+                "event=synthetic kind={:?} target ptr=0x{:x} cookie=0x{:x} received metadata request for unexpected interface {}; returning BAD_TYPE",
                 kind, target.ptr, target.cookie, request_interface
             );
             return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
@@ -2238,7 +2229,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
     let cfg = config::get();
     if !cfg.main.enabled {
         warn!(
-            "[Injector][Synthetic] injector disabled while synthetic target ptr=0x{:x} cookie=0x{:x} is still live; returning SYSTEM_ERROR",
+            "event=synthetic injector disabled while synthetic target ptr=0x{:x} cookie=0x{:x} is still live; returning SYSTEM_ERROR",
             target.ptr, target.cookie
         );
         return Ok(synthetic_parcel_reply(build_service_specific_reply(
@@ -2256,7 +2247,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
         Ok(interface) => interface,
         Err(error) => {
             warn!(
-                "[Injector][Synthetic] failed to read interface token for target ptr=0x{:x} cookie=0x{:x} kind={:?} code=0x{:x}: {:#}; returning BAD_TYPE",
+                "event=synthetic failed to read interface token for target ptr=0x{:x} cookie=0x{:x} kind={:?} code=0x{:x}: {:#}; returning BAD_TYPE",
                 target.ptr, target.cookie, kind, tr.code, error
             );
             return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
@@ -2278,7 +2269,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
         SyntheticTargetKind::SecurityLevel => {
             if request_interface != identify::KEYSTORE_SECURITY_LEVEL_INTERFACE {
                 warn!(
-                    "[Injector][Synthetic] synthetic security-level target ptr=0x{:x} cookie=0x{:x} received unexpected interface {}; returning BAD_TYPE",
+                    "event=synthetic security-level target ptr=0x{:x} cookie=0x{:x} received unexpected interface {}; returning BAD_TYPE",
                     target.ptr, target.cookie, request_interface
                 );
                 return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
@@ -2299,7 +2290,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
                 Err(error) => {
                     let status = synthetic_parse_error_status_code(&error);
                     warn!(
-                        "[Injector][Synthetic] failed to parse synthetic security-level request target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning {}",
+                        "event=synthetic failed to parse synthetic security-level request target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning {}",
                         target.ptr, target.cookie, tr.code, error, status
                     );
                     return synthetic_parse_error_reply(&error);
@@ -2313,7 +2304,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
             }
 
             info!(
-                "[Injector][Synthetic] handling {} security-level {:?} uid={} pid={} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} packages={:?} allowed={} reason={:?}",
+                "event=synthetic handling {} security-level {:?} uid={} pid={} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} packages={:?} allowed={} reason={:?}",
                 command_name,
                 method,
                 caller.uid,
@@ -2340,7 +2331,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
         SyntheticTargetKind::Operation => {
             if request_interface != identify::KEYSTORE_OPERATION_INTERFACE {
                 warn!(
-                    "[Injector][Synthetic] synthetic operation target ptr=0x{:x} cookie=0x{:x} received unexpected interface {}; returning BAD_TYPE",
+                    "event=synthetic operation target ptr=0x{:x} cookie=0x{:x} received unexpected interface {}; returning BAD_TYPE",
                     target.ptr, target.cookie, request_interface
                 );
                 return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
@@ -2359,7 +2350,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
                 Err(error) => {
                     let status = synthetic_parse_error_status_code(&error);
                     warn!(
-                        "[Injector][Synthetic] failed to parse synthetic operation request target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning {}",
+                        "event=synthetic failed to parse synthetic operation request target=ptr:0x{:x}/cookie:0x{:x} code=0x{:x}: {:#}; returning {}",
                         target.ptr, target.cookie, tr.code, error, status
                     );
                     return synthetic_parse_error_reply(&error);
@@ -2368,7 +2359,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
             let method = request.method();
 
             info!(
-                "[Injector][Synthetic] handling {} operation {:?} uid={} pid={} target=ptr:0x{:x}/cookie:0x{:x} packages={:?}",
+                "event=synthetic handling {} operation {:?} uid={} pid={} target=ptr:0x{:x}/cookie:0x{:x} packages={:?}",
                 command_name,
                 method,
                 caller.uid,
@@ -2539,7 +2530,7 @@ unsafe fn build_authorization_reply_mirror(
     let status = parcel::parse_reply_status(data, data_size, offsets, offsets_size)?;
     if !status.is_ok() {
         debug!(
-            "[Injector][Authorization] system {:?} failed with {}; skipping OMK mirror",
+            "event=mirror domain=authorization system {:?} failed with {}; skipping OMK mirror",
             call.method, status
         );
         return Ok(None);
@@ -2589,7 +2580,7 @@ unsafe fn build_authorization_reply_mirror(
         ParsedAuthorizationRequest::GetAuthTokensForCredStore { .. }
         | ParsedAuthorizationRequest::GetLastAuthTime { .. } => {
             debug!(
-                "[Injector][Authorization] {:?} is read-only; preserving system reply",
+                "event=mirror domain=authorization {:?} is read-only; preserving system reply",
                 call.method
             );
             Ok(())
@@ -2601,14 +2592,14 @@ unsafe fn build_authorization_reply_mirror(
             if mutates {
                 clear_mirror_state_dirty(MirrorStateKind::Authorization, call.method, &call.caller);
                 debug!(
-                    "[Injector][Authorization] mirrored {:?} to OMK for uid={} pid={}",
+                    "event=mirror domain=authorization mirrored {:?} to OMK for uid={} pid={}",
                     call.method, call.caller.uid, call.caller.pid
                 );
             }
         }
         Err(error) => {
             warn!(
-                "[Injector][Authorization] failed to mirror {:?} to OMK for uid={} pid={}: {:#}",
+                "event=mirror domain=authorization failed to mirror {:?} to OMK for uid={} pid={}: {:#}",
                 call.method, call.caller.uid, call.caller.pid, error
             );
             mark_mirror_state_dirty(MirrorStateKind::Authorization, call.method, &call.caller);
@@ -2626,7 +2617,7 @@ unsafe fn build_maintenance_reply_mirror(
     let status = parcel::parse_reply_status(data, data_size, offsets, offsets_size)?;
     if !status.is_ok() {
         debug!(
-            "[Injector][Maintenance] system {:?} failed with {}; skipping OMK mirror",
+            "event=mirror domain=maintenance system {:?} failed with {}; skipping OMK mirror",
             call.method, status
         );
         return Ok(None);
@@ -2693,14 +2684,14 @@ unsafe fn build_maintenance_reply_mirror(
         }
         ParsedMaintenanceRequest::GetState { .. } | ParsedMaintenanceRequest::OnDeviceOffBody => {
             debug!(
-                "[Injector][Maintenance] {:?} has no OMK mirror endpoint; preserving system reply",
+                "event=mirror domain=maintenance {:?} has no OMK mirror endpoint; preserving system reply",
                 call.method
             );
             Ok(())
         }
         ParsedMaintenanceRequest::GetAppUidsAffectedBySid { .. } => {
             debug!(
-                "[Injector][Maintenance] {:?} is read-only; preserving system reply",
+                "event=mirror domain=maintenance {:?} is read-only; preserving system reply",
                 call.method
             );
             Ok(())
@@ -2712,14 +2703,14 @@ unsafe fn build_maintenance_reply_mirror(
             if mutates {
                 clear_mirror_state_dirty(MirrorStateKind::Maintenance, call.method, &call.caller);
                 debug!(
-                    "[Injector][Maintenance] mirrored {:?} to OMK for uid={} pid={}",
+                    "event=mirror domain=maintenance mirrored {:?} to OMK for uid={} pid={}",
                     call.method, call.caller.uid, call.caller.pid
                 );
             }
         }
         Err(error) => {
             warn!(
-                "[Injector][Maintenance] failed to mirror {:?} to OMK for uid={} pid={}: {:#}",
+                "event=mirror domain=maintenance failed to mirror {:?} to OMK for uid={} pid={}: {:#}",
                 call.method, call.caller.uid, call.caller.pid, error
             );
             mark_mirror_state_dirty(MirrorStateKind::Maintenance, call.method, &call.caller);
@@ -2911,7 +2902,7 @@ unsafe fn build_security_level_reply_rewrite(
 
     if security_level_request_has_empty_blob_descriptor(&pending.request) {
         debug!(
-            "[Injector][Reply] preserving system {:?} reply for empty BLOB descriptor; OMK AIDL transport cannot preserve empty nullable byte arrays",
+            "event=reply preserving system {:?} reply for empty BLOB descriptor; OMK AIDL transport cannot preserve empty nullable byte arrays",
             pending.method
         );
         return Ok(None);
@@ -3049,7 +3040,7 @@ fn build_operation_reply_rewrite(
     let Some(target) = lookup_operation_target(pending.target) else {
         if lookup_synthetic_target(pending.target) == Some(SyntheticTargetKind::Operation) {
             debug!(
-                "[Injector][Reply] synthetic operation carrier ptr=0x{:x} cookie=0x{:x} has no live backend; returning INVALID_OPERATION_HANDLE",
+                "event=reply synthetic operation carrier ptr=0x{:x} cookie=0x{:x} has no live backend; returning INVALID_OPERATION_HANDLE",
                 pending.target.ptr, pending.target.cookie
             );
             return Ok(Some(invalid_operation_handle_reply()?.into()));
@@ -3071,7 +3062,7 @@ fn build_operation_reply_rewrite(
         if target.finalized {
             if matches!(pending.request, ParsedOperationRequest::Abort) {
                 debug!(
-                    "[Injector][Reply] cleanup abort for finalized OMK operation carrier ptr=0x{:x} cookie=0x{:x}; returning INVALID_OPERATION_HANDLE",
+                    "event=reply cleanup abort for finalized OMK operation carrier ptr=0x{:x} cookie=0x{:x}; returning INVALID_OPERATION_HANDLE",
                     pending.target.ptr, pending.target.cookie
                 );
                 forget_operation_target(pending.target);
@@ -3087,7 +3078,7 @@ fn build_operation_reply_rewrite(
         ParsedOperationRequest::UpdateAad { aad_input } => {
             if !target.aad_allowed {
                 debug!(
-                    "[Injector][Reply] OMK-owned updateAad rejected on a non-AAD-capable operation; returning OMK status reply"
+                    "event=reply OMK-owned updateAad rejected on a non-AAD-capable operation; returning OMK status reply"
                 );
             }
             match backend.r#updateAad(aad_input) {

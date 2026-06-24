@@ -180,7 +180,7 @@ fn create_rpc_server() -> Result<Arc<RpcServer>> {
             PeerIdentity::Local { uid, .. } if *uid == 0 || *uid == KEYSTORE_UID
         );
         if !allowed {
-            warn!("Rejected OMK RPC peer {peer}");
+            warn!("rejected OMK RPC peer {peer}");
         }
         allowed
     });
@@ -194,12 +194,12 @@ fn should_resolve_module_info_bundle(android_major_version: Option<i32>) -> bool
 
 fn install_module_info_bundle_if_available() -> Result<()> {
     if !should_resolve_module_info_bundle(kmr_common::android_version::android_major_version()) {
-        info!("Skipping moduleHash input on pre-Android 16 system");
+        info!("skipping moduleHash input on pre-Android 16 system");
         return Ok(());
     }
 
     // We can no longer resolve module info after dropping privileges.
-    debug!("Resolving APEX module info with root privileges");
+    debug!("resolving APEX module info with root privileges");
     match crate::keymaster::apex::resolve_module_info_bundle() {
         Ok(bundle) => {
             let source = bundle.source.as_str();
@@ -212,7 +212,9 @@ fn install_module_info_bundle_if_available() -> Result<()> {
             );
         }
         Err(error) => {
-            warn!("APEX module info unavailable; moduleHash attestation disabled: {error:#}");
+            warn!(
+                "moduleHash attestation disabled because APEX module info is unavailable: {error:#}"
+            );
         }
     }
 
@@ -227,23 +229,23 @@ fn main() {
     }));
 
     if let Err(error) = run() {
-        error!("Fatal startup error: {error:#}");
+        error!("fatal startup error: {error:#}");
         std::process::exit(1);
     }
 }
 
 fn run() -> Result<()> {
-    info!("Hello, OhMyKeymint!");
+    info!("starting OhMyKeymint");
     crate::keymaster::permission::initialize_runtime_service_context();
 
-    info!("Initial process state");
+    info!("initial process state");
     let _ = rsbinder::ProcessState::init_default();
 
     prepare_android_storage();
     plat::resetprop::bootstrap_privileged_helper()
         .context("failed to bootstrap resetprop helper")?;
 
-    info!("Bootstrapping config");
+    info!("bootstrapping config");
     let mut config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
     plat::device_ids::bootstrap_device_ids(&mut config_file);
     let resolved_trust =
@@ -272,51 +274,51 @@ fn run() -> Result<()> {
     let injector_rpc_server = create_rpc_server()?;
 
     unsafe {
-        info!("Setting UID to KEYSTORE_UID (1017)");
+        info!("setting uid=1017 role=keystore");
         libc::setuid(KEYSTORE_UID); // KEYSTORE_UID
     }
 
     crate::keymaster::metrics_store::update_keystore_crash_count();
 
-    info!("Starting thread pool");
+    info!("starting thread pool");
     rsbinder::ProcessState::start_thread_pool();
 
-    info!("Using Injector backend");
+    info!("using injector backend");
     let server = injector_rpc_server;
 
-    info!("Creating keystore service");
+    info!("creating keystore service");
     let dev = KeystoreService::new_native_binder().context("failed to create omk service")?;
 
-    info!("Adding OMK service to RPC server");
+    info!("adding OMK service to RPC server");
     let service = BnOhMyKsService::new_binder_with_features(dev, sid_features());
     server
         .add_service(rpc::SERVICE, service.as_binder())
         .context("failed to add OMK RPC service")?;
 
-    info!("Creating OMK authorization service");
+    info!("creating OMK authorization service");
     let auth = AuthorizationManager::new_omk_binder()
         .context("failed to create OMK authorization service")?;
-    info!("Adding OMK authorization service to RPC server");
+    info!("adding OMK authorization service to RPC server");
     server
         .add_service(rpc::AUTHORIZATION_SERVICE, auth.as_binder())
         .context("failed to add OMK authorization RPC service")?;
 
-    info!("Creating OMK maintenance service");
+    info!("creating OMK maintenance service");
     let maintenance =
         MaintenanceManager::new_omk_binder().context("failed to create OMK maintenance service")?;
-    info!("Adding OMK maintenance service to RPC server");
+    info!("adding OMK maintenance service to RPC server");
     server
         .add_service(rpc::MAINTENANCE_SERVICE, maintenance.as_binder())
         .context("failed to add OMK maintenance RPC service")?;
 
-    info!("Creating OMK metrics service");
+    info!("creating OMK metrics service");
     let metrics = Metrics::new_native_binder().context("failed to create OMK metrics service")?;
-    info!("Adding OMK metrics service to RPC server");
+    info!("adding OMK metrics service to RPC server");
     server
         .add_service(rpc::METRICS_SERVICE, metrics.as_binder())
         .context("failed to add OMK metrics RPC service")?;
 
-    info!("Serving OMK RPC on {}", rpc::SOCKET);
+    info!("serving OMK RPC socket={}", rpc::SOCKET);
     server.run().context("OMK RPC server stopped")?;
     Ok(())
 }

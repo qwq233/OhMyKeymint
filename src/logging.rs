@@ -11,7 +11,7 @@ static LOGGER_INIT: OnceLock<()> = OnceLock::new();
 pub fn init_logger() {
     let _ = LOGGER_INIT.get_or_init(|| {
         if let Err(error) = init_logger_inner() {
-            eprintln!("[Keymint][Logger] failed to initialize logger: {error:#}");
+            eprintln!("keymint logging failed to initialize: {error:#}");
         }
     });
 }
@@ -28,7 +28,7 @@ fn init_logger_inner() -> Result<()> {
         DEFAULT_LOG_PATH,
         PATTERN,
         level,
-        "[Keymint][Logger]",
+        "keymint logging",
     )?;
     let log4rs = log4rs::Logger::new(config);
 
@@ -39,7 +39,7 @@ fn init_logger_inner() -> Result<()> {
 
     if file_logging_ready {
         log::info!(
-            "[Keymint][Logger] file logging enabled at {} with level {:?}",
+            "file logging enabled at {} with level {:?}",
             DEFAULT_LOG_PATH,
             level
         );

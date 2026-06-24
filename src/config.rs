@@ -88,14 +88,14 @@ pub fn bootstrap_config_file() -> Result<ConfigFile> {
         }
         Err(ConfigLoadError::Read(error)) => {
             let reason = format!("failed to read config file: {error}");
-            log::error!("Failed to read config file, restoring current config: {reason}");
+            log::error!("failed to read config file; restoring current config: {reason}");
             let config_file = current_config_file_snapshot();
             rewrite_invalid_config(&config_file, &reason)?;
             Ok(config_file)
         }
         Err(ConfigLoadError::Parse(error)) => {
             let reason = format!("failed to parse config file: {error}");
-            log::error!("Failed to parse config file, restoring current config: {reason}");
+            log::error!("failed to parse config file; restoring current config: {reason}");
             let config_file = current_config_file_snapshot();
             rewrite_invalid_config(&config_file, &reason)?;
             Ok(config_file)
@@ -114,7 +114,7 @@ pub fn persist_config_file(config_file: &ConfigFile) -> Result<()> {
         toml::to_string_pretty(config_file).context("failed to serialize config.toml")?;
     if let Ok(existing) = fs::read_to_string(path) {
         if existing == serialized {
-            log::debug!("Config file unchanged, skipping rewrite");
+            log::debug!("config file unchanged; skipping rewrite");
             return Ok(());
         }
     }
@@ -195,7 +195,7 @@ fn current_config_file_snapshot() -> ConfigFile {
             Ok(runtime) => runtime.to_config_file(),
             Err(_) => {
                 log::error!(
-                    "Config lock poisoned while snapshotting current config; using defaults"
+                    "config lock poisoned while snapshotting current config; using defaults"
                 );
                 ConfigFile::default()
             }
@@ -207,7 +207,7 @@ fn current_config_file_snapshot() -> ConfigFile {
 fn recover_current_config(reason: &str) {
     let replacement = current_config_file_snapshot();
     if let Err(error) = rewrite_invalid_config(&replacement, reason) {
-        log::error!("Failed to rewrite current config after reload failure: {error:#}");
+        log::error!("failed to rewrite current config after reload failure: {error:#}");
     }
 }
 
@@ -280,7 +280,7 @@ fn reload_runtime_config(trigger: WatchTrigger) {
     let runtime_snapshot = match config().read() {
         Ok(runtime) => runtime.clone(),
         Err(_) => {
-            log::error!("Config lock poisoned while snapshotting config change");
+            log::error!("config lock poisoned while snapshotting config change");
             return;
         }
     };
@@ -304,7 +304,7 @@ fn reload_runtime_config(trigger: WatchTrigger) {
                 match crate::keymaster::keymint_device::reset_initialized_keymint_wrappers() {
                     Ok(()) => {
                         applied_trust_intent = new_config_file.trust.clone();
-                        log::info!("Applied runtime security_patch change");
+                        log::info!("applied runtime security_patch change");
                     }
                     Err(error) => {
                         if let Err(revert_error) = crate::plat::vbmeta::apply_runtime_security_patch(
@@ -312,19 +312,19 @@ fn reload_runtime_config(trigger: WatchTrigger) {
                             &previous_trust_intent.security_patch,
                         ) {
                             log::error!(
-                                "Failed to revert security_patch after wrapper reset failure: {revert_error:#}"
+                            "failed to revert security_patch after wrapper reset failure: {revert_error:#}"
                             );
                         }
                         applied_trust = previous_trust;
                         log::error!(
-                            "Failed to rebuild keymint wrappers after security_patch change; restart keymint to apply it safely: {error:#}"
+                            "failed to rebuild keymint wrappers after security_patch change; restart keymint to apply it safely: {error:#}"
                         );
                     }
                 }
             }
             Err(error) => {
                 log::warn!(
-                    "Failed to hot-apply security_patch change; restart keymint to apply it: {error:#}"
+                    "failed to hot-apply security_patch change; restart keymint to apply it: {error:#}"
                 );
             }
         }
@@ -332,7 +332,7 @@ fn reload_runtime_config(trigger: WatchTrigger) {
 
     let mut applied_crypto = new_config_file.crypto.clone();
     if runtime_snapshot.crypto != new_config_file.crypto {
-        log::warn!("Crypto config changed on disk; restart keymint to apply seed changes.");
+        log::warn!("crypto config changed on disk; restart keymint to apply seed changes");
         applied_crypto = runtime_snapshot.crypto.clone();
     }
 
@@ -342,12 +342,12 @@ fn reload_runtime_config(trigger: WatchTrigger) {
     let mut runtime = match config().write() {
         Ok(runtime) => runtime,
         Err(_) => {
-            log::error!("Config lock poisoned while applying config change");
+            log::error!("config lock poisoned while applying config change");
             return;
         }
     };
     *runtime = updated;
-    log::info!("Config updated via {}", trigger.label());
+    log::info!("config updated via {}", trigger.label());
 }
 
 fn validate_security_patch(value: &str) -> Result<()> {

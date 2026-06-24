@@ -425,15 +425,15 @@ fn wait_remote_call(pid: Pid, return_addr: usize) -> Result<usize> {
     {
         if regs.rip != (return_addr as u64) {
             error!(
-                "Unexpected RIP after remote call: expected 0x{:x}, got 0x{:x}",
+                "unexpected RIP after remote call: expected 0x{:x}, got 0x{:x}",
                 return_addr, regs.rip
             );
             match nix::sys::ptrace::getsiginfo(pid) {
                 Ok(info) => {
-                    error!("Signal info: {:?}", info);
+                    error!("remote call stopped with signal info {:?}", info);
                 }
                 Err(e) => {
-                    error!("Failed to get signal info: {}", e);
+                    error!("failed to get remote call signal info: {}", e);
                 }
             }
             bail!("Remote call did not reach expected function address");
@@ -445,15 +445,15 @@ fn wait_remote_call(pid: Pid, return_addr: usize) -> Result<usize> {
     {
         if regs.eip != (return_addr as u32) {
             error!(
-                "Unexpected EIP after remote call: expected 0x{:x}, got 0x{:x}",
+                "unexpected EIP after remote call: expected 0x{:x}, got 0x{:x}",
                 return_addr, regs.eip
             );
             match nix::sys::ptrace::getsiginfo(pid) {
                 Ok(info) => {
-                    error!("Signal info: {:?}", info);
+                    error!("remote call stopped with signal info {:?}", info);
                 }
                 Err(e) => {
-                    error!("Failed to get signal info: {}", e);
+                    error!("failed to get remote call signal info: {}", e);
                 }
             }
             bail!("Remote call did not reach expected function address");
@@ -466,15 +466,15 @@ fn wait_remote_call(pid: Pid, return_addr: usize) -> Result<usize> {
     {
         if regs.pc != (return_addr as u64) {
             error!(
-                "Unexpected PC after remote call: expected 0x{:x}, got 0x{:x}",
+                "unexpected PC after remote call: expected 0x{:x}, got 0x{:x}",
                 return_addr, regs.pc
             );
             match nix::sys::ptrace::getsiginfo(pid) {
                 Ok(info) => {
-                    error!("Signal info: {:?}", info);
+                    error!("remote call stopped with signal info {:?}", info);
                 }
                 Err(e) => {
-                    error!("Failed to get signal info: {}", e);
+                    error!("failed to get remote call signal info: {}", e);
                 }
             }
             bail!("Remote call did not reach expected function address");
@@ -486,15 +486,15 @@ fn wait_remote_call(pid: Pid, return_addr: usize) -> Result<usize> {
     {
         if regs.uregs[15] != (return_addr as u32) {
             error!(
-                "Unexpected PC after remote call: expected 0x{:x}, got 0x{:x}",
+                "unexpected PC after remote call: expected 0x{:x}, got 0x{:x}",
                 return_addr, regs.uregs[15]
             );
             match nix::sys::ptrace::getsiginfo(pid) {
                 Ok(info) => {
-                    error!("Signal info: {:?}", info);
+                    error!("remote call stopped with signal info {:?}", info);
                 }
                 Err(e) => {
-                    error!("Failed to get signal info: {}", e);
+                    error!("failed to get remote call signal info: {}", e);
                 }
             }
             bail!("Remote call did not reach expected function address");

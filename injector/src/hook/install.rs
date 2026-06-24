@@ -18,7 +18,7 @@ pub(super) fn init_hook() -> Result<()> {
 fn install_hooks() -> Result<()> {
     logging::init_logger();
     let _ = config::get();
-    info!("[BinderInterceptor] Initializing binder ioctl hook...");
+    info!("initializing binder ioctl hook");
     ipc::ensure_process_state();
 
     let maps = lsplt_rs::MapInfo::scan("self");
@@ -61,11 +61,14 @@ fn install_hooks() -> Result<()> {
                         OLD_IOCTL.store(old_ptr, Ordering::SeqCst);
                     }
                     registered += 1;
-                    info!("Registered hook for {} symbol {}", path, symbol);
+                    info!(
+                        "registered binder ioctl hook path={} symbol={}",
+                        path, symbol
+                    );
                 }
                 Err(e) => {
                     warn!(
-                        "Failed to register hook for {} symbol {}: {:?}",
+                        "failed to register binder ioctl hook path={} symbol={}: {:?}",
                         path, symbol, e
                     );
                 }
@@ -78,6 +81,6 @@ fn install_hooks() -> Result<()> {
     }
 
     lsplt_rs::commit_hook().map_err(|e| anyhow!("Failed to commit lsplt hook: {:?}", e))?;
-    info!("Successfully committed {} binder ioctl hook(s)", registered);
+    info!("committed {} binder ioctl hook(s)", registered);
     Ok(())
 }

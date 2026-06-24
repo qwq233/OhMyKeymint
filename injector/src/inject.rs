@@ -53,7 +53,7 @@ struct RemoteFdHandoffAddrs {
 
 fn log_loader_abi() {
     debug!(
-        "[Injector][Loader] build_target={} runtime_arch={} sockaddr_un(size={}, sun_path_offset={}, c_char_size={}) msghdr(size={}, msg_control_offset={}, msg_controllen_offset={}) cmsghdr(size={}, cmsg_len_offset={}, cmsg_level_offset={}, cmsg_type_offset={}) cmsg_space_int={} cmsg_len_int={}",
+        "abi build_target={} runtime_arch={} sockaddr_un(size={}, sun_path_offset={}, c_char_size={}) msghdr(size={}, msg_control_offset={}, msg_controllen_offset={}) cmsghdr(size={}, cmsg_len_offset={}, cmsg_level_offset={}, cmsg_type_offset={}) cmsg_space_int={} cmsg_len_int={}",
         crate::utils::build_target(),
         std::env::consts::ARCH,
         size_of::<libc::sockaddr_un>(),
@@ -174,7 +174,7 @@ fn finish_injection_result(result: Result<()>, cleanup_errors: Vec<anyhow::Error
     }
 
     for cleanup_error in &cleanup_errors {
-        error!("[Injector][Loader] cleanup failed: {cleanup_error:#}");
+        error!("injection cleanup failed: {cleanup_error:#}");
     }
 
     let cleanup_message = cleanup_error_message(&cleanup_errors);
@@ -232,7 +232,7 @@ where
         );
     }
     info!(
-        "[Injector][Loader] remote payload path opened: path={} fd={}",
+        "remote payload path opened: path={} fd={}",
         path.display(),
         remote_lib_fd
     );
@@ -632,7 +632,7 @@ where
         }
         bail!("Failed to send {label} fd locally: {send_error}");
     }
-    debug!("Sent {label} fd {local_fd} to remote abstract socket");
+    debug!("sent {label} fd={local_fd} to remote abstract socket");
 
     let recv_status = sys::remote_post_call_with_status(pid, recvmsg_call);
     let recv_res = match recv_status.result {
@@ -710,7 +710,7 @@ where
                 .with_context(|| format!("failed to validate remote {label} fd from SCM_RIGHTS"));
         }
     };
-    debug!("Remote received {label} fd: {fd}");
+    debug!("remote received {label} fd={fd}");
     if let Err(error) = close_remote(remote_socket) {
         if let Err(close_error) = close_remote(fd) {
             return Err(error.context(format!(
@@ -764,10 +764,10 @@ pub fn inject_library(pid: Pid) -> Result<()> {
         std::fs::read_link("/proc/self/exe").context("Failed to read link /proc/self/exe")?;
 
     nix::sys::ptrace::attach(pid).with_context(|| format!("Failed to attach to process {pid}"))?;
-    debug!("Attached to process {}", pid);
+    debug!("attached to process {}", pid);
 
     if let Err(e) = wait_pid(pid, Signal::SIGSTOP) {
-        warn!("Wait failed, detaching: {}", e);
+        warn!("wait for process stop failed; detaching: {}", e);
         if let Err(detach_error) = nix::sys::ptrace::detach(pid, None)
             .with_context(|| format!("Failed to detach from process {pid} after wait failure"))
         {
@@ -796,7 +796,7 @@ pub fn inject_library(pid: Pid) -> Result<()> {
     let result = do_inject(pid, &self_path);
 
     // === CLEANUP: Always restore registers and detach ===
-    debug!("Restoring registers and detaching");
+    debug!("restoring registers and detaching");
     let mut cleanup_errors = Vec::new();
     if let Err(e) = sys::set_regs(pid, &backup_regs) {
         cleanup_errors.push(e.context("Failed to restore registers"));
@@ -815,7 +815,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         generate_remote_payload_identifier().context("failed to generate payload identifier")?;
     log_loader_abi();
     info!(
-        "[Injector][Loader] starting build_id={} pid={} payload={} self_path={}",
+        "starting injection build_id={} pid={} payload={} self_path={}",
         crate::utils::build_id(),
         pid,
         payload_identifier,
@@ -885,7 +885,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         // Commit SP change to remote process so subsequent remote_call works correctly
         sys::set_regs(pid, &regs)?;
         debug!(
-            "[Injector][Loader] remote scratch push: size={} old_sp=0x{:x} new_sp=0x{:x} align={}",
+            "remote scratch push: size={} old_sp=0x{:x} new_sp=0x{:x} align={}",
             data.len(),
             sp,
             new_sp,
@@ -895,7 +895,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     };
 
     let libc_return_addr = utils::resolve_return_addr(&remote_maps, "libc.so")?;
-    debug!("Resolved libc return address: 0x{:x}", libc_return_addr);
+    debug!("resolved libc return address=0x{:x}", libc_return_addr);
 
     let close_addr = resolve("libc.so", "close")?;
     let open_addr = resolve("libc.so", "open").or_else(|_| resolve("libc.so", "open64"))?;
@@ -965,7 +965,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     })?;
     let local_lib_fd = local_lib_file.as_raw_fd();
     info!(
-        "[Injector][Loader] local payload file ready: fd={} path={} identifier={} sha256={}",
+        "local payload file ready: fd={} path={} identifier={} sha256={}",
         local_lib_fd,
         self_path.display(),
         payload_identifier,
@@ -976,7 +976,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     // Keep the old sockcreate tweak as best-effort only; the main path uses
     // the already deployed injector image and no longer stages an extra copy.
     if let Err(error) = utils::set_sockcreate_con("u:object_r:system_file:s0") {
-        warn!("[Injector][Loader] sockcreate context setup failed: {error:#}");
+        warn!("sockcreate context setup failed: {error:#}");
     }
 
     let fd_handoff_addrs = RemoteFdHandoffAddrs {
@@ -999,7 +999,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         Ok(fd) => fd,
         Err(error) => {
             warn!(
-                "[Injector][Loader] SCM_RIGHTS payload handoff failed: {error:#}. Trying direct fallback via {}.",
+                "payload fd handoff failed: {error:#}. Trying direct fallback via {}.",
                 self_path.display()
             );
             open_remote_payload_fd_from_path(
@@ -1076,7 +1076,10 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         }
         bail!("Failed to find 'entry' symbol in injected image");
     }
-    debug!("Resolved remote entry via dlsym at 0x{:x}", injector_entry);
+    debug!(
+        "resolved remote entry via dlsym address=0x{:x}",
+        injector_entry
+    );
 
     let remote_rpc_fd = send_fd_to_remote(
         pid,
@@ -1098,12 +1101,12 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 
     if let Err(error) = persist_remote_payload_state(pid, &payload_identifier) {
         warn!(
-            "[Injector][Loader] failed to persist payload identifier state for pid {}: {:#}",
+            "failed to persist payload identifier state for pid {}: {:#}",
             pid, error
         );
     }
 
-    info!("Remote entry called successfully");
+    info!("remote entry returned successfully");
     Ok(())
 }
 

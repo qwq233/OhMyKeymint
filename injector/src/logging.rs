@@ -17,7 +17,7 @@ enum LoggerInitMode {
 pub fn init_logger() {
     let _ = LOGGER_INIT.get_or_init(|| {
         if let Err(error) = init_logger_inner(LoggerInitMode::Configured) {
-            eprintln!("[Injector][Logger] failed to initialize logger: {error:#}");
+            eprintln!("injector logging failed to initialize: {error:#}");
         }
     });
 }
@@ -25,7 +25,7 @@ pub fn init_logger() {
 pub fn init_logger_fallback(level: LevelFilter) {
     let _ = LOGGER_INIT.get_or_init(|| {
         if let Err(error) = init_logger_inner(LoggerInitMode::Fixed(level)) {
-            eprintln!("[Injector][Logger] failed to initialize logger: {error:#}");
+            eprintln!("injector logging failed to initialize: {error:#}");
         }
     });
 }
@@ -37,7 +37,7 @@ fn init_logger_inner(mode: LoggerInitMode) -> Result<()> {
             let configured_level = injector_config.main.log_level_filter();
             if crate::config::parse_level_filter(&injector_config.main.log_level).is_none() {
                 eprintln!(
-                    "[Injector][Logger] unknown log level '{}', falling back to debug",
+                    "injector logging unknown log level '{}', falling back to debug",
                     injector_config.main.log_level
                 );
             }
@@ -50,7 +50,7 @@ fn init_logger_inner(mode: LoggerInitMode) -> Result<()> {
         DEFAULT_LOG_PATH,
         PATTERN,
         LevelFilter::Trace,
-        "[Injector][Logger]",
+        "injector logging",
     )?;
 
     let android_logger = android_logger::AndroidLogger::new(
@@ -68,17 +68,14 @@ fn init_logger_inner(mode: LoggerInitMode) -> Result<()> {
 
     if file_logging_ready {
         log::info!(
-            "[Injector][Logger] file logging enabled at {} with level {:?}",
+            "file logging enabled at {} with level {:?}",
             DEFAULT_LOG_PATH,
             configured_level
         );
     }
 
     if let LoggerInitMode::Fixed(level) = mode {
-        log::info!(
-            "[Injector][Logger] initialized fallback logger with fixed level {:?}",
-            level
-        );
+        log::info!("initialized fallback logging with fixed level {:?}", level);
     }
 
     Ok(())

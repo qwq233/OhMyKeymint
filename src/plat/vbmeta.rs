@@ -68,14 +68,14 @@ pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
     let vb_key = match vb_key {
         Ok(value) => value,
         Err(error) => {
-            log::error!("Failed to resolve vb_key: {error:#}");
+            log::error!("failed to resolve vb_key: {error:#}");
             return Err(error);
         }
     };
     let vb_hash = match vb_hash {
         Ok(value) => value,
         Err(error) => {
-            log::error!("Failed to resolve vb_hash: {error:#}");
+            log::error!("failed to resolve vb_hash: {error:#}");
             return Err(error);
         }
     };
@@ -151,7 +151,7 @@ fn resolve_vb_key(
                     source: TrustValueSource::Computed,
                 }),
                 Err(error) => {
-                    log::warn!("Computed vbmeta public key digest unavailable: {error:#}");
+                    log::warn!("computed vbmeta public key digest unavailable: {error:#}");
                     Ok(random_field(TrustValueSource::RandomFallback))
                 }
             }
@@ -180,7 +180,7 @@ fn resolve_vb_hash(spec: &TrustValueSpec) -> Result<ResolvedField> {
                     source: TrustValueSource::Original,
                 }),
                 Err(error) => {
-                    log::warn!("Original verified boot hash unavailable: {error:#}");
+                    log::warn!("original verified boot hash unavailable: {error:#}");
                     Ok(random_field(TrustValueSource::RandomFallback))
                 }
             }
@@ -319,7 +319,7 @@ fn read_hex_property(name: &str) -> Option<[u8; 32]> {
     match parse_hex_32(&value) {
         Ok(bytes) => Some(bytes),
         Err(error) => {
-            log::warn!("Ignoring invalid property {name}={value}: {error:#}");
+            log::warn!("ignoring invalid property {name}={value}: {error:#}");
             None
         }
     }
@@ -505,7 +505,7 @@ fn probe_original_verified_boot_hash_inner() -> Result<[u8; 32]> {
     let metadata = result.context("fallback APP attestation key generation failed")?;
     let extracted = extract_verified_boot_hash_from_metadata(&metadata);
     if let Err(error) = service.deleteKey(&descriptor) {
-        log::warn!("Failed to delete fallback APP vbhash probe key {alias}: {error:?}");
+        log::warn!("failed to delete fallback APP vbhash probe key {alias}: {error:?}");
     }
     extracted
 }

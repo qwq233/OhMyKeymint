@@ -86,7 +86,7 @@ pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMint
     match probe_system_keymint_profile(security_level, version_number) {
         Ok(profile) => profile,
         Err(error) => {
-            log::warn!("Failed to resolve dynamic KeyMint hardware profile: {error:#}");
+            log::warn!("failed to resolve dynamic KeyMint hardware profile: {error:#}");
             fallback_profile(security_level, version_number)
         }
     }
@@ -101,7 +101,7 @@ fn detect_strongbox_keymint_present() -> bool {
     match probe_system_keymint_presence(security_level) {
         Ok(_) => true,
         Err(error) => {
-            log::info!("StrongBox KeyMint HAL is not present: {error:#}");
+            log::info!("optional StrongBox KeyMint HAL is not present: {error:#}");
             false
         }
     }

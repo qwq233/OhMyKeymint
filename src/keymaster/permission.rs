@@ -62,11 +62,11 @@ pub fn initialize_runtime_service_context() {
         Ok(context) => {
             let context = context.to_string();
             if RUNTIME_SERVICE_CONTEXT.set(context.clone()).is_ok() {
-                log::info!("OMK SELinux runtime context: {context}");
+                log::info!("resolved OMK SELinux runtime context={context}");
             }
         }
         Err(error) => {
-            log::warn!("Failed to read OMK SELinux runtime context: {error:#}");
+            log::warn!("failed to read OMK SELinux runtime context: {error:#}");
         }
     }
 }

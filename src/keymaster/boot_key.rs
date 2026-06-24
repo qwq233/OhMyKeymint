@@ -68,14 +68,14 @@ fn lookup_level_zero_km_and_strategy() -> Result<Option<(SecurityLevel, DenyLate
     let (level, strategy) = if let Some(c) = property_val.split_once(':') {
         c
     } else {
-        log::error!("Missing colon in {}: {:?}", PROPERTY_NAME, property_val);
+        log::error!("Missing colon in {PROPERTY_NAME}: {property_val:?}");
         return Ok(None);
     };
     let level = match level {
         "TRUSTED_ENVIRONMENT" => SecurityLevel::TRUSTED_ENVIRONMENT,
         "STRONGBOX" => SecurityLevel::STRONGBOX,
         _ => {
-            log::error!("Unknown security level in {}: {:?}", PROPERTY_NAME, level);
+            log::error!("Unknown security level in {PROPERTY_NAME}: {level:?}");
             return Ok(None);
         }
     };
@@ -91,7 +91,7 @@ fn lookup_level_zero_km_and_strategy() -> Result<Option<(SecurityLevel, DenyLate
             return Ok(None);
         }
     };
-    log::info!("Set from {}: {}", PROPERTY_NAME, property_val);
+    log::info!("Set from {PROPERTY_NAME}: {property_val}");
     Ok(Some((level, strategy)))
 }
 

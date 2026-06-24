@@ -59,7 +59,7 @@ impl rsbinder::DeathRecipient for PmDeathRecipient {
         PM.with(|p| {
             *p.lock().unwrap() = None;
         });
-        debug!("PackageManager died, cleared PM instance");
+        debug!("package manager binder died; cleared cached PM instance");
     }
 }
 
@@ -70,7 +70,7 @@ impl rsbinder::DeathRecipient for ApexDeathRecipient {
         APEX.with(|p| {
             *p.lock().unwrap() = None;
         });
-        debug!("ApexService died, cleared APEX instance");
+        debug!("apex service binder died; cleared cached instance");
     }
 }
 
@@ -81,7 +81,7 @@ impl rsbinder::DeathRecipient for KeystoreDeathRecipient {
         let mut guard = keystore_cache().lock().unwrap();
         guard.service = None;
         guard.death_recipient = None;
-        debug!("System Keystore died, cleared KEYSTORE instance");
+        debug!("system keystore binder died; cleared cached instance");
     }
 }
 
@@ -100,7 +100,7 @@ fn reset_pm() {
     PM.with(|p| {
         *p.lock().unwrap() = None;
     });
-    debug!("Reset PM instance to None");
+    debug!("reset cached PM instance to None");
 }
 
 pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreService>> {
@@ -166,7 +166,7 @@ where
 }
 
 pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
-    debug!("Getting AAID for UID: {}", uid);
+    debug!("resolving AAID uid={}", uid);
     let application_id = if (uid == 0) || (uid == 1000) {
         let info = KeyAttestationPackageInfo {
             packageName: "AndroidSystem".to_string(),
@@ -180,7 +180,7 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
         get_application_id_from_provider(uid)?
     };
 
-    debug!("Application ID: {:?}", application_id);
+    debug!("resolved application_id={:?}", application_id);
 
     encode_application_id(application_id)
 }
@@ -196,7 +196,10 @@ fn get_application_id_from_provider(uid: u32) -> anyhow::Result<KeyAttestationAp
             let pm = get_pm()?;
             let current_uid = unsafe { libc::getuid() };
             let current_euid = unsafe { libc::geteuid() };
-            debug!("Current UID: {}, EUID: {}", current_uid, current_euid);
+            debug!(
+                "calling AAID provider as uid={} euid={}",
+                current_uid, current_euid
+            );
             pm.getKeyAttestationApplicationId(uid as i32)
                 .map_err(anyhow::Error::new)
         };
@@ -205,8 +208,11 @@ fn get_application_id_from_provider(uid: u32) -> anyhow::Result<KeyAttestationAp
             Result::Ok(application_id) => return Ok(application_id),
             Err(error) => {
                 if is_transaction_failed_error(&error) && tried < 2 {
-                    error!("Transaction failed when calling getKeyAttestationApplicationId for UID {}: {:?}", uid, error);
-                    error!("Trying to reset the PM instance to None");
+                    error!(
+                        "getKeyAttestationApplicationId transaction failed uid={}: {:?}",
+                        uid, error
+                    );
+                    error!("resetting cached PM instance after AAID transaction failure");
                     if use_legacy {
                         super::legacy::clear_provider_cache();
                     } else {
@@ -325,7 +331,7 @@ pub fn get_apex_module_info() -> anyhow::Result<Vec<ApexModuleInfo>> {
     let apex = get_apex()?;
     let result: Vec<crate::android::apex::ApexInfo::ApexInfo> =
         apex.getActivePackages().map_err(|e| {
-            log::error!("Failed to get active packages: {:?}", e);
+            log::error!("failed to get active packages: {:?}", e);
             anyhow::anyhow!(err!("getActivePackages failed: {:?}", e))
         })?;
 

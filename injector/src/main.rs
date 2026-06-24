@@ -27,7 +27,7 @@ fn log_runtime_identity(role: &str) {
     let gid = unsafe { libc::getgid() };
     let egid = unsafe { libc::getegid() };
     info!(
-        "[Injector][Startup][{}] uid={} euid={} gid={} egid={}",
+        "runtime identity role={} uid={} euid={} gid={} egid={}",
         role, uid, euid, gid, egid
     );
 }
@@ -38,7 +38,7 @@ fn main() {
     match utils::current_exe_identity() {
         Ok(identity) => {
             info!(
-                "[Injector][Startup] build_id={} build_target={} git_sha={} runtime_arch={} exe={} sha256={} elf={}",
+                "injector binary build_id={} build_target={} git_sha={} runtime_arch={} exe={} sha256={} elf={}",
                 utils::build_id(),
                 utils::build_target(),
                 utils::build_git_sha(),
@@ -49,33 +49,30 @@ fn main() {
             );
         }
         Err(error) => {
-            error!(
-                "[Injector][Startup] failed to describe current injector binary: {:#}",
-                error
-            );
+            error!("failed to describe current injector binary: {:#}", error);
         }
     }
 
     let (pid, target_path) = utils::find_process_by_name("keystore2").unwrap();
     match utils::executable_identity(&target_path) {
         Ok(identity) => info!(
-            "[Injector][Startup] target=keystore2 pid={} exe={} sha256={} elf={}",
+            "keystore2 target pid={} exe={} sha256={} elf={}",
             pid,
             identity.path.display(),
             identity.sha256,
             identity.elf,
         ),
         Err(error) => error!(
-            "[Injector][Startup] failed to describe keystore2 executable {}: {:#}",
+            "failed to describe keystore2 executable {}: {:#}",
             target_path.display(),
             error
         ),
     }
     let pid = Pid::from_raw(pid);
     match inject::inject_library(pid) {
-        Ok(()) => info!("Injection successful"),
+        Ok(()) => info!("injection completed"),
         Err(e) => {
-            error!("Injection failed: {:#}", e);
+            error!("injection failed: {:#}", e);
             std::process::exit(1);
         }
     }
@@ -90,7 +87,7 @@ pub extern "C" fn entry(handle: *const c_void, rpc_fd: libc::c_int) -> bool {
     let config = config::get();
     if config::parse_level_filter(&config.main.log_level).is_none() {
         warn!(
-            "[Injector][Logger] unknown log level '{}', keeping debug fallback",
+            "injector logging unknown log level '{}', keeping debug fallback",
             config.main.log_level
         );
     }

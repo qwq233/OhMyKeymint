@@ -243,7 +243,7 @@ fn load_or_seed(path: &Path, context: LoadContext) -> InjectorConfig {
         Ok(loaded) => {
             if loaded.retries > 0 {
                 log::info!(
-                    "[Injector][Config] {} load from {} succeeded after {} retr{}",
+                    "{} config load from {} succeeded after {} retr{}",
                     context.label(),
                     path.display(),
                     loaded.retries,
@@ -252,7 +252,7 @@ fn load_or_seed(path: &Path, context: LoadContext) -> InjectorConfig {
             }
             if matches!(context, LoadContext::Startup) {
                 log::info!(
-                    "[Injector][Config] loaded config from {} via {}",
+                    "loaded config from {} via {}",
                     path.display(),
                     context.label()
                 );
@@ -262,7 +262,7 @@ fn load_or_seed(path: &Path, context: LoadContext) -> InjectorConfig {
         Err(LoadError::Missing(error)) => {
             let reason = format!("failed to read config: {error}");
             log::warn!(
-                "[Injector][Config] {} via {} {}; restoring current config",
+                "load from {} via {} {}; restoring current config",
                 path.display(),
                 context.label(),
                 reason
@@ -272,7 +272,7 @@ fn load_or_seed(path: &Path, context: LoadContext) -> InjectorConfig {
         Err(LoadError::Read(error)) => {
             let reason = format!("failed to read config: {error}");
             log::warn!(
-                "[Injector][Config] {} via {} {}; restoring current config",
+                "load from {} via {} {}; restoring current config",
                 path.display(),
                 context.label(),
                 reason
@@ -282,7 +282,7 @@ fn load_or_seed(path: &Path, context: LoadContext) -> InjectorConfig {
         Err(LoadError::Parse(error)) => {
             let reason = format!("failed to parse config: {error}");
             log::warn!(
-                "[Injector][Config] {} via {} {}; restoring current config",
+                "load from {} via {} {}; restoring current config",
                 path.display(),
                 context.label(),
                 reason
@@ -302,12 +302,9 @@ fn recover_broken_config(path: &Path, reason: &str) -> InjectorConfig {
             reason,
             false,
         ) {
-            Ok(()) => log::info!(
-                "[Injector][Config] moved invalid config to {}",
-                backup_path.display()
-            ),
+            Ok(()) => log::info!("moved invalid config to {}", backup_path.display()),
             Err(backup_error) => log::error!(
-                "[Injector][Config] failed to preserve broken config {}: {}",
+                "failed to preserve broken config {}: {}",
                 path.display(),
                 backup_error
             ),
@@ -317,7 +314,7 @@ fn recover_broken_config(path: &Path, reason: &str) -> InjectorConfig {
     let replacement = current_config_snapshot();
     if let Err(write_error) = write_config(path, &replacement) {
         log::error!(
-            "[Injector][Config] failed to write replacement config to {}: {}",
+            "failed to write replacement config to {}: {}",
             path.display(),
             write_error
         );
@@ -330,10 +327,7 @@ fn current_config_snapshot() -> InjectorConfig {
         Some(lock) => match lock.read() {
             Ok(config) => config.clone(),
             Err(error) => {
-                log::error!(
-                    "[Injector][Config] config lock poisoned while snapshotting current config: {}",
-                    error
-                );
+                log::error!("current config lock poisoned while snapshotting: {}", error);
                 InjectorConfig::default()
             }
         },
@@ -348,7 +342,7 @@ fn write_config(path: &Path, config: &InjectorConfig) -> io::Result<()> {
 
     let contents = render_config(config)?;
     fs::write(path, contents)?;
-    log::info!("[Injector][Config] wrote config to {}", path.display());
+    log::info!("wrote config to {}", path.display());
     Ok(())
 }
 
@@ -493,10 +487,7 @@ fn start_watcher(path: PathBuf) {
             reload_runtime_config(&reload_path, trigger);
         })
     {
-        log::error!(
-            "[Injector][Config] failed to start config watcher thread: {}",
-            error
-        );
+        log::error!("failed to start config watcher thread: {}", error);
     }
 }
 
@@ -508,14 +499,14 @@ fn reload_runtime_config(path: &Path, trigger: WatchTrigger) {
                 *guard = config.clone();
                 crate::logging::update_runtime_level(config.main.log_level_filter());
                 log::info!(
-                    "[Injector][Config] reloaded config from {} via {}",
+                    "reloaded config from {} via {}",
                     path.display(),
                     trigger.label()
                 );
             }
             Err(error) => {
                 log::error!(
-                    "[Injector][Config] failed to apply reloaded config {}: {}",
+                    "failed to apply config reload from {}: {}",
                     path.display(),
                     error
                 );
@@ -545,7 +536,7 @@ where
         sleeper,
         |retries, error, interval| {
             log::warn!(
-                "[Injector][Config] {} load from {} hit read-side race on retry {}/{}: {}; waiting {} ms",
+                "{} config load from {} hit read-side race on retry {}/{}: {}; waiting {} ms",
                 context.label(),
                 path.display(),
                 retries,

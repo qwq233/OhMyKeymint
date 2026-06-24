@@ -1612,11 +1612,11 @@ impl KeystoreDB {
             .context("Failed to extract stale keybox-bound rows.")?;
 
             let key_count = stale_keys.len();
-            log::info!("Found {key_count} stale keybox-bound keys to retire.");
+            log::info!("found {key_count} stale keybox-bound keys to retire");
 
             let mut notify_gc = false;
             for (key_id, km_uuid) in stale_keys {
-                log::debug!("Retiring stale keybox-bound key {key_id:#x} for UUID {km_uuid:?}");
+                log::debug!("retiring stale keybox-bound key key_id={key_id:#x} uuid={km_uuid:?}");
                 notify_gc = Self::remove_key_rows(tx, key_id)
                     .context("Retiring stale keybox-bound key.")?
                     || notify_gc;
@@ -1628,7 +1628,7 @@ impl KeystoreDB {
     }
 
     fn terminate_uuid_with_count(&mut self, km_uuid: &Uuid) -> Result<usize> {
-        log::info!("Terminating all keys created by UUID {km_uuid:0x?}");
+        log::info!("terminating all keys created by uuid={km_uuid:0x?}");
         let _wp = wd::watch("KeystoreDB::terminate_uuid");
 
         self.with_transaction(Immediate("TX_terminate_uuid"), |tx| {
@@ -1653,11 +1653,11 @@ impl KeystoreDB {
             .context("Failed to extract rows.")?;
 
             let key_count = key_ids.len();
-            log::info!("Found {key_count} keys to terminate.");
+            log::info!("found {key_count} keys to terminate");
 
             let mut notify_gc = false;
             for key_id in key_ids {
-                log::debug!("Terminating key {key_id:0x?}");
+                log::debug!("terminating key key_id={key_id:0x?}");
                 notify_gc =
                     Self::remove_key_rows(tx, key_id).context("In terminate_uuid.")? || notify_gc;
             }
@@ -3132,7 +3132,7 @@ impl KeystoreDB {
                     num_unbound += 1;
                 }
             }
-            info!("Deleting {num_unbound} LSKF-bound keys for {user:?}");
+            info!("deleting {num_unbound} LSKF-bound keys for {user:?}");
             Ok(()).do_gc(notify_gc)
         })
         .context(ks_err!())

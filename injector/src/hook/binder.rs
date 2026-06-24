@@ -202,7 +202,7 @@ pub(crate) unsafe fn parse_secctx_sid(secctx: libc::c_ulong) -> Option<String> {
 
 pub(crate) unsafe fn log_write_transaction(command_name: &str, tr: &binder_transaction_data) {
     info!(
-        "<<< [BinderInterceptor][pre] {} | target: {}, code: 0x{:x}, flags: 0x{:x}{}{}, data_size: {}, offsets_size: {}, parcel: {}",
+        "<<< {} | target: {}, code: 0x{:x}, flags: 0x{:x}{}{}, data_size: {}, offsets_size: {}, parcel: {}",
         command_name,
         format_target(tr),
         tr.code,
