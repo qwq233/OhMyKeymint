@@ -501,12 +501,15 @@ impl HardwareAuthToken {
 
 impl KmKeyParameter {
     pub fn to_km(self) -> Result<KeyParam> {
-        self.to_km_optional()
+        self.to_km_optional(KeyMintDevice::KEY_MINT_V5)
             .map_err(|error| anyhow!("Failed to convert key parameter: {error:?}"))?
             .ok_or_else(|| anyhow!(ks_err!("Invalid tag")))
     }
 
-    pub fn to_km_optional(self) -> std::result::Result<Option<KeyParam>, ValueNotRecognized> {
+    pub fn to_km_optional(
+        self,
+        km_dev_version: i32,
+    ) -> std::result::Result<Option<KeyParam>, ValueNotRecognized> {
         let tag = match keymint::Tag::try_from(self.tag.0) {
             Ok(tag) => tag,
             Err(_) => return Ok(None),
@@ -522,9 +525,15 @@ impl KmKeyParameter {
                 _ => return Err(ValueNotRecognized::KeyPurpose),
             },
             keymint::Tag::Algorithm => match value {
-                KeyParameterValue::Algorithm(v) => Some(KeyParam::Algorithm(
-                    kmr_wire::keymint::Algorithm::try_from(v.0)?,
-                )),
+                KeyParameterValue::Algorithm(v) => {
+                    let algorithm = kmr_wire::keymint::Algorithm::try_from(v.0)?;
+                    if km_dev_version < KeyMintDevice::KEY_MINT_V5
+                        && algorithm == kmr_wire::keymint::Algorithm::MlDsa
+                    {
+                        return Err(ValueNotRecognized::Algorithm);
+                    }
+                    Some(KeyParam::Algorithm(algorithm))
+                }
                 _ => return Err(ValueNotRecognized::Algorithm),
             },
             keymint::Tag::KeySize => match value {
@@ -558,11 +567,18 @@ impl KmKeyParameter {
                 _ => return Err(ValueNotRecognized::Integer),
             },
             keymint::Tag::EcCurve => match value {
-                KeyParameterValue::EcCurve(v) => Some(KeyParam::EcCurve(
-                    kmr_wire::keymint::EcCurve::try_from(v.0)?,
-                )),
+                KeyParameterValue::EcCurve(v) => {
+                    let curve = kmr_wire::keymint::EcCurve::try_from(v.0)?;
+                    if km_dev_version < KeyMintDevice::KEY_MINT_V2
+                        && curve == kmr_wire::keymint::EcCurve::Curve25519
+                    {
+                        return Err(ValueNotRecognized::EcCurve);
+                    }
+                    Some(KeyParam::EcCurve(curve))
+                }
                 _ => return Err(ValueNotRecognized::EcCurve),
             },
+            keymint::Tag::MlDsaVariant if km_dev_version < KeyMintDevice::KEY_MINT_V5 => None,
             keymint::Tag::MlDsaVariant => match value {
                 KeyParameterValue::MlDsaVariant(v) => Some(KeyParam::MlDsaVariant(
                     kmr_wire::keymint::MlDsaVariant::try_from(v.0)?,
@@ -739,6 +755,11 @@ impl KmKeyParameter {
                 check_bool!(value)?;
                 Some(KeyParam::StorageKey)
             }
+            keymint::Tag::AttestationIdSecondImei
+                if km_dev_version < KeyMintDevice::KEY_MINT_V3 =>
+            {
+                None
+            }
             keymint::Tag::AttestationIdSecondImei => {
                 blob_param(value, KeyParam::AttestationIdSecondImei)?
             }
@@ -775,6 +796,7 @@ impl KmKeyParameter {
                 KeyParameterValue::Integer(v) => Some(KeyParam::MaxBootLevel(v as u32)),
                 _ => return Err(ValueNotRecognized::Integer),
             },
+            keymint::Tag::ModuleHash if km_dev_version < KeyMintDevice::KEY_MINT_V4 => None,
             keymint::Tag::ModuleHash => blob_param(value, KeyParam::ModuleHash)?,
         })
     }
@@ -782,12 +804,13 @@ impl KmKeyParameter {
 
 pub fn key_parameters_to_km(
     parameters: &[KmKeyParameter],
+    km_dev_version: i32,
 ) -> std::result::Result<Vec<KeyParam>, ValueNotRecognized> {
     parameters
         .iter()
         .cloned()
         .try_fold(Vec::new(), |mut result, param| {
-            if let Some(param) = param.to_km_optional()? {
+            if let Some(param) = param.to_km_optional(km_dev_version)? {
                 result.push(param);
             }
             Ok(result)
@@ -806,6 +829,7 @@ fn blob_param(
 
 pub fn key_creation_result_to_aidl(
     result: kmr_wire::keymint::KeyCreationResult,
+    km_dev_version: i32,
 ) -> Result<KeyCreationResult, rsbinder::Status> {
     let certificates: Vec<Certificate> = result
         .certificate_chain
@@ -819,7 +843,7 @@ pub fn key_creation_result_to_aidl(
         .key_characteristics
         .iter()
         .map(|kc| {
-            let params = key_params_to_aidl(&kc.authorizations)
+            let params = key_params_to_aidl(&kc.authorizations, km_dev_version)
                 .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
                 .map_err(map_ks_error)?;
 
@@ -837,12 +861,16 @@ pub fn key_creation_result_to_aidl(
     })
 }
 
-pub fn key_params_to_aidl(params: &[KeyParam]) -> Result<Vec<KmKeyParameter>> {
-    params.iter().cloned().map(key_param_to_aidl).collect()
+pub fn key_params_to_aidl(params: &[KeyParam], km_dev_version: i32) -> Result<Vec<KmKeyParameter>> {
+    params
+        .iter()
+        .cloned()
+        .map(|param| key_param_to_aidl(param, km_dev_version))
+        .collect()
 }
 
-pub fn key_param_to_aidl(kp: KeyParam) -> Result<KmKeyParameter> {
-    let tag = Tag(kp.tag() as i32);
+pub fn key_param_to_aidl(kp: KeyParam, km_dev_version: i32) -> Result<KmKeyParameter> {
+    let mut tag = Tag(kp.tag() as i32);
     let value = match kp {
         KeyParam::Purpose(v) => KeyParameterValue::KeyPurpose(
             crate::android::hardware::security::keymint::KeyPurpose::KeyPurpose(v as i32),
@@ -863,6 +891,11 @@ pub fn key_param_to_aidl(kp: KeyParam) -> Result<KmKeyParameter> {
         KeyParam::EcCurve(v) => KeyParameterValue::EcCurve(
             crate::android::hardware::security::keymint::EcCurve::EcCurve(v as i32),
         ),
+        KeyParam::MlDsaVariant(v) if km_dev_version < KeyMintDevice::KEY_MINT_V5 => {
+            error!("TA emitted ML_DSA_VARIANT tag but HAL v5 is not supported");
+            tag = Tag::INVALID;
+            KeyParameterValue::Integer(v as i32)
+        }
         KeyParam::MlDsaVariant(v) => KeyParameterValue::MlDsaVariant(AidlMlDsaVariant(v as i32)),
         KeyParam::RsaPublicExponent(kmr_wire::RsaExponent(v)) => {
             KeyParameterValue::LongInteger(v as i64)
@@ -912,14 +945,24 @@ pub fn key_param_to_aidl(kp: KeyParam) -> Result<KmKeyParameter> {
         | KeyParam::AttestationIdProduct(v)
         | KeyParam::AttestationIdSerial(v)
         | KeyParam::AttestationIdImei(v)
-        | KeyParam::AttestationIdSecondImei(v)
         | KeyParam::AttestationIdMeid(v)
         | KeyParam::AttestationIdManufacturer(v)
         | KeyParam::AttestationIdModel(v)
         | KeyParam::Nonce(v)
         | KeyParam::CertificateSerial(v)
-        | KeyParam::CertificateSubject(v)
-        | KeyParam::ModuleHash(v) => KeyParameterValue::Blob(v),
+        | KeyParam::CertificateSubject(v) => KeyParameterValue::Blob(v),
+        KeyParam::AttestationIdSecondImei(v) if km_dev_version < KeyMintDevice::KEY_MINT_V3 => {
+            error!("TA emitted ATTESTATION_ID_SECOND_IMEI tag but HAL v3 is not supported");
+            tag = Tag::INVALID;
+            KeyParameterValue::Blob(v)
+        }
+        KeyParam::AttestationIdSecondImei(v) => KeyParameterValue::Blob(v),
+        KeyParam::ModuleHash(v) if km_dev_version < KeyMintDevice::KEY_MINT_V4 => {
+            error!("TA emitted MODULE_HASH tag but HAL v4 is not supported");
+            tag = Tag::INVALID;
+            KeyParameterValue::Blob(v)
+        }
+        KeyParam::ModuleHash(v) => KeyParameterValue::Blob(v),
         KeyParam::Origin(v) => KeyParameterValue::Origin(
             crate::android::hardware::security::keymint::KeyOrigin::KeyOrigin(v as i32),
         ),

@@ -9,11 +9,14 @@ const B_TYPE_LARGE: u32 = 0x85;
 pub(crate) const BINDER_WRITE_READ: u32 = 0xc0306201;
 pub(crate) const BC_TRANSACTION_NR: u32 = 0;
 pub(crate) const BC_REPLY_NR: u32 = 1;
+pub(crate) const BC_ACQUIRE_RESULT_NR: u32 = 2;
 pub(crate) const BC_FREE_BUFFER_NR: u32 = 3;
 pub(crate) const BC_INCREFS_DONE_NR: u32 = 8;
 pub(crate) const BC_ACQUIRE_DONE_NR: u32 = 9;
+pub(crate) const BC_DEAD_BINDER_DONE_NR: u32 = 16;
 pub(crate) const BC_TRANSACTION_SG_NR: u32 = 17;
 pub(crate) const BC_REPLY_SG_NR: u32 = 18;
+pub(crate) const BC_FREEZE_NOTIFICATION_DONE_NR: u32 = 21;
 pub(crate) const BR_TRANSACTION_NR: u32 = 2;
 pub(crate) const BR_REPLY_NR: u32 = 3;
 pub(crate) const BR_TRANSACTION_COMPLETE_NR: u32 = 6;
@@ -21,7 +24,12 @@ pub(crate) const BR_INCREFS_NR: u32 = 7;
 pub(crate) const BR_ACQUIRE_NR: u32 = 8;
 pub(crate) const BR_RELEASE_NR: u32 = 9;
 pub(crate) const BR_DECREFS_NR: u32 = 10;
+pub(crate) const BR_ATTEMPT_ACQUIRE_NR: u32 = 11;
 pub(crate) const BR_NOOP_NR: u32 = 12;
+pub(crate) const BR_DEAD_BINDER_NR: u32 = 15;
+pub(crate) const BR_CLEAR_DEATH_NOTIFICATION_DONE_NR: u32 = 16;
+pub(crate) const BR_FROZEN_BINDER_NR: u32 = 21;
+pub(crate) const BR_CLEAR_FREEZE_NOTIFICATION_DONE_NR: u32 = 22;
 pub(crate) const TF_ONE_WAY: u32 = 0x01;
 pub(crate) const TF_STATUS_CODE: u32 = 0x08;
 pub(crate) const BINDER_TYPE_BINDER: u32 = b_pack_chars(b's', b'b', b'*', B_TYPE_LARGE as u8);
@@ -82,9 +90,31 @@ pub(crate) struct binder_ptr_cookie {
     pub cookie: libc::c_ulong,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct binder_pri_ptr_cookie {
+    pub priority: i32,
+    pub ptr: libc::c_ulong,
+    pub cookie: libc::c_ulong,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct binder_frozen_state_info {
+    pub cookie: libc::c_ulong,
+    pub is_frozen: u32,
+    pub reserved: u32,
+}
+
 pub(crate) const BR_NOOP_CMD: u32 = ioc(IOC_NONE, b'r' as u32, BR_NOOP_NR, 0);
 pub(crate) const BR_TRANSACTION_COMPLETE_CMD: u32 =
     ioc(IOC_NONE, b'r' as u32, BR_TRANSACTION_COMPLETE_NR, 0);
+pub(crate) const BC_ACQUIRE_RESULT_CMD: u32 = ioc(
+    IOC_WRITE,
+    b'c' as u32,
+    BC_ACQUIRE_RESULT_NR,
+    size_of::<i32>(),
+);
 pub(crate) const BC_FREE_BUFFER_CMD: u32 = ioc(
     IOC_WRITE,
     b'c' as u32,
@@ -108,6 +138,18 @@ pub(crate) const BC_ACQUIRE_DONE_CMD: u32 = ioc(
     b'c' as u32,
     BC_ACQUIRE_DONE_NR,
     size_of::<binder_ptr_cookie>(),
+);
+pub(crate) const BC_DEAD_BINDER_DONE_CMD: u32 = ioc(
+    IOC_WRITE,
+    b'c' as u32,
+    BC_DEAD_BINDER_DONE_NR,
+    size_of::<libc::c_ulong>(),
+);
+pub(crate) const BC_FREEZE_NOTIFICATION_DONE_CMD: u32 = ioc(
+    IOC_WRITE,
+    b'c' as u32,
+    BC_FREEZE_NOTIFICATION_DONE_NR,
+    size_of::<libc::c_ulong>(),
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

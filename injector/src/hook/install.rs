@@ -1,8 +1,9 @@
+use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::atomic::Ordering;
 
 use anyhow::{anyhow, bail, Result};
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use super::{new_ioctl, HOOK_INIT, OLD_IOCTL};
 use crate::{config, ipc, logging};
@@ -23,16 +24,16 @@ fn install_hooks() -> Result<()> {
 
     let maps = lsplt_rs::MapInfo::scan("self");
     let mut targets = Vec::new();
+    let mut seen = HashSet::new();
 
     for map in maps {
         if let Some(path) = &map.pathname {
-            if path.ends_with("/libbinder.so")
-                || path.ends_with("libbinder.so")
-                || path.ends_with("/libhwbinder.so")
-                || path.ends_with("libhwbinder.so")
+            let name = path.rsplit('/').next().unwrap_or(path);
+            if (name.starts_with("libbinder") || name == "libhwbinder.so")
+                && seen.insert((map.dev, map.inode))
             {
-                info!(
-                    "Found binder-related library for hook: {} (dev={}, inode={})",
+                debug!(
+                    "Found binder library for ioctl hook: {} (dev={}, inode={})",
                     path, map.dev, map.inode
                 );
                 targets.push((path.clone(), map.dev, map.inode));
@@ -41,37 +42,40 @@ fn install_hooks() -> Result<()> {
     }
 
     if targets.is_empty() {
-        bail!("Could not find libbinder.so/libhwbinder.so in process maps");
+        bail!("Could not find binder libraries in process maps");
     }
 
-    let mut registered = 0usize;
+    let mut candidates = Vec::new();
 
     for (path, dev, inode) in targets {
         for symbol in ["ioctl", "__ioctl"] {
-            let mut old_ptr: *mut c_void = std::ptr::null_mut();
-            match lsplt_rs::register_hook(
-                dev,
-                inode,
-                symbol,
-                new_ioctl as *mut c_void,
-                Some(&mut old_ptr),
-            ) {
-                Ok(_) => {
-                    if !old_ptr.is_null() && OLD_IOCTL.load(Ordering::Relaxed).is_null() {
-                        OLD_IOCTL.store(old_ptr, Ordering::SeqCst);
-                    }
-                    registered += 1;
-                    info!(
-                        "registered binder ioctl hook path={} symbol={}",
-                        path, symbol
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "failed to register binder ioctl hook path={} symbol={}: {:?}",
-                        path, symbol, e
-                    );
-                }
+            candidates.push((path.clone(), dev, inode, symbol));
+        }
+    }
+
+    let mut backups = vec![std::ptr::null_mut(); candidates.len()];
+    let mut registered = 0usize;
+
+    for (idx, (path, dev, inode, symbol)) in candidates.iter().enumerate() {
+        match lsplt_rs::register_hook(
+            *dev,
+            *inode,
+            symbol,
+            new_ioctl as *mut c_void,
+            Some(&mut backups[idx]),
+        ) {
+            Ok(_) => {
+                registered += 1;
+                info!(
+                    "registered binder ioctl hook path={} symbol={}",
+                    path, symbol
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "failed to register binder ioctl hook path={} symbol={}: {:?}",
+                    path, symbol, e
+                );
             }
         }
     }
@@ -81,6 +85,18 @@ fn install_hooks() -> Result<()> {
     }
 
     lsplt_rs::commit_hook().map_err(|e| anyhow!("Failed to commit lsplt hook: {:?}", e))?;
-    info!("committed {} binder ioctl hook(s)", registered);
+    let committed = backups.iter().filter(|ptr| !ptr.is_null()).count();
+    for ptr in backups {
+        if !ptr.is_null() && OLD_IOCTL.load(Ordering::Relaxed).is_null() {
+            OLD_IOCTL.store(ptr, Ordering::SeqCst);
+        }
+    }
+    if committed == 0 {
+        bail!("Failed to commit any binder ioctl hooks");
+    }
+    info!(
+        "committed {} binder ioctl hook(s) from {} registration(s)",
+        committed, registered
+    );
     Ok(())
 }

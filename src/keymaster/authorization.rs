@@ -28,7 +28,7 @@ use crate::keymaster::async_task::AsyncTask;
 use crate::keymaster::crypto::{Password, ZVec};
 use crate::keymaster::error::anyhow_error_to_cstring;
 use crate::keymaster::error::Error as KeystoreError;
-use crate::keymaster::keymint_device::localize_auth_token_for_omk;
+use crate::keymaster::keymint_device::{localize_auth_token_for_omk, KeyMintDevice};
 use crate::keymaster::permission::{self, require_forwarded_context, KeystorePerm};
 use crate::keymaster::super_key::WipeKeyOption;
 use crate::keymaster::utils::{
@@ -467,10 +467,13 @@ fn verify_system_auth_token(auth_token: &HardwareAuthToken) -> Result<()> {
     let services = [SYSTEM_KEYMINT_DEFAULT, SYSTEM_KEYMINT_STRONGBOX];
     let key_params = verifier_key_params(auth_token)
         .context(ks_err!("failed to build system verifier key parameters"))?;
-    let op_params = key_params_to_aidl(&[KeyParam::MacLength(VERIFIER_MAC_LENGTH_BITS as u32)])
-        .context(ks_err!(
-            "failed to build system verifier operation parameters"
-        ))?;
+    let op_params = key_params_to_aidl(
+        &[KeyParam::MacLength(VERIFIER_MAC_LENGTH_BITS as u32)],
+        KeyMintDevice::KEY_MINT_V5,
+    )
+    .context(ks_err!(
+        "failed to build system verifier operation parameters"
+    ))?;
     let mut saw_rejection = false;
     let mut failures = Vec::new();
 
@@ -554,7 +557,7 @@ fn verifier_key_params(auth_token: &HardwareAuthToken) -> Result<Vec<KeyParamete
         params.push(KeyParam::UserSecureId(auth_token.authenticatorId as u64));
     }
 
-    key_params_to_aidl(&params)
+    key_params_to_aidl(&params, KeyMintDevice::KEY_MINT_V5)
 }
 
 impl VerifierKeyCacheKey {

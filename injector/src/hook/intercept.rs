@@ -9,12 +9,16 @@ use std::thread::ThreadId;
 use log::{debug, info, warn};
 
 use super::binder::{
-    _ioc_dir, _ioc_nr, _ioc_size, binder_ptr_cookie, binder_transaction_data,
-    binder_transaction_data_secctx, binder_transaction_data_sg, binder_write_read, format_target,
-    log_write_transaction, parse_secctx_sid, preview_transaction_parcel, BC_ACQUIRE_DONE_CMD,
-    BC_REPLY_CMD, BC_REPLY_NR, BC_REPLY_SG_NR, BC_TRANSACTION_NR, BC_TRANSACTION_SG_NR,
-    BINDER_WRITE_READ, BR_ACQUIRE_NR, BR_DECREFS_NR, BR_INCREFS_NR, BR_NOOP_CMD, BR_RELEASE_NR,
-    BR_REPLY_NR, BR_TRANSACTION_COMPLETE_CMD, BR_TRANSACTION_NR, TF_ONE_WAY, TF_STATUS_CODE,
+    _ioc_dir, _ioc_nr, _ioc_size, binder_frozen_state_info, binder_pri_ptr_cookie,
+    binder_ptr_cookie, binder_transaction_data, binder_transaction_data_secctx,
+    binder_transaction_data_sg, binder_write_read, format_target, log_write_transaction,
+    parse_secctx_sid, preview_transaction_parcel, BC_ACQUIRE_DONE_CMD, BC_ACQUIRE_RESULT_CMD,
+    BC_DEAD_BINDER_DONE_CMD, BC_FREEZE_NOTIFICATION_DONE_CMD, BC_REPLY_CMD, BC_REPLY_NR,
+    BC_REPLY_SG_NR, BC_TRANSACTION_NR, BC_TRANSACTION_SG_NR, BINDER_WRITE_READ, BR_ACQUIRE_NR,
+    BR_ATTEMPT_ACQUIRE_NR, BR_CLEAR_DEATH_NOTIFICATION_DONE_NR,
+    BR_CLEAR_FREEZE_NOTIFICATION_DONE_NR, BR_DEAD_BINDER_NR, BR_DECREFS_NR, BR_FROZEN_BINDER_NR,
+    BR_INCREFS_NR, BR_NOOP_CMD, BR_RELEASE_NR, BR_REPLY_NR, BR_TRANSACTION_COMPLETE_CMD,
+    BR_TRANSACTION_NR, TF_ONE_WAY, TF_STATUS_CODE,
 };
 use super::rewrite::{
     clear_outbound_reply_buffers, handle_bc_reply, handle_br_transaction,
@@ -288,6 +292,126 @@ unsafe fn parse_read_buffer(
                             "unexpected binder ref command payload size {} for nr={}",
                             cmd_size, cmd_nr
                         );
+                    }
+                }
+                BR_ATTEMPT_ACQUIRE_NR => {
+                    if cmd_size == size_of::<binder_pri_ptr_cookie>() {
+                        let pri_ptr_cookie =
+                            std::ptr::read_unaligned(ptr as *const binder_pri_ptr_cookie);
+                        let target = LocalBinderTarget {
+                            ptr: pri_ptr_cookie.ptr,
+                            cookie: pri_ptr_cookie.cookie,
+                        };
+                        if handle_synthetic_ref_command(target, cmd_nr) {
+                            let mut write = Vec::with_capacity(size_of::<u32>() + size_of::<i32>());
+                            let success = 1i32;
+                            push_unaligned(&mut write, &BC_ACQUIRE_RESULT_CMD);
+                            push_unaligned(&mut write, &success);
+                            let submitted = submit_write_buffer(
+                                fd,
+                                old_ioctl_fn,
+                                &mut write,
+                                "BC_ACQUIRE_RESULT",
+                            );
+                            if submitted {
+                                info!(
+                                    "event=synthetic consumed binder attempt-acquire for ptr=0x{:x} cookie=0x{:x}",
+                                    target.ptr, target.cookie
+                                );
+                            } else {
+                                warn!(
+                                    "event=synthetic dropping binder attempt-acquire for ptr=0x{:x} cookie=0x{:x} after result submission failed",
+                                    target.ptr, target.cookie
+                                );
+                            }
+                            fill_noop_command(ptr.sub(4), cmd_size + size_of::<u32>());
+                        }
+                    } else {
+                        warn!(
+                            "unexpected binder attempt-acquire payload size {}",
+                            cmd_size
+                        );
+                    }
+                }
+                BR_DEAD_BINDER_NR
+                | BR_CLEAR_DEATH_NOTIFICATION_DONE_NR
+                | BR_CLEAR_FREEZE_NOTIFICATION_DONE_NR => {
+                    if cmd_size == size_of::<libc::c_ulong>() {
+                        let cookie = std::ptr::read_unaligned(ptr as *const libc::c_ulong);
+                        let target = LocalBinderTarget {
+                            ptr: cookie,
+                            cookie: 0,
+                        };
+                        if handle_synthetic_ref_command(target, cmd_nr) {
+                            let submitted = if cmd_nr == BR_DEAD_BINDER_NR {
+                                let mut write = Vec::with_capacity(
+                                    size_of::<u32>() + size_of::<libc::c_ulong>(),
+                                );
+                                push_unaligned(&mut write, &BC_DEAD_BINDER_DONE_CMD);
+                                push_unaligned(&mut write, &cookie);
+                                submit_write_buffer(
+                                    fd,
+                                    old_ioctl_fn,
+                                    &mut write,
+                                    "BC_DEAD_BINDER_DONE",
+                                )
+                            } else {
+                                true
+                            };
+                            if submitted {
+                                info!(
+                                    "event=synthetic consumed binder pointer command nr={} for ptr=0x{:x}",
+                                    cmd_nr, cookie
+                                );
+                            } else {
+                                warn!(
+                                    "event=synthetic dropping binder pointer command nr={} for ptr=0x{:x} after done submission failed",
+                                    cmd_nr, cookie
+                                );
+                            }
+                            fill_noop_command(ptr.sub(4), cmd_size + size_of::<u32>());
+                        }
+                    } else {
+                        warn!(
+                            "unexpected binder pointer command payload size {} for nr={}",
+                            cmd_size, cmd_nr
+                        );
+                    }
+                }
+                BR_FROZEN_BINDER_NR => {
+                    if cmd_size == size_of::<binder_frozen_state_info>() {
+                        let frozen =
+                            std::ptr::read_unaligned(ptr as *const binder_frozen_state_info);
+                        let target = LocalBinderTarget {
+                            ptr: frozen.cookie,
+                            cookie: 0,
+                        };
+                        if handle_synthetic_ref_command(target, cmd_nr) {
+                            let mut write =
+                                Vec::with_capacity(size_of::<u32>() + size_of::<libc::c_ulong>());
+                            push_unaligned(&mut write, &BC_FREEZE_NOTIFICATION_DONE_CMD);
+                            push_unaligned(&mut write, &frozen.cookie);
+                            let submitted = submit_write_buffer(
+                                fd,
+                                old_ioctl_fn,
+                                &mut write,
+                                "BC_FREEZE_NOTIFICATION_DONE",
+                            );
+                            if submitted {
+                                info!(
+                                    "event=synthetic consumed binder frozen command for ptr=0x{:x}",
+                                    frozen.cookie
+                                );
+                            } else {
+                                warn!(
+                                    "event=synthetic dropping binder frozen command for ptr=0x{:x} after done submission failed",
+                                    frozen.cookie
+                                );
+                            }
+                            fill_noop_command(ptr.sub(4), cmd_size + size_of::<u32>());
+                        }
+                    } else {
+                        warn!("unexpected binder frozen payload size {}", cmd_size);
                     }
                 }
                 BR_REPLY_NR => {

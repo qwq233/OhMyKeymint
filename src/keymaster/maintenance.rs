@@ -127,7 +127,7 @@ impl MaintenanceManager {
             )
         })
         .context(err!("setting up boot-level key cache"))?;
-        call_keymint_wrappers("earlyBootEnded", |keymint| keymint.earlyBootEnded())?;
+        replay_early_boot_ended()?;
         Ok(())
     }
 
@@ -303,6 +303,10 @@ fn keymint_unavailable(error: &anyhow::Error) -> bool {
         error.root_cause().downcast_ref::<KsError>(),
         Some(KsError::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
     )
+}
+
+pub(crate) fn replay_early_boot_ended() -> Result<()> {
+    call_keymint_wrappers("earlyBootEnded", |keymint| keymint.earlyBootEnded())
 }
 
 fn call_keymint_wrappers<F>(label: &'static str, mut call: F) -> Result<()>

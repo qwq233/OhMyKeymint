@@ -20,8 +20,9 @@ use crate::android::hardware::security::keymint::IKeyMintOperation::BnKeyMintOpe
 use crate::android::hardware::security::keymint::{
     HardwareAuthToken::HardwareAuthToken, IKeyMintDevice::IKeyMintDevice,
     IKeyMintOperation::IKeyMintOperation, KeyCharacteristics::KeyCharacteristics,
-    KeyCreationResult::KeyCreationResult, KeyParameter::KeyParameter, KeyPurpose::KeyPurpose,
-    SecurityLevel::SecurityLevel,
+    KeyCreationResult::KeyCreationResult, KeyParameter::KeyParameter,
+    KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, SecurityLevel::SecurityLevel,
+    Tag::Tag,
 };
 use crate::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
@@ -414,6 +415,36 @@ fn key_parameter_conversion_status(error: ValueNotRecognized) -> Status {
     map_ks_error(map_key_parameter_conversion_error(error))
 }
 
+fn begin_key_parameters_to_km(
+    params: &[KeyParameter],
+    version_number: i32,
+) -> std::result::Result<Vec<KeyParam>, ValueNotRecognized> {
+    let mut filtered = Vec::with_capacity(params.len());
+    for param in params {
+        match param.r#tag {
+            Tag::ASSOCIATED_DATA | Tag::CONFIRMATION_TOKEN | Tag::UNIQUE_ID => match &param.r#value
+            {
+                KeyParameterValue::Blob(_) => continue,
+                _ => return Err(ValueNotRecognized::Blob),
+            },
+            Tag::MIN_SECONDS_BETWEEN_OPS => match &param.r#value {
+                KeyParameterValue::Integer(_) => continue,
+                _ => return Err(ValueNotRecognized::Integer),
+            },
+            Tag::HARDWARE_TYPE => match &param.r#value {
+                KeyParameterValue::SecurityLevel(_) => continue,
+                _ => return Err(ValueNotRecognized::SecurityLevel),
+            },
+            Tag::IDENTITY_CREDENTIAL_KEY => match &param.r#value {
+                KeyParameterValue::BoolValue(true) => continue,
+                _ => return Err(ValueNotRecognized::Bool),
+            },
+            _ => filtered.push(param.clone()),
+        }
+    }
+    key_parameters_to_km(&filtered, version_number)
+}
+
 #[allow(non_snake_case)]
 impl IKeyMintDevice for KeyMintWrapper {
     fn begin(
@@ -423,7 +454,9 @@ impl IKeyMintDevice for KeyMintWrapper {
         params: &[KeyParameter],
         auth_token: Option<&HardwareAuthToken>,
     ) -> Result<crate::android::hardware::security::keymint::BeginResult::BeginResult, Status> {
-        let km_params = key_parameters_to_km(params).map_err(map_key_parameter_conversion_error);
+        let version_number = resolve_hardware_profile(self.security_level).version_number;
+        let km_params = begin_key_parameters_to_km(params, version_number)
+            .map_err(map_key_parameter_conversion_error);
         let km_params = map_ks_result(km_params)?;
 
         let req = PerformOpReq::DeviceBegin(BeginRequest {
@@ -453,7 +486,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         );
         let operation = BnKeyMintOperation::new_binder(operation);
 
-        let out_params = key_params_to_aidl(&result.params);
+        let out_params = key_params_to_aidl(&result.params, version_number);
         let out_params = out_params.map_err(|error| {
             log::error!("failed to convert begin out params to AIDL: {error:#}");
             Status::new_service_specific_error(ErrorCode::UNKNOWN_ERROR.0, None)
@@ -523,11 +556,12 @@ impl IKeyMintDevice for KeyMintWrapper {
     ) -> rsbinder::status::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
-        let key_parameters = key_parameters_to_km(keyParams)
+        let version_number = resolve_hardware_profile(self.security_level).version_number;
+        let key_parameters = key_parameters_to_km(keyParams, version_number)
             .map_err(map_key_parameter_conversion_error)
             .map_err(map_ks_error)?;
         let attestation_key = if let Some(ak) = attestation_key {
-            let key_parameters = key_parameters_to_km(&ak.attestKeyParams)
+            let key_parameters = key_parameters_to_km(&ak.attestKeyParams, version_number)
                 .map_err(map_key_parameter_conversion_error)
                 .map_err(map_ks_error)?;
             Some(AttestationKey {
@@ -552,7 +586,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             _ => unreachable!("Unexpected response type"),
         };
 
-        let resp = key_creation_result_to_aidl(result)?;
+        let resp = key_creation_result_to_aidl(result, version_number)?;
 
         Result::Ok(resp)
     }
@@ -568,11 +602,12 @@ impl IKeyMintDevice for KeyMintWrapper {
     ) -> rsbinder::status::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
-        let key_parameters = key_parameters_to_km(key_params)
+        let version_number = resolve_hardware_profile(self.security_level).version_number;
+        let key_parameters = key_parameters_to_km(key_params, version_number)
             .map_err(map_key_parameter_conversion_error)
             .map_err(map_ks_error)?;
         let attestation_key = if let Some(ak) = attestation_key {
-            let key_parameters = key_parameters_to_km(&ak.attestKeyParams)
+            let key_parameters = key_parameters_to_km(&ak.attestKeyParams, version_number)
                 .map_err(map_key_parameter_conversion_error)
                 .map_err(map_ks_error)?;
             Some(AttestationKey {
@@ -602,7 +637,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             _ => unreachable!("Unexpected response type"),
         };
 
-        let resp = key_creation_result_to_aidl(result)?;
+        let resp = key_creation_result_to_aidl(result, version_number)?;
 
         Result::Ok(resp)
     }
@@ -618,7 +653,8 @@ impl IKeyMintDevice for KeyMintWrapper {
     ) -> rsbinder::status::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
-        let unwrapping_params = key_parameters_to_km(unwrapping_params)
+        let version_number = resolve_hardware_profile(self.security_level).version_number;
+        let unwrapping_params = key_parameters_to_km(unwrapping_params, version_number)
             .map_err(map_key_parameter_conversion_error)
             .map_err(map_ks_error)?;
 
@@ -645,7 +681,7 @@ impl IKeyMintDevice for KeyMintWrapper {
                 ))
             }
         };
-        let resp = key_creation_result_to_aidl(result)?;
+        let resp = key_creation_result_to_aidl(result, version_number)?;
 
         Result::Ok(resp)
     }
@@ -655,7 +691,8 @@ impl IKeyMintDevice for KeyMintWrapper {
         key_blob_to_upgrade: &[u8],
         upgrade_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
     ) -> rsbinder::status::Result<Vec<u8>> {
-        let upgrade_params = key_parameters_to_km(upgrade_params)
+        let version_number = resolve_hardware_profile(self.security_level).version_number;
+        let upgrade_params = key_parameters_to_km(upgrade_params, version_number)
             .map_err(map_key_parameter_conversion_error)
             .map_err(map_ks_error)?;
 
@@ -784,8 +821,9 @@ impl IKeyMintDevice for KeyMintWrapper {
             _ => unreachable!("Unexpected response type"),
         };
 
+        let version_number = resolve_hardware_profile(self.security_level).version_number;
         let result: Result<Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>, rsbinder::Status> = result.iter().map(|kc| {
-            let params = key_params_to_aidl(&kc.authorizations)
+            let params = key_params_to_aidl(&kc.authorizations, version_number)
                 .map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))
                 .map_err(map_ks_error)?;
 
@@ -863,7 +901,8 @@ impl IKeyMintDevice for KeyMintWrapper {
         &self,
         info: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
     ) -> rsbinder::status::Result<()> {
-        let additional_info = key_parameters_to_km(info)
+        let version_number = resolve_hardware_profile(self.security_level).version_number;
+        let additional_info = key_parameters_to_km(info, version_number)
             .map_err(map_key_parameter_conversion_error)
             .map_err(map_ks_error)?;
 
@@ -1140,10 +1179,6 @@ pub fn get_keymaster_security_level(
     }
 }
 
-fn supports_module_hash_attestation(version_number: i32) -> bool {
-    version_number >= KeyMintDevice::KEY_MINT_V4
-}
-
 #[derive(Clone, Copy)]
 struct ResolvedHardwareProfile {
     version_number: i32,
@@ -1357,7 +1392,7 @@ fn init_keymint_ta(security_level: SecurityLevel) -> Result<KeyMintTa> {
         return Err(Error::Km(ErrorCode::UNKNOWN_ERROR)).context(err!("Failed to set HAL version"));
     }
 
-    if supports_module_hash_attestation(profile.version_number) {
+    if profile.version_number >= KeyMintDevice::KEY_MINT_V4 {
         if let Some(bundle) = crate::global::module_info_bundle() {
             let module_hash = KeyParam::ModuleHash(bundle.sha256.clone());
             let req = PerformOpReq::SetAdditionalAttestationInfo(
@@ -1458,20 +1493,134 @@ fn shared_keymint_wrapper_inner(security_level: SecurityLevel) -> Result<Arc<Key
 
 #[cfg(test)]
 mod tests {
-    use super::{supports_module_hash_attestation, KeyMintDevice};
+    use super::*;
+
+    fn param(tag: Tag, value: KeyParameterValue) -> KeyParameter {
+        KeyParameter {
+            r#tag: tag,
+            r#value: value,
+        }
+    }
 
     #[test]
-    fn module_hash_attestation_starts_at_keymint_v4() {
-        for version in [
-            KeyMintDevice::KEY_MINT_V1,
-            KeyMintDevice::KEY_MINT_V2,
-            KeyMintDevice::KEY_MINT_V3,
-        ] {
-            assert!(!supports_module_hash_attestation(version));
-        }
+    fn begin_conversion_skips_plain_accepted_metadata_tags() {
+        let params = vec![
+            param(
+                Tag::PURPOSE,
+                KeyParameterValue::KeyPurpose(KeyPurpose::SIGN),
+            ),
+            param(Tag::ASSOCIATED_DATA, KeyParameterValue::Blob(vec![1])),
+            param(Tag::CONFIRMATION_TOKEN, KeyParameterValue::Blob(vec![2])),
+            param(Tag::MIN_SECONDS_BETWEEN_OPS, KeyParameterValue::Integer(30)),
+            param(
+                Tag::HARDWARE_TYPE,
+                KeyParameterValue::SecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT),
+            ),
+            param(Tag::UNIQUE_ID, KeyParameterValue::Blob(vec![3])),
+            param(
+                Tag::IDENTITY_CREDENTIAL_KEY,
+                KeyParameterValue::BoolValue(true),
+            ),
+        ];
 
-        for version in [KeyMintDevice::KEY_MINT_V4, KeyMintDevice::KEY_MINT_V5] {
-            assert!(supports_module_hash_attestation(version));
+        assert_eq!(
+            begin_key_parameters_to_km(&params, KeyMintDevice::KEY_MINT_V5).unwrap(),
+            vec![KeyParam::Purpose(kmr_wire::keymint::KeyPurpose::Sign)]
+        );
+    }
+
+    #[test]
+    fn begin_conversion_keeps_malformed_begin_params_rejected() {
+        assert!(matches!(
+            begin_key_parameters_to_km(
+                &[param(Tag::USER_AUTH_TYPE, KeyParameterValue::Integer(2))],
+                KeyMintDevice::KEY_MINT_V5
+            ),
+            Err(ValueNotRecognized::HardwareAuthenticatorType)
+        ));
+        assert!(matches!(
+            begin_key_parameters_to_km(
+                &[param(
+                    Tag::IDENTITY_CREDENTIAL_KEY,
+                    KeyParameterValue::BoolValue(false),
+                )],
+                KeyMintDevice::KEY_MINT_V5
+            ),
+            Err(ValueNotRecognized::Bool)
+        ));
+    }
+
+    fn test_crypto() -> kmr_common::crypto::Implementation {
+        kmr_common::crypto::Implementation {
+            rng: Box::new(BoringRng),
+            clock: Some(Box::new(clock::StdClock)),
+            compare: Box::new(kmr_crypto_boring::eq::BoringEq),
+            aes: Box::new(kmr_crypto_boring::aes::BoringAes),
+            des: Box::new(kmr_crypto_boring::des::BoringDes),
+            hmac: Box::new(BoringHmac),
+            rsa: Box::new(BoringRsa::default()),
+            ec: Box::new(BoringEc::default()),
+            ckdf: Box::new(kmr_crypto_boring::aes_cmac::BoringAesCmac),
+            hkdf: Box::new(BoringHmac),
+            sha256: Box::new(kmr_crypto_boring::sha256::BoringSha256),
+            mldsa: Box::new(kmr_crypto_boring::mldsa::BoringMlDsa),
         }
+    }
+
+    fn test_ta() -> KeyMintTa {
+        let hw_info = HardwareInfo {
+            version_number: KeyMintDevice::KEY_MINT_V5,
+            security_level: kmr_wire::keymint::SecurityLevel::TrustedEnvironment,
+            impl_name: "test",
+            author_name: "test",
+            unique_id: "test",
+        };
+        let rpc_info = RpcInfoV3 {
+            author_name: "test",
+            unique_id: "test",
+            fused: false,
+            supported_num_of_keys_in_csr: MINIMUM_SUPPORTED_KEYS_IN_CSR,
+        };
+        let dev = kmr_ta::device::Implementation {
+            keys: Box::new(soft::Keys::new([0; 32], [1; 32])),
+            sign_info: None,
+            attest_ids: None,
+            sdd_mgr: None,
+            bootloader: Box::new(kmr_ta::device::BootloaderDone),
+            sk_wrapper: None,
+            tup: Box::new(kmr_ta::device::TrustedPresenceUnsupported),
+            legacy_key: None,
+            rpc: Box::new(kmr_ta::device::NoOpRetrieveRpcArtifacts),
+        };
+
+        KeyMintTa::new_allowing_versions(
+            hw_info,
+            RpcInfo::V3(rpc_info),
+            test_crypto(),
+            dev,
+            vec![KeyMintHalVersion::V5],
+        )
+    }
+
+    fn set_boot_info(ta: &mut KeyMintTa) -> i32 {
+        ta.process_req(PerformOpReq::SetBootInfo(kmr_wire::SetBootInfoRequest {
+            verified_boot_state: 0,
+            verified_boot_hash: vec![0; 32],
+            verified_boot_key: vec![0; 32],
+            device_boot_locked: true,
+            boot_patchlevel: 20250605,
+        }))
+        .error_code
+    }
+
+    #[test]
+    fn keymint_ta_early_boot_ended_rejects_late_boot_info() {
+        let mut ta = test_ta();
+        assert_eq!(set_boot_info(&mut ta), 0);
+
+        let resp = ta.process_req(PerformOpReq::DeviceEarlyBootEnded(EarlyBootEndedRequest {}));
+        assert_eq!(resp.error_code, 0);
+
+        assert_eq!(set_boot_info(&mut ta), ErrorCode::EARLY_BOOT_ENDED.0);
     }
 }

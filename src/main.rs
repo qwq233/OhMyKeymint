@@ -257,7 +257,6 @@ fn run() -> Result<()> {
 
     install_module_info_bundle_if_available().context("failed to initialize moduleHash input")?;
 
-    std::thread::spawn(global::await_boot_completed);
     crate::keymaster::entropy::register_feeder();
     global::DB
         .with(|db| {
@@ -267,6 +266,21 @@ fn run() -> Result<()> {
             )
         })
         .context("failed to initialize boot-level key cache")?;
+    let boot_completed =
+        crate::plat::resetprop::read_string_property("sys.boot_completed").as_deref() == Some("1");
+    if boot_completed {
+        crate::keymaster::maintenance::replay_early_boot_ended()
+            .context("failed to replay earlyBootEnded to KeyMint wrappers")?;
+    }
+    std::thread::spawn(move || {
+        global::await_boot_completed();
+        if boot_completed {
+            return;
+        }
+        if let Err(error) = crate::keymaster::maintenance::replay_early_boot_ended() {
+            error!("failed to replay earlyBootEnded after boot completed: {error:#}");
+        }
+    });
     repair_omk_data_files();
 
     keybox::initialize().context("failed to initialize keybox runtime")?;

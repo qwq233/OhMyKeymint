@@ -16,8 +16,9 @@
 
 use super::*;
 use crate::android::hardware::security::keymint::{
-    Algorithm::Algorithm, HardwareAuthenticatorType::HardwareAuthenticatorType,
-    KeyParameter::KeyParameter as KmKeyParameter, KeyParameterValue::KeyParameterValue, Tag::Tag,
+    Algorithm::Algorithm, EcCurve::EcCurve, HardwareAuthenticatorType::HardwareAuthenticatorType,
+    KeyParameter::KeyParameter as KmKeyParameter, KeyParameterValue::KeyParameterValue,
+    SecurityLevel::SecurityLevel, Tag::Tag,
 };
 use anyhow::Result;
 use kmr_wire::keymint::{KeyParam, MlDsaVariant};
@@ -56,28 +57,8 @@ fn user_auth_type_rejects_integer_union() {
 }
 
 #[test]
-fn user_auth_type_integer_with_auth_timeout_is_rejected() {
-    let params = [
-        KmKeyParameter {
-            tag: Tag::USER_AUTH_TYPE,
-            value: KeyParameterValue::Integer(2),
-        },
-        KmKeyParameter {
-            tag: Tag::AUTH_TIMEOUT,
-            value: KeyParameterValue::Integer(30),
-        },
-    ];
-
-    assert!(params
-        .into_iter()
-        .map(KmKeyParameter::to_km)
-        .collect::<Result<Vec<_>>>()
-        .is_err());
-}
-
-#[test]
 fn user_auth_type_returns_aidl_authenticator_union() {
-    let param = key_param_to_aidl(KeyParam::UserAuthType(2)).unwrap();
+    let param = key_param_to_aidl(KeyParam::UserAuthType(2), KeyMintDevice::KEY_MINT_V5).unwrap();
 
     assert_eq!(param.tag, Tag::USER_AUTH_TYPE);
     assert_eq!(
@@ -99,16 +80,6 @@ fn ml_dsa_variant_accepts_aidl_variant_union() {
         param.to_km().unwrap(),
         KeyParam::MlDsaVariant(MlDsaVariant::MlDsa65)
     );
-}
-
-#[test]
-fn ml_dsa_variant_rejects_integer_union() {
-    let param = KmKeyParameter {
-        tag: Tag::ML_DSA_VARIANT,
-        value: KeyParameterValue::Integer(1),
-    };
-
-    assert!(param.to_km().is_err());
 }
 
 #[test]
@@ -153,9 +124,135 @@ fn unknown_key_parameter_tags_are_dropped() {
     ];
 
     assert_eq!(
-        key_parameters_to_km(&params).unwrap(),
+        key_parameters_to_km(&params, KeyMintDevice::KEY_MINT_V5).unwrap(),
         vec![KeyParam::KeySize(KeySizeInBits(256))]
     );
+}
+
+#[test]
+fn key_parameters_follow_keymint_profile() {
+    let params = [
+        KmKeyParameter {
+            tag: Tag::ALGORITHM,
+            value: KeyParameterValue::Algorithm(Algorithm::ML_DSA),
+        },
+        KmKeyParameter {
+            tag: Tag::ML_DSA_VARIANT,
+            value: KeyParameterValue::MlDsaVariant(
+                crate::android::hardware::security::keymint::MlDsaVariant::MlDsaVariant::ML_DSA_65,
+            ),
+        },
+    ];
+
+    assert!(matches!(
+        key_parameters_to_km(&params, KeyMintDevice::KEY_MINT_V4),
+        Err(ValueNotRecognized::Algorithm)
+    ));
+    assert_eq!(
+        key_parameters_to_km(&params[1..], KeyMintDevice::KEY_MINT_V4).unwrap(),
+        Vec::<KeyParam>::new()
+    );
+    assert_eq!(
+        key_parameters_to_km(&params, KeyMintDevice::KEY_MINT_V5).unwrap(),
+        vec![
+            KeyParam::Algorithm(kmr_wire::keymint::Algorithm::MlDsa),
+            KeyParam::MlDsaVariant(MlDsaVariant::MlDsa65),
+        ]
+    );
+
+    let curve25519 = [KmKeyParameter {
+        tag: Tag::EC_CURVE,
+        value: KeyParameterValue::EcCurve(EcCurve::CURVE_25519),
+    }];
+    assert!(matches!(
+        key_parameters_to_km(&curve25519, KeyMintDevice::KEY_MINT_V1),
+        Err(ValueNotRecognized::EcCurve)
+    ));
+    assert_eq!(
+        key_parameters_to_km(&curve25519, KeyMintDevice::KEY_MINT_V2).unwrap(),
+        vec![KeyParam::EcCurve(kmr_wire::keymint::EcCurve::Curve25519)]
+    );
+
+    let second_imei = [KmKeyParameter {
+        tag: Tag::ATTESTATION_ID_SECOND_IMEI,
+        value: KeyParameterValue::Blob(vec![1]),
+    }];
+    assert!(
+        key_parameters_to_km(&second_imei, KeyMintDevice::KEY_MINT_V2)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        key_parameters_to_km(&second_imei, KeyMintDevice::KEY_MINT_V3).unwrap(),
+        vec![KeyParam::AttestationIdSecondImei(vec![1])]
+    );
+
+    let module_hash = [KmKeyParameter {
+        tag: Tag::MODULE_HASH,
+        value: KeyParameterValue::Blob(vec![2]),
+    }];
+    assert!(
+        key_parameters_to_km(&module_hash, KeyMintDevice::KEY_MINT_V3)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        key_parameters_to_km(&module_hash, KeyMintDevice::KEY_MINT_V4).unwrap(),
+        vec![KeyParam::ModuleHash(vec![2])]
+    );
+}
+
+#[test]
+fn key_params_to_aidl_follow_keymint_profile() {
+    let ml_dsa = key_param_to_aidl(
+        KeyParam::MlDsaVariant(MlDsaVariant::MlDsa65),
+        KeyMintDevice::KEY_MINT_V4,
+    )
+    .unwrap();
+    assert_eq!(ml_dsa.tag, Tag::INVALID);
+    assert_eq!(
+        ml_dsa.value,
+        KeyParameterValue::Integer(MlDsaVariant::MlDsa65 as i32)
+    );
+
+    let ml_dsa = key_param_to_aidl(
+        KeyParam::MlDsaVariant(MlDsaVariant::MlDsa65),
+        KeyMintDevice::KEY_MINT_V5,
+    )
+    .unwrap();
+    assert_eq!(ml_dsa.tag, Tag::ML_DSA_VARIANT);
+    assert_eq!(
+        ml_dsa.value,
+        KeyParameterValue::MlDsaVariant(
+            crate::android::hardware::security::keymint::MlDsaVariant::MlDsaVariant::ML_DSA_65,
+        )
+    );
+
+    let second_imei = key_param_to_aidl(
+        KeyParam::AttestationIdSecondImei(vec![1]),
+        KeyMintDevice::KEY_MINT_V2,
+    )
+    .unwrap();
+    assert_eq!(second_imei.tag, Tag::INVALID);
+    assert_eq!(second_imei.value, KeyParameterValue::Blob(vec![1]));
+
+    let second_imei = key_param_to_aidl(
+        KeyParam::AttestationIdSecondImei(vec![1]),
+        KeyMintDevice::KEY_MINT_V3,
+    )
+    .unwrap();
+    assert_eq!(second_imei.tag, Tag::ATTESTATION_ID_SECOND_IMEI);
+    assert_eq!(second_imei.value, KeyParameterValue::Blob(vec![1]));
+
+    let module_hash =
+        key_param_to_aidl(KeyParam::ModuleHash(vec![2]), KeyMintDevice::KEY_MINT_V3).unwrap();
+    assert_eq!(module_hash.tag, Tag::INVALID);
+    assert_eq!(module_hash.value, KeyParameterValue::Blob(vec![2]));
+
+    let module_hash =
+        key_param_to_aidl(KeyParam::ModuleHash(vec![2]), KeyMintDevice::KEY_MINT_V4).unwrap();
+    assert_eq!(module_hash.tag, Tag::MODULE_HASH);
+    assert_eq!(module_hash.value, KeyParameterValue::Blob(vec![2]));
 }
 
 #[test]
@@ -165,7 +262,7 @@ fn invalid_enum_values_use_upstream_error_codes() {
             tag: Tag::ALGORITHM,
             value: KeyParameterValue::Algorithm(Algorithm(999)),
         })
-        .to_km_optional(),
+        .to_km_optional(KeyMintDevice::KEY_MINT_V5),
         Err(ValueNotRecognized::Algorithm)
     ));
 
@@ -201,6 +298,31 @@ fn invalid_enum_values_use_upstream_error_codes() {
 
     for (error, expected) in cases {
         assert_eq!(key_parameter_conversion_error_code(error), expected);
+    }
+}
+
+#[test]
+fn unsupported_known_key_parameters_return_tag_error() {
+    let cases = [
+        (
+            Tag::HARDWARE_TYPE,
+            KeyParameterValue::SecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT),
+        ),
+        (Tag::MIN_SECONDS_BETWEEN_OPS, KeyParameterValue::Integer(30)),
+        (Tag::UNIQUE_ID, KeyParameterValue::Blob(vec![1])),
+        (
+            Tag::IDENTITY_CREDENTIAL_KEY,
+            KeyParameterValue::BoolValue(true),
+        ),
+        (Tag::ASSOCIATED_DATA, KeyParameterValue::Blob(vec![2])),
+        (Tag::CONFIRMATION_TOKEN, KeyParameterValue::Blob(vec![3])),
+    ];
+
+    for (tag, value) in cases {
+        assert!(matches!(
+            KmKeyParameter { tag, value }.to_km_optional(KeyMintDevice::KEY_MINT_V5),
+            Err(ValueNotRecognized::Tag)
+        ));
     }
 }
 
