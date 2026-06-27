@@ -1,18 +1,26 @@
 # Oh My Keymint
 
+[![Telegram](https://img.shields.io/static/v1?label=Telegram&message=@OhMyKeymint&color=0088cc)](https://t.me/OhMyKeymint)  [![CI Build](https://github.com/qwq233/OhMyKeymint/actions/workflows/ci.yml/badge.svg)](https://github.com/qwq233/OhMyKeymint/actions/workflows/ci.yml)
+
 Custom keystore implementation for Android Keystore Spoofer
 
 ## What is this?
 
 This is a complete implementation of the keystore, which fully implements the AOSP AIDL interface, referencing the official AOSP implementation.
 
-In theory, this would make it harder for detectors to identify behavior inconsistent with AOSP, thus achieving greater stealth than the FOSS branch of TrickyStore.
+In theory, this would make it harder for detectors to identify behavior inconsistent with AOSP, thus achieving greater stealth than the FOSS branch of TrickyStore or other TrickyStore-based module like TEESimulator.
 
 ## Install and configure
+
+**Android 12 or above required.**
 
 1. Install this module.
 
 2. Configure (if you need)
+
+3. Replace template keybox.xml (if you need)
+
+The keybox file should be a **valid** XML file with both EC and RSA chain, which means there should be no extra content in it like watermark or invisible characters.
 
 Configuration file is located at `/data/misc/keystore/omk/config.toml` and `/data/misc/keystore/omk/injector.toml`
 
@@ -20,8 +28,10 @@ Configuration file is located at `/data/misc/keystore/omk/config.toml` and `/dat
 
 ```toml
 [main]
-# We can only use Injector as backend at this point.
-backend = "Injector"
+# Only "injector" is currently enabled.
+backend = "injector"
+# Insecure fallback for broken system TEE biometric HAT verification.
+force_skip_system_biometric_hat_verification = false
 
 # The following values ​​are used to generate the seed for device encryption 
 # and verification. Please be sure to save the following values. If you lose
@@ -30,9 +40,13 @@ backend = "Injector"
 [crypto]
 root_kek_seed = "4b61c4b3bdf72bb700c351e020270846fb67ba3885e5fb67547e626af5cc1a7f"
 kak_seed = "d6fa5bb024540928a7d554ab5831a0553dd2f688f5d6cb3cb1645be2ff49e357"
+shared_secret_seed = "3f1a22d9f0fdf7c2e7d2abf8f9465b563c1a7c5adfc443f0b7b327bd35a1d75a"
+shared_secret_nonce = "884ae5e90744bc1c590c4a9959a9c11d1989a9f2b7cc31a50a31c9fc4df7e614"
+# Optional. If omitted, OMK derives the auth-token HMAC key through shared secret.
+# auth_token_hmac_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 [trust]
-os_version = 15
+os_version = 17
 # Accepted values:
 # - "auto": read and preserve the original build.prop patch level
 # - "latest": use the 5th day of the current month
@@ -66,6 +80,14 @@ imei = ""
 imei2 = ""
 ```
 
+OMK writes any successful result back into `config.toml` and leaves still-unavailable
+fields empty.
+
+All `[crypto]` values are 32-byte hex strings. Keep the generated values stable across
+updates; changing them can make existing OMK key material or localized authentication
+tokens unusable. Older configs without `shared_secret_seed` and `shared_secret_nonce`
+are still accepted, and OMK will generate those fields when it rewrites the config.
+
 If `config.toml` becomes invalid, OMK rewrites a canonical default config, renames the broken
 file to `config.toml.bak`, and appends the parse error to the backup.
 
@@ -73,10 +95,6 @@ file to `config.toml.bak`, and appends the parse error to the backup.
 
 ```toml
 # Only packages listed in `scoop` are intercepted.
-# Optional per-package settings can be added under [scoop.<package>].
-# Example:
-# [scoop.io.github.vvb2060.keyattestation]
-# mode = "strict"
 
 scoop = [
   "io.github.vvb2060.keyattestation",
@@ -117,24 +135,12 @@ the filter instead of being rejected.
 ## Restarting keymint and injector
 
 The module ships two background daemons: one for `keymint`, one for `injector`.
-The recommended way to request a restart is through the restart system properties.
-
-Restart only `keymint`:
+You can restart them by following commands.
 
 ```sh
-resetprop persist.sys.omk.restart.keymint 1
-```
-
-Restart only `injector`:
-
-```sh
-resetprop persist.sys.omk.restart.injector 1
-```
-
-Restart both together:
-
-```sh
-resetprop persist.sys.omk.restart.all 1
+touch /data/adb/omk/restart.keymint
+touch /data/adb/omk/restart.injector
+touch /data/adb/omk/restart.all
 ```
 
 If you switch `[trust].vb_key` or `[trust].vb_hash` from `"random"` back to `"auto"`,
@@ -144,14 +150,6 @@ original boot properties.
 
 Changing `[trust].security_patch` does not require a restart by itself. OMK hot-applies
 the new value and rebuilds the active KeyMint wrappers in place.
-
-The daemons also watch these marker files if you prefer the file-based path:
-
-```sh
-touch /data/adb/omk/restart.keymint
-touch /data/adb/omk/restart.injector
-touch /data/adb/omk/restart.all
-```
 
 ## License
 
