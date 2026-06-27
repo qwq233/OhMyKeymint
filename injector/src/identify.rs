@@ -438,15 +438,19 @@ mod tests {
             ),
         ];
 
-        for (code, expected) in cases {
-            assert_eq!(
-                maintenance_method_from_code_for(Some(17), code),
-                Some(expected)
-            );
-            assert_eq!(maintenance_method_from_code_for(None, code), Some(expected));
+        for version in [Some(16), Some(17)] {
+            for (code, expected) in cases {
+                assert_eq!(
+                    maintenance_method_from_code_for(version, code),
+                    Some(expected)
+                );
+            }
+            assert_eq!(maintenance_method_from_code_for(version, u32::MAX), None);
         }
 
-        assert_eq!(maintenance_method_from_code_for(Some(17), u32::MAX), None);
+        for (code, expected) in cases {
+            assert_eq!(maintenance_method_from_code_for(None, code), Some(expected));
+        }
     }
 
     #[test]
@@ -528,12 +532,16 @@ mod tests {
             ),
         ];
 
-        for (code, expected) in cases {
-            assert_eq!(service_method_from_code_for(Some(17), code), Some(expected));
-            assert_eq!(service_method_from_code_for(None, code), Some(expected));
+        for version in [Some(16), Some(17)] {
+            for (code, expected) in cases {
+                assert_eq!(service_method_from_code_for(version, code), Some(expected));
+            }
+            assert_eq!(service_method_from_code_for(version, u32::MAX), None);
         }
 
-        assert_eq!(service_method_from_code_for(Some(17), u32::MAX), None);
+        for (code, expected) in cases {
+            assert_eq!(service_method_from_code_for(None, code), Some(expected));
+        }
     }
 
     #[test]

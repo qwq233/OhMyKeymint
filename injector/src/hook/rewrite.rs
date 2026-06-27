@@ -2371,17 +2371,6 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
         return build_synthetic_aidl_metadata_reply(method);
     }
 
-    let cfg = config::get();
-    if !cfg.main.enabled {
-        warn!(
-            "event=synthetic injector disabled while synthetic target ptr=0x{:x} cookie=0x{:x} is still live; returning SYSTEM_ERROR",
-            target.ptr, target.cookie
-        );
-        return Ok(synthetic_parcel_reply(build_service_specific_reply(
-            ResponseCode::SYSTEM_ERROR.0,
-        )?));
-    }
-
     let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
     let request_interface = match parcel::peek_request_interface(
         data,
@@ -2398,6 +2387,29 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
             return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
         }
     };
+    let expected_interface = synthetic_target_interface(kind);
+    if request_interface != expected_interface {
+        warn!(
+            "event=synthetic {:?} target ptr=0x{:x} cookie=0x{:x} received unexpected interface {}; expected {}; returning BAD_TYPE",
+            kind, target.ptr, target.cookie, request_interface, expected_interface
+        );
+        return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
+    }
+    if let Some(reply) = synthetic_unknown_transaction_reply_for(kind, tr.code) {
+        return Ok(reply);
+    }
+
+    let cfg = config::get();
+    if !cfg.main.enabled {
+        warn!(
+            "event=synthetic injector disabled while synthetic target ptr=0x{:x} cookie=0x{:x} is still live; returning SYSTEM_ERROR",
+            target.ptr, target.cookie
+        );
+        return Ok(synthetic_parcel_reply(build_service_specific_reply(
+            ResponseCode::SYSTEM_ERROR.0,
+        )?));
+    }
+
     let caller = match kind {
         SyntheticTargetKind::SecurityLevel => synthetic_transaction_current_caller(tr, caller_sid),
         SyntheticTargetKind::Operation => {
@@ -2410,18 +2422,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
     };
     let decision = evaluate_caller(&caller, &cfg);
 
-    let expected_interface = synthetic_target_interface(kind);
-    if request_interface != expected_interface {
-        warn!(
-            "event=synthetic {:?} target ptr=0x{:x} cookie=0x{:x} received unexpected interface {}; expected {}; returning BAD_TYPE",
-            kind, target.ptr, target.cookie, request_interface, expected_interface
-        );
-        return Ok(SyntheticReply::Status(StatusCode::BadType.into()));
-    }
     if kind == SyntheticTargetKind::SecurityLevel {
-        if let Some(reply) = synthetic_unknown_transaction_reply_for(kind, tr.code) {
-            return Ok(reply);
-        }
         let request = match parcel::parse_security_level_request(
             data,
             data_size,
@@ -2475,9 +2476,6 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
         return Ok(synthetic_reply_from_outbound(reply));
     }
 
-    if let Some(reply) = synthetic_unknown_transaction_reply_for(kind, tr.code) {
-        return Ok(reply);
-    }
     let request = match parcel::parse_operation_request(
         data,
         data_size,
@@ -3630,10 +3628,14 @@ mod tests {
     }
 
     fn request_parcel(interface: &str) -> rsbinder::Parcel {
+        request_parcel_with_marker(interface, rsbinder::INTERFACE_HEADER)
+    }
+
+    fn request_parcel_with_marker(interface: &str, marker: u32) -> rsbinder::Parcel {
         let mut parcel = rsbinder::Parcel::new();
         parcel.write(&0i32).unwrap();
         parcel.write(&0i32).unwrap();
-        parcel.write(&0u32).unwrap();
+        parcel.write(&marker).unwrap();
         parcel.write(&interface.to_string()).unwrap();
         parcel
     }
@@ -4123,6 +4125,31 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_aidl_metadata_rejects_bad_interface_marker() {
+        for (index, code) in [
+            (0, identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION),
+            (1, identify::AIDL_GET_INTERFACE_HASH_TRANSACTION),
+        ] {
+            let target = LocalBinderTarget {
+                ptr: 0x7254 + index,
+                cookie: 0xb698 + index,
+            };
+            let request = request_parcel_with_marker(identify::KEYSTORE_OPERATION_INTERFACE, 0);
+            let tr = transaction_for_parcel(target, code, &request);
+            let info = SyntheticTargetInfo {
+                kind: SyntheticTargetKind::Operation,
+                caller: Some(CallerIdentity::new(10002, 2000)),
+            };
+
+            let reply = unsafe {
+                build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+            }
+            .expect("bad metadata marker should be handled");
+            assert_synthetic_status(reply, StatusCode::BadType);
+        }
+    }
+
+    #[test]
     fn synthetic_aidl_metadata_accepts_trailing_payload() {
         let expected = keystore2_aidl_metadata().expect("keystore2 metadata should resolve");
 
@@ -4343,6 +4370,53 @@ mod tests {
             "trailing abort must finalize the operation"
         );
         assert_eq!(aborts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn synthetic_operation_bad_interface_marker_rejects_abort() {
+        let _guard = route_state_test_guard();
+
+        let target = LocalBinderTarget {
+            ptr: 0x1335,
+            cookie: 0x5779,
+        };
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
+            update_output: vec![5, 6, 7],
+            aborts: aborts.clone(),
+            update_aad_status: None,
+        });
+        remember_operation_target(
+            target,
+            OperationTargetInfo {
+                route: RouteTarget::Omk,
+                aad_allowed: true,
+                backend: Some(backend),
+                finalized: false,
+            },
+        );
+
+        let request = request_parcel_with_marker(identify::KEYSTORE_OPERATION_INTERFACE, 0);
+        let tr = transaction_for_parcel(
+            target,
+            crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
+            &request,
+        );
+        let info = SyntheticTargetInfo {
+            kind: SyntheticTargetKind::Operation,
+            caller: Some(CallerIdentity::new(10002, 2000)),
+        };
+
+        let reply = unsafe {
+            build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
+        }
+        .expect("bad abort marker should be handled");
+        assert_synthetic_status(reply, StatusCode::BadType);
+        assert!(
+            lookup_operation_target(target).is_some(),
+            "bad marker abort must not finalize the operation"
+        );
+        assert_eq!(aborts.load(Ordering::SeqCst), 0);
     }
 
     #[test]

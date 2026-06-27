@@ -567,7 +567,6 @@ unsafe fn parse_authorization_request_with_resolver(
         },
     };
 
-    ensure_no_request_trailing_data(&parcel, "IKeystoreAuthorization")?;
     Ok(parsed)
 }
 
@@ -750,7 +749,6 @@ unsafe fn parse_maintenance_request_with_resolver(
         }
     };
 
-    ensure_no_request_trailing_data(&parcel, "IKeystoreMaintenance")?;
     Ok(parsed)
 }
 
@@ -1290,7 +1288,10 @@ fn owned_reply_from_parcel(parcel: Parcel, offsets: impl IntoIterator<Item = usi
 fn read_request_interface(parcel: &mut Parcel) -> Result<String> {
     let _: i32 = parcel.read().context("missing strict mode header")?;
     let _: i32 = parcel.read().context("missing work source header")?;
-    let _: u32 = parcel.read().context("missing interface marker")?;
+    let marker: u32 = parcel.read().context("missing interface marker")?;
+    if marker != rsbinder::INTERFACE_HEADER {
+        return Err(StatusCode::BadType.into());
+    }
     parcel.read().context("missing interface token")
 }
 
@@ -1545,10 +1546,18 @@ mod tests {
         interface: &str,
         write_payload: impl FnOnce(&mut Parcel),
     ) -> OwnedReply {
+        build_request_with_marker(interface, rsbinder::INTERFACE_HEADER, write_payload)
+    }
+
+    fn build_request_with_marker(
+        interface: &str,
+        marker: u32,
+        write_payload: impl FnOnce(&mut Parcel),
+    ) -> OwnedReply {
         let mut parcel = Parcel::new();
         parcel.write(&0i32).unwrap();
         parcel.write(&0i32).unwrap();
-        parcel.write(&0u32).unwrap();
+        parcel.write(&marker).unwrap();
         parcel.write(&interface.to_string()).unwrap();
         write_payload(&mut parcel);
         owned_reply_from_parcel(parcel, std::iter::empty::<usize>())
@@ -1690,6 +1699,48 @@ mod tests {
             .chain()
             .find_map(|cause| cause.downcast_ref::<StatusCode>().copied());
         assert_eq!(status, Some(expected));
+    }
+
+    #[test]
+    fn bad_interface_marker_rejects_security_level_delete_key() {
+        let blob_key = blob_key_descriptor(None);
+        let mut request =
+            build_request_with_marker(KEYSTORE_SECURITY_LEVEL_INTERFACE, 0, |parcel| {
+                parcel.write(&blob_key).unwrap()
+            });
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+
+        assert_status_code(
+            unsafe {
+                parse_security_level_request(
+                    data,
+                    data_size,
+                    offsets,
+                    offsets_size,
+                    crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
+                )
+            },
+            StatusCode::BadType,
+        );
+    }
+
+    #[test]
+    fn bad_interface_marker_rejects_operation_abort() {
+        let mut request = build_request_with_marker(KEYSTORE_OPERATION_INTERFACE, 0, |_| {});
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
+
+        assert_status_code(
+            unsafe {
+                parse_operation_request(
+                    data,
+                    data_size,
+                    offsets,
+                    offsets_size,
+                    crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
+                )
+            },
+            StatusCode::BadType,
+        );
     }
 
     fn write_single_blob_key_parameter_array(parcel: &mut Parcel, tag: Tag, blob_len: i32) {
@@ -2118,6 +2169,30 @@ mod tests {
             panic!("update request should parse");
         };
         assert!(input.is_empty());
+    }
+
+    #[test]
+    fn keystore2_mirror_requests_accept_trailing_payload() {
+        let parsed =
+            parse_authorization_request_as_method(AuthorizationMethod::GetLastAuthTime, |parcel| {
+                parcel.write(&0i64).unwrap();
+                parcel
+                    .write(&Vec::<HardwareAuthenticatorType>::new())
+                    .unwrap();
+                parcel.write(&0x4f4d4bi32).unwrap();
+            })
+            .expect("authorization mirror request with trailing payload should parse");
+        let ParsedAuthorizationRequest::GetLastAuthTime { auth_types, .. } = parsed else {
+            panic!("authorization request should parse as GetLastAuthTime");
+        };
+        assert!(auth_types.is_empty());
+
+        let parsed =
+            parse_maintenance_request_as_method(MaintenanceMethod::DeleteAllKeys, |parcel| {
+                parcel.write(&0x4f4d4bi32).unwrap();
+            })
+            .expect("maintenance mirror request with trailing payload should parse");
+        assert!(matches!(parsed, ParsedMaintenanceRequest::DeleteAllKeys));
     }
 
     #[test]
