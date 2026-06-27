@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+echo "+ cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+echo "+ cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings"
+cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings

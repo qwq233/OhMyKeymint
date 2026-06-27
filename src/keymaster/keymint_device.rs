@@ -1496,10 +1496,7 @@ mod tests {
     use super::*;
 
     fn param(tag: Tag, value: KeyParameterValue) -> KeyParameter {
-        KeyParameter {
-            r#tag: tag,
-            r#value: value,
-        }
+        KeyParameter { tag, value }
     }
 
     #[test]
