@@ -649,6 +649,11 @@ mod tests {
     use crate::parcel;
 
     static CAPTURED_REPLY_DATA: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+    static SYNTHETIC_REPLY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn drain_synthetic_completions(fd: c_int) {
+        while consume_synthetic_transaction_complete(fd) {}
+    }
 
     unsafe extern "C" fn capture_reply_ioctl(
         _fd: c_int,
@@ -696,6 +701,10 @@ mod tests {
 
     #[test]
     fn synthetic_parcel_reply_storage_lives_until_ioctl() {
+        let _guard = SYNTHETIC_REPLY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        drain_synthetic_completions(1);
         *CAPTURED_REPLY_DATA
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -722,5 +731,37 @@ mod tests {
         assert_eq!(captured.len(), size_of::<i32>());
         let value = unsafe { std::ptr::read_unaligned(captured.as_ptr() as *const i32) };
         assert_eq!(value, 0x1234_5678);
+        assert!(consume_synthetic_transaction_complete(1));
+        assert!(!consume_synthetic_transaction_complete(1));
+    }
+
+    #[test]
+    fn synthetic_status_reply_registers_completion_but_no_reply_does_not() {
+        let _guard = SYNTHETIC_REPLY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        drain_synthetic_completions(2);
+        let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
+        tr.data.ptr.buffer = 0x2000;
+
+        let submitted = unsafe {
+            submit_synthetic_transaction_reply(
+                2,
+                capture_reply_ioctl,
+                &tr,
+                SyntheticReply::Status(i32::from(rsbinder::StatusCode::UnknownTransaction)),
+            )
+        };
+
+        assert!(submitted);
+        assert!(consume_synthetic_transaction_complete(2));
+        assert!(!consume_synthetic_transaction_complete(2));
+
+        let submitted = unsafe {
+            submit_synthetic_transaction_reply(2, capture_reply_ioctl, &tr, SyntheticReply::NoReply)
+        };
+
+        assert!(submitted);
+        assert!(!consume_synthetic_transaction_complete(2));
     }
 }

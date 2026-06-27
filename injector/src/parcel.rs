@@ -609,9 +609,23 @@ pub unsafe fn parse_metadata_request_interface_allow_trailing(
     data_size: usize,
     offsets: *mut usize,
     offsets_size: usize,
-) -> Result<String> {
+) -> Result<Option<String>> {
     let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    read_request_interface(&mut parcel)
+    read_request_interface_for_check(&mut parcel)
+}
+
+/// # Safety
+///
+/// `data`/`data_size` and `offsets`/`offsets_size` must describe a readable
+/// Binder transaction parcel for the duration of this call.
+pub unsafe fn peek_request_interface_for_check(
+    data: *mut u8,
+    data_size: usize,
+    offsets: *mut usize,
+    offsets_size: usize,
+) -> Result<Option<String>> {
+    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
+    read_request_interface_for_check(&mut parcel)
 }
 
 /// # Safety
@@ -625,8 +639,8 @@ pub unsafe fn validate_dump_request(
     offsets_size: usize,
 ) -> Result<()> {
     let object_size = size_of::<flat_binder_object>();
-    if data_size < object_size + size_of::<i32>() {
-        bail!("dump request is missing fd object or argument count");
+    if data_size < object_size {
+        bail!("dump request is missing fd object");
     }
     if data.is_null() {
         bail!("dump request data pointer is null");
@@ -636,9 +650,6 @@ pub unsafe fn validate_dump_request(
     }
     if !offsets_size.is_multiple_of(size_of::<usize>()) {
         bail!("dump request offsets size is not aligned");
-    }
-    if offsets_size != size_of::<usize>() {
-        bail!("dump request has unexpected binder objects");
     }
 
     let first_offset = std::ptr::read_unaligned(offsets);
@@ -651,16 +662,8 @@ pub unsafe fn validate_dump_request(
         bail!("dump request first object is not a file descriptor");
     }
 
-    let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
-    parcel.set_data_position(object_size);
-    let argc: i32 = parcel.read().context("missing dump argument count")?;
-    if argc < 0 {
-        bail!("dump request has negative argument count");
-    }
-    for _ in 0..argc {
-        let _: String = parcel.read().context("missing dump argument")?;
-    }
-    ensure_no_request_trailing_data(&parcel, "DUMP_TRANSACTION")?;
+    // AOSP BBinder::onTransact lets readInt32() collapse a missing argc to 0
+    // and best-effort reads dump args while data remains.
     Ok(())
 }
 
@@ -1286,13 +1289,17 @@ fn owned_reply_from_parcel(parcel: Parcel, offsets: impl IntoIterator<Item = usi
 }
 
 fn read_request_interface(parcel: &mut Parcel) -> Result<String> {
+    read_request_interface_for_check(parcel)?.ok_or_else(|| StatusCode::BadType.into())
+}
+
+fn read_request_interface_for_check(parcel: &mut Parcel) -> Result<Option<String>> {
     let _: i32 = parcel.read().context("missing strict mode header")?;
     let _: i32 = parcel.read().context("missing work source header")?;
     let marker: u32 = parcel.read().context("missing interface marker")?;
     if marker != rsbinder::INTERFACE_HEADER {
-        return Err(StatusCode::BadType.into());
+        return Ok(None);
     }
-    parcel.read().context("missing interface token")
+    parcel.read().context("missing interface token").map(Some)
 }
 
 fn ensure_no_request_trailing_data(parcel: &Parcel, interface_name: &str) -> Result<()> {

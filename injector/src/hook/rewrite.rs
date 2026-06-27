@@ -2351,7 +2351,8 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
             offsets,
             offsets_size,
         ) {
-            Ok(interface) => interface,
+            Ok(Some(interface)) => interface,
+            Ok(None) => return Ok(SyntheticReply::Status(StatusCode::BadType.into())),
             Err(error) => {
                 warn!(
                         "event=synthetic failed to read AIDL metadata interface token for target ptr=0x{:x} cookie=0x{:x} kind={:?} code=0x{:x}: {:#}; returning BAD_TYPE",
@@ -2372,13 +2373,14 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
     }
 
     let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
-    let request_interface = match parcel::peek_request_interface(
+    let request_interface = match parcel::peek_request_interface_for_check(
         data,
         data_size,
         offsets,
         offsets_size,
     ) {
-        Ok(interface) => interface,
+        Ok(Some(interface)) => interface,
+        Ok(None) => return Ok(SyntheticReply::Status(StatusCode::BadType.into())),
         Err(error) => {
             warn!(
                 "event=synthetic failed to read interface token for target ptr=0x{:x} cookie=0x{:x} kind={:?} code=0x{:x}: {:#}; returning BAD_TYPE",
@@ -3993,6 +3995,25 @@ mod tests {
         .expect("dump should produce a reply");
         assert_synthetic_empty_parcel_reply(dump, "valid dump");
 
+        let mut missing_argc_data = dump_transaction_data(0, &[]);
+        missing_argc_data.truncate(size_of::<flat_binder_object>());
+        let missing_argc_tr = transaction_for_raw_parts(
+            target,
+            rsbinder::DUMP_TRANSACTION,
+            &mut missing_argc_data,
+            &mut offsets,
+        );
+        let missing_argc = unsafe {
+            synthetic_base_transaction_reply(
+                Some(SyntheticTargetKind::Operation),
+                target,
+                &missing_argc_tr,
+            )
+        }
+        .expect("missing argc dump handling should not fail")
+        .expect("missing argc dump should produce a reply");
+        assert_synthetic_empty_parcel_reply(missing_argc, "missing argc dump");
+
         let mut dump_with_args_data = dump_transaction_data(1, &[String::from("--proto")]);
         let dump_with_args_tr = transaction_for_raw_parts(
             target,
@@ -4011,6 +4032,24 @@ mod tests {
         .expect("dump with args should produce a reply");
         assert_synthetic_empty_parcel_reply(dump_with_args, "valid dump with args");
 
+        let mut missing_arg_data = dump_transaction_data(1, &[]);
+        let missing_arg_tr = transaction_for_raw_parts(
+            target,
+            rsbinder::DUMP_TRANSACTION,
+            &mut missing_arg_data,
+            &mut offsets,
+        );
+        let missing_arg = unsafe {
+            synthetic_base_transaction_reply(
+                Some(SyntheticTargetKind::Operation),
+                target,
+                &missing_arg_tr,
+            )
+        }
+        .expect("missing arg dump handling should not fail")
+        .expect("missing arg dump should produce a reply");
+        assert_synthetic_empty_parcel_reply(missing_arg, "missing arg dump");
+
         let mut negative_argc_data = dump_transaction_data(-1, &[]);
         let negative_argc_tr = transaction_for_raw_parts(
             target,
@@ -4027,10 +4066,7 @@ mod tests {
         }
         .expect("negative argc dump handling should not fail")
         .expect("negative argc dump should produce a reply");
-        let SyntheticReply::Status(status) = negative_argc else {
-            panic!("negative argc dump should be a binder status code");
-        };
-        assert_eq!(status, i32::from(StatusCode::BadType));
+        assert_synthetic_empty_parcel_reply(negative_argc, "negative argc dump");
 
         let mut trailing_dump_data = dump_transaction_data(0, &[]);
         trailing_dump_data.extend_from_slice(&0x4f4d4bu32.to_ne_bytes());
@@ -4049,10 +4085,51 @@ mod tests {
         }
         .expect("trailing dump handling should not fail")
         .expect("trailing dump should produce a reply");
-        let SyntheticReply::Status(status) = trailing_dump else {
-            panic!("trailing dump should be a binder status code");
+        assert_synthetic_empty_parcel_reply(trailing_dump, "trailing dump");
+
+        let mut trailing_object_dump_data = dump_transaction_data(0, &[]);
+        while !trailing_object_dump_data
+            .len()
+            .is_multiple_of(size_of::<usize>())
+        {
+            trailing_object_dump_data.push(0);
+        }
+        let trailing_object_offset = trailing_object_dump_data.len();
+        trailing_object_dump_data
+            .resize(trailing_object_offset + size_of::<flat_binder_object>(), 0);
+        let trailing_object = flat_binder_object {
+            hdr: binder_object_header {
+                type_: BINDER_TYPE_BINDER,
+            },
+            flags: 0,
+            handle_or_ptr: flat_binder_object_handle_or_ptr { binder: 0 },
+            cookie: 0,
         };
-        assert_eq!(status, i32::from(StatusCode::BadType));
+        unsafe {
+            std::ptr::write_unaligned(
+                trailing_object_dump_data
+                    .as_mut_ptr()
+                    .add(trailing_object_offset) as *mut flat_binder_object,
+                trailing_object,
+            );
+        }
+        let mut trailing_object_offsets = [0usize, trailing_object_offset];
+        let trailing_object_dump_tr = transaction_for_raw_parts(
+            target,
+            rsbinder::DUMP_TRANSACTION,
+            &mut trailing_object_dump_data,
+            &mut trailing_object_offsets,
+        );
+        let trailing_object_dump = unsafe {
+            synthetic_base_transaction_reply(
+                Some(SyntheticTargetKind::Operation),
+                target,
+                &trailing_object_dump_tr,
+            )
+        }
+        .expect("trailing object dump handling should not fail")
+        .expect("trailing object dump should produce a reply");
+        assert_synthetic_empty_parcel_reply(trailing_object_dump, "trailing object dump");
 
         let unknown_tr = transaction_for_parcel(target, u32::MAX, &empty);
         let unknown = unsafe {
@@ -4118,10 +4195,7 @@ mod tests {
             build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
         }
         .expect("wrong metadata interface should be handled");
-        let SyntheticReply::Status(status) = reply else {
-            panic!("wrong metadata interface should return a binder status");
-        };
-        assert_eq!(status, i32::from(StatusCode::BadType));
+        assert_synthetic_status(reply, StatusCode::BadType);
     }
 
     #[test]
@@ -4939,10 +5013,7 @@ mod tests {
             build_synthetic_br_transaction_reply(&tr, target, info, None, "BR_TRANSACTION")
         }
         .expect("unexpected interface should be handled without fallback");
-        let SyntheticReply::Status(status) = reply else {
-            panic!("unexpected interface should return a binder status, not a service reply");
-        };
-        assert_eq!(status, i32::from(StatusCode::BadType));
+        assert_synthetic_status(reply, StatusCode::BadType);
     }
 
     #[test]
