@@ -83,12 +83,7 @@ enum PrecomputedServiceReply {
         target_key: KeyDescriptor,
         grantee_uid: i32,
     },
-    Error(PrecomputedErrorReply),
-}
-
-enum PrecomputedErrorReply {
-    Status(Status),
-    StatusCode(i32),
+    Error(Status),
 }
 
 enum OmkGrantPrecompute {
@@ -133,6 +128,10 @@ pub(super) enum SyntheticReply {
 
 enum OutboundReply {
     Parcel(Box<parcel::OwnedReply>),
+    // Raw TF_STATUS_CODE transport reply. No keystore2 method-reply path emits
+    // this (AOSP always returns a service-specific parcel); retained for the
+    // install_outbound_reply transport-status machinery and its tests.
+    #[allow(dead_code)]
     Status(i32),
 }
 
@@ -1681,15 +1680,18 @@ fn register_security_level_carrier(
 }
 
 fn build_omk_status_reply(status: &Status) -> anyhow::Result<OutboundReply> {
-    if status.is_ok() {
-        return Ok(synthetic_fallback_reply().into());
+    // OMK is the authoritative keystore backend, so its ServiceSpecific codes
+    // are keystore ResponseCode / KeyMint ErrorCode values that must reach the
+    // client verbatim (matching keystore2's own into_binder for Error::Rc/Km).
+    // Every other status — success on an error path, a transport failure, or
+    // any other binder exception — is mapped to a service-specific SYSTEM_ERROR,
+    // matching AOSP error_to_serialized_error (Error::Binder/BinderTransaction
+    // -> SYSTEM_ERROR); keystore2 never forwards a raw transport status_t.
+    if status.exception_code() == ExceptionCode::ServiceSpecific {
+        return Ok(parcel::build_status_reply(status)?.into());
     }
 
-    if status.exception_code() == ExceptionCode::TransactionFailed {
-        return Ok(OutboundReply::Status(status.transaction_error().into()));
-    }
-
-    Ok(parcel::build_status_reply(status)?.into())
+    Ok(synthetic_fallback_reply().into())
 }
 
 fn error_status(error: &anyhow::Error) -> Option<&Status> {
@@ -1723,26 +1725,29 @@ fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<OutboundReply>
         return build_omk_status_reply(status);
     }
 
-    if let Some(status) = error_status_code(error) {
-        return Ok(OutboundReply::Status(status.into()));
-    }
-
+    // A bare StatusCode (no wrapped Status) is an injector-internal failure, not
+    // an OMK business error (those arrive as Status, handled above). AOSP
+    // keystore2 maps every bare StatusCode through map_binder_status_code ->
+    // Error::BinderTransaction -> SYSTEM_ERROR unconditionally, ignoring the code
+    // itself (error.rs map_binder_status_code/error_to_serialized_error); it
+    // never returns a raw transport status_t nor a code-specific parcel.
+    // OMK-unavailable codes are already filtered out earlier by
+    // omk_unavailable_error. Errors without any status collapse to SYSTEM_ERROR
+    // the same way.
     Ok(synthetic_fallback_reply().into())
 }
 
-fn precomputed_omk_error_reply(error: &anyhow::Error) -> PrecomputedErrorReply {
+fn precomputed_omk_error_reply(error: &anyhow::Error) -> Status {
     if let Some(status) = error_status(error) {
-        return PrecomputedErrorReply::Status(status.clone());
+        return status.clone();
     }
 
-    if let Some(status) = error_status_code(error) {
-        return PrecomputedErrorReply::StatusCode(status.into());
-    }
-
-    PrecomputedErrorReply::Status(Status::new_service_specific_error(
-        ResponseCode::SYSTEM_ERROR.0,
-        None,
-    ))
+    // Mirror build_omk_error_reply: a bare StatusCode (no wrapped Status) is an
+    // injector-internal failure. AOSP keystore2 maps any bare StatusCode through
+    // map_binder_status_code -> Error::BinderTransaction -> SYSTEM_ERROR
+    // (error.rs map_binder_status_code/error_to_serialized_error), regardless of
+    // the code, so it is normalized to a service-specific SYSTEM_ERROR here.
+    Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None)
 }
 
 fn omk_unavailable_status(status: &Status) -> bool {
@@ -1991,12 +1996,7 @@ fn build_precomputed_service_reply(
             tracker::retire_grant_descriptor_after_ungrant(target_key, *grantee_uid);
             Ok(parcel::build_void_reply()?.into())
         }
-        PrecomputedServiceReply::Error(PrecomputedErrorReply::Status(status)) => {
-            build_omk_status_reply(status)
-        }
-        PrecomputedServiceReply::Error(PrecomputedErrorReply::StatusCode(status)) => {
-            Ok(OutboundReply::Status(*status))
-        }
+        PrecomputedServiceReply::Error(status) => build_omk_status_reply(status),
     }
 }
 
@@ -3563,13 +3563,6 @@ mod tests {
         }
     }
 
-    fn assert_outbound_status(reply: OutboundReply, expected: StatusCode) {
-        let OutboundReply::Status(status) = reply else {
-            panic!("expected status reply");
-        };
-        assert_eq!(status, i32::from(expected));
-    }
-
     fn assert_unknown_transaction_reply(reply: SyntheticReply) {
         let SyntheticReply::Status(status) = reply else {
             panic!("unknown transaction should be returned as a binder status code");
@@ -3793,12 +3786,24 @@ mod tests {
     }
 
     #[test]
-    fn omk_transaction_error_keeps_native_status_code() {
+    fn omk_transaction_error_becomes_system_error_reply() {
+        // AOSP keystore2 reports every transport/transaction failure as a
+        // service-specific SYSTEM_ERROR rather than a raw transport status.
         let status: Status = StatusCode::UnknownTransaction.into();
-        assert_outbound_status(
+        let mut reply = outbound_parcel(
             build_omk_status_reply(&status)
                 .expect("transaction status should be converted into a reply"),
-            StatusCode::UnknownTransaction,
+        );
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("status reply should parse");
+        assert_eq!(
+            parsed.exception_code(),
+            rsbinder::ExceptionCode::ServiceSpecific
+        );
+        assert_eq!(
+            parsed.service_specific_error(),
+            ResponseCode::SYSTEM_ERROR.0
         );
     }
 
@@ -5190,7 +5195,10 @@ mod tests {
     }
 
     #[test]
-    fn reachable_omk_status_code_errors_keep_native_status_code() {
+    fn reachable_omk_status_code_errors_become_system_error_reply() {
+        // AOSP keystore2 maps a bare transport StatusCode through
+        // map_binder_status_code -> Error::BinderTransaction -> SYSTEM_ERROR,
+        // surfaced as a service-specific parcel, never a raw transport status.
         for status in [
             StatusCode::RpcError,
             StatusCode::TimedOut,
@@ -5198,11 +5206,22 @@ mod tests {
             StatusCode::UnknownTransaction,
         ] {
             let error = anyhow::Error::new(status);
-            assert_outbound_status(
+            let mut reply = outbound_parcel(
                 build_omk_error_reply_or_preserve_system(&error)
                     .expect("reachable OMK errors should classify cleanly")
                     .expect("non-dead OMK errors must replace system reply"),
-                status,
+            );
+            let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+            let parsed =
+                unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+                    .expect("status reply should parse");
+            assert_eq!(
+                parsed.exception_code(),
+                rsbinder::ExceptionCode::ServiceSpecific
+            );
+            assert_eq!(
+                parsed.service_specific_error(),
+                ResponseCode::SYSTEM_ERROR.0
             );
         }
     }
@@ -5264,10 +5283,7 @@ mod tests {
             |_, _, _| panic!("grant requests must not call ungrant"),
         );
 
-        let OmkGrantPrecompute::Reply(PrecomputedServiceReply::Error(
-            PrecomputedErrorReply::Status(status),
-        )) = result
-        else {
+        let OmkGrantPrecompute::Reply(PrecomputedServiceReply::Error(status)) = result else {
             panic!("reachable OMK business error should be precomputed as an authoritative status");
         };
         assert_eq!(
@@ -6293,7 +6309,20 @@ mod tests {
         })
         .expect("transaction status should be normalized into a reply")
         .expect("OMK transaction status should return an OMK-owned reply");
-        assert_outbound_status(reply, StatusCode::UnknownTransaction);
+        // A transport-level failure talking to the OMK operation backend is
+        // reported as a service-specific SYSTEM_ERROR, matching AOSP keystore2.
+        let mut reply = outbound_parcel(reply);
+        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
+        let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
+            .expect("status reply should parse");
+        assert_eq!(
+            parsed.exception_code(),
+            rsbinder::ExceptionCode::ServiceSpecific
+        );
+        assert_eq!(
+            parsed.service_specific_error(),
+            ResponseCode::SYSTEM_ERROR.0
+        );
     }
 
     #[test]
