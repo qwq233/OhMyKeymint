@@ -56,8 +56,6 @@ struct HalXml {
     #[serde(rename = "@format")]
     format: Option<String>,
     name: Option<String>,
-    #[serde(rename = "version", default)]
-    versions: Vec<String>,
     #[serde(rename = "fqname", default)]
     fqnames: Vec<String>,
     #[serde(rename = "interface", default)]
@@ -72,8 +70,9 @@ struct InterfaceXml {
 }
 
 pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMintHardwareProfile {
-    let version_number = probe_keymint_version_from_vintf(security_level)
-        .unwrap_or_else(fallback_keymint_version_from_android);
+    // VINTF manifests and the KeyMint HAL version are not ordinary-app-visible surfaces, so using
+    // the Android major version here does not create an ordinary-app detection point.
+    let version_number = fallback_keymint_version_from_android();
 
     if let Some(profile) = resolve_property_profile_with(
         security_level,
@@ -292,28 +291,6 @@ fn system_keymint_service_name(security_level: SecurityLevel) -> Option<&'static
     }
 }
 
-fn probe_keymint_version_from_vintf(security_level: SecurityLevel) -> Option<i32> {
-    let instance = security_level_instance(security_level)?;
-
-    for path in vintf_manifest_paths() {
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        match parse_keymint_version_xml(&contents, instance) {
-            Ok(Some(version)) => return Some(version),
-            Ok(None) => {}
-            Err(error) => {
-                log::warn!(
-                    "Ignoring invalid VINTF manifest {}: {error:#}",
-                    path.display()
-                );
-            }
-        }
-    }
-
-    None
-}
-
 fn keymint_instance_declared_in_vintf(security_level: SecurityLevel) -> bool {
     let Some(instance) = security_level_instance(security_level) else {
         return false;
@@ -355,28 +332,6 @@ fn vintf_manifest_paths() -> Vec<PathBuf> {
         paths.push(PathBuf::from(file));
     }
     paths
-}
-
-fn parse_keymint_version_xml(xml: &str, instance: &str) -> Result<Option<i32>> {
-    let manifest: ManifestXml =
-        quick_xml::de::from_str(xml).context("failed to deserialize VINTF XML")?;
-    for hal in manifest.hals {
-        if !hal.references_keymint_device_instance(instance) {
-            continue;
-        }
-
-        for version in hal.versions {
-            let version = version
-                .trim()
-                .parse::<i32>()
-                .with_context(|| format!("invalid KeyMint VINTF version {version:?}"))?;
-            if let Some(version) = normalize_keymint_version(version) {
-                return Ok(Some(version));
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 fn parse_keymint_instance_xml(xml: &str, instance: &str) -> Result<bool> {
@@ -432,14 +387,6 @@ fn detect_android_major_version_with(
     read_property: impl Fn(&str) -> Option<String>,
 ) -> Option<i32> {
     kmr_common::android_version::android_major_version_with(read_property)
-}
-
-fn normalize_keymint_version(version: i32) -> Option<i32> {
-    match version {
-        1..=5 => Some(version * 100),
-        KEYMINT_V1 | KEYMINT_V2 | KEYMINT_V3 | KEYMINT_V4 | KEYMINT_V5 => Some(version),
-        _ => None,
-    }
 }
 
 fn fallback_profile(security_level: SecurityLevel, version_number: i32) -> KeyMintHardwareProfile {
@@ -596,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn vintf_parser_matches_default_and_strongbox_instances() {
+    fn vintf_instance_parser_matches_default_and_strongbox_instances() {
         let xml = r#"
 <manifest version="1.0" type="device">
     <hal format="aidl">
@@ -615,14 +562,6 @@ mod tests {
 </manifest>
 "#;
 
-        assert_eq!(
-            parse_keymint_version_xml(xml, "default").unwrap(),
-            Some(400)
-        );
-        assert_eq!(
-            parse_keymint_version_xml(xml, "strongbox").unwrap(),
-            Some(300)
-        );
         assert!(parse_keymint_instance_xml(xml, "default").unwrap());
         assert!(parse_keymint_instance_xml(xml, "strongbox").unwrap());
         assert!(!parse_keymint_instance_xml(xml, "foo").unwrap());
@@ -646,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn vintf_parser_ignores_unrelated_hals_and_rejects_malformed_xml() {
+    fn vintf_instance_parser_ignores_unrelated_hals_and_rejects_malformed_xml() {
         let unrelated = r#"
 <manifest version="1.0" type="device">
     <hal format="aidl">
@@ -657,20 +596,8 @@ mod tests {
 </manifest>
 "#;
 
-        assert_eq!(
-            parse_keymint_version_xml(unrelated, "default").unwrap(),
-            None
-        );
-        assert!(parse_keymint_version_xml("<manifest>", "default").is_err());
-    }
-
-    #[test]
-    fn keymint_version_normalization_allows_known_versions_only() {
-        assert_eq!(normalize_keymint_version(1), Some(100));
-        assert_eq!(normalize_keymint_version(4), Some(400));
-        assert_eq!(normalize_keymint_version(100), Some(100));
-        assert_eq!(normalize_keymint_version(400), Some(400));
-        assert_eq!(normalize_keymint_version(999), None);
+        assert!(!parse_keymint_instance_xml(unrelated, "default").unwrap());
+        assert!(parse_keymint_instance_xml("<manifest>", "default").is_err());
     }
 
     #[test]
