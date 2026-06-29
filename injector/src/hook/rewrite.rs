@@ -3770,7 +3770,7 @@ mod tests {
 
     #[test]
     fn omk_service_specific_error_can_replace_system_success_reply() {
-        let status = Status::new_service_specific_error(7, None);
+        let status = Status::new_service_specific_error(ResponseCode::PERMISSION_DENIED.0, None);
         let mut reply = outbound_parcel(
             build_omk_status_reply(&status).expect("service-specific status should serialize"),
         );
@@ -3782,7 +3782,10 @@ mod tests {
             parsed.exception_code(),
             rsbinder::ExceptionCode::ServiceSpecific
         );
-        assert_eq!(parsed.service_specific_error(), 7);
+        assert_eq!(
+            parsed.service_specific_error(),
+            ResponseCode::PERMISSION_DENIED.0
+        );
     }
 
     #[test]
@@ -5043,7 +5046,7 @@ mod tests {
 
     #[test]
     fn contextual_omk_status_error_keeps_service_specific_code() {
-        let status = Status::new_service_specific_error(7, None);
+        let status = Status::new_service_specific_error(ResponseCode::PERMISSION_DENIED.0, None);
         let error = anyhow::Error::new(status).context("wrapped OMK failure");
         let mut reply = outbound_parcel(
             build_omk_error_reply(&error).expect("wrapped status should produce a status reply"),
@@ -5056,7 +5059,10 @@ mod tests {
             parsed.exception_code(),
             rsbinder::ExceptionCode::ServiceSpecific
         );
-        assert_eq!(parsed.service_specific_error(), 7);
+        assert_eq!(
+            parsed.service_specific_error(),
+            ResponseCode::PERMISSION_DENIED.0
+        );
     }
 
     #[test]
@@ -5384,7 +5390,7 @@ mod tests {
 
     #[test]
     fn reachable_omk_status_error_becomes_authoritative_reply() {
-        let status = Status::new_service_specific_error(7, None);
+        let status = Status::new_service_specific_error(ResponseCode::PERMISSION_DENIED.0, None);
         let reply = build_omk_status_reply_or_preserve_system(&status)
             .expect("service-specific status should build")
             .expect("reachable OMK status should replace system");
@@ -5397,7 +5403,10 @@ mod tests {
             parsed.exception_code(),
             rsbinder::ExceptionCode::ServiceSpecific
         );
-        assert_eq!(parsed.service_specific_error(), 7);
+        assert_eq!(
+            parsed.service_specific_error(),
+            ResponseCode::PERMISSION_DENIED.0
+        );
     }
 
     #[test]
