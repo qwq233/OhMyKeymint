@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::mem::size_of;
-use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex, OnceLock,
@@ -9,7 +8,6 @@ use std::sync::{
 
 use log::{debug, info, warn};
 use rsbinder::{ExceptionCode, Status, StatusCode};
-use serde::Deserialize;
 
 use super::binder::{
     binder_transaction_data, describe_transaction_objects, format_target,
@@ -46,6 +44,7 @@ struct PendingMaintenanceCall {
     request: ParsedMaintenanceRequest,
     method: MaintenanceMethod,
     caller: CallerIdentity,
+    route: RouteTarget,
 }
 
 struct PendingServiceCall {
@@ -185,51 +184,11 @@ const SYNTHETIC_BINDER_COOKIE_PREFIX_32: u64 = 0x4d4b_0000;
 const KEYSTORE2_HAL_NAME: &str = "android.system.keystore2";
 const KEYSTORE2_SERVICE_INTERFACE: &str = "IKeystoreService";
 const KEYSTORE2_SERVICE_INSTANCE: &str = "default";
-const VINTF_MANIFEST_DIRS: &[&str] = &[
-    "/system/etc/vintf/manifest",
-    "/system_ext/etc/vintf/manifest",
-    "/product/etc/vintf/manifest",
-    "/vendor/etc/vintf/manifest",
-    "/odm/etc/vintf/manifest",
-];
-const VINTF_MANIFEST_FILES: &[&str] = &[
-    "/system/etc/vintf/manifest.xml",
-    "/system_ext/etc/vintf/manifest.xml",
-    "/product/etc/vintf/manifest.xml",
-    "/vendor/etc/vintf/manifest.xml",
-    "/odm/etc/vintf/manifest.xml",
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Keystore2AidlMetadata {
     version: i32,
     hash: &'static str,
-}
-
-#[derive(Debug, Deserialize)]
-struct VintfManifestXml {
-    #[serde(rename = "hal", default)]
-    hals: Vec<VintfHalXml>,
-}
-
-#[derive(Debug, Deserialize)]
-struct VintfHalXml {
-    #[serde(rename = "@format")]
-    format: Option<String>,
-    name: Option<String>,
-    #[serde(rename = "version", default)]
-    versions: Vec<String>,
-    #[serde(rename = "fqname", default)]
-    fqnames: Vec<String>,
-    #[serde(rename = "interface", default)]
-    interfaces: Vec<VintfInterfaceXml>,
-}
-
-#[derive(Debug, Deserialize)]
-struct VintfInterfaceXml {
-    name: Option<String>,
-    #[serde(rename = "instance", default)]
-    instances: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1054,9 +1013,9 @@ pub(super) unsafe fn handle_br_transaction(
         return false;
     }
 
-    // Maintenance calls carry keystore user lifecycle and super-key state. They
-    // are global system state, so mirror them after system success rather than
-    // gating them by scoop package routing.
+    // Maintenance calls mostly carry global keystore state, so mirror them after
+    // system success. migrateKeyNamespace moves app keys, so scoop-routed callers
+    // use OMK as the authoritative business path.
     if request_interface == identify::KEYSTORE_MAINTENANCE_INTERFACE {
         let request = match parcel::parse_maintenance_request(
             data,
@@ -1076,14 +1035,40 @@ pub(super) unsafe fn handle_br_transaction(
         };
 
         let method = request.method();
+        let (route, packages, reason) = if matches!(
+            &request,
+            ParsedMaintenanceRequest::MigrateKeyNamespace { .. }
+        ) {
+            let decision = evaluate_caller(&caller, &cfg);
+            (
+                if decision.allowed {
+                    RouteTarget::Omk
+                } else {
+                    RouteTarget::System
+                },
+                decision.packages,
+                Some(decision.reason),
+            )
+        } else {
+            (RouteTarget::System, Vec::new(), None)
+        };
+        let route_note = if route == RouteTarget::Omk {
+            "using OMK as authoritative business path"
+        } else {
+            "mirroring maintenance state to OMK after system success"
+        };
         info!(
-            "event=decision command={} maintenance_method={:?} code=0x{:x} uid={} pid={} sid='{}'; mirroring maintenance state to OMK after system success",
+            "event=decision command={} maintenance_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} route={:?} reason={:?}; {}",
             command_name,
             method,
             tr.code,
             caller.uid,
             caller.pid,
             caller.sid,
+            packages,
+            route,
+            reason,
+            route_note,
         );
 
         if expects_reply {
@@ -1091,6 +1076,7 @@ pub(super) unsafe fn handle_br_transaction(
                 request,
                 method,
                 caller,
+                route,
             }));
         }
         return false;
@@ -1524,7 +1510,7 @@ pub(super) unsafe fn handle_bc_reply(tr: &mut binder_transaction_data) {
                             format!("{:?}", call.method),
                             call.caller.uid,
                             call.caller.pid,
-                            reply.into(),
+                            reply,
                         )
                     })
                 })
@@ -2051,7 +2037,7 @@ fn fallback_keystore2_aidl_version_from_android() -> i32 {
 }
 
 fn probe_keystore2_aidl_version_from_vintf() -> Option<i32> {
-    for path in vintf_manifest_paths() {
+    for path in kmr_common::vintf::manifest_paths() {
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -2069,43 +2055,14 @@ fn probe_keystore2_aidl_version_from_vintf() -> Option<i32> {
     None
 }
 
-fn vintf_manifest_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for directory in VINTF_MANIFEST_DIRS {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) == Some("xml") {
-                paths.push(path);
-            }
-        }
-    }
-    for file in VINTF_MANIFEST_FILES {
-        paths.push(PathBuf::from(file));
-    }
-    paths
-}
-
 fn parse_keystore2_aidl_version_xml(xml: &str) -> anyhow::Result<Option<i32>> {
-    let manifest: VintfManifestXml = quick_xml::de::from_str(xml)
-        .map_err(|error| anyhow::anyhow!("failed to deserialize VINTF XML: {error}"))?;
-    for hal in manifest.hals {
-        if !hal.references_keystore2_service() {
-            continue;
-        }
-        for version in hal.versions {
-            let version = version
-                .trim()
-                .parse::<i32>()
-                .map_err(|error| anyhow::anyhow!("invalid keystore2 VINTF version: {error}"))?;
-            if let Some(version) = normalize_keystore2_aidl_version(version) {
-                return Ok(Some(version));
-            }
-        }
-    }
-    Ok(None)
+    kmr_common::vintf::parse_aidl_hal_version_xml(
+        xml,
+        KEYSTORE2_HAL_NAME,
+        KEYSTORE2_SERVICE_INTERFACE,
+        KEYSTORE2_SERVICE_INSTANCE,
+        normalize_keystore2_aidl_version,
+    )
 }
 
 fn normalize_keystore2_aidl_version(version: i32) -> Option<i32> {
@@ -2113,30 +2070,6 @@ fn normalize_keystore2_aidl_version(version: i32) -> Option<i32> {
         Some(version)
     } else {
         None
-    }
-}
-
-impl VintfHalXml {
-    fn references_keystore2_service(&self) -> bool {
-        self.format
-            .as_deref()
-            .is_some_and(|format| format.trim() == "aidl")
-            && self.name.as_deref().map(str::trim) == Some(KEYSTORE2_HAL_NAME)
-            && self.references_instance(KEYSTORE2_SERVICE_INTERFACE, KEYSTORE2_SERVICE_INSTANCE)
-    }
-
-    fn references_instance(&self, interface: &str, instance: &str) -> bool {
-        let fqname = format!("{interface}/{instance}");
-        self.fqnames
-            .iter()
-            .any(|candidate| candidate.trim() == fqname)
-            || self.interfaces.iter().any(|candidate| {
-                candidate.name.as_deref().map(str::trim) == Some(interface)
-                    && candidate
-                        .instances
-                        .iter()
-                        .any(|candidate| candidate.trim() == instance)
-            })
     }
 }
 
@@ -2749,7 +2682,36 @@ unsafe fn build_authorization_reply_mirror(
 unsafe fn build_maintenance_reply_mirror(
     tr: &binder_transaction_data,
     call: &PendingMaintenanceCall,
-) -> anyhow::Result<Option<parcel::OwnedReply>> {
+) -> anyhow::Result<Option<OutboundReply>> {
+    match &call.request {
+        ParsedMaintenanceRequest::MigrateKeyNamespace {
+            source,
+            destination,
+        } if call.route == RouteTarget::Omk => {
+            let caller = call.caller.to_caller_info();
+            match ipc::with_omk_maintenance_retry(|maintenance| {
+                Ok(maintenance.r#migrateKeyNamespace(Some(&caller), source, destination)?)
+            }) {
+                Ok(()) => {
+                    clear_mirror_state_dirty(
+                        MirrorStateKind::Maintenance,
+                        call.method,
+                        &call.caller,
+                    );
+                    debug!(
+                        "event=reply OMK authoritative maintenance {:?} succeeded for uid={} pid={}",
+                        call.method, call.caller.uid, call.caller.pid
+                    );
+                    return Ok(Some(parcel::build_void_reply()?.into()));
+                }
+                Err(error) => {
+                    return omk_error_reply_for_method("migrateKeyNamespace", &call.caller, &error);
+                }
+            }
+        }
+        _ => {}
+    }
+
     let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
     let status = parcel::parse_reply_status(data, data_size, offsets, offsets_size)?;
     if !status.is_ok() {
@@ -4285,70 +4247,6 @@ mod tests {
     }
 
     #[test]
-    fn keystore2_vintf_parser_matches_fqname_and_interface_forms() {
-        let xml = r#"
-<manifest version="1.0" type="framework">
-    <hal format="aidl">
-        <name>android.system.keystore2</name>
-        <version>5</version>
-        <fqname>IKeystoreService/default</fqname>
-    </hal>
-    <hal format="aidl">
-        <name>android.system.keystore2</name>
-        <version>4</version>
-        <interface>
-            <name>IKeystoreService</name>
-            <instance>secondary</instance>
-        </interface>
-    </hal>
-</manifest>
-"#;
-
-        assert_eq!(parse_keystore2_aidl_version_xml(xml).unwrap(), Some(5));
-
-        let xml = r#"
-<manifest version="1.0" type="framework">
-    <hal format="aidl">
-        <name>android.system.keystore2</name>
-        <version>4</version>
-        <interface>
-            <name>IKeystoreService</name>
-            <instance>default</instance>
-        </interface>
-    </hal>
-</manifest>
-"#;
-
-        assert_eq!(parse_keystore2_aidl_version_xml(xml).unwrap(), Some(4));
-    }
-
-    #[test]
-    fn keystore2_vintf_parser_ignores_unrelated_and_invalid_versions() {
-        let unrelated = r#"
-<manifest version="1.0" type="framework">
-    <hal format="aidl">
-        <name>android.hardware.security.keymint</name>
-        <version>5</version>
-        <fqname>IKeystoreService/default</fqname>
-    </hal>
-</manifest>
-"#;
-        assert_eq!(parse_keystore2_aidl_version_xml(unrelated).unwrap(), None);
-
-        let future = r#"
-<manifest version="1.0" type="framework">
-    <hal format="aidl">
-        <name>android.system.keystore2</name>
-        <version>99</version>
-        <fqname>IKeystoreService/default</fqname>
-    </hal>
-</manifest>
-"#;
-        assert_eq!(parse_keystore2_aidl_version_xml(future).unwrap(), None);
-        assert!(parse_keystore2_aidl_version_xml("<manifest>").is_err());
-    }
-
-    #[test]
     fn synthetic_operation_missing_args_keep_not_enough_data_status() {
         let _guard = route_state_test_guard();
 
@@ -5791,6 +5689,7 @@ mod tests {
             request: ParsedMaintenanceRequest::OnUserAdded { user_id: 10 },
             method: MaintenanceMethod::OnUserAdded,
             caller,
+            route: RouteTarget::System,
         });
         assert!(pending_preserves_system_on_rewrite_failure(&authorization));
         assert!(pending_preserves_system_on_rewrite_failure(&maintenance));

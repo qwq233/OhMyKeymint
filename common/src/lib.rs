@@ -31,6 +31,7 @@ pub mod keyblob;
 pub mod rpc;
 pub mod runtime;
 pub mod tag;
+pub mod vintf;
 
 /// Location in a source file where an error originated.
 ///

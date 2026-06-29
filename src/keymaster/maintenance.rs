@@ -275,10 +275,6 @@ fn normalize_migration_destination(
         return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
             .context(err!("migration destination must specify an alias"));
     };
-    if destination.blob.is_some() {
-        return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
-            .context(err!("migration destination must not carry a blob"));
-    }
 
     match destination.domain {
         Domain::APP => Ok(KeyDescriptor {
