@@ -108,7 +108,7 @@ fn repair_omk_data_files() {
 }
 
 fn prepare_android_storage() {
-    for dir in [root_path!(), root_path!("data")] {
+    for dir in [root_path!(), root_path!("data"), root_path!("logs")] {
         if let Err(e) = std::fs::create_dir_all(dir) {
             storage_warn(format!("Failed to create OMK directory {dir}: {e:?}"));
             continue;
@@ -148,10 +148,10 @@ fn prepare_android_storage() {
         root_path!("config.toml.bak"),
         root_path!("keybox.xml"),
         root_path!("crash_count"),
-        root_path!("keymint.log"),
-        root_path!("keymint.log.1"),
-        root_path!("injector.log"),
-        root_path!("injector.log.1"),
+        root_path!("logs/keymint.log"),
+        root_path!("logs/keymint.log.1"),
+        root_path!("logs/injector.log"),
+        root_path!("logs/injector.log.1"),
     ] {
         if !Path::new(file).exists() {
             continue;

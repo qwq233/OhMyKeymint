@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use log::LevelFilter;
 
-const DEFAULT_LOG_PATH: &str = "/data/misc/keystore/omk/injector.log";
+const DEFAULT_LOG_PATH: &str = "/data/misc/keystore/omk/logs/injector.log";
 const PATTERN: &str = "{d(%Y-%m-%d %H:%M:%S %Z)(utc)} [{h({l})}] {M} - {m}{n}";
 
 static LOGGER_INIT: OnceLock<()> = OnceLock::new();

@@ -14,7 +14,6 @@ pid_matches_script() {
 start_daemon() {
   script=$1
   pidfile=$2
-  logfile=$3
 
   if [ -f "$pidfile" ]; then
     pid=$(cat "$pidfile" 2>/dev/null)
@@ -24,7 +23,7 @@ start_daemon() {
     rm -f "$pidfile"
   fi
 
-  sh "$script" >"$logfile" 2>&1 &
+  sh "$script"
   pid=$!
   echo $pid > "$pidfile"
   sleep 1
@@ -35,7 +34,5 @@ start_daemon() {
   return 0
 }
 
-start_daemon "$MODDIR/daemon" "$STATE_DIR/keymint-daemon.pid" \
-  /data/local/tmp/omk_daemon.out
-start_daemon "$MODDIR/daemon-injector" "$STATE_DIR/injector-daemon.pid" \
-  /data/local/tmp/injector_daemon.out
+start_daemon "$MODDIR/daemon" "$STATE_DIR/keymint-daemon.pid"
+start_daemon "$MODDIR/daemon-injector" "$STATE_DIR/injector-daemon.pid"
