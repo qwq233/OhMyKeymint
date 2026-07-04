@@ -23,7 +23,7 @@ start_daemon() {
     rm -f "$pidfile"
   fi
 
-  sh "$script"
+  sh "$script" &
   pid=$!
   echo $pid > "$pidfile"
   sleep 1

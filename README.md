@@ -30,7 +30,7 @@ Configuration file is located at `/data/misc/keystore/omk/config.toml` and `/dat
 [main]
 # Only "injector" is currently enabled.
 backend = "injector"
-# Insecure fallback for broken system TEE biometric HAT verification.
+# Insecure fallback for broken system TEE HAT verification.
 force_skip_system_biometric_hat_verification = false
 
 # The following values ​​are used to generate the seed for device encryption 

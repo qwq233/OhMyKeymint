@@ -482,20 +482,6 @@ fn route_for_security_level_request(
     }
 }
 
-fn service_request_has_empty_subcomponent_blob(request: &ParsedServiceRequest) -> bool {
-    match request {
-        ParsedServiceRequest::UpdateSubcomponent {
-            public_cert,
-            certificate_chain,
-            ..
-        } => {
-            matches!(public_cert.as_deref(), Some([]))
-                || matches!(certificate_chain.as_deref(), Some([]))
-        }
-        _ => false,
-    }
-}
-
 fn security_level_request_has_empty_blob_descriptor(request: &ParsedSecurityLevelRequest) -> bool {
     match request {
         ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral { storage_key }
@@ -2828,14 +2814,6 @@ unsafe fn build_service_reply_rewrite(
         return Ok(None);
     }
 
-    if service_request_has_empty_subcomponent_blob(&pending.request) {
-        debug!(
-            "event=reply preserving system {:?} reply for empty certificate subcomponent; OMK AIDL transport cannot preserve empty nullable byte arrays",
-            pending.method
-        );
-        return Ok(None);
-    }
-
     let caller = pending.caller.to_caller_info();
     let _guard = BypassGuard::enter();
 
@@ -4684,42 +4662,6 @@ mod tests {
     }
 
     #[test]
-    fn service_empty_subcomponent_blob_detection_is_narrow() {
-        let key = sample_key_descriptor();
-        assert!(service_request_has_empty_subcomponent_blob(
-            &ParsedServiceRequest::UpdateSubcomponent {
-                key: key.clone(),
-                public_cert: Some(Vec::new()),
-                certificate_chain: None,
-            }
-        ));
-        assert!(service_request_has_empty_subcomponent_blob(
-            &ParsedServiceRequest::UpdateSubcomponent {
-                key: key.clone(),
-                public_cert: None,
-                certificate_chain: Some(Vec::new()),
-            }
-        ));
-        assert!(!service_request_has_empty_subcomponent_blob(
-            &ParsedServiceRequest::UpdateSubcomponent {
-                key: key.clone(),
-                public_cert: None,
-                certificate_chain: None,
-            }
-        ));
-        assert!(!service_request_has_empty_subcomponent_blob(
-            &ParsedServiceRequest::UpdateSubcomponent {
-                key: key.clone(),
-                public_cert: Some(vec![1]),
-                certificate_chain: Some(vec![2]),
-            }
-        ));
-        assert!(!service_request_has_empty_subcomponent_blob(
-            &ParsedServiceRequest::GetKeyEntry { key }
-        ));
-    }
-
-    #[test]
     fn synthetic_empty_blob_reply_is_limited_to_app_uids() {
         let request = ParsedSecurityLevelRequest::DeleteKey {
             key: blob_key_descriptor(Some(Vec::new())),
@@ -4871,27 +4813,6 @@ mod tests {
 
         let reply = unsafe { build_security_level_reply_rewrite(&tr, &pending) }
             .expect("empty masking key rewrite should not fail");
-
-        assert!(reply.is_none());
-    }
-
-    #[test]
-    fn omk_update_subcomponent_empty_blob_rewrite_preserves_system_reply() {
-        let pending = PendingServiceCall {
-            request: ParsedServiceRequest::UpdateSubcomponent {
-                key: sample_key_descriptor(),
-                public_cert: Some(Vec::new()),
-                certificate_chain: None,
-            },
-            method: ServiceMethod::UpdateSubcomponent,
-            caller: CallerIdentity::new(10002, 2000),
-            packages: vec!["com.example".to_string()],
-            route: RouteTarget::Omk,
-        };
-        let tr: binder_transaction_data = unsafe { std::mem::zeroed() };
-
-        let reply = unsafe { build_service_reply_rewrite(&tr, &pending) }
-            .expect("empty updateSubcomponent rewrite should not fail");
 
         assert!(reply.is_none());
     }

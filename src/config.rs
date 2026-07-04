@@ -469,8 +469,8 @@ impl std::str::FromStr for Backend {
 pub struct MainConfig {
     /// Only the injector backend is currently enabled.
     pub backend: Backend,
-    /// Insecure fallback for devices whose system TEE cannot verify biometric
-    /// HATs. Only mirrored system-successful biometric auth tokens may use it.
+    /// Insecure fallback for devices whose system TEE cannot verify HATs.
+    /// When enabled, OMK accepts shape-valid HATs without system KeyMint MAC verification.
     #[serde(default)]
     pub force_skip_system_biometric_hat_verification: bool,
 }
@@ -832,6 +832,17 @@ mod tests {
 
         let serialized = toml::to_string(&MainConfig::default()).unwrap();
         assert!(serialized.contains(r#"backend = "injector""#));
+    }
+
+    #[test]
+    fn main_config_parses_hat_verification_fallback() {
+        let parsed: MainConfig = toml::from_str(
+            r#"backend = "injector"
+force_skip_system_biometric_hat_verification = true"#,
+        )
+        .unwrap();
+        assert!(parsed.force_skip_system_biometric_hat_verification);
+        assert!(!MainConfig::default().force_skip_system_biometric_hat_verification);
     }
 
     #[test]

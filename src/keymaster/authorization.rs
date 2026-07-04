@@ -41,6 +41,7 @@ use crate::top::qwq2333::ohmykeymint::IOhMyAuthorizationService::{
     BnOhMyAuthorizationService, IOhMyAuthorizationService,
 };
 use crate::{
+    config::config,
     global::{DB, ENFORCEMENTS, SUPER_KEY},
     log_client_err,
 };
@@ -314,9 +315,9 @@ impl AuthorizationManager {
         }
 
         validate_auth_token_shape(auth_token)?;
-        if should_skip_mirrored_auth_token_verification(ctx) {
+        if should_skip_system_auth_token_verification(ctx) {
             log::debug!(
-                "system auth token MAC verification skipped for mirrored system-successful authType={:#x} challengeTag={:04x}",
+                "system auth token MAC verification skipped for mirrored/config fallback authType={:#x} challengeTag={:04x}",
                 auth_token.authenticatorType.0,
                 challenge_tag(auth_token.challenge),
             );
@@ -415,8 +416,18 @@ fn validate_auth_token_shape(auth_token: &HardwareAuthToken) -> Result<()> {
     Ok(())
 }
 
-fn should_skip_mirrored_auth_token_verification(ctx: Option<&CallerInfo>) -> bool {
-    ctx.is_some()
+fn should_skip_system_auth_token_verification(ctx: Option<&CallerInfo>) -> bool {
+    if ctx.is_some() {
+        return true;
+    }
+
+    match config().read() {
+        Ok(config) => config.main.force_skip_system_biometric_hat_verification,
+        Err(_) => {
+            error!("config lock poisoned while checking HAT verification fallback");
+            false
+        }
+    }
 }
 
 thread_local! {
