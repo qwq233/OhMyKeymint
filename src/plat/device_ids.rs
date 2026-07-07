@@ -1,5 +1,5 @@
 use crate::{
-    config::{ConfigFile, DeviceProperty},
+    config::{self, ConfigFile, DeviceProperty},
     plat::resetprop::read_string_property,
 };
 
@@ -58,33 +58,30 @@ struct BackfillEvent {
     value: String,
 }
 
-pub fn bootstrap_device_ids(config_file: &mut ConfigFile) {
+fn bootstrap_device_ids(config_file: &mut ConfigFile) -> bool {
     let device = &mut config_file.device;
-    let respect_user_telephony_override = device.override_telephony_properties;
-    let imei_needs_backfill =
-        telephony_field_needs_backfill(&device.imei, respect_user_telephony_override);
-    let imei2_needs_backfill = needs_backfill(&device.imei2);
-    let meid_needs_backfill =
-        telephony_field_needs_backfill(&device.meid, respect_user_telephony_override);
-
-    if !imei_needs_backfill && !imei2_needs_backfill && !meid_needs_backfill {
-        log::debug!("device identifiers already configured; skipping telephony auto-fill");
-        return;
+    if device.override_telephony_properties {
+        log::debug!("device identifiers pinned by config; skipping telephony auto-fill");
+        return false;
     }
 
-    if !respect_user_telephony_override {
-        clear_unpinned_telephony_fields(device);
+    if !needs_backfill(&device.imei)
+        && !needs_backfill(&device.imei2)
+        && !needs_backfill(&device.meid)
+    {
+        log::debug!("device identifiers already configured; skipping telephony auto-fill");
+        return false;
     }
 
     let telephony_api_candidates = probe_telephony_api_candidates();
     let mut events = apply_telephony_candidates(device, &telephony_api_candidates);
-    events.extend(apply_property_fallbacks(device));
     let device_id_candidates = probe_device_id_candidates();
     events.extend(apply_telephony_candidates(device, &device_id_candidates));
+    events.extend(apply_property_fallbacks(device));
 
     if events.is_empty() {
         log_device_id_state(device, "telephony auto-fill left fields empty");
-        return;
+        return false;
     }
 
     for event in events {
@@ -97,6 +94,25 @@ pub fn bootstrap_device_ids(config_file: &mut ConfigFile) {
     }
 
     log_device_id_state(device, "telephony auto-fill result");
+    true
+}
+
+pub fn resolve_runtime_device_ids() -> Result<()> {
+    if !crate::global::boot_completed()
+        && read_string_property("sys.boot_completed").as_deref() != Some("1")
+    {
+        return Ok(());
+    }
+
+    let mut config_file = config::bootstrap_config_file()?;
+    if bootstrap_device_ids(&mut config_file) {
+        config::persist_config_file(&config_file)?;
+        let mut runtime = config::config()
+            .write()
+            .map_err(|_| anyhow!("config lock poisoned while updating device identifiers"))?;
+        runtime.device = config_file.device;
+    }
+    Ok(())
 }
 
 fn apply_telephony_candidates(
@@ -291,20 +307,6 @@ where
 
 fn needs_backfill(value: &str) -> bool {
     value.trim().is_empty()
-}
-
-fn telephony_field_needs_backfill(value: &str, respect_user_override: bool) -> bool {
-    !respect_user_override || needs_backfill(value)
-}
-
-fn clear_unpinned_telephony_fields(device: &mut DeviceProperty) {
-    if !device.imei.trim().is_empty() || !device.meid.trim().is_empty() {
-        log::debug!(
-            "Ignoring user-configured imei/meid because overrideTelephonyProperties is not true"
-        );
-    }
-    device.imei.clear();
-    device.meid.clear();
 }
 
 fn mask_identifier(value: &str) -> String {
@@ -798,20 +800,6 @@ mod tests {
         apply_telephony_candidates(&mut device, &candidates);
         assert_eq!(device.imei, "355231937352445");
         assert!(device.imei2.is_empty());
-    }
-
-    #[test]
-    fn default_mode_clears_user_pinned_imei_and_meid_before_backfill() {
-        let mut config = ConfigFile::default();
-        config.device.imei = "111111111111111".to_string();
-        config.device.meid = "A1000000000001".to_string();
-        config.device.imei2 = "222222222222222".to_string();
-
-        clear_unpinned_telephony_fields(&mut config.device);
-
-        assert!(config.device.imei.is_empty());
-        assert!(config.device.meid.is_empty());
-        assert_eq!(config.device.imei2, "222222222222222");
     }
 
     #[test]

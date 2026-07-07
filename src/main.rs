@@ -254,7 +254,6 @@ fn run() -> Result<()> {
 
     info!("bootstrapping config");
     let mut config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
-    plat::device_ids::bootstrap_device_ids(&mut config_file);
     let resolved_trust =
         plat::vbmeta::bootstrap_vbmeta(&mut config_file).context("failed to bootstrap vbmeta")?;
     config::persist_config_file(&config_file).context("failed to persist config")?;
