@@ -7,6 +7,12 @@ pub struct AidlVersionHash {
 pub const AIDL_GET_INTERFACE_HASH_TRANSACTION: u32 = 0x00ff_fffe;
 pub const AIDL_GET_INTERFACE_VERSION_TRANSACTION: u32 = 0x00ff_ffff;
 
+pub const AID_ROOT: u32 = 0;
+pub const AID_SYSTEM: u32 = 1000;
+pub const AID_KEYSTORE: u32 = 1017;
+pub const KEYSTORE_UID: libc::uid_t = AID_KEYSTORE as libc::uid_t;
+pub const KEYSTORE_GID: libc::gid_t = AID_KEYSTORE as libc::gid_t;
+
 pub const ANDROID_SYSTEM_KEYSTORE2_LATEST_AIDL_VERSION: i32 = 6;
 
 pub const ANDROID_SYSTEM_KEYSTORE2_AIDL_VERSION_HASHES: &[AidlVersionHash] = &[

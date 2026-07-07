@@ -208,7 +208,7 @@ def deploy_binaries(
     command = (
         "set -eu; "
         f"mkdir -p {quote(REMOTE_DIR)}; "
-        f"rm -f {quote(remote_path(REMOTE_DIR, 'rpc.sock'))}; "
+        f"rm -f /data/misc/keystore/omk/rpc.sock; "
         f"cp -f {quote(remote_keymint_stage)} {quote(remote_tmp_keymint)}; "
         f"cp -f {quote(remote_inject_stage)} {quote(remote_tmp_inject)}; "
         f"chmod 0755 {quote(remote_tmp_keymint)} {quote(remote_tmp_inject)}; "

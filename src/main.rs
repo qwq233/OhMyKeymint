@@ -6,12 +6,14 @@ use std::panic;
 use std::sync::Arc;
 use std::{ffi::CString, os::unix::fs::PermissionsExt, path::Path};
 
+use kmr_common::consts::{KEYSTORE_GID, KEYSTORE_UID};
 use kmr_common::rpc;
+use kmr_common::selinux::{clear_sockcreate_con, set_sockcreate_con};
 use log::{debug, error, info, warn};
 use rsbinder::rpc::{PeerIdentity, RpcServer};
-use rsbinder::BinderFeatures;
 
 use crate::{
+    consts::RPC_SOCKET_CONTEXT,
     keymaster::service::KeystoreService,
     keymaster::{
         authorization::AuthorizationManager, maintenance::MaintenanceManager, metrics::Metrics,
@@ -36,16 +38,6 @@ pub mod watchdog;
 
 include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
 // include!( "./aidl.rs"); // for development only
-
-fn sid_features() -> BinderFeatures {
-    let mut features = BinderFeatures::default();
-    features.set_requesting_sid = true;
-
-    features
-}
-
-const KEYSTORE_UID: libc::uid_t = 1017;
-const KEYSTORE_GID: libc::gid_t = 1017;
 
 fn storage_warn(message: String) {
     if log::log_enabled!(log::Level::Warn) {
@@ -170,14 +162,21 @@ fn prepare_android_storage() {
 }
 
 fn create_rpc_server() -> Result<Arc<RpcServer>> {
-    let server =
-        RpcServer::setup_unix_server(rpc::SOCKET).context("failed to bind OMK RPC socket")?;
+    set_sockcreate_con(RPC_SOCKET_CONTEXT)
+        .context("failed to set OMK RPC socket SELinux context")?;
+    let server = RpcServer::setup_unix_server(rpc::SOCKET);
+    let clear_result =
+        clear_sockcreate_con().context("failed to clear OMK RPC socket SELinux context");
+    let server = server.context("failed to bind OMK RPC socket")?;
+    clear_result?;
     server.set_android13plus(rpc::WIRE_MAX_VERSION);
+    std::fs::set_permissions(rpc::SOCKET, std::fs::Permissions::from_mode(0o660))
+        .context("failed to chmod OMK RPC socket")?;
 
     server.set_authorizer(|peer| {
         let allowed = matches!(
             peer,
-            PeerIdentity::Local { uid, .. } if *uid == 0 || *uid == KEYSTORE_UID
+            PeerIdentity::Local { uid, .. } if *uid == KEYSTORE_UID
         );
         if !allowed {
             warn!("rejected OMK RPC peer {peer}");
@@ -186,6 +185,14 @@ fn create_rpc_server() -> Result<Arc<RpcServer>> {
     });
 
     Ok(server)
+}
+
+fn set_keystore_identity() -> Result<()> {
+    let failed = unsafe { libc::setgid(KEYSTORE_GID) != 0 || libc::setuid(KEYSTORE_UID) != 0 };
+    if failed {
+        return Err(std::io::Error::last_os_error()).context("failed to enter keystore uid/gid");
+    }
+    Ok(())
 }
 
 fn should_resolve_module_info_bundle(android_major_version: Option<i32>) -> bool {
@@ -285,12 +292,10 @@ fn run() -> Result<()> {
 
     keybox::initialize().context("failed to initialize keybox runtime")?;
 
-    let injector_rpc_server = create_rpc_server()?;
+    info!("setting uid/gid={} role=keystore", KEYSTORE_UID);
+    set_keystore_identity()?;
 
-    unsafe {
-        info!("setting uid=1017 role=keystore");
-        libc::setuid(KEYSTORE_UID); // KEYSTORE_UID
-    }
+    let injector_rpc_server = create_rpc_server()?;
 
     crate::keymaster::metrics_store::update_keystore_crash_count();
 
@@ -304,7 +309,7 @@ fn run() -> Result<()> {
     let dev = KeystoreService::new_native_binder().context("failed to create omk service")?;
 
     info!("adding OMK service to RPC server");
-    let service = BnOhMyKsService::new_binder_with_features(dev, sid_features());
+    let service = BnOhMyKsService::new_binder_with_features(dev, consts::sid_features());
     server
         .add_service(rpc::SERVICE, service.as_binder())
         .context("failed to add OMK RPC service")?;
@@ -335,20 +340,4 @@ fn run() -> Result<()> {
     info!("serving OMK RPC socket={}", rpc::SOCKET);
     server.run().context("OMK RPC server stopped")?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::should_resolve_module_info_bundle;
-
-    #[test]
-    fn module_info_bundle_is_only_resolved_on_android_16_plus() {
-        for version in [Some(12), Some(13), Some(14), Some(15)] {
-            assert!(!should_resolve_module_info_bundle(version));
-        }
-
-        for version in [None, Some(16), Some(17)] {
-            assert!(should_resolve_module_info_bundle(version));
-        }
-    }
 }

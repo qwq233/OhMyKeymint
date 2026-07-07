@@ -267,7 +267,7 @@ impl AuthorizationManager {
         let mgr = Self::new_manager();
         Ok(BnKeystoreAuthorization::new_binder_with_features(
             mgr,
-            crate::sid_features(),
+            crate::consts::sid_features(),
         ))
     }
 
@@ -275,7 +275,7 @@ impl AuthorizationManager {
         let mgr = Self::new_manager();
         Ok(BnOhMyAuthorizationService::new_binder_with_features(
             mgr,
-            crate::sid_features(),
+            crate::consts::sid_features(),
         ))
     }
 

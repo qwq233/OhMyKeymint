@@ -32,14 +32,14 @@ impl MaintenanceManager {
     pub fn new_native_binder() -> Result<Strong<dyn IKeystoreMaintenance>> {
         Ok(BnKeystoreMaintenance::new_binder_with_features(
             Self,
-            crate::sid_features(),
+            crate::consts::sid_features(),
         ))
     }
 
     pub fn new_omk_binder() -> Result<Strong<dyn IOhMyMaintenanceService>> {
         Ok(BnOhMyMaintenanceService::new_binder_with_features(
             Self,
-            crate::sid_features(),
+            crate::consts::sid_features(),
         ))
     }
 

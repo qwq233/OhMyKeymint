@@ -28,7 +28,6 @@ use crate::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
 };
 use crate::config::{config, CryptoConfig};
-use crate::consts::AID_KEYSTORE;
 use crate::global::DB;
 use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_km_error, map_ks_error, map_ks_result};
@@ -52,6 +51,7 @@ use crate::{
     watchdog as wd,
 };
 use anyhow::{Context, Result};
+use kmr_common::consts::AID_KEYSTORE;
 use kmr_crypto_boring::ec::BoringEc;
 use kmr_crypto_boring::hmac::BoringHmac;
 use kmr_crypto_boring::rng::BoringRng;

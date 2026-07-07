@@ -897,7 +897,7 @@ impl KeystoreOperation {
             Self {
                 operation: Mutex::new(Some(operation)),
             },
-            crate::sid_features(),
+            crate::consts::sid_features(),
         )
     }
 

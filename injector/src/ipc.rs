@@ -1,11 +1,12 @@
 use std::cell::RefCell;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Once;
 use std::thread::LocalKey;
+use std::time::{Duration, Instant};
+use std::{cmp, thread};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use kmr_common::rpc;
 use log::{debug, warn};
 use rsbinder::rpc::RpcSession;
@@ -21,6 +22,8 @@ use crate::top::qwq2333::ohmykeymint::IOhMyKsService::IOhMyKsService;
 use crate::top::qwq2333::ohmykeymint::IOhMyMaintenanceService::IOhMyMaintenanceService;
 
 const SYSTEM_KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/default";
+const RPC_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const RPC_READY_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 thread_local! {
     static OMK: RefCell<Option<Strong<dyn IOhMyKsService>>> = const { RefCell::new(None) };
@@ -54,19 +57,38 @@ pub fn ensure_process_state() {
     });
 }
 
-pub fn install_rpc_session_from_fd(raw_fd: RawFd) -> Result<()> {
-    if raw_fd < 0 {
-        bail!("invalid OMK RPC fd {raw_fd}");
-    }
-
+pub fn install_direct_rpc_session() -> Result<()> {
     ensure_process_state();
     clear_rpc_caches();
 
-    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    let session = RpcSession::from_preconnected_fd(fd, rpc::WIRE_MAX_VERSION)
-        .context("failed to initialize OMK RPC session from preconnected fd")?;
+    let session = connect_rpc_session("failed to connect OMK RPC socket")?;
     *SESSION.lock().expect("RPC session cache poisoned") = Some(session);
     Ok(())
+}
+
+fn connect_rpc_session(connect_context: &'static str) -> Result<RpcSession> {
+    let start = Instant::now();
+    loop {
+        match connect_rpc_session_once(connect_context) {
+            Ok(session) => return Ok(session),
+            Err(error) if start.elapsed() >= RPC_READY_TIMEOUT => {
+                return Err(error).context("OMK RPC server did not become ready in time");
+            }
+            Err(_) => thread::sleep(cmp::min(
+                RPC_READY_RETRY_DELAY,
+                RPC_READY_TIMEOUT.saturating_sub(start.elapsed()),
+            )),
+        }
+    }
+}
+
+fn connect_rpc_session_once(connect_context: &'static str) -> Result<RpcSession> {
+    RpcSession::setup_unix_client_android13plus(rpc::SOCKET, rpc::WIRE_MAX_VERSION)
+        .context(connect_context)
+        .and_then(|session| {
+            session.get_service(rpc::SERVICE).context(connect_context)?;
+            Ok(session)
+        })
 }
 
 fn get_cached_binder<T>(
@@ -100,12 +122,14 @@ where
 }
 
 fn get_rpc_session(connect_context: &'static str) -> Result<RpcSession> {
-    let slot = SESSION.lock().expect("RPC session cache poisoned");
+    let mut slot = SESSION.lock().expect("RPC session cache poisoned");
     if let Some(session) = slot.as_ref() {
         return Ok(session.clone());
     }
 
-    Err(anyhow!("OMK RPC session is not initialized")).context(connect_context)
+    let session = connect_rpc_session(connect_context)?;
+    *slot = Some(session.clone());
+    Ok(session)
 }
 
 fn get_cached_rpc_binder<T>(
@@ -338,19 +362,5 @@ mod tests {
     fn ignores_non_dead_object_status() {
         let status = Status::from(StatusCode::Ok);
         assert!(!is_dead_object_status(&status));
-    }
-
-    #[test]
-    fn missing_rpc_session_keeps_connect_context() {
-        clear_rpc_caches();
-
-        let error = match get_rpc_session("failed to connect to omk service") {
-            Ok(_) => panic!("missing preconnected RPC session should fail"),
-            Err(error) => error,
-        };
-
-        assert!(error
-            .chain()
-            .any(|cause| cause.to_string() == "failed to connect to omk service"));
     }
 }

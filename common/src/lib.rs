@@ -30,6 +30,7 @@ pub mod crypto;
 pub mod keyblob;
 pub mod rpc;
 pub mod runtime;
+pub mod selinux;
 pub mod tag;
 pub mod vintf;
 

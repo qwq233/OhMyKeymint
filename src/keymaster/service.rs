@@ -18,6 +18,8 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use kmr_common::consts::{AID_KEYSTORE, AID_ROOT, AID_SYSTEM};
+
 use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
 use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
 use crate::android::hardware::security::keymint::Tag::Tag;
@@ -605,8 +607,8 @@ impl KeystoreService {
     }
 
     fn enforce_keybox_admin(&self, ctx: &CallerInfo) -> Result<()> {
-        match ctx.callingUid {
-            0 | 1000 | 1017 => Ok(()),
+        match ctx.callingUid as u32 {
+            AID_ROOT | AID_SYSTEM | AID_KEYSTORE => Ok(()),
             uid => Err(Error::perm()).context(err!(
                 "keybox update requires root/system/keystore caller, got uid={uid}"
             )),

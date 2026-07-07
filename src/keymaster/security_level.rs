@@ -145,11 +145,11 @@ impl KeystoreSecurityLevel {
             AospSecurityLevelWrapper {
                 inner: inner.clone(),
             },
-            crate::sid_features(),
+            crate::consts::sid_features(),
         );
         let omk = BnOhMySecurityLevel::new_binder_with_features(
             OmkSecurityLevelWrapper { inner },
-            crate::sid_features(),
+            crate::consts::sid_features(),
         );
         Ok((aosp, omk))
     }

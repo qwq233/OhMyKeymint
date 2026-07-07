@@ -22,7 +22,6 @@ use crate::android::os::IPermissionController::IPermissionController;
 use crate::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, KeyPermission::KeyPermission,
 };
-use crate::consts::{AID_KEYSTORE, AID_ROOT};
 use crate::err as ks_err;
 use crate::keymaster::error::Error as KsError;
 use crate::keymaster::error::ResponseCode;
@@ -30,6 +29,7 @@ use crate::keymaster::utils::AppUid;
 use crate::selinux::{self, implement_class, Backend, ClassPermission};
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 use anyhow::Context as AnyhowContext;
+use kmr_common::consts::{AID_KEYSTORE, AID_ROOT};
 use rsbinder::{calling_caller, hub, thread_state::CallingContext, Caller, Status};
 use std::cmp::PartialEq;
 use std::convert::From;

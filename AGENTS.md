@@ -3,6 +3,7 @@
 - You must always pay absolute attention: has the functionality you want to implement been implemented before? If it has, reuse that method, call that method. Instead of blindly fucking adding methods yourself, writing redundant code, and fucking gilding the lily.
 - You are allowed to use web search and subagents to do whatever you want.
 - Build & check & test target should be `aarch64-linux-android`
+- Target os can only be Android.
 - For scoop-routed applications, OMK is the authoritative business path. If OMK is reachable and
   returns a business error, return that OMK error as-is.
   Do not swallow it, downgrade it, or fallback to a system success reply. Only OMK-unavailable

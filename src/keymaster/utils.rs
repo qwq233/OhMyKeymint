@@ -44,6 +44,9 @@ use crate::{
     },
 };
 use anyhow::{anyhow, Context, Result};
+use kmr_common::consts::{
+    AID_KEYSTORE as RAW_AID_KEYSTORE, AID_ROOT, AID_SYSTEM as RAW_AID_SYSTEM,
+};
 use kmr_wire::keymint::{self, KeyParam};
 use kmr_wire::{KeySizeInBits, ValueNotRecognized};
 use log::{debug, error, info, warn};
@@ -89,7 +92,7 @@ impl AppUid {
 }
 
 /// Uid for the system.
-pub const AID_SYSTEM: AppUid = AppUid(1000);
+pub const AID_SYSTEM: AppUid = AppUid(RAW_AID_SYSTEM as i64);
 
 /// A secure user ID ("sid") corresponding to an `AndroidUserId` that has been registered with a
 /// secure authenticator instance.
@@ -201,7 +204,7 @@ pub fn check_dump_permission() -> anyhow::Result<()> {
 fn check_android_permission(permission: &str, err: Error) -> anyhow::Result<()> {
     let app_id = user_utils::multiuser_get_app_id(AppUid::calling().0 as u32);
     match app_id {
-        consts::AID_ROOT | 1000 | consts::AID_KEYSTORE => Ok(()),
+        AID_ROOT | RAW_AID_SYSTEM | RAW_AID_KEYSTORE => Ok(()),
         _ => Err(err).context(ks_err!(
             "caller does not have the '{permission}' permission"
         )),
@@ -991,7 +994,7 @@ pub const AID_USER_OFFSET: u32 = user_utils::AID_USER_OFFSET;
 
 /// AID of the keystore process itself, used for keys that
 /// keystore generates for its own use.
-pub const AID_KEYSTORE: AppUid = AppUid(consts::AID_KEYSTORE as i64);
+pub const AID_KEYSTORE: AppUid = AppUid(RAW_AID_KEYSTORE as i64);
 
 /// Merges and filters two lists of key descriptors. The first input list, legacy_descriptors,
 /// is assumed to not be sorted or filtered. As such, all key descriptors in that list whose
@@ -1211,7 +1214,7 @@ pub fn app_info_for_uid(uid: AppUid) -> AppInfo {
     let app_id = user_utils::multiuser_get_app_id(uid.0 as u32);
     let app_info = AppInfo {
         target_sdk: None,
-        is_system_app: matches!(app_id, consts::AID_ROOT | 1000 | consts::AID_KEYSTORE),
+        is_system_app: matches!(app_id, AID_ROOT | RAW_AID_SYSTEM | RAW_AID_KEYSTORE),
     };
 
     if !ProcessState::is_initialized() {

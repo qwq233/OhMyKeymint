@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use log::{debug, error};
+use log::debug;
 use lsplt_rs::MapInfo;
 use nix::{
     dir::{Dir, Type},
@@ -117,21 +117,6 @@ pub fn describe_elf(path: &Path) -> Result<String> {
     };
 
     Ok(format!("{class} {arch} (e_machine={machine})"))
-}
-
-// SELinux stuff
-pub fn set_sockcreate_con(context: &str) -> Result<()> {
-    let context = CString::new(context).context("Invalid context string")?;
-    let context = context.as_bytes_with_nul();
-    if let Err(e) = std::fs::write("/proc/thread-self/attr/sockcreate", context) {
-        error!("failed to set sockcreate context: {}", e);
-
-        let tid = unsafe { libc::gettid() as usize };
-        std::fs::write(format!("/proc/{}/attr/sockcreate", tid), context)
-            .context("Failed to set sockcreate context via /proc/[tid]/attr/sockcreate")?;
-    }
-
-    Ok(())
 }
 
 pub fn create_memfd_from_path(path: &Path, name: &str) -> Result<File> {

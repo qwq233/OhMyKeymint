@@ -1,17 +1,15 @@
 use std::ffi::{c_void, CString};
 use std::mem::{offset_of, size_of};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use kmr_common::rpc;
+use kmr_common::{rpc, selinux};
 use log::{debug, error, info, warn};
 use nix::{sys::signal::Signal, unistd::Pid};
 use rand::TryRng;
-use rsbinder::rpc::RpcSession;
 
 use crate::sys::wait_pid;
 use crate::{sys, utils};
@@ -687,6 +685,7 @@ where
         }
         return Err(error.context(format!("failed to read remote {label} control data")));
     }
+
     let fd = match validate_received_remote_fd(
         &remote_msg,
         recv_res,
@@ -724,41 +723,21 @@ where
     Ok(fd)
 }
 
-fn check_rpc_ready_once() -> Result<()> {
-    let session = RpcSession::setup_unix_client_android13plus(rpc::SOCKET, rpc::WIRE_MAX_VERSION)
-        .context("failed to connect to OMK RPC socket")?;
-    session
-        .get_service(rpc::SERVICE)
-        .context("failed to resolve OMK RPC service")?;
-    Ok(())
-}
-
-fn wait_for_rpc_ready() -> Result<()> {
+fn wait_for_rpc_socket() -> Result<()> {
     let start = Instant::now();
-    let mut last_error: Option<anyhow::Error> = None;
 
     while start.elapsed() < READY_TIMEOUT {
-        match check_rpc_ready_once() {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                last_error = Some(error);
-                thread::sleep(READY_RETRY_DELAY);
-            }
+        if Path::new(rpc::SOCKET).exists() {
+            return Ok(());
         }
+        thread::sleep(READY_RETRY_DELAY);
     }
 
-    match last_error {
-        Some(error) => Err(error).context("OMK RPC server did not become ready in time"),
-        None => bail!("OMK RPC server did not become ready in time"),
-    }
-}
-
-fn open_payload_rpc_stream() -> Result<UnixStream> {
-    UnixStream::connect(rpc::SOCKET).context("failed to connect OMK RPC socket for payload")
+    bail!("OMK RPC socket did not appear in time");
 }
 
 pub fn inject_library(pid: Pid) -> Result<()> {
-    wait_for_rpc_ready()?;
+    wait_for_rpc_socket()?;
 
     let self_path =
         std::fs::read_link("/proc/self/exe").context("Failed to read link /proc/self/exe")?;
@@ -971,11 +950,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         payload_identifier,
         utils::sha256_file(self_path).unwrap_or_else(|_| "<unavailable>".to_string())
     );
-    let rpc_stream = open_payload_rpc_stream()?;
-
-    // Keep the old sockcreate tweak as best-effort only; the main path uses
-    // the already deployed injector image and no longer stages an extra copy.
-    if let Err(error) = utils::set_sockcreate_con("u:object_r:system_file:s0") {
+    if let Err(error) = selinux::set_sockcreate_con("u:object_r:system_file:s0") {
         warn!("sockcreate context setup failed: {error:#}");
     }
 
@@ -1081,19 +1056,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         injector_entry
     );
 
-    let remote_rpc_fd = send_fd_to_remote(
-        pid,
-        rpc_stream.as_raw_fd(),
-        "OMK RPC connection",
-        fd_handoff_addrs,
-        &mut push_to_remote_stack,
-        &get_remote_errno,
-        &close_remote,
-    )
-    .context("failed to hand off OMK RPC fd to payload")?;
-    drop(rpc_stream);
-
-    let args = vec![handle, remote_rpc_fd as usize];
+    let args = vec![handle];
     let entry_result = sys::remote_call(pid, injector_entry, libc_return_addr, &args)?;
     if entry_result == 0 {
         bail!("Remote entry returned false");
@@ -1113,6 +1076,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kmr_common::consts::AID_SYSTEM;
 
     #[test]
     fn formatted_payload_identifier_looks_like_shared_library_name() {
@@ -1191,8 +1155,8 @@ mod tests {
     fn valid_test_cred() -> libc::ucred {
         libc::ucred {
             pid: 1234,
-            uid: 1000,
-            gid: 1000,
+            uid: AID_SYSTEM,
+            gid: AID_SYSTEM,
         }
     }
 
