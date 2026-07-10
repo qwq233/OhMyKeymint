@@ -382,8 +382,8 @@ fn received_remote_fds_from_control_data(
             let data_offset = offset + min_len;
             let data_len = header.cmsg_len - min_len;
             let data = &remote_cmsg_data[data_offset..data_offset + data_len];
-            for fd in data.chunks_exact(size_of::<libc::c_int>()) {
-                fds.push(i32::from_ne_bytes(fd.try_into().unwrap()));
+            for fd in data.as_chunks::<{ size_of::<libc::c_int>() }>().0 {
+                fds.push(i32::from_ne_bytes(*fd));
             }
         }
 

@@ -665,6 +665,15 @@ pub fn current_identity_digest() -> [u8; 32] {
     KEYBOX.read().unwrap().identity_digest()
 }
 
+pub(crate) fn signing_certificate_ders_from_disk() -> Result<[Vec<u8>; 2]> {
+    let _io_guard = KEYBOX_IO_LOCK.lock().unwrap();
+    let (keybox, _) = load_keybox_with_fallback(KEYBOX_PATH)?;
+    Ok([
+        keybox.rsa_info.chain[0].encoded_certificate.clone(),
+        keybox.ec_info.chain[0].encoded_certificate.clone(),
+    ])
+}
+
 pub struct KeyboxManager;
 
 impl RetrieveCertSigningInfo for KeyboxManager {

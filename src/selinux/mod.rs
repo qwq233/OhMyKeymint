@@ -670,7 +670,6 @@ mod tests {
     }
 
     mod perm {
-        use super::super::*;
         use super::*;
         use anyhow::Result;
 

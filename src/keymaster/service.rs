@@ -242,23 +242,36 @@ impl KeystoreService {
     }
 
     fn uuid_to_sec_level(&self, uuid: &Uuid) -> SecurityLevel {
-        self.security_levels
-            .read()
-            .unwrap()
+        let security_levels = self.security_levels.read().unwrap();
+        security_levels
             .uuid_by_sec_level
             .iter()
             .find(|(_, v)| **v == *uuid)
             .map(|(s, _)| *s)
+            .or_else(|| {
+                uuid.is_keybox_bound()
+                    .then(|| uuid.to_security_level())
+                    .flatten()
+                    .filter(|s| security_levels.uuid_by_sec_level.contains_key(s))
+            })
             .unwrap_or(SecurityLevel::SOFTWARE)
     }
 
     fn get_i_sec_level_by_uuid(&self, uuid: &Uuid) -> Result<Strong<dyn IKeystoreSecurityLevel>> {
         let security_levels = self.security_levels.read().unwrap();
-        if let Some(dev) = security_levels.i_sec_level_by_uuid.get(uuid) {
-            Ok(dev.clone())
-        } else {
-            Err(Error::sys()).context(err!("KeyMint instance for key not found."))
-        }
+        security_levels
+            .i_sec_level_by_uuid
+            .get(uuid)
+            .or_else(|| {
+                uuid.is_keybox_bound()
+                    .then(|| uuid.to_security_level())
+                    .flatten()
+                    .and_then(|s| security_levels.uuid_by_sec_level.get(&s))
+                    .and_then(|uuid| security_levels.i_sec_level_by_uuid.get(uuid))
+            })
+            .cloned()
+            .ok_or_else(Error::sys)
+            .context(err!("KeyMint instance for key not found."))
     }
 
     fn get_security_level(

@@ -64,6 +64,7 @@ use crate::keymaster::{
     error::{Error as KsError, ErrorCode, ResponseCode},
     super_key::SuperKeyType,
 };
+use crate::plat::attestation::{parse_tlv, ANDROID_ATTESTATION_OID};
 use anyhow::{anyhow, Context, Result};
 use log::info;
 use rand::random;
@@ -84,6 +85,7 @@ use std::{
 use std::{convert::TryFrom, convert::TryInto, ops::Deref, sync::LazyLock, time::SystemTimeError};
 use utils as db_utils;
 use utils::SqlField;
+use x509_cert::{der::Decode, Certificate};
 
 use TransactionBehavior::Immediate;
 
@@ -143,6 +145,8 @@ impl_metadata!(
         AttestationRawPubKey(Vec<u8>) with accessor attestation_raw_pub_key,
         /// SEC1 public key for ECDH encryption
         Sec1PublicKey(Vec<u8>) with accessor sec1_public_key,
+        /// Keybox identity prefix used to produce this entry's device attestation chain.
+        KeyboxAttestationUuidPrefix(Vec<u8>) with accessor keybox_attestation_uuid_prefix,
         //  --- ADD NEW META DATA FIELDS HERE ---
         // For backwards compatibility add new entries only to
         // end of this list and above this comment.
@@ -989,9 +993,9 @@ pub struct SupersededBlob {
 
 impl KeystoreDB {
     const UNASSIGNED_KEY_ID: i64 = -1i64;
-    const CURRENT_DB_VERSION: u32 = 2;
+    const CURRENT_DB_VERSION: u32 = 3;
     const UPGRADERS: &'static [fn(&Transaction) -> Result<u32>] =
-        &[Self::from_0_to_1, Self::from_1_to_2];
+        &[Self::from_0_to_1, Self::from_1_to_2, Self::from_2_to_3];
 
     /// Name of the file that holds the cross-boot persistent database.
     pub const PERSISTENT_DB_FILENAME: &'static str = "keymaster.db";
@@ -1123,6 +1127,108 @@ impl KeystoreDB {
 
         // DB version is now 2.
         Ok(2)
+    }
+
+    // Record keybox identity prefixes for legacy client keys with a device attestation chain.
+    fn from_2_to_3(tx: &Transaction) -> Result<u32> {
+        Self::init_tables(tx)?;
+
+        let _wp = wd::watch("KeystoreDB::from_2_to_3 backfill keybox-attestation metadata");
+        let keybox_signing_certs = crate::keybox::signing_certificate_ders_from_disk()
+            .unwrap_or_else(|error| {
+                log::warn!(
+                    "failed to load keybox signing certificates for metadata backfill: {error:#}"
+                );
+                Default::default()
+            });
+
+        let mut stmt = tx
+            .prepare(
+                "SELECT k.id, k.km_uuid,
+                        (SELECT b.blob FROM persistent.blobentry AS b WHERE b.keyentryid = k.id AND b.subcomponent_type = ? ORDER BY b.id DESC LIMIT 1),
+                        (SELECT b.blob FROM persistent.blobentry AS b WHERE b.keyentryid = k.id AND b.subcomponent_type = ? ORDER BY b.id DESC LIMIT 1)
+                 FROM persistent.keyentry AS k
+                 WHERE k.key_type = ?
+                   AND k.state != ?
+                   AND (
+                       SELECT b.state FROM persistent.blobentry AS b WHERE b.keyentryid = k.id AND b.subcomponent_type = ? ORDER BY b.id DESC LIMIT 1
+                   ) = ?;",
+            )
+            .context("Trying to prepare keybox attestation metadata backfill query")?;
+
+        let mut rows = stmt
+            .query(params![
+                SubComponentType::CERT,
+                SubComponentType::CERT_CHAIN,
+                KeyType::Client,
+                KeyLifeCycle::Unreferenced,
+                SubComponentType::KEY_BLOB,
+                BlobState::Current,
+            ])
+            .context("Trying to query keybox attestation metadata backfill candidates")?;
+
+        let mut candidates = Vec::new();
+        db_utils::with_rows_extract_all(&mut rows, |row| {
+            let key_id: i64 = row.get(0).context("Failed to read key id.")?;
+            let km_uuid: Uuid = row.get(1).context("Failed to read key UUID.")?;
+            if !km_uuid.is_keybox_bound() {
+                return Ok(());
+            }
+            let leaf_cert = row.get(2).context("Failed to read leaf cert.")?;
+            let cert_chain = row.get(3).context("Failed to read cert chain.")?;
+            let (Some(leaf_cert), Some(cert_chain)): (Option<Vec<u8>>, Option<Vec<u8>>) =
+                (leaf_cert, cert_chain)
+            else {
+                return Ok(());
+            };
+            let Ok(leaf_cert) = Certificate::from_der(&leaf_cert) else {
+                return Ok(());
+            };
+            if !leaf_cert
+                .tbs_certificate
+                .extensions
+                .as_ref()
+                .is_some_and(|extensions| {
+                    extensions
+                        .iter()
+                        .any(|e| e.extn_id == ANDROID_ATTESTATION_OID)
+                })
+            {
+                return Ok(());
+            }
+
+            let Ok((_, remaining_chain)) = parse_tlv(&cert_chain) else {
+                return Ok(());
+            };
+            let first_chain_cert = &cert_chain[..cert_chain.len() - remaining_chain.len()];
+            if !keybox_signing_certs
+                .iter()
+                .any(|cert| cert.as_slice() == first_chain_cert)
+            {
+                return Ok(());
+            }
+            let Ok(first_chain_cert) = Certificate::from_der(first_chain_cert) else {
+                return Ok(());
+            };
+            if leaf_cert.tbs_certificate.issuer != first_chain_cert.tbs_certificate.subject {
+                return Ok(());
+            }
+
+            candidates.push((key_id, km_uuid.get_digest().to_vec()));
+            Ok(())
+        })
+        .context("Failed to extract keybox attestation metadata backfill candidates")?;
+
+        for (key_id, prefix) in candidates {
+            tx.execute(
+                "INSERT OR IGNORE INTO persistent.keymetadata (keyentryid, tag, data) VALUES (?, ?, ?);",
+                params![key_id, KeyMetaData::KeyboxAttestationUuidPrefix, prefix],
+            )
+            .context("Trying to insert keybox attestation metadata")?;
+        }
+
+        // DB version is now 3.
+        Ok(3)
     }
 
     fn init_tables(tx: &Transaction) -> Result<()> {
@@ -1588,23 +1694,54 @@ impl KeystoreDB {
         self.with_transaction(Immediate("TX_retire_stale_keybox_bound_entries"), |tx| {
             let mut stmt = tx
                 .prepare(
-                    "SELECT id, km_uuid FROM persistent.keyentry
-                     WHERE key_type = ?
-                       AND state != ?;",
+                    "SELECT k.id, k.km_uuid, m.data
+                     FROM persistent.keyentry AS k
+                     JOIN persistent.keymetadata AS m
+                       ON m.keyentryid = k.id
+                      AND m.tag = ?
+                     WHERE k.key_type = ?
+                       AND k.state != ?;",
                 )
                 .context("Failed to prepare keybox-bound stale key query.")?;
 
             let mut rows = stmt
-                .query(params![KeyType::Client, KeyLifeCycle::Unreferenced])
+                .query(params![
+                    KeyMetaData::KeyboxAttestationUuidPrefix,
+                    KeyType::Client,
+                    KeyLifeCycle::Unreferenced
+                ])
                 .context("Failed to query keybox-bound stale keys.")?;
 
-            let mut stale_keys: Vec<(i64, Uuid)> = Vec::new();
+            let mut stale_keys = Vec::new();
             db_utils::with_rows_extract_all(&mut rows, |row| {
                 let key_id = row.get(0).context("Failed to read stale key id.")?;
                 let km_uuid: Uuid = row.get(1).context("Failed to read stale key UUID.")?;
-                if km_uuid.is_keybox_bound()
-                    && !km_uuid.is_bound_to_keybox_digest(current_identity_digest)
-                {
+                let prefix: Value = row
+                    .get(2)
+                    .context("Failed to read stale keybox attestation metadata.")?;
+                let retire = match prefix {
+                    Value::Blob(prefix)
+                        if prefix.len() == KEYBOX_UUID_DIGEST_BYTES
+                            && km_uuid.is_keybox_bound()
+                            && prefix.as_slice() == km_uuid.get_digest() =>
+                    {
+                        !km_uuid.is_bound_to_keybox_digest(current_identity_digest)
+                    }
+                    Value::Blob(prefix) => {
+                        log::warn!(
+                            "retiring keybox-bound key with invalid attestation metadata: key_id={key_id:#x} uuid={km_uuid:?} prefix_len={}",
+                            prefix.len(),
+                        );
+                        true
+                    }
+                    _ => {
+                        log::warn!(
+                            "retiring keybox-bound key with invalid attestation metadata type: key_id={key_id:#x} uuid={km_uuid:?}",
+                        );
+                        true
+                    }
+                };
+                if retire {
                     stale_keys.push((key_id, km_uuid));
                 }
                 Ok(())
@@ -1967,6 +2104,14 @@ impl KeystoreDB {
                 return Err(KsError::sys())
                     .context(ks_err!("Other blobs cannot be deleted in this way."));
             }
+        }
+        if sc_type == SubComponentType::CERT || sc_type == SubComponentType::CERT_CHAIN {
+            tx.execute(
+                "DELETE FROM persistent.keymetadata
+                 WHERE keyentryid = ? AND tag = ?;",
+                params![key_id, KeyMetaData::KeyboxAttestationUuidPrefix],
+            )
+            .context("Trying to clear keybox attestation metadata.")?;
         }
         Ok(())
     }
@@ -3663,6 +3808,14 @@ mod tests {
         metadata.store_in_db(key_id + 100, tx).unwrap();
     }
 
+    fn add_keybox_attestation_metadata(tx: &Transaction, key_id: i64, km_uuid: Uuid) {
+        let mut metadata = KeyMetaData::new();
+        metadata.add(KeyMetaEntry::KeyboxAttestationUuidPrefix(
+            km_uuid.get_digest().to_vec(),
+        ));
+        metadata.store_in_db(key_id, tx).unwrap();
+    }
+
     fn key_entry_count(db: &KeystoreDB, id: i64) -> i64 {
         db.conn
             .query_row(
@@ -3779,6 +3932,10 @@ mod tests {
             insert_live_client_key(&tx, 2, stale_strongbox_uuid, "stale-strongbox");
             insert_live_client_key(&tx, 3, current_uuid, "current-keybox");
             insert_live_client_key(&tx, 4, KEYSTORE_UUID, "keystore");
+            insert_live_client_key(&tx, 5, stale_tee_uuid, "stale-without-metadata");
+            add_keybox_attestation_metadata(&tx, 1, stale_tee_uuid);
+            add_keybox_attestation_metadata(&tx, 2, stale_strongbox_uuid);
+            add_keybox_attestation_metadata(&tx, 3, current_uuid);
             tx.commit().unwrap();
         }
 
@@ -3792,10 +3949,12 @@ mod tests {
         assert_eq!(0, key_entry_count(&db, 2));
         assert_eq!(1, key_entry_count(&db, 3));
         assert_eq!(1, key_entry_count(&db, 4));
+        assert_eq!(1, key_entry_count(&db, 5));
         assert_eq!(BlobState::Orphaned, blob_state(&db, 1));
         assert_eq!(BlobState::Orphaned, blob_state(&db, 2));
         assert_eq!(BlobState::Current, blob_state(&db, 3));
         assert_eq!(BlobState::Current, blob_state(&db, 4));
+        assert_eq!(BlobState::Current, blob_state(&db, 5));
     }
 
     #[test]
@@ -3810,6 +3969,7 @@ mod tests {
         {
             let tx = db.conn.transaction().unwrap();
             insert_live_client_key(&tx, 1, stale_uuid, "shared-alias");
+            add_keybox_attestation_metadata(&tx, 1, stale_uuid);
             tx.commit().unwrap();
         }
 
@@ -3886,7 +4046,7 @@ mod tests {
             }
 
             assert_eq!(
-                2,
+                3,
                 conn.query_row(
                     "SELECT version FROM persistent.version WHERE id = 0;",
                     [],

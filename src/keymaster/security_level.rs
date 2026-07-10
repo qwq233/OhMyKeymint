@@ -184,6 +184,7 @@ impl KeystoreSecurityLevel {
         creation_result: KeyCreationResult,
         user: AndroidUserId,
         flags: Option<i32>,
+        keybox_attestation_allowed: bool,
     ) -> Result<KeyMetadata> {
         let KeyCreationResult {
             keyBlob: key_blob,
@@ -198,6 +199,7 @@ impl KeystoreSecurityLevel {
         //    KeyMint, or
         //  - `certificate_chain[1]`: a single `Certificate` that actually (and confusingly) holds
         //    the DER-encoded certs of the chain concatenated together.
+        let keybox_attested = keybox_attestation_allowed && certificate_chain.len() > 1;
         let mut cert_info: CertificateInfo = CertificateInfo::new(
             // Leaf is always a single cert in the first entry, if present.
             match certificate_chain.len() {
@@ -253,6 +255,11 @@ impl KeystoreSecurityLevel {
                     let km_uuid = Uuid::from(self.security_level);
                     let mut key_metadata = KeyMetaData::new();
                     key_metadata.add(KeyMetaEntry::CreationDate(creation_date));
+                    if keybox_attested && km_uuid.is_keybox_bound() {
+                        key_metadata.add(KeyMetaEntry::KeyboxAttestationUuidPrefix(
+                            km_uuid.get_digest().to_vec(),
+                        ));
+                    }
                     blob_metadata.add(BlobMetaEntry::KmUuid(km_uuid));
 
                     let key_id = db
@@ -797,6 +804,7 @@ impl KeystoreSecurityLevel {
             .add_required_parameters(ctx, caller_uid, params, &key)
             .context(ks_err!("Trying to get aaid."))?;
 
+        let keybox_attestation_allowed = attestation_key_info.is_none();
         let creation_result = match attestation_key_info {
             Some(AttestationKeyInfo::UserGenerated {
                 key_id_guard,
@@ -835,8 +843,14 @@ impl KeystoreSecurityLevel {
         .context(ks_err!())?;
 
         let user = caller_uid.owning_user();
-        self.store_new_key(key, creation_result, user, Some(flags))
-            .context(ks_err!())
+        self.store_new_key(
+            key,
+            creation_result,
+            user,
+            Some(flags),
+            keybox_attestation_allowed,
+        )
+        .context(ks_err!())
     }
 
     fn import_key(
@@ -899,7 +913,7 @@ impl KeystoreSecurityLevel {
         .context(ks_err!("Trying to call importKey"))?;
 
         let user = caller_uid.owning_user();
-        self.store_new_key(key, creation_result, user, Some(flags))
+        self.store_new_key(key, creation_result, user, Some(flags), true)
             .context(ks_err!())
     }
 
@@ -1035,7 +1049,7 @@ impl KeystoreSecurityLevel {
             )
             .context(ks_err!())?;
 
-        self.store_new_key(key, creation_result, user, None)
+        self.store_new_key(key, creation_result, user, None, true)
             .context(ks_err!("Trying to store the new key for {user:?}"))
     }
 
