@@ -63,13 +63,10 @@ fn test_round_latency_logic() {
 
 #[test]
 fn test_crash_count_record_is_per_boot() {
-    let record = format_crash_count_record("boot-a", 2);
+    let record = "boot-a\n2\n";
 
-    assert_eq!(
-        parse_crash_count_record(&record, "boot-a").unwrap(),
-        Some(2)
-    );
-    assert_eq!(parse_crash_count_record(&record, "boot-b").unwrap(), None);
+    assert_eq!(parse_crash_count_record(record, "boot-a").unwrap(), Some(2));
+    assert_eq!(parse_crash_count_record(record, "boot-b").unwrap(), None);
 }
 
 #[test]

@@ -59,21 +59,15 @@ struct InterfaceXml {
 }
 
 pub fn manifest_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for directory in VINTF_MANIFEST_DIRS {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) == Some("xml") {
-                paths.push(path);
-            }
-        }
-    }
-    for file in VINTF_MANIFEST_FILES {
-        paths.push(PathBuf::from(file));
-    }
+    let mut paths = VINTF_MANIFEST_DIRS
+        .iter()
+        .filter_map(|directory| std::fs::read_dir(directory).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("xml"))
+        .collect::<Vec<_>>();
+    paths.extend(VINTF_MANIFEST_FILES.iter().map(PathBuf::from));
     paths
 }
 

@@ -52,7 +52,7 @@ impl LockedRotatingFileAppender {
         max_size_bytes: u64,
     ) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        Self::remove_legacy_lock_file(&path);
+        let _ = fs::remove_file(suffixed_path(&path, ".lock"));
         Ok(Self {
             path,
             lock: Mutex::new(()),
@@ -64,7 +64,11 @@ impl LockedRotatingFileAppender {
     fn open_log_file(path: &Path) -> io::Result<File> {
         fs::create_dir_all(Self::parent_dir(path))?;
         let file = OpenOptions::new().create(true).append(true).open(path)?;
-        Self::apply_parent_metadata(path, &file);
+        let fd = file.as_raw_fd();
+        if let Ok(parent_metadata) = fs::metadata(Self::parent_dir(path)) {
+            let _ = unsafe { libc::fchown(fd, parent_metadata.uid(), parent_metadata.gid()) };
+        }
+        let _ = unsafe { libc::fchmod(fd, 0o660) };
         Ok(file)
     }
 
@@ -72,22 +76,6 @@ impl LockedRotatingFileAppender {
         path.parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
-    }
-
-    fn remove_legacy_lock_file(path: &Path) {
-        match fs::remove_file(suffixed_path(path, ".lock")) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => {}
-        }
-    }
-
-    fn apply_parent_metadata(path: &Path, file: &File) {
-        let fd = file.as_raw_fd();
-        if let Ok(parent_metadata) = fs::metadata(Self::parent_dir(path)) {
-            let _ = unsafe { libc::fchown(fd, parent_metadata.uid(), parent_metadata.gid()) };
-        }
-        let _ = unsafe { libc::fchmod(fd, 0o660) };
     }
 
     fn rotate_if_needed(&self, next_write_len: usize) -> io::Result<()> {
@@ -115,19 +103,13 @@ fn rotate_existing_log_file(path: &Path) -> io::Result<()> {
     }
 
     let rotated_path = suffixed_path(path, ".1");
-    match fs::remove_file(&rotated_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
+    let ignore_not_found = |result: io::Result<()>| match result {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    };
 
-    match fs::rename(path, &rotated_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-
-    Ok(())
+    ignore_not_found(fs::remove_file(&rotated_path))?;
+    ignore_not_found(fs::rename(path, &rotated_path))
 }
 
 impl Append for LockedRotatingFileAppender {
@@ -242,8 +224,7 @@ pub fn build_console_file_config<P: AsRef<Path>>(
             }
         };
 
-    let config = builder.build(root.build(level))?;
-    Ok((config, file_logging_ready))
+    Ok((builder.build(root.build(level))?, file_logging_ready))
 }
 
 #[cfg(test)]

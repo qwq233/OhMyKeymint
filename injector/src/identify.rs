@@ -304,9 +304,11 @@ mod tests {
         rsbinder::FIRST_CALL_TRANSACTION + offset
     }
 
+    type MethodLayout<'a, T> = (&'a [Option<i32>], &'a [(u32, T)], u32);
+
     #[test]
-    fn authorization_method_codes_follow_current_generated_aidl_constants() {
-        let cases = [
+    fn authorization_method_codes_follow_supported_layouts() {
+        const CURRENT_CASES: &[(u32, AuthorizationMethod)] = &[
             (
                 authorization_tx::r#addAuthToken,
                 AuthorizationMethod::AddAuthToken,
@@ -340,66 +342,51 @@ mod tests {
                 AuthorizationMethod::GetLastAuthTime,
             ),
         ];
-
-        for (code, expected) in cases {
-            assert_eq!(
-                authorization_method_from_code_for(Some(17), code),
-                Some(expected)
-            );
-            assert_eq!(
-                authorization_method_from_code_for(None, code),
-                Some(expected)
-            );
-        }
-
-        assert_eq!(authorization_method_from_code_for(Some(17), u32::MAX), None);
-    }
-
-    #[test]
-    fn authorization_method_codes_follow_android_12_to_14_layout() {
-        let cases = [
-            (0, AuthorizationMethod::AddAuthToken),
-            (1, AuthorizationMethod::LegacyOnLockScreenEvent),
-            (2, AuthorizationMethod::GetAuthTokensForCredStore),
+        let android_12_to_14_cases = [
+            (tx(0), AuthorizationMethod::AddAuthToken),
+            (tx(1), AuthorizationMethod::LegacyOnLockScreenEvent),
+            (tx(2), AuthorizationMethod::GetAuthTokensForCredStore),
+        ];
+        let android_15_to_16_cases = [
+            (tx(0), AuthorizationMethod::AddAuthToken),
+            (tx(1), AuthorizationMethod::OnDeviceUnlocked),
+            (tx(2), AuthorizationMethod::OnDeviceLocked),
+            (tx(3), AuthorizationMethod::OnWeakUnlockMethodsExpired),
+            (tx(4), AuthorizationMethod::OnNonLskfUnlockMethodsExpired),
+            (tx(5), AuthorizationMethod::GetAuthTokensForCredStore),
+            (tx(6), AuthorizationMethod::GetLastAuthTime),
         ];
 
-        for version in [Some(12), Some(13), Some(14)] {
-            for (offset, expected) in cases {
-                assert_eq!(
-                    authorization_method_from_code_for(version, tx(offset)),
-                    Some(expected)
-                );
-            }
-            assert_eq!(authorization_method_from_code_for(version, tx(3)), None);
-        }
-    }
-
-    #[test]
-    fn authorization_method_codes_follow_android_15_to_16_layout() {
-        let cases = [
-            (0, AuthorizationMethod::AddAuthToken),
-            (1, AuthorizationMethod::OnDeviceUnlocked),
-            (2, AuthorizationMethod::OnDeviceLocked),
-            (3, AuthorizationMethod::OnWeakUnlockMethodsExpired),
-            (4, AuthorizationMethod::OnNonLskfUnlockMethodsExpired),
-            (5, AuthorizationMethod::GetAuthTokensForCredStore),
-            (6, AuthorizationMethod::GetLastAuthTime),
+        let layouts: [MethodLayout<'_, AuthorizationMethod>; 3] = [
+            (&[Some(17), None], CURRENT_CASES, u32::MAX),
+            (
+                &[Some(12), Some(13), Some(14)],
+                &android_12_to_14_cases,
+                tx(3),
+            ),
+            (&[Some(15), Some(16)], &android_15_to_16_cases, tx(7)),
         ];
-
-        for version in [Some(15), Some(16)] {
-            for (offset, expected) in cases {
+        for (versions, cases, invalid_code) in layouts {
+            for &version in versions {
+                for &(code, expected) in cases {
+                    assert_eq!(
+                        authorization_method_from_code_for(version, code),
+                        Some(expected),
+                        "version={version:?} code={code}"
+                    );
+                }
                 assert_eq!(
-                    authorization_method_from_code_for(version, tx(offset)),
-                    Some(expected)
+                    authorization_method_from_code_for(version, invalid_code),
+                    None,
+                    "version={version:?} out of range"
                 );
             }
-            assert_eq!(authorization_method_from_code_for(version, tx(7)), None);
         }
     }
 
     #[test]
-    fn maintenance_method_codes_follow_current_generated_aidl_constants() {
-        let cases = [
+    fn maintenance_method_codes_follow_supported_layouts() {
+        const CURRENT_CASES: &[(u32, MaintenanceMethod)] = &[
             (
                 maintenance_tx::r#onUserAdded,
                 MaintenanceMethod::OnUserAdded,
@@ -437,74 +424,60 @@ mod tests {
                 MaintenanceMethod::GetAppUidsAffectedBySid,
             ),
         ];
-
-        for version in [Some(16), Some(17)] {
-            for (code, expected) in cases {
-                assert_eq!(
-                    maintenance_method_from_code_for(version, code),
-                    Some(expected)
-                );
-            }
-            assert_eq!(maintenance_method_from_code_for(version, u32::MAX), None);
-        }
-
-        for (code, expected) in cases {
-            assert_eq!(maintenance_method_from_code_for(None, code), Some(expected));
-        }
-    }
-
-    #[test]
-    fn maintenance_method_codes_follow_android_12_to_14_layout() {
-        let cases = [
-            (0, MaintenanceMethod::OnUserAdded),
-            (1, MaintenanceMethod::OnUserRemoved),
-            (2, MaintenanceMethod::OnUserPasswordChanged),
-            (3, MaintenanceMethod::ClearNamespace),
-            (4, MaintenanceMethod::GetState),
-            (5, MaintenanceMethod::EarlyBootEnded),
-            (6, MaintenanceMethod::OnDeviceOffBody),
-            (7, MaintenanceMethod::MigrateKeyNamespace),
-            (8, MaintenanceMethod::DeleteAllKeys),
+        let android_12_to_14_cases = [
+            (tx(0), MaintenanceMethod::OnUserAdded),
+            (tx(1), MaintenanceMethod::OnUserRemoved),
+            (tx(2), MaintenanceMethod::OnUserPasswordChanged),
+            (tx(3), MaintenanceMethod::ClearNamespace),
+            (tx(4), MaintenanceMethod::GetState),
+            (tx(5), MaintenanceMethod::EarlyBootEnded),
+            (tx(6), MaintenanceMethod::OnDeviceOffBody),
+            (tx(7), MaintenanceMethod::MigrateKeyNamespace),
+            (tx(8), MaintenanceMethod::DeleteAllKeys),
+        ];
+        let android_15_cases = [
+            (tx(0), MaintenanceMethod::OnUserAdded),
+            (tx(1), MaintenanceMethod::InitUserSuperKeys),
+            (tx(2), MaintenanceMethod::OnUserRemoved),
+            (tx(3), MaintenanceMethod::OnUserLskfRemoved),
+            (tx(4), MaintenanceMethod::OnUserPasswordChanged),
+            (tx(5), MaintenanceMethod::ClearNamespace),
+            (tx(6), MaintenanceMethod::EarlyBootEnded),
+            (tx(7), MaintenanceMethod::MigrateKeyNamespace),
+            (tx(8), MaintenanceMethod::DeleteAllKeys),
+            (tx(9), MaintenanceMethod::GetAppUidsAffectedBySid),
         ];
 
-        for version in [Some(12), Some(13), Some(14)] {
-            for (offset, expected) in cases {
+        let layouts: [MethodLayout<'_, MaintenanceMethod>; 3] = [
+            (&[Some(16), Some(17), None], CURRENT_CASES, u32::MAX),
+            (
+                &[Some(12), Some(13), Some(14)],
+                &android_12_to_14_cases,
+                tx(9),
+            ),
+            (&[Some(15)], &android_15_cases, tx(10)),
+        ];
+        for (versions, cases, invalid_code) in layouts {
+            for &version in versions {
+                for &(code, expected) in cases {
+                    assert_eq!(
+                        maintenance_method_from_code_for(version, code),
+                        Some(expected),
+                        "version={version:?} code={code}"
+                    );
+                }
                 assert_eq!(
-                    maintenance_method_from_code_for(version, tx(offset)),
-                    Some(expected)
+                    maintenance_method_from_code_for(version, invalid_code),
+                    None,
+                    "version={version:?} out of range"
                 );
             }
-            assert_eq!(maintenance_method_from_code_for(version, tx(9)), None);
         }
     }
 
     #[test]
-    fn maintenance_method_codes_follow_android_15_layout() {
-        let cases = [
-            (0, MaintenanceMethod::OnUserAdded),
-            (1, MaintenanceMethod::InitUserSuperKeys),
-            (2, MaintenanceMethod::OnUserRemoved),
-            (3, MaintenanceMethod::OnUserLskfRemoved),
-            (4, MaintenanceMethod::OnUserPasswordChanged),
-            (5, MaintenanceMethod::ClearNamespace),
-            (6, MaintenanceMethod::EarlyBootEnded),
-            (7, MaintenanceMethod::MigrateKeyNamespace),
-            (8, MaintenanceMethod::DeleteAllKeys),
-            (9, MaintenanceMethod::GetAppUidsAffectedBySid),
-        ];
-
-        for (offset, expected) in cases {
-            assert_eq!(
-                maintenance_method_from_code_for(Some(15), tx(offset)),
-                Some(expected)
-            );
-        }
-        assert_eq!(maintenance_method_from_code_for(Some(15), tx(10)), None);
-    }
-
-    #[test]
-    fn service_method_codes_follow_current_generated_aidl_constants() {
-        let cases = [
+    fn service_method_codes_follow_supported_layouts() {
+        const CURRENT_CASES: &[(u32, ServiceMethod)] = &[
             (
                 service_tx::r#getSecurityLevel,
                 ServiceMethod::GetSecurityLevel,
@@ -531,64 +504,47 @@ mod tests {
                 ServiceMethod::GetSupplementaryAttestationInfo,
             ),
         ];
-
-        for version in [Some(16), Some(17)] {
-            for (code, expected) in cases {
-                assert_eq!(service_method_from_code_for(version, code), Some(expected));
-            }
-            assert_eq!(service_method_from_code_for(version, u32::MAX), None);
-        }
-
-        for (code, expected) in cases {
-            assert_eq!(service_method_from_code_for(None, code), Some(expected));
-        }
-    }
-
-    #[test]
-    fn service_method_codes_follow_android_12_to_13_layout() {
-        let cases = [
-            (0, ServiceMethod::GetSecurityLevel),
-            (1, ServiceMethod::GetKeyEntry),
-            (2, ServiceMethod::UpdateSubcomponent),
-            (3, ServiceMethod::ListEntries),
-            (4, ServiceMethod::DeleteKey),
-            (5, ServiceMethod::Grant),
-            (6, ServiceMethod::Ungrant),
+        let android_12_to_13_cases = [
+            (tx(0), ServiceMethod::GetSecurityLevel),
+            (tx(1), ServiceMethod::GetKeyEntry),
+            (tx(2), ServiceMethod::UpdateSubcomponent),
+            (tx(3), ServiceMethod::ListEntries),
+            (tx(4), ServiceMethod::DeleteKey),
+            (tx(5), ServiceMethod::Grant),
+            (tx(6), ServiceMethod::Ungrant),
+        ];
+        let android_14_to_15_cases = [
+            (tx(0), ServiceMethod::GetSecurityLevel),
+            (tx(1), ServiceMethod::GetKeyEntry),
+            (tx(2), ServiceMethod::UpdateSubcomponent),
+            (tx(3), ServiceMethod::ListEntries),
+            (tx(4), ServiceMethod::DeleteKey),
+            (tx(5), ServiceMethod::Grant),
+            (tx(6), ServiceMethod::Ungrant),
+            (tx(7), ServiceMethod::GetNumberOfEntries),
+            (tx(8), ServiceMethod::ListEntriesBatched),
         ];
 
-        for version in [Some(12), Some(13)] {
-            for (offset, expected) in cases {
-                assert_eq!(
-                    service_method_from_code_for(version, tx(offset)),
-                    Some(expected)
-                );
-            }
-            assert_eq!(service_method_from_code_for(version, tx(7)), None);
-        }
-    }
-
-    #[test]
-    fn service_method_codes_follow_android_14_to_15_layout() {
-        let cases = [
-            (0, ServiceMethod::GetSecurityLevel),
-            (1, ServiceMethod::GetKeyEntry),
-            (2, ServiceMethod::UpdateSubcomponent),
-            (3, ServiceMethod::ListEntries),
-            (4, ServiceMethod::DeleteKey),
-            (5, ServiceMethod::Grant),
-            (6, ServiceMethod::Ungrant),
-            (7, ServiceMethod::GetNumberOfEntries),
-            (8, ServiceMethod::ListEntriesBatched),
+        let layouts: [MethodLayout<'_, ServiceMethod>; 3] = [
+            (&[Some(16), Some(17), None], CURRENT_CASES, u32::MAX),
+            (&[Some(12), Some(13)], &android_12_to_13_cases, tx(7)),
+            (&[Some(14), Some(15)], &android_14_to_15_cases, tx(9)),
         ];
-
-        for version in [Some(14), Some(15)] {
-            for (offset, expected) in cases {
+        for (versions, cases, invalid_code) in layouts {
+            for &version in versions {
+                for &(code, expected) in cases {
+                    assert_eq!(
+                        service_method_from_code_for(version, code),
+                        Some(expected),
+                        "version={version:?} code={code}"
+                    );
+                }
                 assert_eq!(
-                    service_method_from_code_for(version, tx(offset)),
-                    Some(expected)
+                    service_method_from_code_for(version, invalid_code),
+                    None,
+                    "version={version:?} out of range"
                 );
             }
-            assert_eq!(service_method_from_code_for(version, tx(9)), None);
         }
     }
 

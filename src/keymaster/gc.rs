@@ -131,7 +131,7 @@ impl GcInternal {
                     .super_key
                     .read()
                     .unwrap()
-                    .unwrap_key_if_required(&metadata, &blob)
+                    .unwrap_key_if_required_with_omk_compatibility(&metadata, &blob)
                     .context(ks_err!("Trying to unwrap to-be-deleted blob.",))?;
                 (self.invalidate_key)(uuid, &blob).context(ks_err!("Trying to invalidate key."))?;
             }

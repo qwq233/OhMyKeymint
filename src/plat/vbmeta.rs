@@ -65,21 +65,6 @@ pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
     );
     let vb_hash = resolve_vb_hash(&config_file.trust.vb_hash);
 
-    let vb_key = match vb_key {
-        Ok(value) => value,
-        Err(error) => {
-            log::error!("failed to resolve vb_key: {error:#}");
-            return Err(error);
-        }
-    };
-    let vb_hash = match vb_hash {
-        Ok(value) => value,
-        Err(error) => {
-            log::error!("failed to resolve vb_hash: {error:#}");
-            return Err(error);
-        }
-    };
-
     sync_sysprops_if_needed(&vb_key, &vb_hash)?;
     update_trust_record(
         &mut config_file.trust_record,
@@ -126,62 +111,58 @@ pub fn apply_runtime_security_patch(
     Ok(resolved)
 }
 
-fn resolve_vb_key(
-    spec: &TrustValueSpec,
-    device_locked: bool,
-    slot_suffix: &str,
-) -> Result<ResolvedField> {
+fn resolve_vb_key(spec: &TrustValueSpec, device_locked: bool, slot_suffix: &str) -> ResolvedField {
     match spec {
-        TrustValueSpec::Hex(value) => Ok(ResolvedField {
+        TrustValueSpec::Hex(value) => ResolvedField {
             value: *value,
             source: TrustValueSource::ExplicitHex,
-        }),
-        TrustValueSpec::Random => Ok(random_field(TrustValueSource::RandomExplicit)),
+        },
+        TrustValueSpec::Random => random_field(TrustValueSource::RandomExplicit),
         TrustValueSpec::Auto => {
             if let Some(value) = read_hex_property(VBMETA_KEY_PROP) {
-                return Ok(ResolvedField {
+                return ResolvedField {
                     value,
                     source: TrustValueSource::Property,
-                });
+                };
             }
 
             match compute_vbmeta_public_key_digest(slot_suffix, device_locked) {
-                Ok(value) => Ok(ResolvedField {
+                Ok(value) => ResolvedField {
                     value,
                     source: TrustValueSource::Computed,
-                }),
+                },
                 Err(error) => {
                     log::warn!("computed vbmeta public key digest unavailable: {error:#}");
-                    Ok(random_field(TrustValueSource::RandomFallback))
+                    random_field(TrustValueSource::RandomFallback)
                 }
             }
         }
     }
 }
 
-fn resolve_vb_hash(spec: &TrustValueSpec) -> Result<ResolvedField> {
+fn resolve_vb_hash(spec: &TrustValueSpec) -> ResolvedField {
     match spec {
-        TrustValueSpec::Hex(value) => Ok(ResolvedField {
+        TrustValueSpec::Hex(value) => ResolvedField {
             value: *value,
             source: TrustValueSource::ExplicitHex,
-        }),
-        TrustValueSpec::Random => Ok(random_field(TrustValueSource::RandomExplicit)),
+        },
+        TrustValueSpec::Random => random_field(TrustValueSource::RandomExplicit),
         TrustValueSpec::Auto => {
             if let Some(value) = read_hex_property(VBMETA_HASH_PROP) {
-                return Ok(ResolvedField {
+                return ResolvedField {
                     value,
                     source: TrustValueSource::Property,
-                });
+                };
             }
 
             match probe_original_verified_boot_hash_with_timeout(ORIGINAL_HASH_TIMEOUT) {
-                Ok(value) => Ok(ResolvedField {
+                Ok(value) => ResolvedField {
                     value,
                     source: TrustValueSource::Original,
-                }),
+                },
                 Err(error) => {
                     log::warn!("original verified boot hash unavailable: {error:#}");
-                    Ok(random_field(TrustValueSource::RandomFallback))
+                    random_field(TrustValueSource::RandomFallback)
                 }
             }
         }
@@ -224,15 +205,11 @@ fn resolve_security_patch_value(security_patch_spec: &str, original: &str) -> Re
 }
 
 fn read_build_prop_security_patch() -> Option<String> {
-    for path in BUILD_PROP_PATHS {
-        let Ok(contents) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        if let Some(value) = parse_build_prop_value(&contents, SECURITY_PATCH_PROP) {
-            return Some(value);
-        }
-    }
-    None
+    BUILD_PROP_PATHS.iter().find_map(|path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|contents| parse_build_prop_value(&contents, SECURITY_PATCH_PROP))
+    })
 }
 
 fn parse_build_prop_value(contents: &str, key: &str) -> Option<String> {
@@ -316,23 +293,18 @@ fn sync_sysprops_if_needed(vb_key: &ResolvedField, vb_hash: &ResolvedField) -> R
 
 fn read_hex_property(name: &str) -> Option<[u8; 32]> {
     let value = resetprop::read_string_property(name)?;
-    match parse_hex_32(&value) {
-        Ok(bytes) => Some(bytes),
-        Err(error) => {
+    parse_hex_32(&value)
+        .map_err(|error| {
             log::warn!("ignoring invalid property {name}={value}: {error:#}");
-            None
-        }
-    }
+        })
+        .ok()
 }
 
 fn parse_hex_32(value: &str) -> Result<[u8; 32]> {
     let decoded = hex::decode(value).with_context(|| format!("invalid hex value {value}"))?;
-    if decoded.len() != 32 {
-        bail!("hex value must be 32 bytes, got {}", decoded.len());
-    }
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(&decoded);
-    Ok(bytes)
+    decoded
+        .try_into()
+        .map_err(|decoded: Vec<u8>| anyhow!("hex value must be 32 bytes, got {}", decoded.len()))
 }
 
 impl TrustValueSource {
@@ -559,10 +531,6 @@ fn extract_verified_boot_hash_from_metadata(metadata: &KeyMetadata) -> Result<[u
         .certificate
         .as_deref()
         .ok_or_else(|| anyhow!("attestation leaf certificate missing"))?;
-    extract_verified_boot_hash_from_leaf_certificate(leaf)
-}
-
-fn extract_verified_boot_hash_from_leaf_certificate(leaf: &[u8]) -> Result<[u8; 32]> {
     attestation::extract_verified_boot_hash_from_leaf_certificate(leaf)
 }
 

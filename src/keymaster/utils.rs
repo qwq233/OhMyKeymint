@@ -1183,14 +1183,6 @@ pub struct AppInfo {
 }
 
 const PACKAGE_MANAGER_NATIVE_SERVICE: &str = "package_native";
-const PM_GET_LOCATION_FLAGS_ANDROID_12_14: rsbinder::TransactionCode =
-    rsbinder::FIRST_CALL_TRANSACTION + 4;
-const PM_GET_TARGET_SDK_ANDROID_12_14: rsbinder::TransactionCode =
-    rsbinder::FIRST_CALL_TRANSACTION + 5;
-const PM_GET_LOCATION_FLAGS_ANDROID_15_16: rsbinder::TransactionCode =
-    rsbinder::FIRST_CALL_TRANSACTION + 5;
-const PM_GET_TARGET_SDK_ANDROID_15_16: rsbinder::TransactionCode =
-    rsbinder::FIRST_CALL_TRANSACTION + 6;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PackageManagerNativeLayout {
@@ -1204,6 +1196,22 @@ fn package_manager_native_layout(android_major: Option<i32>) -> PackageManagerNa
         Some(version) if version >= 17 => PackageManagerNativeLayout::Android17,
         Some(15 | 16) | None => PackageManagerNativeLayout::Android15Or16,
         _ => PackageManagerNativeLayout::Android12To14,
+    }
+}
+
+fn legacy_pm_transactions(
+    layout: PackageManagerNativeLayout,
+) -> (rsbinder::TransactionCode, rsbinder::TransactionCode) {
+    match layout {
+        PackageManagerNativeLayout::Android12To14 => (
+            rsbinder::FIRST_CALL_TRANSACTION + 5,
+            rsbinder::FIRST_CALL_TRANSACTION + 4,
+        ),
+        PackageManagerNativeLayout::Android15Or16 => (
+            rsbinder::FIRST_CALL_TRANSACTION + 6,
+            rsbinder::FIRST_CALL_TRANSACTION + 5,
+        ),
+        PackageManagerNativeLayout::Android17 => unreachable!("Android 17 uses generated AIDL"),
     }
 }
 
@@ -1286,6 +1294,7 @@ fn app_info_for_uid_legacy_pm(
     mut app_info: AppInfo,
     layout: PackageManagerNativeLayout,
 ) -> AppInfo {
+    let (target_sdk_transaction, location_flags_transaction) = legacy_pm_transactions(layout);
     let pkg_names = match pm.getNamesForUids(&[uid.0 as i32]) {
         Ok(names) => names,
         Err(e) => {
@@ -1309,7 +1318,7 @@ fn app_info_for_uid_legacy_pm(
             pkg_name,
             package_manager_native_get_i32_for_package(
                 &binder,
-                legacy_pm_get_target_sdk_transaction(layout),
+                target_sdk_transaction,
                 pkg_name,
                 "target SDK version",
             ),
@@ -1321,7 +1330,7 @@ fn app_info_for_uid_legacy_pm(
                 pkg_name,
                 package_manager_native_get_i32_for_package(
                     &binder,
-                    legacy_pm_get_location_flags_transaction(layout),
+                    location_flags_transaction,
                     pkg_name,
                     "location flags",
                 ),
@@ -1332,27 +1341,6 @@ fn app_info_for_uid_legacy_pm(
 
     app_info
 }
-
-fn legacy_pm_get_location_flags_transaction(
-    layout: PackageManagerNativeLayout,
-) -> rsbinder::TransactionCode {
-    match layout {
-        PackageManagerNativeLayout::Android12To14 => PM_GET_LOCATION_FLAGS_ANDROID_12_14,
-        PackageManagerNativeLayout::Android15Or16 => PM_GET_LOCATION_FLAGS_ANDROID_15_16,
-        PackageManagerNativeLayout::Android17 => unreachable!("Android 17 uses generated AIDL"),
-    }
-}
-
-fn legacy_pm_get_target_sdk_transaction(
-    layout: PackageManagerNativeLayout,
-) -> rsbinder::TransactionCode {
-    match layout {
-        PackageManagerNativeLayout::Android12To14 => PM_GET_TARGET_SDK_ANDROID_12_14,
-        PackageManagerNativeLayout::Android15Or16 => PM_GET_TARGET_SDK_ANDROID_15_16,
-        PackageManagerNativeLayout::Android17 => unreachable!("Android 17 uses generated AIDL"),
-    }
-}
-
 fn update_app_info_with_target_sdk<E: std::fmt::Debug>(
     uid: AppUid,
     pkg_name: &str,

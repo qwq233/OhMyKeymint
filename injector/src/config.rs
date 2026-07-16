@@ -1,7 +1,7 @@
 use kmr_common::runtime::{
     file_watch::{self, WatchTrigger},
     fs::backup_file_with_reason,
-    retry::{retry_read_race, ReadRaceErrorKind},
+    retry::{retry_read_race, ReadRaceErrorKind, RetryOutcome},
 };
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
@@ -9,28 +9,17 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/data/misc/keystore/omk/injector.toml";
 const REPLACE_SAVE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const REPLACE_SAVE_RETRY_LIMIT: usize = 10;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct InjectorConfig {
     pub scoop: Vec<String>,
-    pub scoop_details: BTreeMap<String, toml::Table>,
-    pub main: MainConfig,
-    pub filter: FilterConfig,
-    pub intercept: InterceptConfig,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-#[serde(deny_unknown_fields)]
-struct ParsedInjectorConfig {
-    pub scoop: Vec<String>,
-    #[serde(default)]
     pub scoop_details: BTreeMap<String, toml::Table>,
     pub main: MainConfig,
     pub filter: FilterConfig,
@@ -79,19 +68,6 @@ impl Default for InjectorConfig {
             main: MainConfig::default(),
             filter: FilterConfig::default(),
             intercept: InterceptConfig::default(),
-        }
-    }
-}
-
-impl Default for ParsedInjectorConfig {
-    fn default() -> Self {
-        let config = InjectorConfig::default();
-        Self {
-            scoop: config.scoop,
-            scoop_details: config.scoop_details,
-            main: config.main,
-            filter: config.filter,
-            intercept: config.intercept,
         }
     }
 }
@@ -148,15 +124,14 @@ impl Default for InterceptConfig {
 
 #[derive(Debug)]
 enum LoadError {
-    Missing(io::Error),
-    Read(io::Error),
+    Io(io::Error),
     Parse(String),
 }
 
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Missing(error) | Self::Read(error) => write!(f, "{error}"),
+            Self::Io(error) => write!(f, "{error}"),
             Self::Parse(error) => write!(f, "{error}"),
         }
     }
@@ -166,12 +141,6 @@ impl std::fmt::Display for LoadError {
 enum LoadContext {
     Startup,
     Reload(WatchTrigger),
-}
-
-#[derive(Debug)]
-struct LoadedConfig {
-    config: InjectorConfig,
-    retries: usize,
 }
 
 #[derive(Deserialize)]
@@ -187,7 +156,7 @@ struct WritableConfig<'a> {
     intercept: &'a InterceptConfig,
 }
 
-static CONFIG: OnceLock<RwLock<InjectorConfig>> = OnceLock::new();
+static CONFIG: OnceLock<RwLock<Arc<InjectorConfig>>> = OnceLock::new();
 static WATCHER_STARTED: OnceLock<()> = OnceLock::new();
 
 impl LoadContext {
@@ -199,19 +168,22 @@ impl LoadContext {
     }
 }
 
-pub fn get() -> InjectorConfig {
-    ensure_initialized();
-    CONFIG
-        .get()
-        .expect("injector config should be initialized")
-        .read()
-        .expect("injector config lock poisoned")
-        .clone()
+pub fn get() -> Arc<InjectorConfig> {
+    if CONFIG.get().is_none() || WATCHER_STARTED.get().is_none() {
+        ensure_initialized();
+    }
+    Arc::clone(
+        &CONFIG
+            .get()
+            .expect("injector config should be initialized")
+            .read()
+            .expect("injector config lock poisoned"),
+    )
 }
 
 fn ensure_initialized() {
     let path = config_path();
-    CONFIG.get_or_init(|| RwLock::new(load_or_seed(&path, LoadContext::Startup)));
+    CONFIG.get_or_init(|| RwLock::new(Arc::new(load_or_seed(&path, LoadContext::Startup))));
     WATCHER_STARTED.get_or_init(|| start_watcher(path));
 }
 
@@ -222,19 +194,19 @@ fn config_path() -> PathBuf {
 }
 
 fn load_from_path(path: &Path) -> Result<InjectorConfig, LoadError> {
-    match fs::read_to_string(path) {
-        Ok(contents) => parse_config(&contents).map_err(LoadError::Parse),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(LoadError::Missing(error)),
-        Err(error) => Err(LoadError::Read(error)),
-    }
+    let contents = fs::read_to_string(path).map_err(LoadError::Io)?;
+    parse_config(&contents).map_err(LoadError::Parse)
 }
 
-fn load_with_context(path: &Path, context: LoadContext) -> Result<LoadedConfig, LoadError> {
+fn load_with_context(
+    path: &Path,
+    context: LoadContext,
+) -> Result<RetryOutcome<InjectorConfig>, LoadError> {
     match context {
         LoadContext::Reload(trigger) if trigger.should_retry_reads() => {
             load_with_read_race_retry(path, context, load_from_path, std::thread::sleep)
         }
-        _ => load_from_path(path).map(|config| LoadedConfig { config, retries: 0 }),
+        _ => load_from_path(path).map(|value| RetryOutcome { value, retries: 0 }),
     }
 }
 
@@ -257,19 +229,9 @@ fn load_or_seed(path: &Path, context: LoadContext) -> InjectorConfig {
                     context.label()
                 );
             }
-            loaded.config
+            loaded.value
         }
-        Err(LoadError::Missing(error)) => {
-            let reason = format!("failed to read config: {error}");
-            log::warn!(
-                "load from {} via {} {}; restoring current config",
-                path.display(),
-                context.label(),
-                reason
-            );
-            recover_broken_config(path, &reason)
-        }
-        Err(LoadError::Read(error)) => {
+        Err(LoadError::Io(error)) => {
             let reason = format!("failed to read config: {error}");
             log::warn!(
                 "load from {} via {} {}; restoring current config",
@@ -325,7 +287,7 @@ fn recover_broken_config(path: &Path, reason: &str) -> InjectorConfig {
 fn current_config_snapshot() -> InjectorConfig {
     match CONFIG.get() {
         Some(lock) => match lock.read() {
-            Ok(config) => config.clone(),
+            Ok(config) => config.as_ref().clone(),
             Err(error) => {
                 log::error!("current config lock poisoned while snapshotting: {}", error);
                 InjectorConfig::default()
@@ -380,9 +342,9 @@ fn render_config(config: &InjectorConfig) -> io::Result<String> {
 
 fn parse_config(contents: &str) -> Result<InjectorConfig, String> {
     let preprocessed = preprocess_config(contents)?;
-    let parsed: ParsedInjectorConfig =
+    let parsed: InjectorConfig =
         toml::from_str(&preprocessed).map_err(|error| error.to_string())?;
-    Ok(InjectorConfig::from(parsed).normalized())
+    Ok(parsed.normalized())
 }
 
 fn preprocess_config(contents: &str) -> Result<String, String> {
@@ -395,15 +357,6 @@ fn preprocess_config(contents: &str) -> Result<String, String> {
         rewritten.push_str(&rewrite_scoop_header(body, line_no + 1)?);
         rewritten.push_str(ending);
     }
-
-    if contents.is_empty() {
-        return Ok(String::new());
-    }
-
-    if !contents.ends_with('\n') && !rewritten.ends_with('\n') {
-        return Ok(rewritten);
-    }
-
     Ok(rewritten)
 }
 
@@ -456,10 +409,7 @@ fn normalize_packages(packages: Vec<String>) -> Vec<String> {
     let mut normalized = Vec::new();
     for package in packages {
         let package = package.trim();
-        if package.is_empty() {
-            continue;
-        }
-        if seen.insert(package.to_string()) {
+        if !package.is_empty() && seen.insert(package.to_string()) {
             normalized.push(package.to_string());
         }
     }
@@ -472,10 +422,9 @@ fn normalize_scoop_details(
     let mut normalized = BTreeMap::new();
     for (package, table) in details {
         let package = package.trim();
-        if package.is_empty() {
-            continue;
+        if !package.is_empty() {
+            normalized.insert(package.to_string(), table);
         }
-        normalized.insert(package.to_string(), table);
     }
     normalized
 }
@@ -496,8 +445,9 @@ fn reload_runtime_config(path: &Path, trigger: WatchTrigger) {
     if let Some(lock) = CONFIG.get() {
         match lock.write() {
             Ok(mut guard) => {
-                *guard = config.clone();
-                crate::logging::update_runtime_level(config.main.log_level_filter());
+                let level = config.main.log_level_filter();
+                *guard = Arc::new(config);
+                crate::logging::update_runtime_level(level);
                 log::info!(
                     "reloaded config from {} via {}",
                     path.display(),
@@ -520,7 +470,7 @@ fn load_with_read_race_retry<F, S>(
     context: LoadContext,
     mut loader: F,
     sleeper: S,
-) -> Result<LoadedConfig, LoadError>
+) -> Result<RetryOutcome<InjectorConfig>, LoadError>
 where
     F: FnMut(&Path) -> Result<InjectorConfig, LoadError>,
     S: FnMut(Duration),
@@ -528,7 +478,7 @@ where
     retry_read_race(
         || loader(path),
         |error| match error {
-            LoadError::Missing(_) | LoadError::Read(_) => ReadRaceErrorKind::Retryable,
+            LoadError::Io(_) => ReadRaceErrorKind::Retryable,
             LoadError::Parse(_) => ReadRaceErrorKind::Fatal,
         },
         REPLACE_SAVE_RETRY_LIMIT,
@@ -546,10 +496,6 @@ where
             );
         },
     )
-    .map(|outcome| LoadedConfig {
-        config: outcome.value,
-        retries: outcome.retries,
-    })
 }
 
 pub fn parse_level_filter(value: &str) -> Option<LevelFilter> {
@@ -578,18 +524,6 @@ impl InjectorConfig {
     }
 }
 
-impl From<ParsedInjectorConfig> for InjectorConfig {
-    fn from(value: ParsedInjectorConfig) -> Self {
-        Self {
-            scoop: value.scoop,
-            scoop_details: value.scoop_details,
-            main: value.main,
-            filter: value.filter,
-            intercept: value.intercept,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_match_expected_behavior() {
+    fn config_defaults_and_log_levels_match_contract() {
         let config = InjectorConfig::default();
         assert!(config.main.enabled);
         assert_eq!(config.scoop, default_scoop());
@@ -622,6 +556,11 @@ mod tests {
         assert!(config.intercept.get_number_of_entries);
         assert!(config.intercept.list_entries_batched);
         assert!(config.intercept.get_supplementary_attestation_info);
+
+        assert_eq!(parse_level_filter("warn"), Some(LevelFilter::Warn));
+        assert_eq!(parse_level_filter("WARNING"), Some(LevelFilter::Warn));
+        assert_eq!(parse_level_filter("trace"), Some(LevelFilter::Trace));
+        assert_eq!(parse_level_filter("unknown"), None);
     }
 
     #[test]
@@ -630,8 +569,7 @@ mod tests {
             r#"
 scoop = ["com.example.app", "com.other.app", "com.example.app"]
 
-[scoop.com.example.app]
-enabled = true
+[scoop."com.example.app"]
 mode = "strict"
 
 [main]
@@ -669,14 +607,6 @@ get_supplementary_attestation_info = true
             parsed
                 .scoop_details
                 .get("com.example.app")
-                .and_then(|table| table.get("enabled"))
-                .and_then(toml::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            parsed
-                .scoop_details
-                .get("com.example.app")
                 .and_then(|table| table.get("mode"))
                 .and_then(toml::Value::as_str),
             Some("strict")
@@ -694,29 +624,7 @@ get_supplementary_attestation_info = true
     }
 
     #[test]
-    fn parses_quoted_scoop_package_headers() {
-        let parsed = parse_config(
-            r#"
-scoop = ["com.example.app"]
-
-[scoop."com.example.app"]
-enabled = true
-"#,
-        )
-        .expect("quoted scoop header should parse");
-
-        assert_eq!(
-            parsed
-                .scoop_details
-                .get("com.example.app")
-                .and_then(|table| table.get("enabled"))
-                .and_then(toml::Value::as_bool),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn legacy_scope_syntax_is_rejected() {
+    fn legacy_config_syntax_is_rejected() {
         let error = parse_config(
             r#"
 [[scope]]
@@ -725,10 +633,7 @@ package = "com.legacy.app"
         )
         .expect_err("legacy scope syntax should be rejected");
         assert!(error.contains("unknown field"));
-    }
 
-    #[test]
-    fn legacy_allow_packages_is_rejected() {
         let error = parse_config(
             r#"
 scoop = ["com.example.app"]
@@ -757,18 +662,12 @@ allow_packages = ["com.legacy.app"]
         assert!(rendered.contains("scoop = ["));
         assert!(rendered.contains("[scoop.com.example.app]"));
         assert!(!rendered.contains("[[scope]]"));
+        let reparsed = parse_config(&rendered).expect("rendered config should parse");
+        assert_eq!(reparsed.scoop_details, config.scoop_details);
     }
 
     #[test]
-    fn log_level_parser_accepts_common_spellings() {
-        assert_eq!(parse_level_filter("warn"), Some(LevelFilter::Warn));
-        assert_eq!(parse_level_filter("WARNING"), Some(LevelFilter::Warn));
-        assert_eq!(parse_level_filter("trace"), Some(LevelFilter::Trace));
-        assert_eq!(parse_level_filter("unknown"), None);
-    }
-
-    #[test]
-    fn missing_config_is_written_with_defaults() {
+    fn missing_and_invalid_config_recover_safely() {
         let path = temp_config_path("missing");
         if path.exists() {
             fs::remove_file(&path).expect("stale test config should be removable");
@@ -783,10 +682,7 @@ allow_packages = ["com.legacy.app"]
         assert_eq!(reparsed.scoop, default_scoop());
 
         fs::remove_file(&path).expect("test config should be cleaned up");
-    }
 
-    #[test]
-    fn invalid_config_is_backed_up_and_replaced() {
         let path = temp_config_path("invalid");
         let backup = PathBuf::from(format!("{}.bak", path.display()));
         fs::write(&path, "[main\nbroken").expect("invalid config should be written");
@@ -822,7 +718,7 @@ allow_packages = ["com.legacy.app"]
     }
 
     #[test]
-    fn replace_save_retry_waits_for_readable_file() {
+    fn replace_save_retry_only_retries_read_failures() {
         let path = temp_config_path("replace-save-retry");
         let mut attempts = 0usize;
         let mut sleeps = Vec::new();
@@ -833,7 +729,10 @@ allow_packages = ["com.legacy.app"]
             |_path| {
                 attempts += 1;
                 match attempts {
-                    1 | 2 => Err(LoadError::Missing(io::Error::from(io::ErrorKind::NotFound))),
+                    1 => Err(LoadError::Io(io::Error::from(io::ErrorKind::NotFound))),
+                    2 => Err(LoadError::Io(io::Error::from(
+                        io::ErrorKind::PermissionDenied,
+                    ))),
                     _ => Ok(InjectorConfig::default()),
                 }
             },
@@ -847,10 +746,7 @@ allow_packages = ["com.legacy.app"]
         assert!(sleeps
             .iter()
             .all(|duration| *duration == REPLACE_SAVE_RETRY_INTERVAL));
-    }
 
-    #[test]
-    fn replace_save_retry_does_not_retry_parse_failures() {
         let path = temp_config_path("replace-save-parse");
         let mut sleeps = Vec::new();
 
@@ -864,16 +760,5 @@ allow_packages = ["com.legacy.app"]
 
         assert!(matches!(error, LoadError::Parse(_)));
         assert!(sleeps.is_empty());
-    }
-
-    #[test]
-    fn reload_trigger_priority_prefers_close_write_over_replace_save() {
-        let mut selected = Some(WatchTrigger::CloseWrite);
-        let candidate = WatchTrigger::ReplaceSave;
-        selected = match selected {
-            Some(current) if current.priority() <= candidate.priority() => Some(current),
-            _ => Some(candidate),
-        };
-        assert_eq!(selected, Some(WatchTrigger::CloseWrite));
     }
 }

@@ -601,6 +601,13 @@ pub fn require_forwarded_context<'a>(
     Ok(ctx)
 }
 
+pub(crate) fn require_omk_ctx<'a>(
+    ctx: Option<&'a CallerInfo>,
+    label: &str,
+) -> std::result::Result<&'a CallerInfo, Status> {
+    require_forwarded_context(ctx, label).map_err(crate::keymaster::error::into_logged_binder)
+}
+
 fn validate_forwarded_context(ctx: &CallerInfo, label: &str) -> anyhow::Result<()> {
     if ctx.callingUid < 0 {
         return Err(KsError::perm())
@@ -653,7 +660,6 @@ fn check_android_permission_with_controller(
     }
 }
 
-#[cfg(target_os = "android")]
 fn check_android_permission_with_manager(
     uid: u32,
     permission: &str,

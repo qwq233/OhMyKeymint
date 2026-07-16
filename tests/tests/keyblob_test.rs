@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Integration test.
-#![cfg(soong)]
-
 // Explicitly include alloc because macros from `kmr_common` assume it.
 
 use kmr_common::{crypto, crypto::Rng, expect_err, keyblob, keyblob::legacy::KeyBlob};

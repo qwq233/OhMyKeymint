@@ -864,12 +864,9 @@ pub fn update_keystore_crash_count() {
 
     if let Err(e) = std::fs::write(
         KEYSTORE_CRASH_COUNT_PATH,
-        format_crash_count_record(&boot_id, new_count),
+        format!("{boot_id}\n{new_count}\n"),
     ) {
-        error!(
-            concat!("failed to write keystore crash count file: {:?}"),
-            e
-        );
+        error!("failed to write keystore crash count file: {e:?}");
     }
 }
 
@@ -913,10 +910,6 @@ fn parse_crash_count_record(record: &str, current_boot_id: &str) -> Result<Optio
         return Err(anyhow!("crash count is negative"));
     }
     Ok(Some(count))
-}
-
-fn format_crash_count_record(boot_id: &str, count: i32) -> String {
-    format!("{boot_id}\n{count}\n")
 }
 
 /// Enum defining the bit position for each padding mode. Since padding mode can be repeatable, it

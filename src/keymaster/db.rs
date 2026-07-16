@@ -1681,10 +1681,6 @@ impl KeystoreDB {
         .context(ks_err!())
     }
 
-    pub fn terminate_uuid(&mut self, km_uuid: &Uuid) -> Result<()> {
-        self.terminate_uuid_with_count(km_uuid).map(|_| ())
-    }
-
     pub fn retire_stale_keybox_bound_entries(
         &mut self,
         current_identity_digest: [u8; 32],
@@ -1764,7 +1760,7 @@ impl KeystoreDB {
         .context(ks_err!())
     }
 
-    fn terminate_uuid_with_count(&mut self, km_uuid: &Uuid) -> Result<usize> {
+    pub fn terminate_uuid(&mut self, km_uuid: &Uuid) -> Result<()> {
         log::info!("terminating all keys created by uuid={km_uuid:0x?}");
         let _wp = wd::watch("KeystoreDB::terminate_uuid");
 
@@ -1799,7 +1795,7 @@ impl KeystoreDB {
                     Self::remove_key_rows(tx, key_id).context("In terminate_uuid.")? || notify_gc;
             }
 
-            Ok(key_count).do_gc(notify_gc)
+            Ok(()).do_gc(notify_gc)
         })
         .context(ks_err!())
     }
@@ -4073,5 +4069,63 @@ mod tests {
                 .unwrap()
             );
         }
+    }
+
+    #[test]
+    fn password_wrapped_omk_legacy_super_key_is_readable() {
+        use crate::keymaster::{
+            crypto::{aes_gcm_decrypt, aes_gcm_encrypt, Password, AES_256_KEY_LENGTH},
+            super_key::{SuperEncryptionAlgorithm, SuperKeyManager},
+            utils::AesGcm,
+        };
+
+        let mut metadata = BlobMetaData::new();
+        metadata.add(BlobMetaEntry::EncryptedBy(EncryptedBy::Password));
+        metadata.add(BlobMetaEntry::Salt((0..16).collect()));
+        metadata.add(BlobMetaEntry::Iv(vec![
+            135, 102, 115, 223, 119, 37, 203, 8, 101, 245, 150, 34,
+        ]));
+        metadata.add(BlobMetaEntry::AeadTag(vec![
+            105, 14, 104, 82, 5, 231, 107, 134, 58, 151, 124, 28, 182, 166, 135, 87,
+        ]));
+        let entry = KeyEntry {
+            key_blob_info: Some((
+                vec![
+                    219, 195, 182, 222, 80, 53, 55, 22, 100, 139, 61, 52, 163, 203, 85, 223, 191,
+                    79, 62, 126, 216, 19, 47, 186, 221, 46, 242, 244, 14, 97, 11, 61,
+                ],
+                metadata,
+            )),
+            ..Default::default()
+        };
+        let password = Password::from(&b"fixed synthetic password"[..]);
+        let super_key = SuperKeyManager::extract_super_key_from_key_entry_with_omk_compatibility(
+            SuperEncryptionAlgorithm::Aes256Gcm,
+            entry,
+            &password,
+            None,
+        )
+        .unwrap();
+
+        let (ciphertext, iv, tag) = aes_gcm_encrypt(b"probe", &[0x42; 32]).unwrap();
+        assert_eq!(
+            &super_key.decrypt(&ciphertext, &iv, &tag).unwrap()[..],
+            b"probe"
+        );
+
+        let (new_blob, new_metadata) =
+            SuperKeyManager::encrypt_with_password(&[0x42; 32], &password).unwrap();
+        let legacy_key = password
+            .derive_key_omk_legacy(new_metadata.salt().unwrap(), AES_256_KEY_LENGTH)
+            .unwrap();
+        assert!(matches!(
+            aes_gcm_decrypt(
+                &new_blob,
+                new_metadata.iv().unwrap(),
+                new_metadata.aead_tag().unwrap(),
+                &legacy_key,
+            ),
+            Err(kmr_crypto_boring::error::Error::DecryptionFailed)
+        ));
     }
 }

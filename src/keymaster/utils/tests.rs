@@ -574,19 +574,17 @@ fn test_package_manager_native_layout() {
         PackageManagerNativeLayout::Android15Or16
     );
     assert_eq!(
-        legacy_pm_get_location_flags_transaction(PackageManagerNativeLayout::Android12To14),
-        rsbinder::FIRST_CALL_TRANSACTION + 4
+        legacy_pm_transactions(PackageManagerNativeLayout::Android12To14),
+        (
+            rsbinder::FIRST_CALL_TRANSACTION + 5,
+            rsbinder::FIRST_CALL_TRANSACTION + 4
+        )
     );
     assert_eq!(
-        legacy_pm_get_target_sdk_transaction(PackageManagerNativeLayout::Android12To14),
-        rsbinder::FIRST_CALL_TRANSACTION + 5
-    );
-    assert_eq!(
-        legacy_pm_get_location_flags_transaction(PackageManagerNativeLayout::Android15Or16),
-        rsbinder::FIRST_CALL_TRANSACTION + 5
-    );
-    assert_eq!(
-        legacy_pm_get_target_sdk_transaction(PackageManagerNativeLayout::Android15Or16),
-        rsbinder::FIRST_CALL_TRANSACTION + 6
+        legacy_pm_transactions(PackageManagerNativeLayout::Android15Or16),
+        (
+            rsbinder::FIRST_CALL_TRANSACTION + 6,
+            rsbinder::FIRST_CALL_TRANSACTION + 5
+        )
     );
 }

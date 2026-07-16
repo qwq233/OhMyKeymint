@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rsbinder::{Interface, Status, Strong};
+use rsbinder::{Interface, Strong};
 
 use crate::android::hardware::security::keymint::{
     ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice, SecurityLevel::SecurityLevel,
@@ -17,7 +17,7 @@ use crate::keymaster::error::{into_logged_binder, map_km_error, KsError};
 use crate::keymaster::keymint_device::{get_keymint_wrapper, KeyMintWrapper};
 use crate::keymaster::permission::{
     check_forwarded_context, check_key_permission, check_keystore_permission,
-    check_manage_users_permission, require_forwarded_context, CallerCtx, KeyPerm, KeystorePerm,
+    check_manage_users_permission, require_omk_ctx, CallerCtx, KeyPerm, KeystorePerm,
 };
 use crate::keymaster::utils::{AndroidUserId, AppUid, SecureUserId};
 use crate::top::qwq2333::ohmykeymint::{
@@ -252,13 +252,6 @@ fn check_maintenance_permission(
     check_keystore_permission(permission, ctx)
 }
 
-fn require_omk_ctx<'a>(
-    ctx: Option<&'a CallerInfo>,
-    label: &str,
-) -> std::result::Result<&'a CallerInfo, Status> {
-    require_forwarded_context(ctx, label).map_err(into_logged_binder)
-}
-
 fn checked_user_id(user_id: i32) -> Result<AndroidUserId> {
     if user_id < 0 {
         return Err(KsError::Rc(ResponseCode::INVALID_ARGUMENT))
@@ -294,13 +287,6 @@ fn normalize_migration_destination(
     }
 }
 
-fn keymint_unavailable(error: &anyhow::Error) -> bool {
-    matches!(
-        error.root_cause().downcast_ref::<KsError>(),
-        Some(KsError::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
-    )
-}
-
 pub(crate) fn replay_early_boot_ended() -> Result<()> {
     call_keymint_wrappers("earlyBootEnded", |keymint| keymint.earlyBootEnded())
 }
@@ -318,7 +304,12 @@ where
             map_km_error(call(&strongbox))
                 .context(err!("calling optional StrongBox KeyMint {label}"))?;
         }
-        Err(error) if keymint_unavailable(&error) => {
+        Err(error)
+            if matches!(
+                error.root_cause().downcast_ref::<KsError>(),
+                Some(KsError::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
+            ) =>
+        {
             log::debug!("optional StrongBox KeyMint unavailable for {label}");
         }
         Err(error) => return Err(error).context(err!("opening optional StrongBox KeyMint")),

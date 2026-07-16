@@ -15,7 +15,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::string::ToString;
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 use std::{format, fs, vec};
@@ -55,7 +54,6 @@ impl WatchTrigger {
         }
     }
 
-    #[cfg(target_os = "android")]
     fn from_inotify_mask(mask: u32) -> Option<Self> {
         if (mask & libc::IN_Q_OVERFLOW) != 0 {
             return Some(Self::Overflow);
@@ -70,44 +68,29 @@ impl WatchTrigger {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct PathStamp {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
 pub fn spawn_path_watcher<F>(thread_name: &str, path: PathBuf, on_change: F) -> Result<()>
 where
     F: Fn(WatchTrigger) + Send + Sync + 'static,
 {
-    let callback = Arc::new(on_change);
     thread::Builder::new()
         .name(thread_name.to_string())
-        .spawn(move || watch_loop(path, callback))
+        .spawn(move || {
+            if let Err(error) = watch_loop_inotify(&path, &on_change) {
+                log::error!(
+                    "inotify watcher failed for {}: {}; falling back to polling",
+                    path.display(),
+                    error
+                );
+                watch_loop_polling(&path, &on_change);
+            }
+        })
         .with_context(|| format!("failed to spawn watcher thread {thread_name}"))?;
     Ok(())
 }
 
-fn inspect_path(path: &Path) -> Option<PathStamp> {
+fn inspect_path(path: &Path) -> Option<(u64, Option<SystemTime>)> {
     let metadata = fs::metadata(path).ok()?;
-    Some(PathStamp {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
-}
-
-fn watch_loop<F>(path: PathBuf, callback: Arc<F>)
-where
-    F: Fn(WatchTrigger) + Send + Sync + 'static,
-{
-    if let Err(error) = watch_loop_inotify(&path, callback.as_ref()) {
-        log::error!(
-            "inotify watcher failed for {}: {}; falling back to polling",
-            path.display(),
-            error
-        );
-        watch_loop_polling(&path, callback.as_ref());
-    }
+    Some((metadata.len(), metadata.modified().ok()))
 }
 
 fn watch_loop_polling<F>(path: &Path, callback: &F)
@@ -199,12 +182,9 @@ where
 
             if (event.mask & libc::IN_Q_OVERFLOW) != 0 || name == watched_name.as_slice() {
                 if let Some(candidate) = WatchTrigger::from_inotify_mask(event.mask) {
-                    reload_trigger = match reload_trigger {
-                        Some(current) if current.priority() <= candidate.priority() => {
-                            Some(current)
-                        }
-                        _ => Some(candidate),
-                    };
+                    reload_trigger = Some(reload_trigger.map_or(candidate, |current| {
+                        std::cmp::min_by_key(current, candidate, |trigger| trigger.priority())
+                    }));
                 }
             }
 
@@ -223,13 +203,12 @@ mod tests {
 
     #[test]
     fn higher_priority_trigger_is_retained() {
-        let selected = match Some(WatchTrigger::CloseWrite) {
-            Some(current) if current.priority() <= WatchTrigger::ReplaceSave.priority() => {
-                Some(current)
-            }
-            _ => Some(WatchTrigger::ReplaceSave),
-        };
+        let selected = std::cmp::min_by_key(
+            WatchTrigger::CloseWrite,
+            WatchTrigger::ReplaceSave,
+            |trigger| trigger.priority(),
+        );
 
-        assert_eq!(selected, Some(WatchTrigger::CloseWrite));
+        assert_eq!(selected, WatchTrigger::CloseWrite);
     }
 }

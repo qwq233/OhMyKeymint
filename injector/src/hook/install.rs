@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Result};
 use log::{debug, info, warn};
 
 use super::{new_ioctl, HOOK_INIT, OLD_IOCTL};
-use crate::{config, ipc, logging};
+use crate::{config, ipc};
 
 pub(super) fn init_hook() -> Result<()> {
     let result = HOOK_INIT.get_or_init(|| install_hooks().map_err(|error| format!("{error:#}")));
@@ -17,16 +17,14 @@ pub(super) fn init_hook() -> Result<()> {
 }
 
 fn install_hooks() -> Result<()> {
-    logging::init_logger();
     let _ = config::get();
     info!("initializing binder ioctl hook");
     ipc::ensure_process_state();
 
-    let maps = lsplt_rs::MapInfo::scan("self");
-    let mut targets = Vec::new();
+    let mut candidates = Vec::new();
     let mut seen = HashSet::new();
 
-    for map in maps {
+    for map in lsplt_rs::MapInfo::scan("self") {
         if let Some(path) = &map.pathname {
             let name = path.rsplit('/').next().unwrap_or(path);
             if (name.starts_with("libbinder") || name == "libhwbinder.so")
@@ -36,21 +34,15 @@ fn install_hooks() -> Result<()> {
                     "Found binder library for ioctl hook: {} (dev={}, inode={})",
                     path, map.dev, map.inode
                 );
-                targets.push((path.clone(), map.dev, map.inode));
+                for symbol in ["ioctl", "__ioctl"] {
+                    candidates.push((path.clone(), map.dev, map.inode, symbol));
+                }
             }
         }
     }
 
-    if targets.is_empty() {
+    if candidates.is_empty() {
         bail!("Could not find binder libraries in process maps");
-    }
-
-    let mut candidates = Vec::new();
-
-    for (path, dev, inode) in targets {
-        for symbol in ["ioctl", "__ioctl"] {
-            candidates.push((path.clone(), dev, inode, symbol));
-        }
     }
 
     let mut backups = vec![std::ptr::null_mut(); candidates.len()];

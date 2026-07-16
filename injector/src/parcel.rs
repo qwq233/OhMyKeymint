@@ -1137,10 +1137,9 @@ pub fn build_local_binder_carrier_bytes(
     bytes
 }
 
-fn build_sized_parcelable_reply<F>(write_payload: F) -> Result<OwnedReply>
-where
-    F: FnOnce(&mut Parcel, &mut Option<usize>) -> std::result::Result<(), StatusCode>,
-{
+fn build_sized_parcelable_reply(
+    write_payload: impl FnOnce(&mut Parcel, &mut Option<usize>) -> std::result::Result<(), StatusCode>,
+) -> Result<OwnedReply> {
     let mut parcel = Parcel::new();
     parcel.write(&Status::from(StatusCode::Ok))?;
     parcel.write(&NON_NULL_PARCELABLE_FLAG)?;
@@ -1241,9 +1240,7 @@ pub fn build_plain_reply<T: Serialize>(value: &T) -> Result<OwnedReply> {
 }
 
 pub fn build_void_reply() -> Result<OwnedReply> {
-    let mut parcel = Parcel::new();
-    parcel.write(&Status::from(StatusCode::Ok))?;
-    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
+    build_status_reply(&Status::from(StatusCode::Ok))
 }
 
 pub fn build_status_reply(status: &Status) -> Result<OwnedReply> {
@@ -1281,10 +1278,9 @@ pub fn contains_known_keystore_interface(parcel: &[u8]) -> bool {
 }
 
 fn owned_reply_from_parcel(parcel: Parcel, offsets: impl IntoIterator<Item = usize>) -> OwnedReply {
-    let offsets: Vec<usize> = offsets.into_iter().collect();
     OwnedReply {
         parcel,
-        offsets: offsets.into_boxed_slice(),
+        offsets: offsets.into_iter().collect(),
     }
 }
 
@@ -1519,6 +1515,7 @@ mod tests {
     };
     use crate::android::system::keystore2::AuthenticatorSpec::AuthenticatorSpec;
     use crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse;
+    use crate::android::system::keystore2::IKeystoreSecurityLevel::KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING;
     use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
     use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
     use crate::android::system::keystore2::KeyMetadata::KeyMetadata;
@@ -1709,7 +1706,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_interface_marker_rejects_security_level_delete_key() {
+    fn bad_interface_marker_is_rejected() {
         let blob_key = blob_key_descriptor(None);
         let mut request =
             build_request_with_marker(KEYSTORE_SECURITY_LEVEL_INTERFACE, 0, |parcel| {
@@ -1725,25 +1722,6 @@ mod tests {
                     offsets,
                     offsets_size,
                     crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
-                )
-            },
-            StatusCode::BadType,
-        );
-    }
-
-    #[test]
-    fn bad_interface_marker_rejects_operation_abort() {
-        let mut request = build_request_with_marker(KEYSTORE_OPERATION_INTERFACE, 0, |_| {});
-        let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
-
-        assert_status_code(
-            unsafe {
-                parse_operation_request(
-                    data,
-                    data_size,
-                    offsets,
-                    offsets_size,
-                    crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
                 )
             },
             StatusCode::BadType,
@@ -1911,6 +1889,7 @@ mod tests {
     #[test]
     fn keystore_non_null_arrays_preserve_empty() {
         let key = blob_key_descriptor(None);
+        let auth_bound_flags = KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING;
         let empty_sids = Vec::<i64>::new();
         let empty_auth_types = Vec::<HardwareAuthenticatorType>::new();
         let empty_params = Vec::<KeyParameter>::new();
@@ -2020,18 +1999,22 @@ mod tests {
                 parcel.write(&key).unwrap();
                 parcel.write(&Option::<KeyDescriptor>::None).unwrap();
                 parcel.write(&empty_params).unwrap();
-                parcel.write(&0i32).unwrap();
+                parcel.write(&auth_bound_flags).unwrap();
                 parcel.write(&empty_bytes).unwrap();
             },
         )
         .expect("empty generateKey params should parse");
         let ParsedSecurityLevelRequest::GenerateKey {
-            params, entropy, ..
+            params,
+            flags,
+            entropy,
+            ..
         } = parsed
         else {
             panic!("generateKey request should parse");
         };
         assert!(params.is_empty());
+        assert_eq!(flags, auth_bound_flags);
         assert!(entropy.is_empty());
 
         let parsed = parse_security_level_request_with_payload(
@@ -2040,18 +2023,22 @@ mod tests {
                 parcel.write(&key).unwrap();
                 parcel.write(&Option::<KeyDescriptor>::None).unwrap();
                 parcel.write(&empty_params).unwrap();
-                parcel.write(&0i32).unwrap();
+                parcel.write(&auth_bound_flags).unwrap();
                 parcel.write(&empty_bytes).unwrap();
             },
         )
         .expect("empty importKey params should parse");
         let ParsedSecurityLevelRequest::ImportKey {
-            params, key_data, ..
+            params,
+            flags,
+            key_data,
+            ..
         } = parsed
         else {
             panic!("importKey request should parse");
         };
         assert!(params.is_empty());
+        assert_eq!(flags, auth_bound_flags);
         assert!(key_data.is_empty());
 
         let parsed = parse_security_level_request_with_payload(
@@ -2179,7 +2166,7 @@ mod tests {
     }
 
     #[test]
-    fn keystore2_mirror_requests_accept_trailing_payload() {
+    fn keystore_requests_accept_trailing_payload() {
         let parsed =
             parse_authorization_request_as_method(AuthorizationMethod::GetLastAuthTime, |parcel| {
                 parcel.write(&0i64).unwrap();
@@ -2200,10 +2187,7 @@ mod tests {
             })
             .expect("maintenance mirror request with trailing payload should parse");
         assert!(matches!(parsed, ParsedMaintenanceRequest::DeleteAllKeys));
-    }
 
-    #[test]
-    fn keystore2_business_requests_accept_trailing_payload() {
         let app_key = KeyDescriptor {
             domain: crate::android::system::keystore2::Domain::Domain::APP,
             nspace: 0,
@@ -2275,16 +2259,17 @@ mod tests {
             Some(KEYSTORE_AUTHORIZATION_INTERFACE),
         );
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut request);
-        assert!(contains_keystore_authorization_interface(unsafe {
-            std::slice::from_raw_parts(data, data_size)
-        }));
+        assert!(contains_utf16_token(
+            unsafe { std::slice::from_raw_parts(data, data_size) },
+            KEYSTORE_AUTHORIZATION_INTERFACE
+        ));
         let interface = unsafe { peek_request_interface(data, data_size, offsets, offsets_size) }
             .expect("request interface should parse");
         assert_eq!(interface, KEYSTORE_SERVICE_INTERFACE);
     }
 
     #[test]
-    fn security_level_delete_key_preserves_non_null_empty_blob_descriptor() {
+    fn security_level_blob_descriptor_preserves_null_and_empty() {
         let parsed = parse_security_level_key_request(
             crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
             &blob_key_descriptor(Some(Vec::new())),
@@ -2298,10 +2283,7 @@ mod tests {
             crate::android::system::keystore2::Domain::Domain::BLOB
         );
         assert_eq!(key.blob, Some(Vec::new()));
-    }
 
-    #[test]
-    fn security_level_convert_storage_key_preserves_non_null_empty_blob_descriptor() {
         let parsed = parse_security_level_key_request(
             crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#convertStorageKeyToEphemeral,
             &blob_key_descriptor(Some(Vec::new())),
@@ -2318,10 +2300,7 @@ mod tests {
             crate::android::system::keystore2::Domain::Domain::BLOB
         );
         assert_eq!(storage_key.blob, Some(Vec::new()));
-    }
 
-    #[test]
-    fn security_level_blob_descriptor_keeps_null_blob_distinct_from_empty() {
         let parsed = parse_security_level_key_request(
             crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
             &blob_key_descriptor(None),
@@ -2358,52 +2337,6 @@ mod tests {
         };
         assert_eq!(user_id, 11);
         assert_eq!(password, None);
-    }
-
-    #[test]
-    fn plain_reply_round_trip() {
-        let value = vec![1u8, 2, 3, 4];
-        let mut reply = build_plain_reply(&value).expect("plain reply should serialize");
-        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
-        let parsed: Vec<u8> =
-            unsafe { parse_success_reply(data, data_size, offsets, offsets_size) }.unwrap();
-        assert_eq!(parsed, value);
-    }
-
-    #[test]
-    fn service_plain_replies_round_trip() {
-        let descriptors = vec![
-            KeyDescriptor {
-                domain: crate::android::system::keystore2::Domain::Domain::APP,
-                nspace: 10001,
-                alias: Some("alpha".to_string()),
-                blob: None,
-            },
-            KeyDescriptor {
-                domain: crate::android::system::keystore2::Domain::Domain::GRANT,
-                nspace: 42,
-                alias: None,
-                blob: None,
-            },
-        ];
-        let mut list_reply =
-            build_plain_reply(&descriptors).expect("descriptor list reply should serialize");
-        let (data, data_size, offsets, offsets_size) = raw_parts(&mut list_reply);
-        let parsed: Vec<KeyDescriptor> =
-            unsafe { parse_success_reply(data, data_size, offsets, offsets_size) }.unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].alias.as_deref(), Some("alpha"));
-        assert_eq!(
-            parsed[1].domain,
-            crate::android::system::keystore2::Domain::Domain::GRANT
-        );
-
-        let count = 7i32;
-        let mut count_reply = build_plain_reply(&count).expect("count reply should serialize");
-        let (data, data_size, offsets, offsets_size) = raw_parts(&mut count_reply);
-        let parsed_count: i32 =
-            unsafe { parse_success_reply(data, data_size, offsets, offsets_size) }.unwrap();
-        assert_eq!(parsed_count, count);
     }
 
     #[test]

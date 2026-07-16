@@ -38,13 +38,14 @@ use crate::keymaster::db::{KeyEntryLoadBits, KeyType, SubComponentType};
 use crate::keymaster::error::{into_logged_binder, KsError as Error};
 use crate::keymaster::id_rotation::IdRotationState;
 use crate::keymaster::permission::{
-    check_grant_permission, check_key_permission, check_keystore_permission,
-    require_forwarded_context, KeyPerm, KeyPermSet, KeystorePerm,
+    check_grant_permission, check_key_permission, check_keystore_permission, require_omk_ctx,
+    KeyPerm, KeyPermSet, KeystorePerm,
 };
 use crate::keymaster::security_level::KeystoreSecurityLevel;
 use crate::keymaster::utils::{
     count_key_entries, key_parameters_to_authorizations, list_key_entries, AppUid,
 };
+use crate::selinux;
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 use crate::top::qwq2333::ohmykeymint::IOhMyKsService::IOhMyKsService;
 use crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::IOhMySecurityLevel;
@@ -276,18 +277,16 @@ impl KeystoreService {
 
     fn get_security_level(
         &self,
-        _ctx: Option<&CallerInfo>,
         sec_level: SecurityLevel,
     ) -> Result<Strong<dyn IKeystoreSecurityLevel>> {
         self.ensure_security_levels_current()?;
         let security_levels = self.security_levels.read().unwrap();
-        if let Some(uuid) = security_levels.uuid_by_sec_level.get(&sec_level) {
-            if let Some(dev) = security_levels.i_sec_level_by_uuid.get(uuid) {
-                Ok(dev.clone())
-            } else {
-                Err(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
-                    .context(err!("No such security level."))
-            }
+        if let Some(dev) = security_levels
+            .uuid_by_sec_level
+            .get(&sec_level)
+            .and_then(|uuid| security_levels.i_sec_level_by_uuid.get(uuid))
+        {
+            Ok(dev.clone())
         } else {
             Err(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
                 .context(err!("No such security level."))
@@ -296,7 +295,6 @@ impl KeystoreService {
 
     fn get_iohmy_security_level(
         &self,
-        _ctx: Option<&CallerInfo>,
         sec_level: SecurityLevel,
     ) -> Result<Strong<dyn IOhMySecurityLevel>> {
         self.ensure_security_levels_current()?;
@@ -479,7 +477,10 @@ impl KeystoreService {
         };
 
         if let Err(e) = check_key_permission(KeyPerm::GetInfo, &k, None, ctx) {
-            if is_permission_denied(&e) {
+            if matches!(
+                e.root_cause().downcast_ref::<selinux::Error>(),
+                Some(selinux::Error::PermissionDenied)
+            ) {
                 check_keystore_permission(KeystorePerm::List, ctx)
                     .context(err!("While checking keystore permission."))?;
                 if namespace != -1 {
@@ -636,17 +637,6 @@ fn calling_uid(ctx: Option<&CallerInfo>) -> AppUid {
     )
 }
 
-fn require_omk_ctx<'a>(ctx: Option<&'a CallerInfo>, label: &str) -> Result<&'a CallerInfo, Status> {
-    require_forwarded_context(ctx, label).map_err(into_logged_binder)
-}
-
-fn is_permission_denied(error: &anyhow::Error) -> bool {
-    matches!(
-        error.root_cause().downcast_ref::<Error>(),
-        Some(Error::Rc(ResponseCode::PERMISSION_DENIED))
-    )
-}
-
 impl rsbinder::Interface for KeystoreService {}
 
 // Implementation of IKeystoreService. See AIDL spec at
@@ -658,7 +648,7 @@ impl IKeystoreService for KeystoreService {
         security_level: SecurityLevel,
     ) -> Result<Strong<dyn IKeystoreSecurityLevel>, Status> {
         let _wp = wd::watch_millis_with("IKeystoreService::getSecurityLevel", 500, security_level);
-        self.get_security_level(None, security_level)
+        self.get_security_level(security_level)
             .map_err(into_logged_binder)
     }
 
@@ -739,7 +729,7 @@ impl IOhMyKsService for KeystoreService {
         security_level: SecurityLevel,
     ) -> Result<Strong<dyn IKeystoreSecurityLevel>, Status> {
         let _wp = wd::watch_millis_with("IOhMyKsService::getSecurityLevel", 500, security_level);
-        self.get_security_level(None, security_level)
+        self.get_security_level(security_level)
             .map_err(into_logged_binder)
     }
 
@@ -748,7 +738,7 @@ impl IOhMyKsService for KeystoreService {
         security_level: SecurityLevel,
     ) -> Result<Strong<dyn IOhMySecurityLevel>, Status> {
         let _wp = wd::watch_millis_with("IOhMyKsService::getSecurityLevel", 500, security_level);
-        self.get_iohmy_security_level(None, security_level)
+        self.get_iohmy_security_level(security_level)
             .map_err(into_logged_binder)
     }
 

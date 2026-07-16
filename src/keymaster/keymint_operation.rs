@@ -47,8 +47,7 @@ impl IKeyMintOperation for KeyMintOperation {
     ) -> rsbinder::status::Result<()> {
         self.wrapper
             .op_update_aad(self.op_handle, input, authToken, timeStampToken)
-            .map_err(map_ks_error)?;
-        Ok(())
+            .map_err(map_ks_error)
     }
 
     fn r#update(
@@ -62,7 +61,6 @@ impl IKeyMintOperation for KeyMintOperation {
         self.wrapper
             .op_update(self.op_handle, input, authToken, timeStampToken)
             .map_err(map_ks_error)
-            .map(|rsp: Vec<u8>| rsp.to_vec())
     }
 
     fn r#finish(
@@ -85,7 +83,6 @@ impl IKeyMintOperation for KeyMintOperation {
                 confirmationToken,
             )
             .map_err(map_ks_error)
-            .map(|rsp: Vec<u8>| rsp.to_vec())
     }
 
     fn r#abort(&self) -> rsbinder::status::Result<()> {

@@ -1,6 +1,3 @@
-use std::os::unix::fs::FileExt as _;
-use std::path::PathBuf;
-
 use std::ffi::c_void;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -22,22 +19,22 @@ pub type Regs = libc::user_regs_struct;
 
 pub const NT_PRSTATUS: std::ffi::c_int = 1;
 
-pub fn align_stack(regs: &mut Regs, preserve: usize) {
+pub fn align_stack(regs: &mut Regs) {
     #[cfg(target_arch = "x86_64")]
     {
-        regs.rsp = (regs.rsp.wrapping_sub(preserve as u64)) & !0xf;
+        regs.rsp &= !0xf;
     }
     #[cfg(target_arch = "x86")]
     {
-        regs.esp = (regs.esp.wrapping_sub(preserve as u32)) & !0xf;
+        regs.esp &= !0xf;
     }
     #[cfg(target_arch = "aarch64")]
     {
-        regs.sp = (regs.sp.wrapping_sub(preserve as u64)) & !0xf;
+        regs.sp &= !0xf;
     }
     #[cfg(target_arch = "arm")]
     {
-        regs.uregs[13] = (regs.uregs[13].wrapping_sub(preserve as u32)) & !0xf;
+        regs.uregs[13] &= !0xf;
     }
 }
 
@@ -209,64 +206,45 @@ pub fn read_stack(pid: Pid, remote_addr: usize, buf: &mut [u8]) -> Result<usize>
     }
 }
 
-pub fn push_stack(pid: Pid, remote_addr: usize, data: &[u8], use_proc_mem: bool) -> Result<usize> {
+pub fn push_stack(pid: Pid, remote_addr: usize, data: &[u8]) -> Result<usize> {
     let new_addr = remote_addr
         .checked_sub(data.len())
         .ok_or_else(|| anyhow!("Stack overflow when pushing data"))?;
 
-    if use_proc_mem {
-        let mem_path = PathBuf::from(format!("/proc/{}/mem", pid.as_raw()));
-        let mem_file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&mem_path)
-            .context(format!("Failed to open {}", mem_path.display()))?;
+    let local = iovec {
+        iov_base: data.as_ptr() as *mut c_void,
+        iov_len: data.len(),
+    };
 
-        mem_file
-            .write_at(data, new_addr as u64)
-            .context(format!("Failed to write to address 0x{:x}", new_addr))?;
+    let remote = iovec {
+        iov_base: new_addr as *mut c_void,
+        iov_len: data.len(),
+    };
 
-        Ok(new_addr)
-    } else {
-        let local = iovec {
-            iov_base: data.as_ptr() as *mut c_void,
-            iov_len: data.len(),
-        };
+    let result = unsafe {
+        libc::process_vm_writev(
+            pid.as_raw(),
+            &local as *const iovec,
+            1,
+            &remote as *const iovec,
+            1,
+            0,
+        )
+    };
 
-        let remote = iovec {
-            iov_base: new_addr as *mut c_void,
-            iov_len: data.len(),
-        };
-
-        let result = unsafe {
-            libc::process_vm_writev(
-                pid.as_raw(),
-                &local as *const iovec,
-                1,
-                &remote as *const iovec,
-                1,
-                0,
-            )
-        };
-
-        if result == -1 {
-            error!(
-                "process_vm_writev failed: {}",
-                std::io::Error::last_os_error()
-            );
-            Err(anyhow!(
-                "process_vm_writev failed: {}",
-                std::io::Error::last_os_error()
-            ))
-        } else if result != data.len() as isize {
-            Err(anyhow!(
-                "process_vm_writev wrote incomplete data: {}/{} bytes",
-                result,
-                data.len()
-            ))
-        } else {
-            Ok(new_addr)
-        }
+    if result == -1 {
+        let error = std::io::Error::last_os_error();
+        error!("process_vm_writev failed: {}", error);
+        bail!("process_vm_writev failed: {}", error);
     }
+    if result != data.len() as isize {
+        bail!(
+            "process_vm_writev wrote incomplete data: {}/{} bytes",
+            result,
+            data.len()
+        );
+    }
+    Ok(new_addr)
 }
 
 pub fn setup_remote_call(
@@ -276,7 +254,7 @@ pub fn setup_remote_call(
     return_addr: usize,
     args: &[usize],
 ) -> Result<()> {
-    align_stack(regs, 0);
+    align_stack(regs);
     trace!(
         "Setting up remote call: func_addr=0x{:x}, return_addr=0x{:x}, regs=0{:?}, args={:?}",
         func_addr,
@@ -320,12 +298,12 @@ pub fn setup_remote_call(
                 .ok_or_else(|| anyhow!("Stack overflow when reserving x86_64 call padding"))?;
             for i in (6..args.len()).rev() {
                 let arg_bytes = args[i].to_ne_bytes();
-                sp = push_stack(pid, sp, &arg_bytes, false)?;
+                sp = push_stack(pid, sp, &arg_bytes)?;
             }
         }
 
         let ret_bytes = return_addr.to_ne_bytes();
-        sp = push_stack(pid, sp, &ret_bytes, false)?;
+        sp = push_stack(pid, sp, &ret_bytes)?;
         regs.rsp = sp as u64;
         regs.rip = func_addr as u64;
     }
@@ -336,11 +314,11 @@ pub fn setup_remote_call(
 
         for i in (0..args.len()).rev() {
             let arg_bytes = (args[i] as u32).to_ne_bytes();
-            sp = push_stack(pid, sp, &arg_bytes, false)?;
+            sp = push_stack(pid, sp, &arg_bytes)?;
         }
 
         let ret_bytes = (return_addr as u32).to_ne_bytes();
-        sp = push_stack(pid, sp, &ret_bytes, false)?;
+        sp = push_stack(pid, sp, &ret_bytes)?;
 
         regs.esp = sp as u32;
         regs.eip = func_addr as u32;
@@ -363,7 +341,7 @@ pub fn setup_remote_call(
             sp = target_sp + size;
 
             for i in (ARG_REG_COUNT..args.len()).rev() {
-                sp = push_stack(pid, sp, &args[i].to_ne_bytes(), false)?;
+                sp = push_stack(pid, sp, &args[i].to_ne_bytes())?;
             }
         }
         // set link register to dummy return address
@@ -386,7 +364,7 @@ pub fn setup_remote_call(
 
             for i in (REG_ARGS_COUNT..args.len()).rev() {
                 let arg_bytes = (args[i] as u32).to_ne_bytes();
-                sp = push_stack(pid, sp, &arg_bytes, false)?;
+                sp = push_stack(pid, sp, &arg_bytes)?;
             }
         }
 
@@ -429,12 +407,8 @@ fn wait_remote_call(pid: Pid, return_addr: usize) -> Result<usize> {
                 return_addr, regs.rip
             );
             match nix::sys::ptrace::getsiginfo(pid) {
-                Ok(info) => {
-                    error!("remote call stopped with signal info {:?}", info);
-                }
-                Err(e) => {
-                    error!("failed to get remote call signal info: {}", e);
-                }
+                Ok(info) => error!("remote call stopped with signal info {:?}", info),
+                Err(e) => error!("failed to get remote call signal info: {}", e),
             }
             bail!("Remote call did not reach expected function address");
         }
@@ -449,12 +423,8 @@ fn wait_remote_call(pid: Pid, return_addr: usize) -> Result<usize> {
                 return_addr, regs.eip
             );
             match nix::sys::ptrace::getsiginfo(pid) {
-                Ok(info) => {
-                    error!("remote call stopped with signal info {:?}", info);
-                }
-                Err(e) => {
-                    error!("failed to get remote call signal info: {}", e);
-                }
+                Ok(info) => error!("remote call stopped with signal info {:?}", info),
+                Err(e) => error!("failed to get remote call signal info: {}", e),
             }
             bail!("Remote call did not reach expected function address");
         }
@@ -470,12 +440,8 @@ fn wait_remote_call(pid: Pid, return_addr: usize) -> Result<usize> {
                 return_addr, regs.pc
             );
             match nix::sys::ptrace::getsiginfo(pid) {
-                Ok(info) => {
-                    error!("remote call stopped with signal info {:?}", info);
-                }
-                Err(e) => {
-                    error!("failed to get remote call signal info: {}", e);
-                }
+                Ok(info) => error!("remote call stopped with signal info {:?}", info),
+                Err(e) => error!("failed to get remote call signal info: {}", e),
             }
             bail!("Remote call did not reach expected function address");
         }
@@ -490,12 +456,8 @@ fn wait_remote_call(pid: Pid, return_addr: usize) -> Result<usize> {
                 return_addr, regs.uregs[15]
             );
             match nix::sys::ptrace::getsiginfo(pid) {
-                Ok(info) => {
-                    error!("remote call stopped with signal info {:?}", info);
-                }
-                Err(e) => {
-                    error!("failed to get remote call signal info: {}", e);
-                }
+                Ok(info) => error!("remote call stopped with signal info {:?}", info),
+                Err(e) => error!("failed to get remote call signal info: {}", e),
             }
             bail!("Remote call did not reach expected function address");
         }

@@ -35,8 +35,7 @@ pub fn backup_file_with_reason(
             .with_context(|| format!("failed to remove stale backup {}", backup.display()))?;
     }
 
-    let rename_result = fs::rename(path, backup);
-    if let Err(rename_error) = rename_result {
+    if let Err(rename_error) = fs::rename(path, backup) {
         if !allow_copy_fallback {
             return Err(rename_error)
                 .with_context(|| format!("failed to move invalid file to {}", backup.display()));

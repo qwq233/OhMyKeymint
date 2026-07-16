@@ -1,6 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::FromRawFd;
+use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::{
     ffi::CString,
@@ -10,11 +9,6 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use log::debug;
 use lsplt_rs::MapInfo;
-use nix::{
-    dir::{Dir, Type},
-    fcntl::OFlag,
-    sys::stat::Mode,
-};
 use sha2::{Digest, Sha256};
 
 const ELF_CLASS_32: u8 = 1;
@@ -48,8 +42,7 @@ pub fn current_exe_path() -> Result<PathBuf> {
 }
 
 pub fn current_exe_identity() -> Result<ExecutableIdentity> {
-    let path = current_exe_path()?;
-    executable_identity(&path)
+    executable_identity(&current_exe_path()?)
 }
 
 pub fn executable_identity(path: &Path) -> Result<ExecutableIdentity> {
@@ -79,7 +72,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex_encode(&sha256.finalize()))
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -117,34 +110,6 @@ pub fn describe_elf(path: &Path) -> Result<String> {
     };
 
     Ok(format!("{class} {arch} (e_machine={machine})"))
-}
-
-pub fn create_memfd_from_path(path: &Path, name: &str) -> Result<File> {
-    let memfd_name = CString::new(name).context("Invalid memfd name")?;
-    let raw_fd = unsafe {
-        libc::syscall(
-            libc::SYS_memfd_create as libc::c_long,
-            memfd_name.as_ptr(),
-            libc::MFD_CLOEXEC as libc::c_uint,
-        )
-    } as libc::c_int;
-    if raw_fd < 0 {
-        return Err(anyhow!(
-            "memfd_create failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    let mut input = File::open(path)
-        .with_context(|| format!("Failed to open payload image {}", path.display()))?;
-    let mut memfd = unsafe { File::from_raw_fd(raw_fd) };
-    std::io::copy(&mut input, &mut memfd)
-        .with_context(|| format!("Failed to copy payload image {}", path.display()))?;
-    memfd.flush().context("Failed to flush memfd payload")?;
-    memfd
-        .seek(SeekFrom::Start(0))
-        .context("Failed to rewind memfd payload")?;
-    Ok(memfd)
 }
 
 // Hook stuff
@@ -187,10 +152,9 @@ pub fn resolve_func_addr(
     lib_name: &str,
     name: &str,
 ) -> Result<usize> {
-    let lib = unsafe {
-        let lib = CString::new(lib_name).map_err(|_| anyhow!("Invalid library name"))?;
-        libc::dlopen(lib.as_ptr(), libc::RTLD_NOW)
-    };
+    let lib_name_c = CString::new(lib_name).map_err(|_| anyhow!("Invalid library name"))?;
+    let name_c = CString::new(name).map_err(|_| anyhow!("Invalid function name"))?;
+    let lib = unsafe { libc::dlopen(lib_name_c.as_ptr(), libc::RTLD_NOW) };
     if lib.is_null() {
         return Err(anyhow!(
             "Failed to open library '{}': {}",
@@ -199,29 +163,24 @@ pub fn resolve_func_addr(
         ));
     }
 
-    let symbol = unsafe {
-        let name = CString::new(name).map_err(|_| anyhow!("Invalid function name"))?;
-        libc::dlsym(lib, name.as_ptr())
-    };
-    if symbol.is_null() {
+    let symbol = unsafe { libc::dlsym(lib, name_c.as_ptr()) };
+    let symbol_error = symbol.is_null().then(std::io::Error::last_os_error);
+    unsafe {
+        libc::dlclose(lib);
+    }
+    if let Some(error) = symbol_error {
         return Err(anyhow!(
             "Failed to find symbol '{}' in library '{}': {}",
             name,
             lib_name,
-            std::io::Error::last_os_error()
+            error
         ));
     }
 
-    unsafe {
-        libc::dlclose(lib);
-    }
-
     let local_addr = resolve_base_addr(local, lib_name)
-        .context(format!("failed to find local base for module {}", lib_name))?;
-    let remote_addr = resolve_base_addr(remote, lib_name).context(format!(
-        "failed to find remote base for module {}",
-        lib_name
-    ))?;
+        .with_context(|| format!("failed to find local base for module {}", lib_name))?;
+    let remote_addr = resolve_base_addr(remote, lib_name)
+        .with_context(|| format!("failed to find remote base for module {}", lib_name))?;
 
     let offset = (symbol as usize)
         .checked_sub(local_addr)
@@ -238,26 +197,16 @@ pub fn resolve_func_addr(
 }
 
 pub fn find_process_by_name(target_name: &str) -> Result<(i32, PathBuf)> {
-    let mut proc_dir = Dir::open("/proc", OFlag::O_RDONLY | OFlag::O_DIRECTORY, Mode::empty())?;
-
-    for entry_result in proc_dir.iter() {
-        let entry = match entry_result {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-
-        if entry.file_type() != Some(Type::Directory) {
+    for entry in std::fs::read_dir("/proc")?.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
 
         let file_name = entry.file_name();
-
-        let pid_str = file_name.to_str().unwrap();
-        if !pid_str.chars().all(char::is_numeric) {
+        let Some(pid) = file_name.to_str().and_then(|name| name.parse::<i32>().ok()) else {
             continue;
-        }
-
-        let path = PathBuf::from("/proc").join(pid_str);
+        };
+        let path = entry.path();
 
         let process_name = match std::fs::read(path.join("cmdline")) {
             Ok(cmdline) => {
@@ -282,7 +231,6 @@ pub fn find_process_by_name(target_name: &str) -> Result<(i32, PathBuf)> {
             continue;
         }
 
-        let pid = pid_str.parse::<i32>().unwrap();
         let target = std::fs::read_link(path.join("exe"))
             .unwrap_or_else(|_| PathBuf::from(format!("/proc/{pid}/exe")));
         debug!("found target executable path={:?} pid={}", target, pid);
@@ -295,17 +243,4 @@ pub fn find_process_by_name(target_name: &str) -> Result<(i32, PathBuf)> {
         format!("Process '{}' not found", target_name),
     ))
     .context("")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::hex_encode;
-
-    #[test]
-    fn hex_encode_uses_lowercase_fixed_width_bytes() {
-        assert_eq!(
-            hex_encode(&[0x00, 0x01, 0x0f, 0x10, 0xab, 0xff]),
-            "00010f10abff"
-        );
-    }
 }

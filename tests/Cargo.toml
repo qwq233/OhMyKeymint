@@ -8,9 +8,6 @@ authors = ["David Drysdale <drysdale@google.com>"]
 edition = "2021"
 license = "Apache-2.0"
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(soong)'] }
-
 [dependencies]
 ciborium = { version = "0.2.2", default-features = false }
 env_logger = "0.11.10"
@@ -21,3 +18,6 @@ kmr-ta = { path = "../ta", version = "0.1.0" }
 kmr-wire = { path = "../wire", version = "0.1.0" }
 log = "^0.4"
 x509-cert = "0.2.5"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(soong)'] }

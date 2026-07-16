@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex};
 
 use crate::android::system::keystore2::Domain::Domain;
 use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
@@ -15,53 +15,39 @@ pub struct SecurityLevelTargetInfo {
     pub source_method: ServiceMethod,
 }
 
-static SECURITY_LEVEL_TARGETS: OnceLock<
+type TrackedDescriptorKey = (Domain, i64);
+type GrantTargetKey = (Domain, i64, Option<String>, Option<Vec<u8>>, i32);
+
+static SECURITY_LEVEL_TARGETS: LazyLock<
     Mutex<HashMap<LocalBinderTarget, SecurityLevelTargetInfo>>,
-> = OnceLock::new();
-static KEY_DESCRIPTOR_ROUTE_TARGETS: OnceLock<Mutex<HashMap<String, RouteTarget>>> =
-    OnceLock::new();
-static GRANT_DESCRIPTORS_BY_TARGET: OnceLock<Mutex<HashMap<String, KeyDescriptor>>> =
-    OnceLock::new();
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static KEY_DESCRIPTOR_ROUTE_TARGETS: LazyLock<Mutex<HashMap<TrackedDescriptorKey, RouteTarget>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static GRANT_DESCRIPTORS_BY_TARGET: LazyLock<Mutex<HashMap<GrantTargetKey, KeyDescriptor>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 #[cfg(test)]
 static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-fn security_level_targets() -> &'static Mutex<HashMap<LocalBinderTarget, SecurityLevelTargetInfo>> {
-    SECURITY_LEVEL_TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
+fn tracked_descriptor_key(descriptor: &KeyDescriptor) -> Option<TrackedDescriptorKey> {
+    matches!(descriptor.domain, Domain::KEY_ID | Domain::GRANT)
+        .then_some((descriptor.domain, descriptor.nspace))
 }
 
-fn key_descriptor_route_targets() -> &'static Mutex<HashMap<String, RouteTarget>> {
-    KEY_DESCRIPTOR_ROUTE_TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn grant_descriptors_by_target() -> &'static Mutex<HashMap<String, KeyDescriptor>> {
-    GRANT_DESCRIPTORS_BY_TARGET.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn tracked_descriptor_key(descriptor: &KeyDescriptor) -> Option<String> {
-    match descriptor.domain {
-        Domain::KEY_ID | Domain::GRANT => {
-            Some(format!("{:?}:{}", descriptor.domain, descriptor.nspace))
-        }
-        _ => None,
-    }
-}
-
-fn descriptor_identity_key(descriptor: &KeyDescriptor) -> String {
-    format!(
-        "{:?}:{}:{:?}:{:?}",
-        descriptor.domain, descriptor.nspace, descriptor.alias, descriptor.blob
+fn grant_target_key(target: &KeyDescriptor, grantee_uid: i32) -> GrantTargetKey {
+    (
+        target.domain,
+        target.nspace,
+        target.alias.clone(),
+        target.blob.clone(),
+        grantee_uid,
     )
-}
-
-fn grant_target_key(target: &KeyDescriptor, grantee_uid: i32) -> String {
-    format!("{}:{}", descriptor_identity_key(target), grantee_uid)
 }
 
 pub(crate) fn remember_security_level_target(
     target: LocalBinderTarget,
     info: SecurityLevelTargetInfo,
 ) {
-    security_level_targets()
+    SECURITY_LEVEL_TARGETS
         .lock()
         .expect("security level target map poisoned")
         .insert(target, info);
@@ -70,7 +56,7 @@ pub(crate) fn remember_security_level_target(
 pub(crate) fn lookup_security_level_target(
     target: LocalBinderTarget,
 ) -> Option<SecurityLevelTargetInfo> {
-    security_level_targets()
+    SECURITY_LEVEL_TARGETS
         .lock()
         .expect("security level target map poisoned")
         .get(&target)
@@ -81,7 +67,7 @@ pub fn remember_key_descriptor_route(descriptor: &KeyDescriptor, route: RouteTar
     let Some(key) = tracked_descriptor_key(descriptor) else {
         return;
     };
-    key_descriptor_route_targets()
+    KEY_DESCRIPTOR_ROUTE_TARGETS
         .lock()
         .expect("key-descriptor route map poisoned")
         .insert(key, route);
@@ -95,11 +81,11 @@ pub fn forget_key_descriptor_route(descriptor: &KeyDescriptor) {
     let Some(key) = tracked_descriptor_key(descriptor) else {
         return;
     };
-    key_descriptor_route_targets()
+    KEY_DESCRIPTOR_ROUTE_TARGETS
         .lock()
         .expect("key-descriptor route map poisoned")
         .remove(&key);
-    grant_descriptors_by_target()
+    GRANT_DESCRIPTORS_BY_TARGET
         .lock()
         .expect("grant target map poisoned")
         .retain(|_, grant| grant != descriptor);
@@ -107,7 +93,7 @@ pub fn forget_key_descriptor_route(descriptor: &KeyDescriptor) {
 
 pub fn lookup_key_descriptor_route(descriptor: &KeyDescriptor) -> Option<RouteTarget> {
     let key = tracked_descriptor_key(descriptor)?;
-    key_descriptor_route_targets()
+    KEY_DESCRIPTOR_ROUTE_TARGETS
         .lock()
         .expect("key-descriptor route map poisoned")
         .get(&key)
@@ -129,14 +115,14 @@ pub fn remember_grant_descriptor_for_ungrant(
     if tracked_descriptor_key(grant).is_none() {
         return;
     }
-    grant_descriptors_by_target()
+    GRANT_DESCRIPTORS_BY_TARGET
         .lock()
         .expect("grant target map poisoned")
         .insert(grant_target_key(target, grantee_uid), grant.clone());
 }
 
 pub fn retire_grant_descriptor_after_ungrant(target: &KeyDescriptor, grantee_uid: i32) {
-    let grant = grant_descriptors_by_target()
+    let grant = GRANT_DESCRIPTORS_BY_TARGET
         .lock()
         .expect("grant target map poisoned")
         .remove(&grant_target_key(target, grantee_uid));
@@ -150,15 +136,15 @@ pub fn retire_grant_descriptor_after_ungrant(target: &KeyDescriptor, grantee_uid
 
 #[cfg(test)]
 pub fn clear_state_for_tests() {
-    security_level_targets()
+    SECURITY_LEVEL_TARGETS
         .lock()
         .expect("security level target map poisoned")
         .clear();
-    key_descriptor_route_targets()
+    KEY_DESCRIPTOR_ROUTE_TARGETS
         .lock()
         .expect("key-descriptor route map poisoned")
         .clear();
-    grant_descriptors_by_target()
+    GRANT_DESCRIPTORS_BY_TARGET
         .lock()
         .expect("grant target map poisoned")
         .clear();
@@ -187,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn tracks_key_id_and_grant_descriptors() {
+    fn key_route_tracking_lifecycle() {
         let _guard = state_test_guard();
         let key_id = descriptor(Domain::KEY_ID, 11);
         let grant = descriptor(Domain::GRANT, 22);
@@ -200,30 +186,37 @@ mod tests {
         assert_eq!(lookup_key_descriptor_route(&key_id), Some(RouteTarget::Omk));
         assert_eq!(lookup_key_descriptor_route(&grant), Some(RouteTarget::Omk));
         assert_eq!(lookup_key_descriptor_route(&app), None);
-    }
+        let mut equivalent_key_id = key_id.clone();
+        equivalent_key_id.alias = Some("ignored".to_string());
+        equivalent_key_id.blob = Some(vec![1, 2, 3]);
+        assert_eq!(
+            lookup_key_descriptor_route(&equivalent_key_id),
+            Some(RouteTarget::Omk)
+        );
 
-    #[test]
-    fn forget_removes_grant_descriptor_route() {
-        let _guard = state_test_guard();
         let surfaced = descriptor(Domain::GRANT, 1);
 
         remember_key_descriptor_route(&surfaced, RouteTarget::Omk);
         forget_key_descriptor_route(&surfaced);
 
         assert_eq!(lookup_key_descriptor_route(&surfaced), None);
-    }
 
-    #[test]
-    fn ungrant_target_retires_remembered_grant_descriptor() {
-        let _guard = state_test_guard();
         let target = KeyDescriptor {
             domain: Domain::APP,
             nspace: 10001,
             alias: Some("alpha".to_string()),
             blob: None,
         };
-        let surfaced = descriptor(Domain::GRANT, 1);
+        let mut alias_target = target.clone();
+        alias_target.alias = Some("beta".to_string());
+        let mut blob_target = target.clone();
+        blob_target.blob = Some(vec![1, 2, 3]);
+        let target_key = grant_target_key(&target, 10002);
+        assert_ne!(target_key, grant_target_key(&alias_target, 10002));
+        assert_ne!(target_key, grant_target_key(&blob_target, 10002));
+        assert_ne!(target_key, grant_target_key(&target, 10003));
 
+        let surfaced = descriptor(Domain::GRANT, 1);
         remember_key_descriptor_route(&surfaced, RouteTarget::Omk);
         remember_grant_descriptor_for_ungrant(&target, 10002, &surfaced);
         retire_grant_descriptor_after_ungrant(&target, 10002);
@@ -232,5 +225,6 @@ mod tests {
             lookup_key_descriptor_route(&surfaced),
             Some(RouteTarget::System)
         );
+        clear_state_for_tests();
     }
 }

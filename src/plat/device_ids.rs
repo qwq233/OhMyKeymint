@@ -254,6 +254,14 @@ fn classify_identifier(raw: &str, source: String) -> Option<IdentifierCandidate>
         return None;
     }
 
+    if value.len() == 14 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Some(IdentifierCandidate {
+            kind: IdentifierKind::Meid,
+            value: value.to_ascii_uppercase(),
+            source,
+        });
+    }
+
     if value.bytes().all(|byte| byte.is_ascii_digit()) {
         let kind = match value.len() {
             15 | 16 => IdentifierKind::Imei,
@@ -263,14 +271,6 @@ fn classify_identifier(raw: &str, source: String) -> Option<IdentifierCandidate>
         return Some(IdentifierCandidate {
             kind,
             value: value.to_string(),
-            source,
-        });
-    }
-
-    if value.len() == 14 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Some(IdentifierCandidate {
-            kind: IdentifierKind::Meid,
-            value: value.to_ascii_uppercase(),
             source,
         });
     }
@@ -286,23 +286,15 @@ fn select_property_candidate<'a, I>(
 where
     I: IntoIterator<Item = (&'a str, String)>,
 {
-    for (property, raw) in candidates {
-        let Some(candidate) = classify_identifier(&raw, property.to_string()) else {
-            continue;
-        };
-        if candidate.kind != expected_kind {
-            continue;
-        }
-        if excluded_values
-            .iter()
-            .any(|existing| existing == &candidate.value)
-        {
-            continue;
-        }
-        return Some(candidate);
-    }
-
-    None
+    candidates
+        .into_iter()
+        .filter_map(|(property, raw)| classify_identifier(&raw, property.to_string()))
+        .find(|candidate| {
+            candidate.kind == expected_kind
+                && !excluded_values
+                    .iter()
+                    .any(|existing| existing == &candidate.value)
+        })
 }
 
 fn needs_backfill(value: &str) -> bool {
@@ -486,7 +478,6 @@ fn telephony_transactions_for(android_major: Option<i32>) -> TelephonyTransactio
         Some(version) if version <= 12 => (149, Some(151)),
         Some(13) => (145, Some(147)),
         Some(14) => (148, Some(151)),
-        Some(15 | 16) | None => (147, Some(150)),
         Some(version) if version >= 17 => (132, None),
         _ => (147, Some(150)),
     };
@@ -498,28 +489,11 @@ fn telephony_transactions_for(android_major: Option<i32>) -> TelephonyTransactio
 }
 
 fn normalize_imei_candidate(raw: &str, source: String) -> Option<IdentifierCandidate> {
-    let value = raw.trim();
-    if matches!(value.len(), 15 | 16) && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Some(IdentifierCandidate {
-            kind: IdentifierKind::Imei,
-            value: value.to_string(),
-            source,
-        });
-    }
-
-    None
+    classify_identifier(raw, source).filter(|candidate| candidate.kind == IdentifierKind::Imei)
 }
 
 fn normalize_meid_candidate(raw: &str, source: String) -> Option<IdentifierCandidate> {
     let value = raw.trim();
-    if value.len() == 18 && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Some(IdentifierCandidate {
-            kind: IdentifierKind::Meid,
-            value: value.to_string(),
-            source,
-        });
-    }
-
     if value.len() == 14 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Some(IdentifierCandidate {
             kind: IdentifierKind::Meid,
@@ -527,8 +501,7 @@ fn normalize_meid_candidate(raw: &str, source: String) -> Option<IdentifierCandi
             source,
         });
     }
-
-    None
+    classify_identifier(value, source).filter(|candidate| candidate.kind == IdentifierKind::Meid)
 }
 
 #[cfg(test)]
@@ -564,6 +537,10 @@ mod tests {
         assert_eq!(meid_hex.kind, IdentifierKind::Meid);
         assert_eq!(meid_hex.value, "A100000927F62B");
 
+        let meid_numeric_hex = classify_identifier("12345678901234", "binder".to_string()).unwrap();
+        assert_eq!(meid_numeric_hex.kind, IdentifierKind::Meid);
+        assert_eq!(meid_numeric_hex.value, "12345678901234");
+
         let meid_dec = classify_identifier("990012345678901234", "binder".to_string()).unwrap();
         assert_eq!(meid_dec.kind, IdentifierKind::Meid);
         assert_eq!(meid_dec.value, "990012345678901234");
@@ -571,7 +548,7 @@ mod tests {
 
     #[test]
     fn classify_identifier_rejects_invalid_shapes() {
-        assert!(classify_identifier("12345678901234", "binder".to_string()).is_none());
+        assert!(classify_identifier("1234567890123", "binder".to_string()).is_none());
         assert!(classify_identifier("3552-3193-7352-445", "binder".to_string()).is_none());
         assert!(classify_identifier("not-an-id", "binder".to_string()).is_none());
     }
@@ -585,6 +562,7 @@ mod tests {
         let meid = normalize_meid_candidate("a100000927f62b", "phone".to_string()).unwrap();
         assert_eq!(meid.kind, IdentifierKind::Meid);
         assert_eq!(meid.value, "A100000927F62B");
+        assert!(normalize_meid_candidate("12345678901234", "phone".to_string()).is_some());
 
         assert!(normalize_imei_candidate("A100000927F62B", "phone".to_string()).is_none());
         assert!(normalize_meid_candidate("355231937352445", "phone".to_string()).is_none());

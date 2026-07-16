@@ -23,12 +23,6 @@ log = "^0.4"
 anyhow = "1.0.102"
 thiserror = "2.0.18"
 nix = { version = "0.31.2", features = ["mman"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-openssl = "0.10.76"
-ffi = { package = "openssl-sys", version = "0.9.112", features = ["bindgen"] }
-
-[target.'cfg(target_os = "android")'.dependencies]
 openssl = { package = "openssl", version = "0.10.76", features = ["unstable_boringssl", "bindgen"] }
 ffi = { package = "openssl-sys", version = "0.9.112", features = ["bindgen"] }
 bssl_sys = { package = "bssl-sys", version = "0.1.0" }

@@ -35,13 +35,13 @@ pub fn extract_verified_boot_hash_from_leaf_certificate(leaf: &[u8]) -> Result<[
 }
 
 pub fn extract_attestation_challenge_from_attestation_extension(bytes: &[u8]) -> Result<Vec<u8>> {
-    let parsed = parse_attestation_extension(bytes)?;
-    Ok(parsed.challenge.to_vec())
+    let (challenge, _) = parse_attestation_extension(bytes)?;
+    Ok(challenge.to_vec())
 }
 
 pub fn extract_verified_boot_hash_from_attestation_extension(bytes: &[u8]) -> Result<[u8; 32]> {
-    let parsed = parse_attestation_extension(bytes)?;
-    extract_verified_boot_hash_from_authorization_list(parsed.hardware_enforced)
+    let (_, hardware_enforced) = parse_attestation_extension(bytes)?;
+    extract_verified_boot_hash_from_authorization_list(hardware_enforced)
 }
 
 pub fn parse_tlv(input: &[u8]) -> Result<(Tlv<'_>, &[u8])> {
@@ -148,12 +148,7 @@ fn find_attestation_extension(certificate: &Certificate) -> Result<&[u8]> {
     Ok(extension.extn_value.as_bytes())
 }
 
-struct ParsedAttestation<'a> {
-    challenge: &'a [u8],
-    hardware_enforced: &'a [u8],
-}
-
-fn parse_attestation_extension(bytes: &[u8]) -> Result<ParsedAttestation<'_>> {
+fn parse_attestation_extension(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
     let (top_level, rest) = parse_tlv(bytes)?;
     ensure_sequence(top_level, "attestation extension")?;
     if !rest.is_empty() {
@@ -182,10 +177,7 @@ fn parse_attestation_extension(bytes: &[u8]) -> Result<ParsedAttestation<'_>> {
         bail!("unexpected trailing data after hardwareEnforced");
     }
 
-    Ok(ParsedAttestation {
-        challenge: challenge.value,
-        hardware_enforced: hardware_enforced.value,
-    })
+    Ok((challenge.value, hardware_enforced.value))
 }
 
 fn extract_verified_boot_hash_from_authorization_list(mut bytes: &[u8]) -> Result<[u8; 32]> {

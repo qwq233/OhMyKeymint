@@ -91,15 +91,12 @@ fn process(filename: &str, hex: bool) {
         keyblob.sw_enforced
     );
 
-    #[cfg(soong)]
-    {
-        // Also round-trip the keyblob to binary and expect to get back where we started.
-        let regenerated_data = keyblob.serialize(&hmac, &hidden).unwrap();
-        assert_eq!(
-            &regenerated_data[..regenerated_data.len()],
-            &data[..data.len()]
-        );
-    }
+    // Also round-trip the keyblob to binary and expect to get back where we started.
+    let regenerated_data = keyblob.serialize(&hmac, &hidden).unwrap();
+    assert_eq!(
+        &regenerated_data[..regenerated_data.len()],
+        &data[..data.len()]
+    );
 
     // Create a PlaintextKeyBlob from the data.
     let mut combined = keyblob.hw_enforced.clone();

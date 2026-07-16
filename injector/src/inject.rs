@@ -1,6 +1,6 @@
 use std::ffi::{c_void, CString};
 use std::mem::{offset_of, size_of};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -28,16 +28,6 @@ struct android_dlextinfo {
     library_fd: i32,
     library_fd_offset: i64,
     library_namespace: *mut c_void,
-}
-
-struct RawFdGuard(RawFd);
-
-impl Drop for RawFdGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::close(self.0);
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -109,32 +99,12 @@ fn build_local_abstract_sockaddr(magic_bytes: &[u8]) -> Result<libc::sockaddr_un
     Ok(local_dest_addr)
 }
 
-fn align_down(value: usize, alignment: usize) -> Result<usize> {
-    if alignment == 0 || !alignment.is_power_of_two() {
-        bail!("invalid alignment: {}", alignment);
-    }
-    Ok(value & !(alignment - 1))
-}
-
-fn format_remote_payload_identifier(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-
-    let mut identifier = String::with_capacity(3 + (bytes.len() * 2) + 3);
-    identifier.push_str("lib");
-    for byte in bytes {
-        identifier.push(HEX[(byte >> 4) as usize] as char);
-        identifier.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    identifier.push_str(".so");
-    identifier
-}
-
 fn generate_remote_payload_identifier() -> Result<String> {
     let mut random = [0u8; 16];
     let mut rng = rand::rngs::SysRng;
     rng.try_fill_bytes(&mut random)
         .context("failed to fill payload identifier bytes from SysRng")?;
-    Ok(format_remote_payload_identifier(&random))
+    Ok(format!("lib{}.so", utils::hex_encode(&random)))
 }
 
 fn generate_fd_handoff_name() -> Result<[u8; 16]> {
@@ -158,14 +128,6 @@ fn remote_c_int_result(value: usize) -> i32 {
     value as u32 as i32
 }
 
-fn cleanup_error_message(errors: &[anyhow::Error]) -> String {
-    errors
-        .iter()
-        .map(|error| format!("{error:#}"))
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
 fn finish_injection_result(result: Result<()>, cleanup_errors: Vec<anyhow::Error>) -> Result<()> {
     if cleanup_errors.is_empty() {
         return result;
@@ -175,7 +137,11 @@ fn finish_injection_result(result: Result<()>, cleanup_errors: Vec<anyhow::Error
         error!("injection cleanup failed: {cleanup_error:#}");
     }
 
-    let cleanup_message = cleanup_error_message(&cleanup_errors);
+    let cleanup_message = cleanup_errors
+        .iter()
+        .map(|error| format!("{error:#}"))
+        .collect::<Vec<_>>()
+        .join("; ");
     match result {
         Ok(()) => Err(anyhow!("injection cleanup failed: {cleanup_message}")),
         Err(error) => Err(error.context(format!(
@@ -214,13 +180,16 @@ where
     let path_c = CString::new(path.as_os_str().as_encoded_bytes())
         .with_context(|| format!("Invalid remote payload path {}", path.display()))?;
     let remote_path_ptr = push_to_remote_stack(path_c.as_bytes_with_nul())?;
-    let args = vec![
-        remote_path_ptr,
-        (libc::O_RDONLY | libc::O_CLOEXEC) as usize,
-        0,
-    ];
-    let remote_lib_fd =
-        remote_c_int_result(sys::remote_call(pid, open_addr, libc_return_addr, &args)?);
+    let remote_lib_fd = remote_c_int_result(sys::remote_call(
+        pid,
+        open_addr,
+        libc_return_addr,
+        &[
+            remote_path_ptr,
+            (libc::O_RDONLY | libc::O_CLOEXEC) as usize,
+            0,
+        ],
+    )?);
     if remote_lib_fd == -1 {
         let err = get_remote_errno()?;
         bail!(
@@ -448,18 +417,17 @@ where
 {
     let enable: libc::c_int = 1;
     let remote_enable_ptr = push_to_remote_stack(&enable.to_ne_bytes())?;
-    let args = vec![
-        remote_socket as usize,
-        libc::SOL_SOCKET as usize,
-        libc::SO_PASSCRED as usize,
-        remote_enable_ptr,
-        size_of::<libc::c_int>(),
-    ];
     let result = remote_c_int_result(sys::remote_call(
         pid,
         addrs.setsockopt,
         addrs.libc_return,
-        &args,
+        &[
+            remote_socket as usize,
+            libc::SOL_SOCKET as usize,
+            libc::SO_PASSCRED as usize,
+            remote_enable_ptr,
+            size_of::<libc::c_int>(),
+        ],
     )?);
     if result == -1 {
         let err = get_remote_errno()?;
@@ -491,18 +459,17 @@ where
             std::io::Error::last_os_error()
         );
     }
-    let _local_sock_guard = RawFdGuard(local_socket);
+    let local_socket = unsafe { OwnedFd::from_raw_fd(local_socket) };
 
-    let args = vec![
-        libc::AF_UNIX as usize,
-        (libc::SOCK_DGRAM | libc::SOCK_CLOEXEC) as usize,
-        0,
-    ];
     let remote_socket = remote_c_int_result(sys::remote_call(
         pid,
         addrs.socket,
         addrs.libc_return,
-        &args,
+        &[
+            libc::AF_UNIX as usize,
+            (libc::SOCK_DGRAM | libc::SOCK_CLOEXEC) as usize,
+            0,
+        ],
     )?);
     if remote_socket == -1 {
         let err = get_remote_errno()?;
@@ -527,9 +494,12 @@ where
     );
 
     let remote_addr_ptr = push_to_remote_stack(&addr_bytes)?;
-    let args = vec![remote_socket as usize, remote_addr_ptr, addr_len];
-    let bind_res =
-        remote_c_int_result(sys::remote_call(pid, addrs.bind, addrs.libc_return, &args)?);
+    let bind_res = remote_c_int_result(sys::remote_call(
+        pid,
+        addrs.bind,
+        addrs.libc_return,
+        &[remote_socket as usize, remote_addr_ptr, addr_len],
+    )?);
     if bind_res == -1 {
         let err = get_remote_errno()?;
         close_remote(remote_socket)?;
@@ -611,7 +581,7 @@ where
         *(libc::CMSG_DATA(cmsg) as *mut libc::c_int) = local_fd;
     }
 
-    let send_res = unsafe { libc::sendmsg(local_socket, &local_hdr, 0) };
+    let send_res = unsafe { libc::sendmsg(local_socket.as_raw_fd(), &local_hdr, 0) };
     if send_res == -1 {
         let send_error = std::io::Error::last_os_error();
         if let Err(cancel_error) = sys::remote_cancel_call(pid, recvmsg_call) {
@@ -739,8 +709,7 @@ fn wait_for_rpc_socket() -> Result<()> {
 pub fn inject_library(pid: Pid) -> Result<()> {
     wait_for_rpc_socket()?;
 
-    let self_path =
-        std::fs::read_link("/proc/self/exe").context("Failed to read link /proc/self/exe")?;
+    let self_path = utils::current_exe_path()?;
 
     nix::sys::ptrace::attach(pid).with_context(|| format!("Failed to attach to process {pid}"))?;
     debug!("attached to process {}", pid);
@@ -835,13 +804,13 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         let tentative_sp = sp
             .checked_sub(data.len())
             .context("stack underflow while reserving remote storage")?;
-        let new_sp = align_down(tentative_sp, 16)?;
+        let new_sp = tentative_sp & !0xf;
         let write_base = new_sp
             .checked_add(data.len())
             .context("aligned remote stack write overflow")?;
         // Keep the remote scratch allocations 16-byte aligned like the reference
         // injector. Ancillary socket control buffers are sensitive to layout.
-        let new_sp = sys::push_stack(pid, write_base, data, false)?;
+        let new_sp = sys::push_stack(pid, write_base, data)?;
 
         // Update local regs copy
         #[cfg(target_arch = "x86_64")]
@@ -922,8 +891,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     };
 
     let close_remote = |fd: i32| -> Result<()> {
-        let args = vec![fd as usize];
-        let close_res = sys::remote_call(pid, close_addr, libc_return_addr, &args)?;
+        let close_res = sys::remote_call(pid, close_addr, libc_return_addr, &[fd as usize])?;
         if close_res != 0 {
             let err = get_remote_errno().unwrap_or(0);
             bail!(
@@ -1016,8 +984,12 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 
     // Call dlopen
     // args: filename, flags (RTLD_NOW=2), extinfo
-    let args = vec![remote_path_ptr, libc::RTLD_NOW as usize, remote_info_ptr];
-    let handle = sys::remote_call(pid, dlopen_addr, libc_return_addr, &args)?;
+    let handle = sys::remote_call(
+        pid,
+        dlopen_addr,
+        libc_return_addr,
+        &[remote_path_ptr, libc::RTLD_NOW as usize, remote_info_ptr],
+    )?;
 
     debug!(
         "Remote dlopen handle: 0x{:x} using identifier={} fd={}",
@@ -1056,8 +1028,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         injector_entry
     );
 
-    let args = vec![handle];
-    let entry_result = sys::remote_call(pid, injector_entry, libc_return_addr, &args)?;
+    let entry_result = sys::remote_call(pid, injector_entry, libc_return_addr, &[handle])?;
     if entry_result == 0 {
         bail!("Remote entry returned false");
     }
@@ -1077,25 +1048,6 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     use kmr_common::consts::AID_SYSTEM;
-
-    #[test]
-    fn formatted_payload_identifier_looks_like_shared_library_name() {
-        let identifier =
-            format_remote_payload_identifier(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
-
-        assert_eq!(identifier, "lib0123456789abcdef.so");
-    }
-
-    #[test]
-    fn generated_payload_identifier_has_expected_shape() {
-        let identifier = generate_remote_payload_identifier().expect("identifier should generate");
-        assert!(identifier.starts_with("lib"));
-        assert!(identifier.ends_with(".so"));
-        assert_eq!(identifier.len(), 38);
-        assert!(identifier[3..identifier.len() - 3]
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
-    }
 
     #[test]
     fn remote_c_int_result_interprets_low_32_bits_as_signed() {

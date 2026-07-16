@@ -41,6 +41,7 @@ use x509_cert::der::asn1::{
     Any as X509Any, BitString as X509BitString, GeneralizedTime as X509GeneralizedTime,
     OctetString as X509OctetString, UtcTime as X509UtcTime,
 };
+use x509_cert::der::oid::AssociatedOid as X509AssociatedOid;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::{
     AlgorithmIdentifierOwned as X509AlgorithmIdentifierOwned,
@@ -58,9 +59,6 @@ use x509_cert::{
 /// OID value for the Android Attestation extension.
 pub const ATTESTATION_EXTENSION_OID: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.1.17");
-const X509_KEY_USAGE_OID: X509ObjectIdentifier = X509ObjectIdentifier::new_unwrap("2.5.29.15");
-const X509_BASIC_CONSTRAINTS_OID: X509ObjectIdentifier =
-    X509ObjectIdentifier::new_unwrap("2.5.29.19");
 const X509_ATTESTATION_EXTENSION_OID: X509ObjectIdentifier =
     X509ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.1.17");
 
@@ -152,7 +150,7 @@ pub(crate) fn tbs_certificate<'a>(
 
     // Build certificate extensions
     let key_usage_extension = Extension {
-        extn_id: X509_KEY_USAGE_OID,
+        extn_id: KeyUsage::OID,
         critical: true,
         extn_value: X509OctetString::new(key_usage_ext_bits)
             .map_err(|e| x509_der_error(e, format_args!("failed to build OctetString")))?,
@@ -163,7 +161,7 @@ pub(crate) fn tbs_certificate<'a>(
 
     if let Some(basic_constraint_ext_val) = basic_constraint_ext_val {
         let basic_constraint_ext = Extension {
-            extn_id: X509_BASIC_CONSTRAINTS_OID,
+            extn_id: BasicConstraints::OID,
             critical: true,
             extn_value: X509OctetString::new(basic_constraint_ext_val)
                 .map_err(|e| x509_der_error(e, format_args!("failed to build OctetString")))?,
@@ -1828,14 +1826,7 @@ mod tests {
     fn test_authz_list_rejects_mismatched_attestation_id() {
         let attestation_ids = AttestationIdInfo {
             brand: b"good".to_vec(),
-            device: vec![],
-            product: vec![],
-            serial: vec![],
-            imei: vec![],
-            imei2: vec![],
-            meid: vec![],
-            manufacturer: vec![],
-            model: vec![],
+            ..Default::default()
         };
         let keygen_params = [KeyParam::AttestationIdBrand(b"bad".to_vec())];
         let error =
@@ -1853,15 +1844,9 @@ mod tests {
         let primary = b"primary-imei".to_vec();
         let secondary = b"secondary-imei".to_vec();
         let attestation_ids = AttestationIdInfo {
-            brand: vec![],
-            device: vec![],
-            product: vec![],
-            serial: vec![],
             imei: primary.clone(),
             imei2: secondary.clone(),
-            meid: vec![],
-            manufacturer: vec![],
-            model: vec![],
+            ..Default::default()
         };
         let keygen_params = [
             KeyParam::AttestationIdImei(secondary.clone()),
@@ -1877,17 +1862,7 @@ mod tests {
 
     #[test]
     fn test_authz_list_encodes_empty_second_imei() {
-        let attestation_ids = AttestationIdInfo {
-            brand: vec![],
-            device: vec![],
-            product: vec![],
-            serial: vec![],
-            imei: vec![],
-            imei2: vec![],
-            meid: vec![],
-            manufacturer: vec![],
-            model: vec![],
-        };
+        let attestation_ids = AttestationIdInfo::default();
         let keygen_params = [KeyParam::AttestationIdSecondImei(vec![])];
         let authz_list =
             AuthorizationList::new(&[], &keygen_params, Some(&attestation_ids), None, None, &[])

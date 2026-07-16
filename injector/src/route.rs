@@ -1,4 +1,4 @@
-use rsbinder::{thread_state::CallingContext, Strong};
+use rsbinder::Strong;
 
 use crate::android::system::keystore2::IKeystoreOperation::IKeystoreOperation as AospKeystoreOperation;
 use crate::android::system::keystore2::IKeystoreSecurityLevel::IKeystoreSecurityLevel as AospKeystoreSecurityLevel;
@@ -36,18 +36,6 @@ impl CallerIdentity {
             callingUid: self.uid as i64,
             callingSid: self.sid.clone(),
             callingPid: self.pid as i64,
-        }
-    }
-
-    pub fn from_calling_context(context: &CallingContext) -> Self {
-        Self {
-            uid: context.uid,
-            pid: context.pid,
-            sid: context
-                .sid
-                .as_ref()
-                .map(|sid| sid.to_string_lossy().into_owned())
-                .unwrap_or_default(),
         }
     }
 }

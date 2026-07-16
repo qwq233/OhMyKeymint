@@ -496,7 +496,12 @@ fn verify_system_auth_token(auth_token: &HardwareAuthToken) -> Result<()> {
                 continue;
             }
         };
-        let key_id = VerifierKeyCacheKey::for_token(auth_token, service);
+        let key_id = VerifierKeyCacheKey {
+            service,
+            auth_type: auth_token.authenticatorType.0,
+            user_id: auth_token.userId,
+            authenticator_id: auth_token.authenticatorId,
+        };
 
         let key = match get_system_verifier_key(service, &keymint, &key_id, &key_params) {
             Ok(key) => key,
@@ -569,17 +574,6 @@ fn verifier_key_params(auth_token: &HardwareAuthToken) -> Result<Vec<KeyParamete
     }
 
     key_params_to_aidl(&params, KeyMintDevice::KEY_MINT_V5)
-}
-
-impl VerifierKeyCacheKey {
-    fn for_token(auth_token: &HardwareAuthToken, service: &'static str) -> Self {
-        Self {
-            service,
-            auth_type: auth_token.authenticatorType.0,
-            user_id: auth_token.userId,
-            authenticator_id: auth_token.authenticatorId,
-        }
-    }
 }
 
 fn get_system_keymint(service: &'static str) -> Result<Strong<dyn IKeyMintDevice>> {

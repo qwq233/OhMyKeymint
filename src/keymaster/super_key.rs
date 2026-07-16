@@ -21,10 +21,10 @@ use crate::android::hardware::security::keymint::{
 use crate::android::system::keystore2::{Domain::Domain, KeyDescriptor::KeyDescriptor};
 use crate::err as ks_err;
 use crate::keymaster::{
-    boot_key::{get_level_zero_key, BootLevel, BootLevelKeyCache},
+    boot_key::{get_level_zero_key, BootLevel, BootLevelKeyCache, LegacyBootLevelKeyCache},
     crypto::{
-        aes_gcm_decrypt, aes_gcm_encrypt, generate_aes256_key, generate_salt, ECDHPrivateKey,
-        Password, ZVec, AES_256_KEY_LENGTH,
+        aes_gcm_decrypt, aes_gcm_encrypt, generate_aes256_key, generate_salt,
+        is_decryption_failure, ECDHPrivateKey, Password, ZVec, AES_256_KEY_LENGTH,
     },
     db::{
         BlobMetaData, BlobMetaEntry, EncryptedBy, KeyEntry, KeyEntryLoadBits, KeyIdGuard,
@@ -288,6 +288,7 @@ struct SkmState {
     user_keys: HashMap<AndroidUserId, UserSuperKeys>,
     key_index: HashMap<i64, Weak<SuperKey>>,
     boot_level_key_cache: Option<Mutex<BootLevelKeyCache>>,
+    legacy_boot_level_key_cache: Mutex<Option<LegacyBootLevelKeyCache>>,
 }
 
 impl SkmState {
@@ -315,8 +316,20 @@ impl SuperKeyManager {
         }
         let level_zero_key =
             get_level_zero_key(db).context(ks_err!("get_level_zero_key failed"))?;
+        let legacy_level_zero_key = level_zero_key.try_clone();
         skm_guard.data.boot_level_key_cache =
             Some(Mutex::new(BootLevelKeyCache::new(level_zero_key)));
+        *skm_guard
+            .data
+            .legacy_boot_level_key_cache
+            .get_mut()
+            .unwrap() = match legacy_level_zero_key {
+            Ok(key) => Some(LegacyBootLevelKeyCache::new(key)),
+            Err(error) => {
+                warn!("failed to initialize legacy boot-level cache: {error:?}");
+                None
+            }
+        };
         info!("Starting boot level watcher.");
         let clone = skm.clone();
         std::thread::spawn(move || {
@@ -353,11 +366,36 @@ impl SuperKeyManager {
                     boot_level_key_cache
                         .advance_boot_level(level)
                         .context(ks_err!("advance_boot_level failed"))?;
+                    let legacy_cache = skm_guard
+                        .data
+                        .legacy_boot_level_key_cache
+                        .get_mut()
+                        .unwrap();
+                    let legacy_result = legacy_cache
+                        .as_mut()
+                        .map(|cache| cache.advance_boot_level(level));
+                    if let Some(Err(error)) = legacy_result {
+                        error!(
+                            "legacy boot-level cache failed to advance and was disabled: {error:?}"
+                        );
+                        if let Some(mut cache) = legacy_cache.take() {
+                            cache.finish();
+                        }
+                    }
                 } else {
                     info!(
                         "keystore.boot_level {level:?} hits maximum {MAX_MAX_BOOT_LEVEL:?}, finishing.",
                     );
                     boot_level_key_cache.finish();
+                    if let Some(mut legacy_cache) = skm_guard
+                        .data
+                        .legacy_boot_level_key_cache
+                        .get_mut()
+                        .unwrap()
+                        .take()
+                    {
+                        legacy_cache.finish();
+                    }
                     break;
                 }
             }
@@ -467,6 +505,103 @@ impl SuperKeyManager {
         )
     }
 
+    pub fn unwrap_key_if_required_with_omk_compatibility<'a>(
+        &self,
+        metadata: &BlobMetaData,
+        blob: &'a [u8],
+    ) -> Result<KeyBlob<'a>> {
+        let aosp_error = match self.unwrap_key_if_required(metadata, blob) {
+            Ok(key_blob) => return Ok(key_blob),
+            Err(error) => error,
+        };
+        if !is_decryption_failure(&aosp_error) {
+            return Err(aosp_error);
+        }
+
+        match self.try_unwrap_key_with_omk_legacy(metadata, blob) {
+            Ok(Some(key_blob)) => Ok(key_blob),
+            Ok(None) | Err(_) => Err(aosp_error),
+        }
+    }
+
+    fn try_unwrap_key_with_omk_legacy<'a>(
+        &self,
+        metadata: &BlobMetaData,
+        blob: &'a [u8],
+    ) -> Result<Option<KeyBlob<'a>>> {
+        let Some(key_id) = SuperKeyIdentifier::from_metadata(metadata) else {
+            return Ok(None);
+        };
+        let Some(super_key) = self
+            .lookup_key(&key_id)
+            .context(ks_err!("lookup_key failed"))?
+        else {
+            return Ok(None);
+        };
+
+        let key = match key_id {
+            SuperKeyIdentifier::BootLevel(level) => {
+                let legacy_key = {
+                    let mut legacy_cache = self.data.legacy_boot_level_key_cache.lock().unwrap();
+                    let Some(cache) = legacy_cache.as_mut() else {
+                        return Ok(None);
+                    };
+                    match cache.aes_key(level) {
+                        Ok(Some(key)) => key,
+                        Ok(None) => return Ok(None),
+                        Err(error) => {
+                            error!("legacy boot-level cache failed and was disabled: {error:?}");
+                            if let Some(mut cache) = legacy_cache.take() {
+                                cache.finish();
+                            }
+                            return Ok(None);
+                        }
+                    }
+                };
+                let legacy_super_key = SuperKey {
+                    algorithm: SuperEncryptionAlgorithm::Aes256Gcm,
+                    key: legacy_key,
+                    id: key_id,
+                    reencrypt_with: None,
+                };
+                match Self::unwrap_key_with_key(blob, metadata, &legacy_super_key) {
+                    Ok(key) => key,
+                    Err(_) => return Ok(None),
+                }
+            }
+            SuperKeyIdentifier::DatabaseId(_)
+                if super_key.algorithm == SuperEncryptionAlgorithm::EcdhP521 =>
+            {
+                let (Some(public_key), Some(salt), Some(iv), Some(aead_tag)) = (
+                    metadata.public_key(),
+                    metadata.salt(),
+                    metadata.iv(),
+                    metadata.aead_tag(),
+                ) else {
+                    return Ok(None);
+                };
+                match ECDHPrivateKey::from_private_key(&super_key.key).and_then(|key| {
+                    key.decrypt_message_omk_legacy(public_key, salt, iv, blob, aead_tag)
+                }) {
+                    Ok(key) => key,
+                    Err(_) => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        };
+
+        Ok(Some(KeyBlob::Sensitive {
+            key,
+            reencrypt_with: super_key
+                .reencrypt_with
+                .as_ref()
+                .unwrap_or(&super_key)
+                .clone(),
+            force_reencrypt: matches!(key_id, SuperKeyIdentifier::BootLevel(_))
+                || super_key.reencrypt_with.is_some(),
+        }))
+    }
+
     /// Unwraps an encrypted key blob given an encryption key.
     fn unwrap_key_with_key(blob: &[u8], metadata: &BlobMetaData, key: &SuperKey) -> Result<ZVec> {
         match key.algorithm {
@@ -534,8 +669,10 @@ impl SuperKeyManager {
         entry: KeyEntry,
         pw: &Password,
     ) -> Result<Arc<SuperKey>> {
-        let super_key = Self::extract_super_key_from_key_entry(algorithm, entry, pw, None)
-            .context(ks_err!("Failed to extract super key from key entry"))?;
+        let super_key = Self::extract_super_key_from_key_entry_with_omk_compatibility(
+            algorithm, entry, pw, None,
+        )
+        .context(ks_err!("Failed to extract super key from key entry"))?;
         self.install_credential_encrypted_key_for_user(user, super_key.clone())
             .context(ks_err!(
                 "Failed to install CredentialEncrypted super key for user!"
@@ -594,6 +731,58 @@ impl SuperKeyManager {
         } else {
             Err(Error::Rc(ResponseCode::VALUE_CORRUPTED)).context(ks_err!("No key blob info."))
         }
+    }
+
+    pub(crate) fn extract_super_key_from_key_entry_with_omk_compatibility(
+        algorithm: SuperEncryptionAlgorithm,
+        entry: KeyEntry,
+        pw: &Password,
+        reencrypt_with: Option<Arc<SuperKey>>,
+    ) -> Result<Arc<SuperKey>> {
+        let legacy_input = entry.key_blob_info().as_ref().and_then(|(blob, metadata)| {
+            match (
+                metadata.encrypted_by(),
+                metadata.salt(),
+                metadata.iv(),
+                metadata.aead_tag(),
+            ) {
+                (Some(&EncryptedBy::Password), Some(salt), Some(iv), Some(tag)) => Some((
+                    entry.id(),
+                    blob.clone(),
+                    salt.to_vec(),
+                    iv.to_vec(),
+                    tag.to_vec(),
+                )),
+                _ => None,
+            }
+        });
+        let legacy_reencrypt_with = reencrypt_with.clone();
+
+        let aosp_error =
+            match Self::extract_super_key_from_key_entry(algorithm, entry, pw, reencrypt_with) {
+                Ok(super_key) => return Ok(super_key),
+                Err(error) => error,
+            };
+        if !is_decryption_failure(&aosp_error) {
+            return Err(aosp_error);
+        }
+
+        let Some((id, blob, salt, iv, tag)) = legacy_input else {
+            return Err(aosp_error);
+        };
+        let key = match pw
+            .derive_key_omk_legacy(&salt, AES_256_KEY_LENGTH)
+            .and_then(|key| aes_gcm_decrypt(&blob, &iv, &tag, &key))
+        {
+            Ok(key) => key,
+            Err(_) => return Err(aosp_error),
+        };
+        Ok(Arc::new(SuperKey {
+            algorithm,
+            key,
+            id: SuperKeyIdentifier::DatabaseId(id),
+            reencrypt_with: legacy_reencrypt_with,
+        }))
     }
 
     /// Encrypts the super key from a key derived from the password, before storing in the database.
@@ -830,12 +1019,14 @@ impl SuperKeyManager {
     ) -> Result<Arc<SuperKey>> {
         let loaded_key = db.load_super_key(key_type, user)?;
         if let Some((_, key_entry)) = loaded_key {
-            Ok(Self::extract_super_key_from_key_entry(
-                key_type.algorithm,
-                key_entry,
-                password,
-                reencrypt_with,
-            )?)
+            Ok(
+                Self::extract_super_key_from_key_entry_with_omk_compatibility(
+                    key_type.algorithm,
+                    key_entry,
+                    password,
+                    reencrypt_with,
+                )?,
+            )
         } else {
             self.create_super_key(db, user, key_type, password, reencrypt_with)
         }
@@ -1305,5 +1496,51 @@ impl Deref for KeyBlob<'_> {
             Self::NonSensitive(key) => key,
             Self::Ref(key) => key,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_legacy_boot_level_blob_is_reencrypted() -> Result<()> {
+        let root_key: Vec<u8> = (0..32).collect();
+        let mut manager = SuperKeyManager::default();
+        manager.data.boot_level_key_cache = Some(Mutex::new(BootLevelKeyCache::new(
+            ZVec::try_from(root_key.as_slice())?,
+        )));
+        *manager.data.legacy_boot_level_key_cache.get_mut().unwrap() = Some(
+            LegacyBootLevelKeyCache::new(ZVec::try_from(root_key.as_slice())?),
+        );
+
+        let ciphertext = [
+            236, 196, 68, 130, 60, 179, 173, 62, 180, 0, 32, 20, 124, 251, 61, 176,
+        ];
+        let mut metadata = BlobMetaData::new();
+        metadata.add(BlobMetaEntry::MaxBootLevel(2));
+        metadata.add(BlobMetaEntry::Iv(vec![
+            182, 80, 3, 102, 134, 164, 167, 2, 202, 32, 175, 101,
+        ]));
+        metadata.add(BlobMetaEntry::AeadTag(vec![
+            138, 140, 225, 83, 27, 227, 54, 239, 244, 143, 209, 157, 38, 113, 43, 158,
+        ]));
+
+        let unwrapped =
+            manager.unwrap_key_if_required_with_omk_compatibility(&metadata, &ciphertext)?;
+        assert_eq!(&unwrapped[..], b"legacy boot blob");
+        assert!(unwrapped.force_reencrypt());
+
+        let (reencrypted, metadata) =
+            SuperKeyManager::reencrypt_if_required(&unwrapped, &unwrapped)?;
+        let KeyBlob::NonSensitive(ciphertext) = reencrypted else {
+            panic!("expected a re-encrypted key blob")
+        };
+        let metadata = metadata.unwrap();
+        let unwrapped =
+            manager.unwrap_key_if_required_with_omk_compatibility(&metadata, &ciphertext)?;
+        assert_eq!(&unwrapped[..], b"legacy boot blob");
+        assert!(!unwrapped.force_reencrypt());
+        Ok(())
     }
 }

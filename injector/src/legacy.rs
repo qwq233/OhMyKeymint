@@ -169,14 +169,11 @@ mod tests {
     use super::should_use_legacy_aaid_provider;
 
     #[test]
-    fn legacy_aaid_provider_covers_android_12_to_14() {
+    fn legacy_aaid_provider_boundary_is_android_14() {
         for version in [Some(12), Some(13), Some(14)] {
             assert!(should_use_legacy_aaid_provider(version));
         }
-    }
 
-    #[test]
-    fn new_aaid_provider_starts_at_android_15() {
         for version in [None, Some(15), Some(16), Some(17)] {
             assert!(!should_use_legacy_aaid_provider(version));
         }

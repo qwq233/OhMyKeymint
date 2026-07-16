@@ -1,7 +1,7 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::LocalKey;
 
-use anyhow::Ok;
 use der::asn1::SetOfVec;
 use der::Encode;
 use kmr_common::crypto::Sha256;
@@ -29,19 +29,17 @@ const KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/defaul
 
 static KEYSTORE_CACHE: OnceLock<Mutex<KeystoreServiceCache>> = OnceLock::new();
 static KEYSTORE_INIT: OnceLock<Mutex<()>> = OnceLock::new();
+static KEYSTORE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Default)]
 struct KeystoreServiceCache {
     service: Option<rsbinder::Strong<dyn IKeystoreService>>,
     death_recipient: Option<Arc<dyn DeathRecipient>>,
+    generation: u64,
 }
 
 fn keystore_cache() -> &'static Mutex<KeystoreServiceCache> {
-    KEYSTORE_CACHE.get_or_init(|| {
-        Mutex::new(KeystoreServiceCache {
-            service: None,
-            death_recipient: None,
-        })
-    })
+    KEYSTORE_CACHE.get_or_init(Default::default)
 }
 
 fn keystore_init_lock() -> &'static Mutex<()> {
@@ -74,11 +72,18 @@ impl rsbinder::DeathRecipient for ApexDeathRecipient {
     }
 }
 
-struct KeystoreDeathRecipient;
+struct KeystoreDeathRecipient {
+    died: AtomicBool,
+    generation: u64,
+}
 
 impl rsbinder::DeathRecipient for KeystoreDeathRecipient {
     fn binder_died(&self, _who: &rsbinder::WIBinder) {
+        self.died.store(true, Ordering::Release);
         let mut guard = keystore_cache().lock().unwrap();
+        if guard.generation != self.generation {
+            return;
+        }
         guard.service = None;
         guard.death_recipient = None;
         debug!("system keystore binder died; cleared cached instance");
@@ -105,32 +110,45 @@ fn reset_pm() {
 
 pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreService>> {
     let _init_guard = keystore_init_lock().lock().unwrap();
-    let mut guard = keystore_cache().lock().unwrap();
-    if let Some(service) = guard.service.as_ref() {
-        if keystore_service_is_alive(service) {
-            return Ok(service.clone());
+    let cached = keystore_cache().lock().unwrap().service.clone();
+    if let Some(service) = cached {
+        if keystore_service_is_alive(&service) {
+            return Ok(service);
         }
 
+        let mut guard = keystore_cache().lock().unwrap();
         guard.service = None;
         guard.death_recipient = None;
     }
 
     let service: rsbinder::Strong<dyn IKeystoreService> = hub::get_interface(KEYSTORE_SERVICE)
         .map_err(|error| anyhow::anyhow!("failed to connect to {KEYSTORE_SERVICE}: {error:?}"))?;
-    let recipient: Arc<dyn DeathRecipient> = Arc::new(KeystoreDeathRecipient {});
+    let generation = KEYSTORE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    let recipient = Arc::new(KeystoreDeathRecipient {
+        died: AtomicBool::new(false),
+        generation,
+    });
+    let death_recipient: Arc<dyn DeathRecipient> = recipient.clone();
     service
         .as_binder()
-        .link_to_death(Arc::downgrade(&recipient))?;
-    if !keystore_service_is_alive(&service) {
+        .link_to_death(Arc::downgrade(&death_recipient))?;
+    if recipient.died.load(Ordering::Acquire) || !keystore_service_is_alive(&service) {
+        return Err(anyhow::anyhow!(
+            "connected to {KEYSTORE_SERVICE} but binder died during initialization"
+        ));
+    }
+
+    let mut guard = keystore_cache().lock().unwrap();
+    guard.death_recipient = Some(death_recipient);
+    guard.service = Some(service.clone());
+    guard.generation = generation;
+    if recipient.died.load(Ordering::Acquire) {
         guard.service = None;
         guard.death_recipient = None;
         return Err(anyhow::anyhow!(
             "connected to {KEYSTORE_SERVICE} but binder died during initialization"
         ));
     }
-
-    guard.death_recipient = Some(recipient);
-    guard.service = Some(service.clone());
 
     Ok(service)
 }
@@ -335,7 +353,7 @@ pub fn get_apex_module_info() -> anyhow::Result<Vec<ApexModuleInfo>> {
             anyhow::anyhow!(err!("getActivePackages failed: {:?}", e))
         })?;
 
-    let result: Vec<ApexModuleInfo> = result
+    result
         .iter()
         .map(|i| {
             Ok(ApexModuleInfo {
@@ -344,9 +362,7 @@ pub fn get_apex_module_info() -> anyhow::Result<Vec<ApexModuleInfo>> {
             })
         })
         .collect::<anyhow::Result<Vec<ApexModuleInfo>>>()
-        .map_err(|e| anyhow::anyhow!(err!("ApexModuleInfo conversion failed: {:?}", e)))?;
-
-    Ok(result)
+        .map_err(|e| anyhow::anyhow!(err!("ApexModuleInfo conversion failed: {:?}", e)))
 }
 
 pub const AID_USER_OFFSET: u32 = 100000;

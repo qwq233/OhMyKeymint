@@ -9,34 +9,12 @@ use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
-const RESETPROP_FALLBACKS: &[ResetpropSpec] = &[
-    ResetpropSpec::direct("/system_ext/bin/resetprop"),
-    ResetpropSpec::direct("/system/bin/resetprop"),
-    ResetpropSpec::direct("/data/adb/ksu/bin/resetprop"),
-    ResetpropSpec::subcommand("/data/adb/ksud", "resetprop"),
+const RESETPROP_FALLBACKS: &[(&str, Option<&str>)] = &[
+    ("/system_ext/bin/resetprop", None),
+    ("/system/bin/resetprop", None),
+    ("/data/adb/ksu/bin/resetprop", None),
+    ("/data/adb/ksud", Some("resetprop")),
 ];
-
-#[derive(Clone, Copy)]
-struct ResetpropSpec {
-    program: &'static str,
-    prepend_arg: Option<&'static str>,
-}
-
-impl ResetpropSpec {
-    const fn direct(program: &'static str) -> Self {
-        Self {
-            program,
-            prepend_arg: None,
-        }
-    }
-
-    const fn subcommand(program: &'static str, prepend_arg: &'static str) -> Self {
-        Self {
-            program,
-            prepend_arg: Some(prepend_arg),
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct ResetpropCommand {
@@ -119,18 +97,23 @@ pub fn read_string_property(name: &str) -> Option<String> {
 }
 
 pub fn find_resetprop_command() -> Result<ResetpropCommand> {
-    if let Some(program) = find_program_in_path("resetprop") {
+    if let Some(program) = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| directory.join("resetprop"))
+            .find(|candidate| candidate.exists())
+            .map(|candidate| candidate.to_string_lossy().into_owned())
+    }) {
         return Ok(ResetpropCommand {
             program,
             prepend_arg: None,
         });
     }
 
-    for fallback in RESETPROP_FALLBACKS {
-        if Path::new(fallback.program).exists() {
+    for (program, prepend_arg) in RESETPROP_FALLBACKS {
+        if Path::new(program).exists() {
             return Ok(ResetpropCommand {
-                program: fallback.program.to_string(),
-                prepend_arg: fallback.prepend_arg.map(str::to_string),
+                program: program.to_string(),
+                prepend_arg: prepend_arg.map(str::to_string),
             });
         }
     }
@@ -159,20 +142,9 @@ fn execute_write_and_verify(command: &ResetpropCommand, property: &str, value: &
     } else {
         bail!(
             "property verification failed for {property}: expected {value}, got {}",
-            actual.trim()
+            actual
         )
     }
-}
-
-fn find_program_in_path(name: &str) -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    for directory in std::env::split_paths(&path) {
-        let candidate = directory.join(name);
-        if candidate.exists() {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-    None
 }
 
 struct ResetpropHelperClient {
@@ -241,12 +213,10 @@ fn helper_loop(stream: UnixStream, command: ResetpropCommand) -> Result<()> {
         }
 
         let response = match parse_request(&line) {
-            Ok(ResetpropRequest::Set { property, value }) => {
-                match execute_write_and_verify(&command, &property, &value) {
-                    Ok(()) => "OK\n".to_string(),
-                    Err(error) => format!("ERR\t{error:#}\n"),
-                }
-            }
+            Ok((property, value)) => match execute_write_and_verify(&command, &property, &value) {
+                Ok(()) => "OK\n".to_string(),
+                Err(error) => format!("ERR\t{error:#}\n"),
+            },
             Err(error) => format!("ERR\t{error:#}\n"),
         };
         writer
@@ -259,22 +229,14 @@ fn helper_loop(stream: UnixStream, command: ResetpropCommand) -> Result<()> {
 }
 
 #[cfg(unix)]
-enum ResetpropRequest {
-    Set { property: String, value: String },
-}
-
-#[cfg(unix)]
-fn parse_request(line: &str) -> Result<ResetpropRequest> {
+fn parse_request(line: &str) -> Result<(String, String)> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
     let mut parts = trimmed.splitn(3, '\t');
     match (parts.next(), parts.next(), parts.next()) {
         (Some("SET"), Some(property), Some(value))
             if !property.trim().is_empty() && !value.trim().is_empty() =>
         {
-            Ok(ResetpropRequest::Set {
-                property: property.to_string(),
-                value: value.to_string(),
-            })
+            Ok((property.to_string(), value.to_string()))
         }
         _ => Err(anyhow!("invalid resetprop helper request: {trimmed:?}")),
     }

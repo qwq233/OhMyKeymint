@@ -48,7 +48,6 @@ use std::{
 };
 
 type ConfirmationTokenReceiver = Arc<Mutex<Option<Receiver<Vec<u8>>>>>;
-type DeferredAuthTokens = (Option<HardwareAuthToken>, Option<TimeStampToken>);
 type FinishAuthTokens = (
     Option<HardwareAuthToken>,
     Option<TimeStampToken>,
@@ -298,7 +297,7 @@ impl AuthInfo {
 
     /// This function is the authorization hook called before operation update.
     /// It returns the auth tokens required by the operation to commence update.
-    pub fn before_update(&mut self) -> Result<DeferredAuthTokens> {
+    pub fn before_update(&mut self) -> Result<(Option<HardwareAuthToken>, Option<TimeStampToken>)> {
         self.get_auth_tokens()
     }
 
@@ -351,7 +350,7 @@ impl AuthInfo {
     /// deferred authorization was requested by `finalize_create_authorization`, this function may
     /// block on the generation of a time stamp token. It then moves the tokens into the
     /// [`DeferredAuthState::Token`] state for future use.
-    fn get_auth_tokens(&mut self) -> Result<DeferredAuthTokens> {
+    fn get_auth_tokens(&mut self) -> Result<(Option<HardwareAuthToken>, Option<TimeStampToken>)> {
         let deferred_tokens = if let DeferredAuthState::Waiting(ref auth_request) = self.state {
             Some(
                 auth_request

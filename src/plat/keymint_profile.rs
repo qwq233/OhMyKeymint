@@ -46,7 +46,9 @@ pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMint
         return profile;
     }
 
-    match probe_system_keymint_profile(security_level, version_number) {
+    match probe_system_keymint_hardware_info(security_level)
+        .and_then(|info| profile_from_system_hardware_info(&info, security_level, version_number))
+    {
         Ok(profile) => profile,
         Err(error) => {
             log::warn!("failed to resolve dynamic KeyMint hardware profile: {error:#}");
@@ -57,11 +59,15 @@ pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMint
 
 fn detect_strongbox_keymint_present() -> bool {
     let security_level = SecurityLevel::STRONGBOX;
-    if system_keymint_declared(security_level) {
+    if system_keymint_service_name(security_level).is_some_and(|service| {
+        hub::is_declared(service) || keymint_instance_declared_in_vintf(security_level)
+    }) {
         return true;
     }
 
-    match probe_system_keymint_presence(security_level) {
+    match probe_system_keymint_hardware_info(security_level)
+        .and_then(|info| ensure_system_hardware_security_level(&info, security_level))
+    {
         Ok(_) => true,
         Err(error) => {
             log::info!("optional StrongBox KeyMint HAL is not present: {error:#}");
@@ -70,32 +76,21 @@ fn detect_strongbox_keymint_present() -> bool {
     }
 }
 
-fn system_keymint_declared(security_level: SecurityLevel) -> bool {
-    let Some(service) = system_keymint_service_name(security_level) else {
-        return false;
-    };
-    hub::is_declared(service) || keymint_instance_declared_in_vintf(security_level)
-}
-
 fn resolve_property_profile_with(
     security_level: SecurityLevel,
     version_number: i32,
     read_property: impl Fn(&str) -> Option<String>,
 ) -> Option<KeyMintHardwareProfile> {
-    resolve_property_profile_from_namespace(
-        "ro.product.vendor.",
-        security_level,
-        version_number,
-        &read_property,
-    )
-    .or_else(|| {
-        resolve_property_profile_from_namespace(
-            "ro.product.",
-            security_level,
-            version_number,
-            &read_property,
-        )
-    })
+    ["ro.product.vendor.", "ro.product."]
+        .into_iter()
+        .find_map(|prefix| {
+            resolve_property_profile_from_namespace(
+                prefix,
+                security_level,
+                version_number,
+                &read_property,
+            )
+        })
 }
 
 fn resolve_property_profile_from_namespace(
@@ -110,13 +105,12 @@ fn resolve_property_profile_from_namespace(
     let device = product_property(prefix, "device", read_property);
     let name = product_property(prefix, "name", read_property);
 
-    let author_name = first_value([manufacturer.as_ref(), brand.as_ref()])?.to_string();
-    let identity = first_value([
-        device.as_ref(),
-        name.as_ref(),
-        model.as_ref(),
-        brand.as_ref(),
-    ]);
+    let author_name = manufacturer.as_deref().or(brand.as_deref())?.to_string();
+    let identity = device
+        .as_deref()
+        .or(name.as_deref())
+        .or(model.as_deref())
+        .or(brand.as_deref());
     let impl_name = build_impl_name(&author_name, identity, security_level);
     let unique_id = derive_unique_id(&author_name, &impl_name, security_level, version_number)?;
 
@@ -150,10 +144,6 @@ fn clean_dynamic_value(value: String) -> Option<String> {
     Some(value.to_string())
 }
 
-fn first_value<const N: usize>(values: [Option<&String>; N]) -> Option<&str> {
-    values.into_iter().flatten().map(String::as_str).next()
-}
-
 fn build_impl_name(
     author_name: &str,
     identity: Option<&str>,
@@ -161,32 +151,16 @@ fn build_impl_name(
 ) -> String {
     let mut parts = vec![author_name.to_string()];
     if let Some(identity) = identity {
-        if !starts_with_ignore_ascii_case(identity, author_name) {
+        if !identity
+            .get(..author_name.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(author_name))
+        {
             parts.push(identity.to_string());
         }
     }
     parts.push(security_level_label(security_level).to_string());
     parts.push("KeyMint".to_string());
     parts.join(" ")
-}
-
-fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
-    value
-        .get(..prefix.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-}
-
-fn probe_system_keymint_profile(
-    security_level: SecurityLevel,
-    version_number: i32,
-) -> Result<KeyMintHardwareProfile> {
-    let info = probe_system_keymint_hardware_info(security_level)?;
-    profile_from_system_hardware_info(&info, security_level, version_number)
-}
-
-fn probe_system_keymint_presence(security_level: SecurityLevel) -> Result<()> {
-    let info = probe_system_keymint_hardware_info(security_level)?;
-    ensure_system_hardware_security_level(&info, security_level)
 }
 
 fn probe_system_keymint_hardware_info(
@@ -262,7 +236,13 @@ fn probe_keymint_version_from_vintf(security_level: SecurityLevel) -> Option<i32
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };
-        match parse_keymint_version_xml(&contents, instance) {
+        match kmr_common::vintf::parse_aidl_hal_version_xml(
+            &contents,
+            KEYMINT_HAL_NAME,
+            KEYMINT_DEVICE_INTERFACE,
+            instance,
+            normalize_keymint_version,
+        ) {
             Ok(Some(version)) => return Some(version),
             Ok(None) => {}
             Err(error) => {
@@ -286,7 +266,12 @@ fn keymint_instance_declared_in_vintf(security_level: SecurityLevel) -> bool {
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };
-        match parse_keymint_instance_xml(&contents, instance) {
+        match kmr_common::vintf::parse_aidl_hal_instance_xml(
+            &contents,
+            KEYMINT_HAL_NAME,
+            KEYMINT_DEVICE_INTERFACE,
+            instance,
+        ) {
             Ok(true) => return true,
             Ok(false) => {}
             Err(error) => {
@@ -301,27 +286,8 @@ fn keymint_instance_declared_in_vintf(security_level: SecurityLevel) -> bool {
     false
 }
 
-fn parse_keymint_version_xml(xml: &str, instance: &str) -> Result<Option<i32>> {
-    kmr_common::vintf::parse_aidl_hal_version_xml(
-        xml,
-        KEYMINT_HAL_NAME,
-        KEYMINT_DEVICE_INTERFACE,
-        instance,
-        normalize_keymint_version,
-    )
-}
-
-fn parse_keymint_instance_xml(xml: &str, instance: &str) -> Result<bool> {
-    kmr_common::vintf::parse_aidl_hal_instance_xml(
-        xml,
-        KEYMINT_HAL_NAME,
-        KEYMINT_DEVICE_INTERFACE,
-        instance,
-    )
-}
-
 fn fallback_keymint_version_from_android() -> i32 {
-    match detect_android_major_version() {
+    match kmr_common::android_version::android_major_version() {
         Some(version) if version >= 17 => KEYMINT_V5,
         Some(16) => KEYMINT_V4,
         Some(14 | 15) => KEYMINT_V3,
@@ -329,17 +295,6 @@ fn fallback_keymint_version_from_android() -> i32 {
         Some(12) => KEYMINT_V1,
         _ => KEYMINT_V4,
     }
-}
-
-fn detect_android_major_version() -> Option<i32> {
-    kmr_common::android_version::android_major_version()
-}
-
-#[cfg(test)]
-fn detect_android_major_version_with(
-    read_property: impl Fn(&str) -> Option<String>,
-) -> Option<i32> {
-    kmr_common::android_version::android_major_version_with(read_property)
 }
 
 fn normalize_keymint_version(version: i32) -> Option<i32> {
@@ -520,7 +475,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            detect_android_major_version_with(property_reader(&values)),
+            kmr_common::android_version::android_major_version_with(property_reader(&values)),
             Some(16)
         );
     }

@@ -50,7 +50,7 @@ use crate::keymaster::metrics_store::{
 use crate::keymaster::operation::{KeystoreOperation, LoggingInfo, OperationDb};
 use crate::keymaster::permission::{
     check_device_attestation_permissions, check_key_permission,
-    check_unique_id_attestation_permissions, require_forwarded_context, KeyPerm,
+    check_unique_id_attestation_permissions, require_omk_ctx, KeyPerm,
 };
 use crate::keymaster::security_level_manager;
 use crate::keymaster::super_key::{KeyBlob, SuperKeyManager};
@@ -406,7 +406,7 @@ impl KeystoreSecurityLevel {
         let km_blob = SUPER_KEY
             .read()
             .unwrap()
-            .unwrap_key_if_required(&blob_metadata, km_blob)
+            .unwrap_key_if_required_with_omk_compatibility(&blob_metadata, km_blob)
             .context(ks_err!("Failed to handle super encryption."))?;
 
         let (begin_result, upgraded_blob) = self
@@ -999,7 +999,10 @@ impl KeystoreSecurityLevel {
         let wrapping_key_blob = SUPER_KEY
             .read()
             .unwrap()
-            .unwrap_key_if_required(&wrapping_blob_metadata, &wrapping_key_blob)
+            .unwrap_key_if_required_with_omk_compatibility(
+                &wrapping_blob_metadata,
+                &wrapping_key_blob,
+            )
             .context(ks_err!(
                 "Failed to handle super encryption for wrapping key."
             ))?;
@@ -1214,13 +1217,6 @@ fn caller_uid(ctx: Option<&CallerInfo>) -> AppUid {
         ctx.map(|ctx| ctx.callingUid)
             .unwrap_or_else(|| CallingContext::default().uid.into()),
     )
-}
-
-fn require_omk_ctx<'a>(
-    ctx: Option<&'a CallerInfo>,
-    label: &str,
-) -> std::result::Result<&'a CallerInfo, Status> {
-    require_forwarded_context(ctx, label).map_err(into_logged_binder)
 }
 
 impl binder::Interface for AospSecurityLevelWrapper {}

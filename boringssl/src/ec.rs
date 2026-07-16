@@ -15,11 +15,10 @@
 //! BoringSSL-based implementation of elliptic curve functionality.
 use crate::types::{EvpMdCtx, EvpPkeyCtx};
 use crate::{cvt, cvt_p, digest_into_openssl, openssl_err, openssl_last_err, ossl};
-#[cfg(soong)]
 use bssl_sys as ffi;
 use core::ops::DerefMut;
 use core::ptr;
-use foreign_types::ForeignType;
+use foreign_types::{ForeignType, ForeignTypeRef};
 use kmr_common::{
     crypto,
     crypto::{ec, ec::Key, AccumulatingOperation, CurveType, OpaqueOr},
@@ -33,22 +32,27 @@ use openssl::hash::MessageDigest;
 use std::boxed::Box;
 use std::vec::Vec;
 
-#[cfg(soong)]
 fn private_key_from_der_for_group(
     der: &[u8],
     group: &openssl::ec::EcGroupRef,
 ) -> Result<openssl::ec::EcKey<openssl::pkey::Private>, openssl::error::ErrorStack> {
-    // This method is an Android modification to the rust-openssl crate.
-    openssl::ec::EcKey::private_key_from_der_for_group(der, group)
-}
-
-#[cfg(not(soong))]
-fn private_key_from_der_for_group(
-    der: &[u8],
-    _group: &openssl::ec::EcGroupRef,
-) -> Result<openssl::ec::EcKey<openssl::pkey::Private>, openssl::error::ErrorStack> {
-    // This doesn't work if the encoded data is missing the curve.
-    openssl::ec::EcKey::private_key_from_der(der)
+    let mut cbs = ffi::CBS {
+        data: der.as_ptr(),
+        len: der.len(),
+    };
+    // Safety: cbs references `der` for this call, `group` is valid, and a successful result is
+    // transferred into the returned EcKey.
+    let key = unsafe { ffi::EC_KEY_parse_private_key(&mut cbs, group.as_ptr()) };
+    if key.is_null() {
+        Err(openssl::error::ErrorStack::get())
+    } else if unsafe { ffi::CBS_len(&cbs) } != 0 {
+        // Safety: `key` is still owned by this function.
+        unsafe { ffi::EC_KEY_free(key) };
+        Err(openssl::error::ErrorStack::get())
+    } else {
+        // Safety: `key` is non-null and ownership is transferred to EcKey.
+        Ok(unsafe { openssl::ec::EcKey::from_ptr(key) })
+    }
 }
 
 /// [`crypto::Ec`] implementation based on BoringSSL.
@@ -247,7 +251,6 @@ impl crypto::AccumulatingOperation for BoringEcAgreeOperation {
                 let derived = ossl!(deriver.derive_to_vec())?;
                 Ok(derived)
             }
-            #[cfg(soong)]
             Key::X25519(key) => {
                 // The BoringSSL `EVP_PKEY` interface does not support X25519, so need to invoke the
                 // `ffi:X25519()` method directly. First need to extract the raw peer key from the
@@ -288,8 +291,6 @@ impl crypto::AccumulatingOperation for BoringEcAgreeOperation {
                     Err(super::openssl_last_err())
                 }
             }
-            #[cfg(not(soong))]
-            Key::X25519(_) => Err(km_err!(UnsupportedEcCurve, "X25519 not supported in cargo")),
             Key::Ed25519(_) => Err(km_err!(
                 IncompatibleAlgorithm,
                 "Ed25519 key not valid for agreement"
@@ -504,4 +505,20 @@ fn nist_key_to_group(key: &ec::Key) -> Result<openssl::ec::EcGroup, Error> {
         }
     })
     .map_err(openssl_err!("failed to determine EcGroup"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_key_der_rejects_trailing_data() {
+        let group =
+            openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
+        let key = openssl::ec::EcKey::generate(&group).unwrap();
+        let mut der = key.private_key_to_der().unwrap();
+        der.push(0);
+
+        assert!(private_key_from_der_for_group(&der, &group).is_err());
+    }
 }

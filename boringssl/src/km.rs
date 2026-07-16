@@ -2,15 +2,15 @@ use std::vec;
 use std::vec::Vec;
 
 use crate::{error::Error, zvec::ZVec};
-use ffi::EVP_MAX_MD_SIZE;
-use foreign_types::ForeignType;
+use bssl_sys::EVP_MAX_MD_SIZE;
+use foreign_types::{ForeignType, ForeignTypeRef};
 use kmr_common::crypto::Rng;
 use openssl::{
     ec::{EcGroup, EcKey, EcPoint, EcPointRef},
     hash::MessageDigest,
     nid::Nid,
     pkcs5::pbkdf2_hmac,
-    pkey::{PKey, Private},
+    pkey::Private,
     symm::{Cipher, Crypter, Mode},
 };
 
@@ -28,6 +28,12 @@ pub const SALT_LENGTH: usize = 16;
 pub const HMAC_SHA256_LEN: usize = 32;
 /// Length of the GCM tag in bytes.
 pub const GCM_TAG_LENGTH: usize = 128 / 8;
+/// Length of ECDH P-521 output in bytes.
+pub const ECDH_P521_OUTPUT_LEN: usize = 66;
+
+/// Older versions of keystore incorrectly truncated ECDH P-521 outputs to the following length.
+/// Retain the ability to decrypt keys that were stored in the database using the old method.
+pub const LEGACY_TRUNCATED_ECDH_OUTPUT_LEN: usize = 32;
 
 /// AES-GCM encryption result: `(ciphertext, iv, tag)`.
 pub type AesGcmEncryption = (Vec<u8>, Vec<u8>, Vec<u8>);
@@ -101,57 +107,31 @@ pub fn aes_gcm_decrypt(data: &[u8], iv: &[u8], tag: &[u8], key: &[u8]) -> Result
         _ => return Err(Error::InvalidKeyLength),
     }
 
-    let mut result = vec![0; data.len()];
-
-    // Safety: The first two arguments must point to buffers with a size given by the third
-    // argument. We pass the length of the key buffer along with the key.
-    // The `iv` buffer must be 12 bytes and the `tag` buffer 16, which we check above.
-    match AES_gcm_decrypt(data, result.as_mut_slice(), key, iv, tag) {
-        true => Ok(ZVec::try_from(result.as_slice())?),
-        false => Err(Error::DecryptionFailed),
-    }
-}
-
-#[allow(non_snake_case)]
-fn AES_gcm_decrypt(input: &[u8], output: &mut [u8], key: &[u8], iv: &[u8], tag: &[u8]) -> bool {
     let cipher = match key.len() {
         16 => Cipher::aes_128_gcm(),
         32 => Cipher::aes_256_gcm(),
-        _ => return false,
+        _ => return Err(Error::InvalidKeyLength),
     };
 
-    let mut crypter = match Crypter::new(cipher, Mode::Decrypt, key, Some(iv)) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+    let mut crypter =
+        Crypter::new(cipher, Mode::Decrypt, key, Some(iv)).map_err(|_| Error::DecryptionFailed)?;
 
     crypter.pad(false);
+    crypter.set_tag(tag).map_err(|_| Error::DecryptionFailed)?;
 
-    if crypter.set_tag(tag).is_err() {
-        return false;
-    }
-
-    let mut decrypted = vec![0u8; input.len() + cipher.block_size()];
-
-    let count = match crypter.update(input, &mut decrypted) {
-        Ok(count) => count,
-        Err(_) => return false,
-    };
-
-    let final_count = match crypter.finalize(&mut decrypted[count..]) {
-        Ok(count) => count,
-        Err(_) => return false, // 标签验证失败或其他错误
-    };
-
+    let mut result = ZVec::new(data.len() + cipher.block_size())?;
+    let count = crypter
+        .update(data, &mut result)
+        .map_err(|_| Error::DecryptionFailed)?;
+    let final_count = crypter
+        .finalize(&mut result[count..])
+        .map_err(|_| Error::DecryptionFailed)?;
     let total_count = count + final_count;
-
-    if total_count != input.len() {
-        return false;
+    if total_count != data.len() {
+        return Err(Error::DecryptionFailed);
     }
-
-    output[..total_count].copy_from_slice(&decrypted[..total_count]);
-
-    true
+    result.reduce_len(total_count);
+    Ok(result)
 }
 
 /// Uses AES GCM to encrypt a message given a key.
@@ -266,12 +246,12 @@ impl<'a> Password<'a> {
         }
 
         let pw = self.get_key();
-        let mut result = vec![0; out_len];
+        let mut result = ZVec::new(out_len)?;
 
         // Call pbkdf2 with the correct arguments.
-        pbkdf2(result.as_mut_slice(), pw, salt).map_err(|_| Error::EncryptionFailed)?;
+        pbkdf2(&mut result, pw, salt).map_err(|_| Error::EncryptionFailed)?;
 
-        Ok(ZVec::try_from(result.as_slice())?)
+        Ok(result)
     }
 
     /// Derives a key from the given high-entropy synthetic password and salt, using HKDF.
@@ -279,6 +259,13 @@ impl<'a> Password<'a> {
         let prk = hkdf_extract(self.get_key(), salt)?;
         let info = [];
         hkdf_expand(out_len, &prk, &info)
+    }
+
+    /// Reproduce the accidental KDF used by older OhMyKeymint builds.
+    #[doc(hidden)]
+    pub fn derive_key_omk_legacy(&self, salt: &[u8], out_len: usize) -> Result<ZVec, Error> {
+        let prk = omk_legacy_kdf_extract(self.get_key(), salt)?;
+        omk_legacy_kdf_expand(out_len, &prk, &[])
     }
 
     /// Try to make another Password object with the same data.
@@ -290,13 +277,23 @@ impl<'a> Password<'a> {
 /// Calls the boringssl HKDF_extract function.
 pub fn hkdf_extract(secret: &[u8], salt: &[u8]) -> Result<ZVec, Error> {
     let max_size: usize = EVP_MAX_MD_SIZE.try_into().unwrap();
-    let mut buf = vec![0; max_size];
+    let mut buf = ZVec::new(max_size)?;
 
     let mut out_len = 0;
     // Safety: HKDF_extract writes at most EVP_MAX_MD_SIZE bytes.
     // Secret and salt point to valid buffers.
-    let result = { hkdf_extract_rs(buf.as_mut_slice(), &mut out_len, secret, salt) };
-    if !result {
+    let result = unsafe {
+        bssl_sys::HKDF_extract(
+            buf.as_mut_ptr(),
+            &mut out_len,
+            bssl_sys::EVP_sha256(),
+            secret.as_ptr(),
+            secret.len(),
+            salt.as_ptr(),
+            salt.len(),
+        )
+    };
+    if result != 1 {
         return Err(Error::HKDFExtractFailed);
     }
     // According to the boringssl API, this should never happen.
@@ -305,39 +302,49 @@ pub fn hkdf_extract(secret: &[u8], salt: &[u8]) -> Result<ZVec, Error> {
     }
     // HKDF_extract may write fewer than the maximum number of bytes, so we
     // truncate the buffer.
-    let mut buf = ZVec::try_from(buf)?;
     buf.reduce_len(out_len);
     Ok(buf)
 }
 
-fn hkdf_extract_rs(out_key: &mut [u8], out_len: &mut usize, secret: &[u8], salt: &[u8]) -> bool {
-    let digest = MessageDigest::sha256();
-
-    match openssl::pkcs5::pbkdf2_hmac(secret, salt, 1, digest, out_key) {
-        Ok(_) => {
-            *out_len = out_key.len();
-            true
-        }
-        Err(_) => false,
-    }
-}
-
 /// Calls the boringssl HKDF_expand function.
 pub fn hkdf_expand(out_len: usize, prk: &[u8], info: &[u8]) -> Result<ZVec, Error> {
-    let mut buf = vec![0; out_len];
+    let mut buf = ZVec::new(out_len)?;
     // Safety: HKDF_expand writes out_len bytes to the buffer.
     // prk and info are valid buffers.
-    let result = hkdf_expand_rs(buf.as_mut_slice(), prk, info);
-    if !result {
+    let result = unsafe {
+        bssl_sys::HKDF_expand(
+            buf.as_mut_ptr(),
+            out_len,
+            bssl_sys::EVP_sha256(),
+            prk.as_ptr(),
+            prk.len(),
+            info.as_ptr(),
+            info.len(),
+        )
+    };
+    if result != 1 {
         return Err(Error::HKDFExpandFailed);
     }
-    Ok(ZVec::try_from(buf.as_slice())?)
+    Ok(buf)
 }
 
-fn hkdf_expand_rs(out_key: &mut [u8], prk: &[u8], info: &[u8]) -> bool {
-    let digest = MessageDigest::sha256();
+/// Reproduce the accidental PBKDF2-based extract used by older OhMyKeymint builds.
+#[doc(hidden)]
+pub fn omk_legacy_kdf_extract(secret: &[u8], salt: &[u8]) -> Result<ZVec, Error> {
+    let max_size: usize = EVP_MAX_MD_SIZE.try_into().unwrap();
+    let mut buf = ZVec::new(max_size)?;
+    pbkdf2_hmac(secret, salt, 1, MessageDigest::sha256(), &mut buf)
+        .map_err(|_| Error::HKDFExtractFailed)?;
+    Ok(buf)
+}
 
-    openssl::pkcs5::pbkdf2_hmac(prk, info, 1, digest, out_key).is_ok()
+/// Reproduce the accidental PBKDF2-based expand used by older OhMyKeymint builds.
+#[doc(hidden)]
+pub fn omk_legacy_kdf_expand(out_len: usize, prk: &[u8], info: &[u8]) -> Result<ZVec, Error> {
+    let mut buf = ZVec::new(out_len)?;
+    pbkdf2_hmac(prk, info, 1, MessageDigest::sha256(), &mut buf)
+        .map_err(|_| Error::HKDFExpandFailed)?;
+    Ok(buf)
 }
 
 /// P-521 ECDH private key used by legacy KeyMaster message encryption.
@@ -353,24 +360,51 @@ impl OwnedECPoint {
     }
 }
 
+/// Selects how the ECDH P-521 output is used.
+#[derive(Clone, Copy)]
+pub enum EcdhComputeKeyVersion {
+    /// Use only the first 32 bytes of the ECDH P-521 output.  This does not follow cryptographic
+    /// best practices.  The code is retained only to allow decrypting existing keys.
+    LegacyTruncated,
+    /// Use the full 66 bytes of the ECDH P-521 output.
+    Current,
+}
+
 /// Calls the boringssl ECDH_compute_key function.
-pub fn ecdh_compute_key(pub_key: &EcPointRef, priv_key: &ECKey) -> Result<ZVec, Error> {
-    let group =
-        EcGroup::from_curve_name(Nid::SECP521R1).map_err(|_| Error::ECDHComputeKeyFailed)?;
-    let peer_key =
-        EcKey::from_public_key(&group, pub_key).map_err(|_| Error::ECDHComputeKeyFailed)?;
-    let peer_pkey = PKey::from_ec_key(peer_key).map_err(|_| Error::ECDHComputeKeyFailed)?;
-    let private_pkey =
-        PKey::from_ec_key(priv_key.0.clone()).map_err(|_| Error::ECDHComputeKeyFailed)?;
-    let mut deriver =
-        openssl::derive::Deriver::new(&private_pkey).map_err(|_| Error::ECDHComputeKeyFailed)?;
-    deriver
-        .set_peer(&peer_pkey)
-        .map_err(|_| Error::ECDHComputeKeyFailed)?;
-    let secret = deriver
-        .derive_to_vec()
-        .map_err(|_| Error::ECDHComputeKeyFailed)?;
-    Ok(ZVec::try_from(secret.as_slice())?)
+pub fn ecdh_compute_key(
+    pub_key: &EcPointRef,
+    priv_key: &ECKey,
+    version: EcdhComputeKeyVersion,
+) -> Result<ZVec, Error> {
+    let mut buf = ZVec::new(ECDH_P521_OUTPUT_LEN)?;
+    // Safety: ECDH_compute_key writes at most buf.len() bytes, and both keys are valid objects.
+    let result = unsafe {
+        bssl_sys::ECDH_compute_key(
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            pub_key.as_ptr(),
+            priv_key.0.as_ptr(),
+            None,
+        )
+    };
+    if result == -1 {
+        return Err(Error::ECDHComputeKeyFailed);
+    }
+    let out_len = result.try_into().unwrap();
+    // According to the boringssl API, this should never happen.
+    if out_len > buf.len() {
+        return Err(Error::ECDHComputeKeyFailed);
+    }
+    // ECDH_compute_key may write fewer than the maximum number of bytes, so we
+    // truncate the buffer.
+    buf.reduce_len(out_len);
+
+    // If attempting the legacy key decryption method, further truncate the output.
+    match version {
+        EcdhComputeKeyVersion::LegacyTruncated => buf.reduce_len(LEGACY_TRUNCATED_ECDH_OUTPUT_LEN),
+        EcdhComputeKeyVersion::Current => (),
+    }
+    Ok(buf)
 }
 
 /// Calls the boringssl EC_KEY_generate_key function.
@@ -426,17 +460,18 @@ unsafe fn ECKEYParsePrivateKey(buf: *const u8, len: usize) -> *mut ffi::EC_KEY {
 
 /// Calls the boringssl EC_KEY_marshal_private_key function.
 pub fn ec_key_marshal_private_key(key: &ECKey) -> Result<ZVec, Error> {
-    let len = 73; // Empirically observed length of private key.
+    let len = 73; // Empirically observed length of private key
     let mut buf = ZVec::new(len)?;
     // Safety: the key is valid.
     // This will not write past the specified length of the buffer; if the
     // len above is too short, it returns 0.
     let written_len =
         unsafe { ECKEYMarshalPrivateKey(key.0.as_ptr(), buf.as_mut_ptr(), buf.len()) };
-    if written_len != len {
-        return Err(Error::ECKEYMarshalPrivateKeyFailed);
+    if written_len == len {
+        Ok(buf)
+    } else {
+        Err(Error::ECKEYMarshalPrivateKeyFailed)
     }
-    Ok(buf)
 }
 
 /// Calls the boringssl EC_KEY_parse_private_key function.

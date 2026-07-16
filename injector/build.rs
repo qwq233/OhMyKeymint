@@ -15,12 +15,8 @@ fn add_all_aidl_sources(builder: rsbinder_aidl::Builder, dir: &str) -> rsbinder_
 fn main() {
     println!("cargo:rerun-if-changed=../aidl");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS");
     println!("cargo:rerun-if-env-changed=TARGET");
-
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
-        println!("cargo:rustc-link-arg-bin=inject=-Wl,--export-dynamic-symbol=entry");
-    }
+    println!("cargo:rustc-link-arg-bin=inject=-Wl,--export-dynamic-symbol=entry");
 
     let build_target = std::env::var("TARGET").unwrap_or_else(|_| "unknown-target".to_string());
     let package_version =
@@ -40,25 +36,23 @@ fn main() {
     println!("cargo:rustc-env=INJECTOR_BUILD_GIT_SHA={git_sha}");
     println!("cargo:rustc-env=INJECTOR_BUILD_ID={build_id}");
 
-    let aidl = rsbinder_aidl::Builder::new()
-        .include_dir(PathBuf::from("../aidl/android/system/keystore2"))
-        .include_dir(PathBuf::from("../aidl/android/hardware/security/keymint"))
-        .include_dir(PathBuf::from(
-            "../aidl/android/hardware/security/secureclock",
-        ))
-        .include_dir(PathBuf::from("../aidl/android/security/authorization"))
-        .include_dir(PathBuf::from("../aidl/android/security/maintenance"))
-        .include_dir(PathBuf::from("../aidl/android/security/keystore"))
-        .include_dir(PathBuf::from("../aidl/top/qwq2333/ohmykeymint"))
-        .output(PathBuf::from("aidl.rs"));
-
-    let aidl = add_all_aidl_sources(aidl, "../aidl/android/system/keystore2");
-    let aidl = add_all_aidl_sources(aidl, "../aidl/android/hardware/security/keymint");
-    let aidl = add_all_aidl_sources(aidl, "../aidl/android/hardware/security/secureclock");
-    let aidl = add_all_aidl_sources(aidl, "../aidl/android/security/authorization");
-    let aidl = add_all_aidl_sources(aidl, "../aidl/android/security/maintenance");
-    let aidl = add_all_aidl_sources(aidl, "../aidl/android/security/keystore");
-    let aidl = add_all_aidl_sources(aidl, "../aidl/top/qwq2333/ohmykeymint");
+    let aidl_dirs = [
+        "../aidl/android/system/keystore2",
+        "../aidl/android/hardware/security/keymint",
+        "../aidl/android/hardware/security/secureclock",
+        "../aidl/android/security/authorization",
+        "../aidl/android/security/maintenance",
+        "../aidl/android/security/keystore",
+        "../aidl/top/qwq2333/ohmykeymint",
+    ];
+    let mut aidl = rsbinder_aidl::Builder::new();
+    for dir in aidl_dirs {
+        aidl = aidl.include_dir(PathBuf::from(dir));
+    }
+    let mut aidl = aidl.output(PathBuf::from("aidl.rs"));
+    for dir in aidl_dirs {
+        aidl = add_all_aidl_sources(aidl, dir);
+    }
 
     aidl.generate().unwrap();
 
