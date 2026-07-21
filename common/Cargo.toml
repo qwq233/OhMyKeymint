@@ -25,7 +25,7 @@ pkcs1 = { version = "0.7.5", features = ["alloc"] }
 pkcs8 = "0.11.0"
 rand = "0.10.1"
 quick-xml = { version = "0.41.0", features = ["serialize"] }
-rsproperties = { version = "0.4.0", features = ["builder"] }
+rsproperties = { version = "0.6.0", features = ["builder"] }
 sec1 = { version = "0.8.1", features = ["alloc", "der"] }
 serde = { version = "1.0.228", features = ["derive"] }
 spki = { version = "0.8.0"}
