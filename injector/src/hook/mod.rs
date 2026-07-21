@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 pub(crate) mod binder;
 mod install;
 mod intercept;
-mod rewrite;
+pub(crate) mod rewrite;
 
 static OLD_IOCTL: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static HOOK_INIT: OnceLock<Result<(), String>> = OnceLock::new();

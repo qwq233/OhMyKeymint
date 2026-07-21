@@ -3,13 +3,10 @@ use std::mem::size_of;
 use anyhow::{anyhow, bail, Context, Result};
 use rsbinder::{
     Deserialize, FromIBinder, Parcel, Serialize, SerializeOption, Status, StatusCode, Strong,
-    NON_NULL_PARCELABLE_FLAG, NULL_PARCELABLE_FLAG,
+    NON_NULL_PARCELABLE_FLAG,
 };
 
 use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
-use crate::android::hardware::security::keymint::KeyParameterValue::{
-    KeyParameterValue, Tag as KeyParameterValueTag,
-};
 use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
 use crate::android::hardware::security::keymint::Tag::Tag;
 use crate::android::hardware::security::keymint::{
@@ -25,8 +22,9 @@ use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
 use crate::android::system::keystore2::KeyParameters::KeyParameters;
 use crate::android::system::keystore2::OperationChallenge::OperationChallenge;
 use crate::hook::binder::{
-    binder_object_header, flat_binder_object, flat_binder_object_handle_or_ptr, BINDER_TYPE_BINDER,
-    BINDER_TYPE_FD, BINDER_TYPE_HANDLE, BINDER_TYPE_WEAK_BINDER, BINDER_TYPE_WEAK_HANDLE,
+    binder_object_header, flat_binder_object, flat_binder_object_handle_or_ptr, LocalBinderTarget,
+    BINDER_TYPE_BINDER, BINDER_TYPE_FD, BINDER_TYPE_HANDLE, BINDER_TYPE_WEAK_BINDER,
+    BINDER_TYPE_WEAK_HANDLE,
 };
 use crate::identify::{
     authorization_method_from_code, maintenance_method_from_code, operation_method_from_code,
@@ -40,6 +38,7 @@ use crate::identify::{
 pub struct OwnedReply {
     parcel: Parcel,
     pub offsets: Box<[usize]>,
+    pub(crate) native_operation_target: Option<LocalBinderTarget>,
 }
 
 impl OwnedReply {
@@ -57,6 +56,14 @@ impl OwnedReply {
 
     pub fn data_mut_ptr(&mut self) -> *mut u8 {
         self.parcel.as_mut_ptr()
+    }
+}
+
+impl Drop for OwnedReply {
+    fn drop(&mut self) {
+        if let Some(target) = self.native_operation_target.take() {
+            crate::hook::rewrite::drop_synthetic_operation_target(target);
+        }
     }
 }
 
@@ -278,156 +285,6 @@ pub enum ParsedSecurityLevelRequest {
     },
 }
 
-fn read_key_descriptor_preserving_empty_blob(
-    parcel: &mut Parcel,
-) -> rsbinder::Result<KeyDescriptor> {
-    let status: i32 = parcel.read()?;
-    if status == NULL_PARCELABLE_FLAG {
-        return Err(StatusCode::UnexpectedNull);
-    }
-    read_key_descriptor_body_preserving_empty_blob(parcel)
-}
-
-fn read_key_descriptor_body_preserving_empty_blob(
-    parcel: &mut Parcel,
-) -> rsbinder::Result<KeyDescriptor> {
-    let mut key = KeyDescriptor::default();
-    parcel.sized_read(|sub_parcel| {
-        if !sub_parcel.has_more_data() {
-            return Ok(());
-        }
-        key.domain = sub_parcel.read()?;
-        if !sub_parcel.has_more_data() {
-            return Ok(());
-        }
-        key.nspace = sub_parcel.read()?;
-        if !sub_parcel.has_more_data() {
-            return Ok(());
-        }
-        key.alias = sub_parcel.read()?;
-        if !sub_parcel.has_more_data() {
-            return Ok(());
-        }
-        key.blob = read_nullable_byte_array_preserving_empty(sub_parcel)?;
-        Ok(())
-    })?;
-    Ok(key)
-}
-
-fn read_optional_key_descriptor_preserving_empty_blob(
-    parcel: &mut Parcel,
-) -> rsbinder::Result<Option<KeyDescriptor>> {
-    let null: i32 = parcel.read()?;
-    if null == NULL_PARCELABLE_FLAG {
-        Ok(None)
-    } else {
-        read_key_descriptor_body_preserving_empty_blob(parcel).map(Some)
-    }
-}
-
-fn read_nullable_byte_array_preserving_empty(
-    parcel: &mut Parcel,
-) -> rsbinder::Result<Option<Vec<u8>>> {
-    let len: i32 = parcel.read()?;
-    if len < -1 {
-        return Err(StatusCode::BadValue);
-    }
-    if len == -1 {
-        return Ok(None);
-    }
-
-    let len = usize::try_from(len).map_err(|_| StatusCode::BadValue)?;
-    let padded = len.checked_add(3).ok_or(StatusCode::BadValue)? & !3;
-    if padded > parcel.data_avail() {
-        return Err(StatusCode::NotEnoughData);
-    }
-
-    let pos = parcel.data_position();
-    let bytes = if len == 0 {
-        Vec::new()
-    } else {
-        // Parcel byte arrays are packed bytes followed by 4-byte padding.
-        unsafe { std::slice::from_raw_parts(parcel.as_ptr().add(pos), len) }.to_vec()
-    };
-    parcel.set_data_position(pos + padded);
-    Ok(Some(bytes))
-}
-
-fn read_non_null_byte_array_preserving_empty(parcel: &mut Parcel) -> rsbinder::Result<Vec<u8>> {
-    read_nullable_byte_array_preserving_empty(parcel)?.ok_or(StatusCode::UnexpectedNull)
-}
-
-fn read_non_null_array<T: Deserialize>(parcel: &mut Parcel) -> rsbinder::Result<Vec<T>> {
-    let len: i32 = parcel.read()?;
-    if len < -1 {
-        return Err(StatusCode::BadValue);
-    }
-    if len == -1 {
-        return Err(StatusCode::UnexpectedNull);
-    }
-
-    let len = usize::try_from(len).map_err(|_| StatusCode::BadValue)?;
-    let mut result = Vec::with_capacity(len.min(parcel.data_avail()));
-    for _ in 0..len {
-        result.push(parcel.read()?);
-    }
-    Ok(result)
-}
-
-fn read_key_parameter_array(parcel: &mut Parcel) -> rsbinder::Result<Vec<KeyParameter>> {
-    let len: i32 = parcel.read()?;
-    if len < -1 {
-        return Err(StatusCode::BadValue);
-    }
-    if len == -1 {
-        return Err(StatusCode::UnexpectedNull);
-    }
-
-    let len = usize::try_from(len).map_err(|_| StatusCode::BadValue)?;
-    let mut result = Vec::with_capacity(len.min(parcel.data_avail()));
-    for _ in 0..len {
-        result.push(read_key_parameter(parcel)?);
-    }
-    Ok(result)
-}
-
-fn read_key_parameter(parcel: &mut Parcel) -> rsbinder::Result<KeyParameter> {
-    let status: i32 = parcel.read()?;
-    if status == NULL_PARCELABLE_FLAG {
-        return Err(StatusCode::UnexpectedNull);
-    }
-
-    let mut parameter = KeyParameter::default();
-    parcel.sized_read(|sub_parcel| {
-        if !sub_parcel.has_more_data() {
-            return Ok(());
-        }
-        parameter.tag = sub_parcel.read()?;
-        if !sub_parcel.has_more_data() {
-            return Ok(());
-        }
-        parameter.value = read_key_parameter_value(sub_parcel)?;
-        Ok(())
-    })?;
-    Ok(parameter)
-}
-
-fn read_key_parameter_value(parcel: &mut Parcel) -> rsbinder::Result<KeyParameterValue> {
-    let pos = parcel.data_position();
-    let status: i32 = parcel.read()?;
-    if status == NULL_PARCELABLE_FLAG {
-        return Err(StatusCode::UnexpectedNull);
-    }
-    let tag: i32 = parcel.read()?;
-    if tag != KeyParameterValueTag::r#blob.0 {
-        parcel.set_data_position(pos);
-        return parcel.read();
-    }
-    Ok(KeyParameterValue::Blob(
-        read_non_null_byte_array_preserving_empty(parcel)?,
-    ))
-}
-
 impl ParsedSecurityLevelRequest {
     pub fn method(&self) -> SecurityLevelMethod {
         match self {
@@ -536,7 +393,7 @@ unsafe fn parse_authorization_request_with_resolver(
         },
         AuthorizationMethod::OnDeviceLocked => ParsedAuthorizationRequest::OnDeviceLocked {
             user_id: parcel.read()?,
-            unlocking_sids: read_non_null_array(&mut parcel)?,
+            unlocking_sids: parcel.read()?,
             weak_unlock_enabled: parcel.read()?,
         },
         AuthorizationMethod::OnUserStorageLocked => {
@@ -563,7 +420,7 @@ unsafe fn parse_authorization_request_with_resolver(
         }
         AuthorizationMethod::GetLastAuthTime => ParsedAuthorizationRequest::GetLastAuthTime {
             secure_user_id: parcel.read()?,
-            auth_types: read_non_null_array(&mut parcel)?,
+            auth_types: parcel.read()?,
         },
     };
 
@@ -715,7 +572,7 @@ unsafe fn parse_maintenance_request_with_resolver(
         },
         MaintenanceMethod::InitUserSuperKeys => ParsedMaintenanceRequest::InitUserSuperKeys {
             user_id: parcel.read()?,
-            password: read_non_null_byte_array_preserving_empty(&mut parcel)?,
+            password: parcel.read()?,
             allow_existing: parcel.read()?,
         },
         MaintenanceMethod::OnUserRemoved => ParsedMaintenanceRequest::OnUserRemoved {
@@ -740,8 +597,8 @@ unsafe fn parse_maintenance_request_with_resolver(
         MaintenanceMethod::EarlyBootEnded => ParsedMaintenanceRequest::EarlyBootEnded,
         MaintenanceMethod::OnDeviceOffBody => ParsedMaintenanceRequest::OnDeviceOffBody,
         MaintenanceMethod::MigrateKeyNamespace => ParsedMaintenanceRequest::MigrateKeyNamespace {
-            source: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            destination: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+            source: parcel.read()?,
+            destination: parcel.read()?,
         },
         MaintenanceMethod::DeleteAllKeys => ParsedMaintenanceRequest::DeleteAllKeys,
         MaintenanceMethod::GetAppUidsAffectedBySid => {
@@ -784,27 +641,27 @@ pub unsafe fn parse_service_request(
             security_level: parcel.read()?,
         },
         ServiceMethod::GetKeyEntry => ParsedServiceRequest::GetKeyEntry {
-            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+            key: parcel.read()?,
         },
         ServiceMethod::UpdateSubcomponent => ParsedServiceRequest::UpdateSubcomponent {
-            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            public_cert: read_nullable_byte_array_preserving_empty(&mut parcel)?,
-            certificate_chain: read_nullable_byte_array_preserving_empty(&mut parcel)?,
+            key: parcel.read()?,
+            public_cert: parcel.read()?,
+            certificate_chain: parcel.read()?,
         },
         ServiceMethod::ListEntries => ParsedServiceRequest::ListEntries {
             domain: parcel.read()?,
             nspace: parcel.read()?,
         },
         ServiceMethod::DeleteKey => ParsedServiceRequest::DeleteKey {
-            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+            key: parcel.read()?,
         },
         ServiceMethod::Grant => ParsedServiceRequest::Grant {
-            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+            key: parcel.read()?,
             grantee_uid: parcel.read()?,
             access_vector: parcel.read()?,
         },
         ServiceMethod::Ungrant => ParsedServiceRequest::Ungrant {
-            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+            key: parcel.read()?,
             grantee_uid: parcel.read()?,
         },
         ServiceMethod::GetNumberOfEntries => ParsedServiceRequest::GetNumberOfEntries {
@@ -852,38 +709,38 @@ pub unsafe fn parse_security_level_request(
 
     let parsed = match method {
         SecurityLevelMethod::CreateOperation => ParsedSecurityLevelRequest::CreateOperation {
-            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            operation_parameters: read_key_parameter_array(&mut parcel)?,
+            key: parcel.read()?,
+            operation_parameters: parcel.read()?,
             forced: parcel.read()?,
         },
         SecurityLevelMethod::GenerateKey => ParsedSecurityLevelRequest::GenerateKey {
-            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            attestation_key: read_optional_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            params: read_key_parameter_array(&mut parcel)?,
+            key: parcel.read()?,
+            attestation_key: parcel.read()?,
+            params: parcel.read()?,
             flags: parcel.read()?,
-            entropy: read_non_null_byte_array_preserving_empty(&mut parcel)?,
+            entropy: parcel.read()?,
         },
         SecurityLevelMethod::ImportKey => ParsedSecurityLevelRequest::ImportKey {
-            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            attestation_key: read_optional_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            params: read_key_parameter_array(&mut parcel)?,
+            key: parcel.read()?,
+            attestation_key: parcel.read()?,
+            params: parcel.read()?,
             flags: parcel.read()?,
-            key_data: read_non_null_byte_array_preserving_empty(&mut parcel)?,
+            key_data: parcel.read()?,
         },
         SecurityLevelMethod::ImportWrappedKey => ParsedSecurityLevelRequest::ImportWrappedKey {
-            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            wrapping_key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
-            masking_key: read_nullable_byte_array_preserving_empty(&mut parcel)?,
-            params: read_key_parameter_array(&mut parcel)?,
-            authenticators: read_non_null_array(&mut parcel)?,
+            key: parcel.read()?,
+            wrapping_key: parcel.read()?,
+            masking_key: parcel.read()?,
+            params: parcel.read()?,
+            authenticators: parcel.read()?,
         },
         SecurityLevelMethod::ConvertStorageKeyToEphemeral => {
             ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral {
-                storage_key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+                storage_key: parcel.read()?,
             }
         }
         SecurityLevelMethod::DeleteKey => ParsedSecurityLevelRequest::DeleteKey {
-            key: read_key_descriptor_preserving_empty_blob(&mut parcel)?,
+            key: parcel.read()?,
         },
     };
 
@@ -916,10 +773,10 @@ pub unsafe fn parse_operation_request(
 
     let parsed = match method {
         OperationMethod::UpdateAad => ParsedOperationRequest::UpdateAad {
-            aad_input: read_non_null_byte_array_preserving_empty(&mut parcel)?,
+            aad_input: parcel.read()?,
         },
         OperationMethod::Update => ParsedOperationRequest::Update {
-            input: read_non_null_byte_array_preserving_empty(&mut parcel)?,
+            input: parcel.read()?,
         },
         OperationMethod::Finish => ParsedOperationRequest::Finish {
             input: parcel.read()?,
@@ -1193,17 +1050,10 @@ pub fn build_create_operation_reply(reply: CreateOperationResponse) -> Result<Ow
         r#parameters,
         r#upgradedBlob,
     } = reply;
+    let operation = r#iOperation.as_ref().ok_or(StatusCode::UnexpectedNull)?;
     build_sized_parcelable_reply(|sub_parcel, binder_offset| {
-        match r#iOperation.as_ref() {
-            Some(binder) => {
-                *binder_offset = Some(sub_parcel.data_position());
-                sub_parcel.write(&Some(binder.clone()))?;
-            }
-            None => {
-                let none: Option<Strong<dyn IKeystoreOperation>> = None;
-                sub_parcel.write(&none)?;
-            }
-        }
+        *binder_offset = Some(sub_parcel.data_position());
+        sub_parcel.write(operation)?;
         sub_parcel.write(&r#operationChallenge)?;
         sub_parcel.write(&r#parameters)?;
         sub_parcel.write(&r#upgradedBlob)?;
@@ -1281,6 +1131,7 @@ fn owned_reply_from_parcel(parcel: Parcel, offsets: impl IntoIterator<Item = usi
     OwnedReply {
         parcel,
         offsets: offsets.into_iter().collect(),
+        native_operation_target: None,
     }
 }
 
@@ -1510,8 +1361,11 @@ fn contains_utf16_token(parcel: &[u8], token: &str) -> bool {
 mod tests {
     use super::*;
     use crate::android::hardware::security::keymint::{
-        HardwareAuthenticatorType::HardwareAuthenticatorType, KeyParameter::KeyParameter,
-        KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
+        HardwareAuthenticatorType::HardwareAuthenticatorType,
+        KeyParameter::KeyParameter,
+        KeyParameterValue::{KeyParameterValue, Tag as KeyParameterValueTag},
+        SecurityLevel::SecurityLevel,
+        Tag::Tag,
     };
     use crate::android::system::keystore2::AuthenticatorSpec::AuthenticatorSpec;
     use crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse;
@@ -1643,7 +1497,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_key_descriptor_round_trip_collapses_non_null_empty_blob() {
+    fn generated_key_descriptor_round_trip_preserves_non_null_empty_blob() {
         let key = blob_key_descriptor(Some(Vec::new()));
         let mut parcel = Parcel::new();
         parcel.write(&key).unwrap();
@@ -1651,7 +1505,7 @@ mod tests {
 
         let decoded: KeyDescriptor = parcel.read().unwrap();
 
-        assert_eq!(decoded.blob, None);
+        assert_eq!(decoded.blob, Some(Vec::new()));
     }
 
     fn parse_security_level_key_request(
@@ -1887,6 +1741,44 @@ mod tests {
     }
 
     #[test]
+    fn generated_deserializers_reject_invalid_lengths_and_presence_flags() {
+        assert_status_code(
+            parse_authorization_request_as_method(
+                AuthorizationMethod::OnDeviceUnlocked,
+                |parcel| {
+                    parcel.write(&0i32).unwrap();
+                    parcel.write(&-2i32).unwrap();
+                },
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_operation_request_with_payload(
+                crate::android::system::keystore2::IKeystoreOperation::transactions::r#update,
+                |parcel| parcel.write(&-2i32).unwrap(),
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_security_level_request_with_payload(
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
+                |parcel| parcel.write(&2i32).unwrap(),
+            ),
+            StatusCode::UnexpectedNull,
+        );
+        assert_status_code(
+            parse_security_level_request_with_payload(
+                crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#generateKey,
+                |parcel| {
+                    parcel.write(&blob_key_descriptor(None)).unwrap();
+                    parcel.write(&2i32).unwrap();
+                },
+            ),
+            StatusCode::UnexpectedNull,
+        );
+    }
+
+    #[test]
     fn keystore_non_null_arrays_preserve_empty() {
         let key = blob_key_descriptor(None);
         let auth_bound_flags = KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING;
@@ -1895,6 +1787,32 @@ mod tests {
         let empty_params = Vec::<KeyParameter>::new();
         let empty_authenticators = Vec::<AuthenticatorSpec>::new();
         let empty_bytes = Vec::<u8>::new();
+
+        let parsed = parse_authorization_request_as_method(
+            AuthorizationMethod::OnDeviceUnlocked,
+            |parcel| {
+                parcel.write(&0i32).unwrap();
+                parcel.write(&Some(Vec::<u8>::new())).unwrap();
+            },
+        )
+        .expect("empty onDeviceUnlocked password should parse");
+        let ParsedAuthorizationRequest::OnDeviceUnlocked { password, .. } = parsed else {
+            panic!("onDeviceUnlocked request should parse");
+        };
+        assert_eq!(password, Some(Vec::new()));
+
+        let parsed = parse_maintenance_request_as_method(
+            MaintenanceMethod::OnUserPasswordChanged,
+            |parcel| {
+                parcel.write(&0i32).unwrap();
+                parcel.write(&Some(Vec::<u8>::new())).unwrap();
+            },
+        )
+        .expect("empty onUserPasswordChanged password should parse");
+        let ParsedMaintenanceRequest::OnUserPasswordChanged { password, .. } = parsed else {
+            panic!("onUserPasswordChanged request should parse");
+        };
+        assert_eq!(password, Some(Vec::new()));
 
         let parsed =
             parse_authorization_request_as_method(AuthorizationMethod::OnDeviceLocked, |parcel| {
@@ -2016,6 +1934,29 @@ mod tests {
         assert!(params.is_empty());
         assert_eq!(flags, auth_bound_flags);
         assert!(entropy.is_empty());
+
+        let empty_attestation_key = blob_key_descriptor(Some(Vec::new()));
+        let parsed = parse_security_level_request_with_payload(
+            crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#generateKey,
+            |parcel| {
+                parcel.write(&key).unwrap();
+                parcel.write(&Some(empty_attestation_key.clone())).unwrap();
+                parcel.write(&empty_params).unwrap();
+                parcel.write(&0i32).unwrap();
+                parcel.write(&empty_bytes).unwrap();
+            },
+        )
+        .expect("empty optional attestation-key blob should parse");
+        let ParsedSecurityLevelRequest::GenerateKey {
+            attestation_key, ..
+        } = parsed
+        else {
+            panic!("generateKey request should parse");
+        };
+        assert_eq!(
+            attestation_key.and_then(|descriptor| descriptor.blob),
+            Some(Vec::new())
+        );
 
         let parsed = parse_security_level_request_with_payload(
             crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#importKey,
@@ -2327,6 +2268,18 @@ mod tests {
         assert_eq!(password.as_deref(), Some(&[1, 2, 3][..]));
 
         let parsed = parse_maintenance_request_for_android(Some(12), tx(2), |parcel| {
+            parcel.write(&12i32).unwrap();
+            parcel.write(&Some(Vec::<u8>::new())).unwrap();
+        })
+        .expect("legacy empty password change should parse");
+
+        let ParsedMaintenanceRequest::OnUserPasswordChanged { user_id, password } = parsed else {
+            panic!("legacy empty password change should stay OnUserPasswordChanged");
+        };
+        assert_eq!(user_id, 12);
+        assert_eq!(password, Some(Vec::new()));
+
+        let parsed = parse_maintenance_request_for_android(Some(12), tx(2), |parcel| {
             parcel.write(&11i32).unwrap();
             parcel.write(&None::<Vec<u8>>).unwrap();
         })
@@ -2370,26 +2323,17 @@ mod tests {
     }
 
     #[test]
-    fn create_operation_reply_round_trip_without_binder() {
+    fn create_operation_reply_rejects_missing_binder() {
         let response = CreateOperationResponse {
             r#iOperation: None,
             r#operationChallenge: Some(OperationChallenge { challenge: 0x1234 }),
             r#parameters: None,
             r#upgradedBlob: Some(vec![9, 8, 7]),
         };
-        let mut reply = build_create_operation_reply(response)
-            .expect("create operation reply should serialize");
-        let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
-        let parsed: CreateOperationResponse =
-            unsafe { parse_success_reply(data, data_size, offsets, offsets_size) }.unwrap();
-        assert!(parsed.r#iOperation.is_none());
-        assert_eq!(
-            parsed
-                .r#operationChallenge
-                .map(|challenge| challenge.challenge),
-            Some(0x1234)
+        assert_status_code(
+            build_create_operation_reply(response),
+            StatusCode::UnexpectedNull,
         );
-        assert_eq!(parsed.r#upgradedBlob.as_deref(), Some(&[9, 8, 7][..]));
     }
 
     #[test]
@@ -2410,16 +2354,20 @@ mod tests {
         )
         .expect("create operation carrier reply should serialize");
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
-        let parsed: CreateOperationResponse =
-            unsafe { parse_success_reply(data, data_size, offsets, offsets_size) }.unwrap();
-        assert!(parsed.r#iOperation.is_none());
-        assert_eq!(
-            parsed
-                .r#operationChallenge
-                .map(|challenge| challenge.challenge),
-            Some(0x5678)
-        );
-        let parsed_nonce = parsed.r#parameters.as_ref().and_then(|parameters| {
+        let mut parcel = unsafe { parcel_from_ipc_parts(data, data_size, offsets, offsets_size) };
+        read_ok_status(&mut parcel).unwrap();
+        read_non_null_parcelable_flag(&mut parcel, "create-operation").unwrap();
+        let parsed: (
+            Option<OperationChallenge>,
+            Option<KeyParameters>,
+            Option<Vec<u8>>,
+        ) = read_sized_reply_payload(&mut parcel, "create-operation test payload", |sub_parcel| {
+            read_reply_binder_carrier(sub_parcel, data)?;
+            Ok((sub_parcel.read()?, sub_parcel.read()?, sub_parcel.read()?))
+        })
+        .unwrap();
+        assert_eq!(parsed.0.map(|challenge| challenge.challenge), Some(0x5678));
+        let parsed_nonce = parsed.1.as_ref().and_then(|parameters| {
             parameters.keyParameter.iter().find_map(|parameter| {
                 if parameter.tag == Tag::NONCE {
                     match &parameter.value {
@@ -2432,6 +2380,6 @@ mod tests {
             })
         });
         assert_eq!(parsed_nonce, Some(nonce.as_slice()));
-        assert_eq!(parsed.r#upgradedBlob.as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(parsed.2.as_deref(), Some(&[1, 2, 3][..]));
     }
 }

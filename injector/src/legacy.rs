@@ -82,7 +82,7 @@ fn get_provider_binder() -> Result<SIBinder> {
         return Ok(provider.clone());
     }
 
-    let provider = hub::get_service(PROVIDER_SERVICE)
+    let provider = hub::check_service(PROVIDER_SERVICE)
         .ok_or_else(|| anyhow::anyhow!("service {PROVIDER_SERVICE} unavailable"))?;
     let descriptor = provider.descriptor();
     if descriptor != LEGACY_PROVIDER_DESCRIPTOR {

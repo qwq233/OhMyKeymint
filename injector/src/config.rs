@@ -310,7 +310,9 @@ fn write_config(path: &Path, config: &InjectorConfig) -> io::Result<()> {
 
 fn render_config(config: &InjectorConfig) -> io::Result<String> {
     let mut contents = String::from(
-        "# Only packages listed in `scoop` are intercepted.\n\
+        "# With `[filter].enabled = true`, a UID is intercepted when any package\n\
+         # sharing that UID is listed in `scoop`.\n\
+         # Filter deny settings still apply to every package resolved for the UID.\n\
          # Optional per-package settings can be added under [scoop.<package>].\n\
          # Example:\n\
          # [scoop.io.github.vvb2060.keyattestation]\n\

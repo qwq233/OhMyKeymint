@@ -94,7 +94,9 @@ file to `config.toml.bak`, and appends the parse error to the backup.
 ### /data/misc/keystore/omk/injector.toml
 
 ```toml
-# Only packages listed in `scoop` are intercepted.
+# With `[filter].enabled = true`, a UID is intercepted when any package
+# sharing that UID is listed in `scoop`.
+# The filter and deny settings still apply to every package resolved for the UID.
 
 scoop = [
   "io.github.vvb2060.keyattestation",
@@ -131,6 +133,8 @@ get_supplementary_attestation_info = true
 
 `allow_unknown_package = true` allows callers whose package name cannot be resolved to pass
 the filter instead of being rejected.
+
+Disabling `[filter]` allows every resolved UID.
 
 ## Restarting keymint and injector
 
