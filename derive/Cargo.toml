@@ -14,7 +14,7 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "^1.0"
 quote = "^1.0"
-syn = { version = "2.0.38", features = ["derive", "parsing"] }
+syn = { version = "3.0.2", features = ["derive", "parsing"] }
 
 [dev-dependencies]
 ciborium = { version = "0.2.2", default-features = false }
