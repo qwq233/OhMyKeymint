@@ -208,11 +208,7 @@ impl MaintenanceManager {
     fn delete_all_keys(&self, ctx: Option<&CallerInfo>) -> Result<()> {
         check_maintenance_permission(KeystorePerm::DeleteAllKeys, ctx, "deleteAllKeys")
             .context(err!("caller missing delete_all_keys permission"))?;
-        call_keymint_wrappers("deleteAllKeys", |keymint| keymint.deleteAllKeys())?;
-        DB.with(|db| db.borrow_mut().unbind_all_keys())
-            .context(err!(
-                "removing all key database entries after deleteAllKeys"
-            ))
+        call_keymint_wrappers("deleteAllKeys", |keymint| keymint.deleteAllKeys())
     }
 
     fn get_app_uids_affected_by_sid(

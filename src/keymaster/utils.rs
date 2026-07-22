@@ -1137,6 +1137,19 @@ impl<T: AesGcmKey> AesGcm for T {
     }
 }
 
+/// Preserve the deprecated `get_interface` wrapper's single `getService` lookup and
+/// lazy-service start without inheriting its version-dependent wait behavior.
+pub(crate) fn get_interface_once<T: FromIBinder + ?Sized>(
+    name: &str,
+) -> Result<Strong<T>, StatusCode> {
+    let binder = hub::default()?
+        .try_get_service(name)
+        .ok()
+        .flatten()
+        .ok_or(StatusCode::NameNotFound)?;
+    FromIBinder::try_from(binder)
+}
+
 /// Get the Binder interface identified by `name`, retrying any failures up to the given
 /// `retry_count`.
 pub fn retry_get_interface<T: FromIBinder + ?Sized>(
@@ -1146,7 +1159,7 @@ pub fn retry_get_interface<T: FromIBinder + ?Sized>(
     let mut attempts = 0;
     let mut wait_time = Duration::from_secs(1);
     loop {
-        let err = match hub::get_interface(name) {
+        let err = match get_interface_once(name) {
             Ok(res) => {
                 if attempts > 1 {
                     info!("Success on get_interface({name}) after {attempts} failures!");
@@ -1230,7 +1243,7 @@ pub fn app_info_for_uid(uid: AppUid) -> AppInfo {
     }
 
     let pm: Strong<dyn IPackageManagerNative> =
-        match hub::get_interface(PACKAGE_MANAGER_NATIVE_SERVICE) {
+        match get_interface_once(PACKAGE_MANAGER_NATIVE_SERVICE) {
             Ok(pm) => pm,
             Err(e) => {
                 warn!("failed to connect to PackageManager: {e:?}");
@@ -1303,7 +1316,10 @@ fn app_info_for_uid_legacy_pm(
         }
     };
 
-    let binder = match hub::get_service(PACKAGE_MANAGER_NATIVE_SERVICE) {
+    let binder = match hub::try_get_service(PACKAGE_MANAGER_NATIVE_SERVICE)
+        .ok()
+        .flatten()
+    {
         Some(binder) => binder,
         None => {
             warn!("failed to connect to PackageManager service binder");

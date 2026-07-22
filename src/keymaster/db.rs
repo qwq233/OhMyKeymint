@@ -3279,35 +3279,6 @@ impl KeystoreDB {
         .context(ks_err!())
     }
 
-    /// Removes every known key entry after KeyMint deleteAllKeys succeeds.
-    pub fn unbind_all_keys(&mut self) -> Result<()> {
-        let _wp = wd::watch("KeystoreDB::unbind_all_keys");
-
-        self.with_transaction(Immediate("TX_unbind_all_keys"), |tx| {
-            let mut stmt = tx
-                .prepare("SELECT id FROM persistent.keyentry;")
-                .context(ks_err!("Preparing full key deletion query."))?;
-            let mut rows = stmt
-                .query([])
-                .context(ks_err!("Querying keys for full deletion."))?;
-
-            let mut key_ids = Vec::new();
-            db_utils::with_rows_extract_all(&mut rows, |row| {
-                key_ids.push(row.get(0).context("Failed to read key id.")?);
-                Ok(())
-            })
-            .context(ks_err!("Extracting keys for full deletion."))?;
-
-            let mut notify_gc = false;
-            for key_id in key_ids {
-                notify_gc =
-                    Self::remove_key_rows(tx, key_id).context("In unbind_all_keys.")? || notify_gc;
-            }
-            Ok(()).do_gc(notify_gc)
-        })
-        .context(ks_err!())
-    }
-
     fn load_key_components(
         tx: &Transaction,
         load_bits: KeyEntryLoadBits,

@@ -25,7 +25,7 @@ use crate::android::system::keystore2::{
 use crate::err as ks_err;
 use crate::keymaster::error::Error as KsError;
 use crate::keymaster::error::ResponseCode;
-use crate::keymaster::utils::AppUid;
+use crate::keymaster::utils::{get_interface_once, AppUid};
 use crate::selinux::{self, implement_class, Backend, ClassPermission};
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 use anyhow::Context as AnyhowContext;
@@ -643,7 +643,7 @@ fn check_android_permission_with_controller(
     permission_denied: KsError,
 ) -> anyhow::Result<()> {
     let controller: rsbinder::Strong<dyn IPermissionController> =
-        hub::get_interface(PERMISSION_CONTROLLER_SERVICE).context(format!(
+        get_interface_once(PERMISSION_CONTROLLER_SERVICE).context(format!(
             "service {PERMISSION_CONTROLLER_SERVICE} unavailable"
         ))?;
     let has_permission = controller
@@ -665,7 +665,9 @@ fn check_android_permission_with_manager(
     permission: &str,
     permission_denied: KsError,
 ) -> anyhow::Result<()> {
-    let binder = hub::get_service(PERMISSION_MANAGER_SERVICE)
+    let binder = hub::try_get_service(PERMISSION_MANAGER_SERVICE)
+        .ok()
+        .flatten()
         .ok_or_else(KsError::sys)
         .context(format!("service {PERMISSION_MANAGER_SERVICE} unavailable"))?;
     let proxy = binder

@@ -245,12 +245,12 @@ fn run() -> Result<()> {
     info!("starting OhMyKeymint");
     crate::keymaster::permission::initialize_runtime_service_context();
 
-    info!("initial process state");
-    let _ = rsbinder::ProcessState::init_default();
-
     prepare_android_storage();
     plat::resetprop::bootstrap_privileged_helper()
         .context("failed to bootstrap resetprop helper")?;
+
+    info!("initial process state");
+    let _ = rsbinder::ProcessState::init_default();
 
     info!("bootstrapping config");
     let mut config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;

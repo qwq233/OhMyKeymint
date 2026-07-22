@@ -1,23 +1,13 @@
 use crate::{
     config::{self, ConfigFile, DeviceProperty},
-    plat::resetprop::read_string_property,
+    plat::resetprop::{
+        is_binder_service_unavailable, read_string_property, runtime_get_device_id_for_phone,
+        runtime_get_imei_for_slot, runtime_get_meid_for_slot, runtime_telephony_features,
+        TelephonyFeatures,
+    },
 };
 
-use anyhow::{anyhow, bail, Context, Result};
-use rsbinder::{hub, Status};
-
-const PHONE_SUB_INFO_SERVICE: &str = "iphonesubinfo";
-const GET_DEVICE_ID_FOR_PHONE_TRANSACTION: rsbinder::TransactionCode =
-    rsbinder::FIRST_CALL_TRANSACTION + 3;
-const CALLING_PACKAGE: &str = "android";
-const CALLING_FEATURE: &str = "android";
-const PHONE_SERVICE: &str = "phone";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TelephonyTransactions {
-    get_imei_for_slot: rsbinder::TransactionCode,
-    get_meid_for_slot: Option<rsbinder::TransactionCode>,
-}
+use anyhow::Result;
 
 const IMEI_PROPERTIES: &[&str] = &[
     "ro.ril.oem.imei",
@@ -58,11 +48,11 @@ struct BackfillEvent {
     value: String,
 }
 
-fn bootstrap_device_ids(config_file: &mut ConfigFile) -> bool {
+fn bootstrap_device_ids(config_file: &mut ConfigFile) -> Option<bool> {
     let device = &mut config_file.device;
     if device.override_telephony_properties {
         log::debug!("device identifiers pinned by config; skipping telephony auto-fill");
-        return false;
+        return Some(false);
     }
 
     if !needs_backfill(&device.imei)
@@ -70,49 +60,61 @@ fn bootstrap_device_ids(config_file: &mut ConfigFile) -> bool {
         && !needs_backfill(&device.meid)
     {
         log::debug!("device identifiers already configured; skipping telephony auto-fill");
-        return false;
+        return Some(false);
     }
 
-    let telephony_api_candidates = probe_telephony_api_candidates();
-    let mut events = apply_telephony_candidates(device, &telephony_api_candidates);
-    let device_id_candidates = probe_device_id_candidates();
-    events.extend(apply_telephony_candidates(device, &device_id_candidates));
+    let mut service_unavailable = false;
+    let features = match runtime_telephony_features() {
+        Ok(features) => features,
+        Err(error) => {
+            service_unavailable = is_binder_service_unavailable(&error);
+            log::warn!("device ID feature probe failed; probing all ID APIs once: {error:#}");
+            TelephonyFeatures {
+                any: true,
+                gsm: true,
+                cdma: true,
+            }
+        }
+    };
+    let (candidates, probe_service_unavailable) = probe_device_id_candidates(features);
+    service_unavailable |= probe_service_unavailable;
+    let mut events = apply_telephony_candidates(device, &candidates);
     events.extend(apply_property_fallbacks(device));
 
     if events.is_empty() {
         log_device_id_state(device, "telephony auto-fill left fields empty");
-        return false;
+    } else {
+        for event in &events {
+            log::info!(
+                "Auto-filled {} from {} as {}",
+                event.field,
+                event.source,
+                mask_identifier(&event.value)
+            );
+        }
+        log_device_id_state(device, "telephony auto-fill result");
     }
 
-    for event in events {
-        log::info!(
-            "Auto-filled {} from {} as {}",
-            event.field,
-            event.source,
-            mask_identifier(&event.value)
-        );
-    }
-
-    log_device_id_state(device, "telephony auto-fill result");
-    true
+    (!service_unavailable).then_some(!events.is_empty())
 }
 
-pub fn resolve_runtime_device_ids() -> Result<()> {
-    if !crate::global::boot_completed()
-        && read_string_property("sys.boot_completed").as_deref() != Some("1")
-    {
-        return Ok(());
-    }
-
+pub fn resolve_runtime_device_ids() -> Result<Option<DeviceProperty>> {
     let mut config_file = config::bootstrap_config_file()?;
-    if bootstrap_device_ids(&mut config_file) {
-        config::persist_config_file(&config_file)?;
-        let mut runtime = config::config()
-            .write()
-            .map_err(|_| anyhow!("config lock poisoned while updating device identifiers"))?;
-        runtime.device = config_file.device;
+    let Some(changed) = bootstrap_device_ids(&mut config_file) else {
+        log::debug!("telephony Binder services are not ready; deferring attestation ID snapshot");
+        return Ok(None);
+    };
+    let device = config_file.device.clone();
+    match config::config().write() {
+        Ok(mut runtime) => runtime.device = device.clone(),
+        Err(_) => log::warn!("config lock poisoned while updating device identifiers"),
     }
-    Ok(())
+    if changed {
+        if let Err(error) = config::persist_config_file(&config_file) {
+            log::warn!("failed to persist resolved device identifiers: {error:#}");
+        }
+    }
+    Ok(Some(device))
 }
 
 fn apply_telephony_candidates(
@@ -326,191 +328,74 @@ fn log_device_id_state(device: &DeviceProperty, label: &str) {
     );
 }
 
-fn probe_telephony_api_candidates() -> Vec<IdentifierCandidate> {
+fn probe_device_id_candidates(features: TelephonyFeatures) -> (Vec<IdentifierCandidate>, bool) {
     let mut candidates = Vec::new();
-
-    for slot in [0_i32, 1_i32] {
-        match probe_imei_slot(slot) {
-            Ok(Some(value)) => {
-                let source = format!("telephony api imei slot {slot}");
-                match normalize_imei_candidate(&value, source.clone()) {
-                    Some(candidate) => candidates.push(candidate),
-                    None => log::warn!(
-                        "Ignoring invalid telephony IMEI from {source}: {}",
-                        mask_identifier(value.trim())
-                    ),
-                }
-            }
-            Ok(None) => log::debug!("telephony API IMEI slot {slot} returned no identifier"),
-            Err(error) => log::warn!("telephony API IMEI slot {slot} probe failed: {error:#}"),
-        }
+    let mut service_unavailable = false;
+    if features.gsm {
+        service_unavailable |= collect_slot_candidates(
+            &mut candidates,
+            "telephony API IMEI",
+            Some(IdentifierKind::Imei),
+            runtime_get_imei_for_slot,
+        );
+    }
+    if features.cdma {
+        service_unavailable |= collect_slot_candidates(
+            &mut candidates,
+            "telephony API MEID",
+            Some(IdentifierKind::Meid),
+            runtime_get_meid_for_slot,
+        );
+    }
+    if features.any {
+        service_unavailable |= collect_slot_candidates(
+            &mut candidates,
+            "device ID",
+            None,
+            runtime_get_device_id_for_phone,
+        );
     }
 
-    for slot in [0_i32, 1_i32] {
-        match probe_meid_slot(slot) {
-            Ok(Some(value)) => {
-                let source = format!("telephony api meid slot {slot}");
-                match normalize_meid_candidate(&value, source.clone()) {
-                    Some(candidate) => candidates.push(candidate),
-                    None => log::warn!(
-                        "Ignoring invalid telephony MEID from {source}: {}",
-                        mask_identifier(value.trim())
-                    ),
-                }
-            }
-            Ok(None) => log::debug!("telephony API MEID slot {slot} returned no identifier"),
-            Err(error) => log::warn!("telephony API MEID slot {slot} probe failed: {error:#}"),
-        }
+    if candidates.is_empty() {
+        log::debug!("telephony device IDs are unavailable");
     }
-
-    candidates
+    (candidates, service_unavailable)
 }
 
-fn probe_device_id_candidates() -> Vec<IdentifierCandidate> {
-    let mut candidates = Vec::new();
-
-    for slot in [0_i32, 1_i32] {
-        match probe_device_id_slot(slot) {
-            Ok(Some(value)) => {
-                let source = format!("device id slot {slot}");
-                match classify_identifier(&value, source.clone()) {
-                    Some(candidate) => candidates.push(candidate),
-                    None => log::warn!(
-                        "Ignoring unrecognized device identifier from {source}: {}",
-                        mask_identifier(value.trim())
-                    ),
-                }
-            }
-            Ok(None) => log::debug!("device ID slot {slot} returned no identifier"),
-            Err(error) => log::warn!("device ID slot {slot} probe failed: {error:#}"),
-        }
-    }
-
-    candidates
-}
-
-fn probe_device_id_slot(slot: i32) -> Result<Option<String>> {
-    probe_phone_string_via_binder(
-        PHONE_SUB_INFO_SERVICE,
-        GET_DEVICE_ID_FOR_PHONE_TRANSACTION,
-        slot,
-        "iphonesubinfo",
-        "phoneId",
-        "device id",
-    )
-}
-
-fn probe_imei_slot(slot: i32) -> Result<Option<String>> {
-    probe_phone_string_via_binder(
-        PHONE_SERVICE,
-        telephony_transactions().get_imei_for_slot,
-        slot,
-        "phone",
-        "slot",
-        "identifier",
-    )
-}
-
-fn probe_meid_slot(slot: i32) -> Result<Option<String>> {
-    let Some(transaction) = telephony_transactions().get_meid_for_slot else {
-        log::debug!("phone getMeidForSlot is not present on Android 17");
-        return Ok(None);
-    };
-
-    probe_phone_string_via_binder(
-        PHONE_SERVICE,
-        transaction,
-        slot,
-        "phone",
-        "slot",
-        "identifier",
-    )
-}
-
-fn probe_phone_string_via_binder(
-    service: &str,
-    transaction: rsbinder::TransactionCode,
-    slot: i32,
+fn collect_slot_candidates(
+    candidates: &mut Vec<IdentifierCandidate>,
     label: &str,
-    slot_label: &str,
-    value_label: &str,
-) -> Result<Option<String>> {
-    let binder =
-        hub::get_service(service).ok_or_else(|| anyhow!("service {service} unavailable"))?;
-    let proxy = binder
-        .as_proxy()
-        .with_context(|| format!("{label} binder was unexpectedly local"))?;
-    let mut data = proxy
-        .prepare_transact(true)
-        .with_context(|| format!("failed to prepare {label} transaction"))?;
-    data.write(&slot)
-        .with_context(|| format!("failed to write {slot_label} for {label}"))?;
-    data.write(&CALLING_PACKAGE.to_string())
-        .with_context(|| format!("failed to write calling package for {label}"))?;
-    data.write(&CALLING_FEATURE.to_string())
-        .with_context(|| format!("failed to write calling feature for {label}"))?;
-
-    let mut reply = proxy
-        .submit_transact(transaction, &data, 0)
-        .with_context(|| format!("{label} transact failed"))?
-        .with_context(|| format!("{label} returned no reply"))?;
-    reply.set_data_position(0);
-
-    let status: Status = reply
-        .read()
-        .with_context(|| format!("failed to decode {label} reply status"))?;
-    if !status.is_ok() {
-        bail!("{label} returned non-ok status: {status}");
+    expected_kind: Option<IdentifierKind>,
+    mut probe: impl FnMut(i32) -> Result<Option<String>>,
+) -> bool {
+    let mut service_unavailable = false;
+    for slot in [0_i32, 1_i32] {
+        let source = format!("{} slot {slot}", label.to_ascii_lowercase());
+        match probe(slot) {
+            Ok(Some(value)) => {
+                match classify_identifier(&value, source.clone()).filter(|candidate| {
+                    expected_kind.is_none_or(|expected| candidate.kind == expected)
+                }) {
+                    Some(candidate) => candidates.push(candidate),
+                    None => log::warn!(
+                        "Ignoring invalid {label} from {source}: {}",
+                        mask_identifier(value.trim())
+                    ),
+                }
+            }
+            Ok(None) => log::debug!("{label} slot {slot} returned no identifier"),
+            Err(error) => {
+                service_unavailable |= is_binder_service_unavailable(&error);
+                log::warn!("{label} slot {slot} probe failed: {error:#}");
+            }
+        }
     }
-
-    let value: Option<String> = reply
-        .read()
-        .with_context(|| format!("failed to decode {label} {value_label} string"))?;
-    Ok(value.filter(|value| !value.trim().is_empty()))
-}
-
-fn telephony_transactions() -> TelephonyTransactions {
-    telephony_transactions_for(kmr_common::android_version::android_major_version())
-}
-
-fn telephony_transactions_for(android_major: Option<i32>) -> TelephonyTransactions {
-    let (imei_offset, meid_offset) = match android_major {
-        Some(version) if version <= 12 => (149, Some(151)),
-        Some(13) => (145, Some(147)),
-        Some(14) => (148, Some(151)),
-        Some(version) if version >= 17 => (132, None),
-        _ => (147, Some(150)),
-    };
-
-    TelephonyTransactions {
-        get_imei_for_slot: rsbinder::FIRST_CALL_TRANSACTION + imei_offset,
-        get_meid_for_slot: meid_offset.map(|offset| rsbinder::FIRST_CALL_TRANSACTION + offset),
-    }
-}
-
-fn normalize_imei_candidate(raw: &str, source: String) -> Option<IdentifierCandidate> {
-    classify_identifier(raw, source).filter(|candidate| candidate.kind == IdentifierKind::Imei)
-}
-
-fn normalize_meid_candidate(raw: &str, source: String) -> Option<IdentifierCandidate> {
-    let value = raw.trim();
-    if value.len() == 14 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Some(IdentifierCandidate {
-            kind: IdentifierKind::Meid,
-            value: value.to_ascii_uppercase(),
-            source,
-        });
-    }
-    classify_identifier(value, source).filter(|candidate| candidate.kind == IdentifierKind::Meid)
+    service_unavailable
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ensure_binder_process_state() {
-        let _ = rsbinder::ProcessState::init_default();
-    }
 
     fn empty_device() -> DeviceProperty {
         DeviceProperty {
@@ -551,75 +436,6 @@ mod tests {
         assert!(classify_identifier("1234567890123", "binder".to_string()).is_none());
         assert!(classify_identifier("3552-3193-7352-445", "binder".to_string()).is_none());
         assert!(classify_identifier("not-an-id", "binder".to_string()).is_none());
-    }
-
-    #[test]
-    fn normalize_telephony_api_candidates_accept_expected_shapes() {
-        let imei = normalize_imei_candidate("355231937352445", "phone".to_string()).unwrap();
-        assert_eq!(imei.kind, IdentifierKind::Imei);
-        assert_eq!(imei.value, "355231937352445");
-
-        let meid = normalize_meid_candidate("a100000927f62b", "phone".to_string()).unwrap();
-        assert_eq!(meid.kind, IdentifierKind::Meid);
-        assert_eq!(meid.value, "A100000927F62B");
-        assert!(normalize_meid_candidate("12345678901234", "phone".to_string()).is_some());
-
-        assert!(normalize_imei_candidate("A100000927F62B", "phone".to_string()).is_none());
-        assert!(normalize_meid_candidate("355231937352445", "phone".to_string()).is_none());
-    }
-
-    #[test]
-    fn telephony_api_uses_android_request_metadata() {
-        assert_eq!(CALLING_PACKAGE, "android");
-        assert_eq!(CALLING_FEATURE, "android");
-    }
-
-    #[test]
-    fn telephony_transaction_table_matches_supported_android_versions() {
-        use rsbinder::FIRST_CALL_TRANSACTION;
-
-        let android_12 = telephony_transactions_for(Some(12));
-        assert_eq!(android_12.get_imei_for_slot, FIRST_CALL_TRANSACTION + 149);
-        assert_eq!(
-            android_12.get_meid_for_slot,
-            Some(FIRST_CALL_TRANSACTION + 151)
-        );
-
-        let android_13 = telephony_transactions_for(Some(13));
-        assert_eq!(android_13.get_imei_for_slot, FIRST_CALL_TRANSACTION + 145);
-        assert_eq!(
-            android_13.get_meid_for_slot,
-            Some(FIRST_CALL_TRANSACTION + 147)
-        );
-
-        let android_14 = telephony_transactions_for(Some(14));
-        assert_eq!(android_14.get_imei_for_slot, FIRST_CALL_TRANSACTION + 148);
-        assert_eq!(
-            android_14.get_meid_for_slot,
-            Some(FIRST_CALL_TRANSACTION + 151)
-        );
-
-        let android_15 = telephony_transactions_for(Some(15));
-        assert_eq!(android_15.get_imei_for_slot, FIRST_CALL_TRANSACTION + 147);
-        assert_eq!(
-            android_15.get_meid_for_slot,
-            Some(FIRST_CALL_TRANSACTION + 150)
-        );
-
-        let android_16 = telephony_transactions_for(Some(16));
-        assert_eq!(android_16.get_imei_for_slot, FIRST_CALL_TRANSACTION + 147);
-        assert_eq!(
-            android_16.get_meid_for_slot,
-            Some(FIRST_CALL_TRANSACTION + 150)
-        );
-
-        let android_17 = telephony_transactions_for(Some(17));
-        assert_eq!(android_17.get_imei_for_slot, FIRST_CALL_TRANSACTION + 132);
-        assert_eq!(android_17.get_meid_for_slot, None);
-        assert_eq!(
-            GET_DEVICE_ID_FOR_PHONE_TRANSACTION,
-            FIRST_CALL_TRANSACTION + 3
-        );
     }
 
     #[test]
@@ -683,59 +499,53 @@ mod tests {
     }
 
     #[test]
-    fn empty_telephony_result_still_falls_through_to_property_candidate() {
-        let mut device = empty_device();
-        let telephony_candidates = Vec::new();
-        let property_candidates = vec![IdentifierCandidate {
-            kind: IdentifierKind::Imei,
-            value: "355231937352445".to_string(),
-            source: "persist.vendor.radio.imei1".to_string(),
-        }];
+    fn slot_probe_keeps_valid_candidates_after_errors() {
+        let mut candidates = Vec::new();
+        let mut imeis = vec![
+            Ok(Some("355231937352445".to_string())),
+            Err(anyhow::anyhow!("slot unavailable")),
+        ]
+        .into_iter();
+        let service_unavailable = collect_slot_candidates(
+            &mut candidates,
+            "telephony API IMEI",
+            Some(IdentifierKind::Imei),
+            |_| imeis.next().unwrap(),
+        );
+        assert!(!service_unavailable);
 
-        let telephony_events = apply_telephony_candidates(&mut device, &telephony_candidates);
-        let property_events = apply_telephony_candidates(&mut device, &property_candidates);
+        let mut device_ids = vec![Ok(None), Ok(Some("A100000927F62B".to_string()))].into_iter();
+        let service_unavailable =
+            collect_slot_candidates(&mut candidates, "device ID", None, |_| {
+                device_ids.next().unwrap()
+            });
+        assert!(!service_unavailable);
 
-        assert!(telephony_events.is_empty());
-        assert_eq!(property_events.len(), 1);
-        assert_eq!(device.imei, "355231937352445");
-        assert_eq!(property_events[0].source, "persist.vendor.radio.imei1");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].kind, IdentifierKind::Imei);
+        assert_eq!(candidates[1].kind, IdentifierKind::Meid);
     }
 
     #[test]
-    fn property_failure_still_falls_through_to_generic_device_id_candidate() {
-        let mut device = empty_device();
-        let telephony_candidates = Vec::new();
-        let property_candidates = Vec::new();
-        let device_id_candidates = vec![IdentifierCandidate {
-            kind: IdentifierKind::Meid,
-            value: "A100000927F62B".to_string(),
-            source: "device id slot 0".to_string(),
-        }];
+    fn slot_probe_keeps_candidates_but_retries_after_service_unavailable() {
+        use crate::plat::resetprop::BinderServiceUnavailable;
 
-        apply_telephony_candidates(&mut device, &telephony_candidates);
-        let property_events = apply_telephony_candidates(&mut device, &property_candidates);
-        let device_id_events = apply_telephony_candidates(&mut device, &device_id_candidates);
+        let mut candidates = Vec::new();
+        let mut imeis = vec![
+            Ok(Some("355231937352445".to_string())),
+            Err(BinderServiceUnavailable("phone".to_string()).into()),
+        ]
+        .into_iter();
+        let service_unavailable = collect_slot_candidates(
+            &mut candidates,
+            "telephony API IMEI",
+            Some(IdentifierKind::Imei),
+            |_| imeis.next().unwrap(),
+        );
 
-        assert!(property_events.is_empty());
-        assert_eq!(device_id_events.len(), 1);
-        assert_eq!(device.meid, "A100000927F62B");
-        assert_eq!(device_id_events[0].source, "device id slot 0");
-    }
-
-    #[test]
-    fn field_stays_empty_only_after_all_three_sources_fail() {
-        let mut device = empty_device();
-
-        let telephony_events = apply_telephony_candidates(&mut device, &[]);
-        let property_events = apply_telephony_candidates(&mut device, &[]);
-        let device_id_events = apply_telephony_candidates(&mut device, &[]);
-
-        assert!(telephony_events.is_empty());
-        assert!(property_events.is_empty());
-        assert!(device_id_events.is_empty());
-        assert!(device.imei.is_empty());
-        assert!(device.imei2.is_empty());
-        assert!(device.meid.is_empty());
+        assert!(service_unavailable);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].value, "355231937352445");
     }
 
     #[test]
@@ -760,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_imei_does_not_fill_second_slot() {
+    fn single_imei_does_not_require_imei2_or_meid() {
         let mut device = empty_device();
         let candidates = vec![
             IdentifierCandidate {
@@ -778,17 +588,17 @@ mod tests {
         apply_telephony_candidates(&mut device, &candidates);
         assert_eq!(device.imei, "355231937352445");
         assert!(device.imei2.is_empty());
+        assert!(device.meid.is_empty());
     }
 
     #[test]
     fn override_mode_preserves_user_pinned_imei_and_meid() {
-        ensure_binder_process_state();
         let mut config = ConfigFile::default();
         config.device.override_telephony_properties = true;
         config.device.imei = "111111111111111".to_string();
         config.device.meid = "A1000000000001".to_string();
 
-        bootstrap_device_ids(&mut config);
+        assert_eq!(bootstrap_device_ids(&mut config), Some(false));
 
         assert_eq!(config.device.imei, "111111111111111");
         assert_eq!(config.device.meid, "A1000000000001");

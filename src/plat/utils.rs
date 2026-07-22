@@ -1,13 +1,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread::LocalKey;
 
 use der::asn1::SetOfVec;
 use der::Encode;
 use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::sha256::BoringSha256;
 use log::{debug, error};
-use rsbinder::{hub, DeathRecipient, FromIBinder, Strong};
+use rsbinder::DeathRecipient;
 
 use crate::android::apex::IApexService::IApexService;
 use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
@@ -19,10 +18,10 @@ use crate::android::system::keystore2::{
 use crate::err;
 use crate::keymaster::apex::ApexModuleInfo;
 use crate::keymaster::error::KsError;
+use crate::keymaster::utils::get_interface_once;
 
 thread_local! {
     static PM: Mutex<Option<rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider>>> = Mutex::new(None);
-    static APEX: Mutex<Option<rsbinder::Strong<dyn IApexService>>> = Mutex::new(None);
 }
 
 const KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/default";
@@ -50,28 +49,6 @@ fn keystore_service_is_alive(service: &rsbinder::Strong<dyn IKeystoreService>) -
     service.as_binder().ping_binder().is_ok()
 }
 
-struct PmDeathRecipient;
-
-impl rsbinder::DeathRecipient for PmDeathRecipient {
-    fn binder_died(&self, _who: &rsbinder::WIBinder) {
-        PM.with(|p| {
-            *p.lock().unwrap() = None;
-        });
-        debug!("package manager binder died; cleared cached PM instance");
-    }
-}
-
-struct ApexDeathRecipient;
-
-impl rsbinder::DeathRecipient for ApexDeathRecipient {
-    fn binder_died(&self, _who: &rsbinder::WIBinder) {
-        APEX.with(|p| {
-            *p.lock().unwrap() = None;
-        });
-        debug!("apex service binder died; cleared cached instance");
-    }
-}
-
 struct KeystoreDeathRecipient {
     died: AtomicBool,
     generation: u64,
@@ -90,9 +67,18 @@ impl rsbinder::DeathRecipient for KeystoreDeathRecipient {
     }
 }
 
-#[allow(non_snake_case)]
 fn get_pm() -> anyhow::Result<rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider>> {
-    get_thread_local_binder(&PM, "sec_key_att_app_id_provider", || PmDeathRecipient {})
+    PM.with(|slot| {
+        let mut slot = slot.lock().unwrap();
+        if let Some(client) = slot.as_ref() {
+            return Ok(client.clone());
+        }
+
+        let client: rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider> =
+            get_interface_once("sec_key_att_app_id_provider")?;
+        *slot = Some(client.clone());
+        Ok(client)
+    })
 }
 
 const ERROR_GET_ATTESTATION_APPLICATION_ID_FAILED: i32 = 1;
@@ -121,7 +107,7 @@ pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreSe
         guard.death_recipient = None;
     }
 
-    let service: rsbinder::Strong<dyn IKeystoreService> = hub::get_interface(KEYSTORE_SERVICE)
+    let service: rsbinder::Strong<dyn IKeystoreService> = get_interface_once(KEYSTORE_SERVICE)
         .map_err(|error| anyhow::anyhow!("failed to connect to {KEYSTORE_SERVICE}: {error:?}"))?;
     let generation = KEYSTORE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let recipient = Arc::new(KeystoreDeathRecipient {
@@ -151,36 +137,6 @@ pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreSe
     }
 
     Ok(service)
-}
-
-#[allow(non_snake_case)]
-fn get_apex() -> anyhow::Result<rsbinder::Strong<dyn IApexService>> {
-    get_thread_local_binder(&APEX, "apexservice", || ApexDeathRecipient {})
-}
-
-fn get_thread_local_binder<T, R>(
-    slot: &'static LocalKey<Mutex<Option<Strong<T>>>>,
-    service_name: &'static str,
-    make_recipient: impl FnOnce() -> R,
-) -> anyhow::Result<Strong<T>>
-where
-    T: FromIBinder + ?Sized + 'static,
-    R: DeathRecipient + 'static,
-{
-    slot.with(|slot| {
-        let mut guard = slot.lock().unwrap();
-        if let Some(client) = guard.as_ref() {
-            return Ok(client.clone());
-        }
-
-        let client: Strong<T> = hub::get_interface(service_name)?;
-        let recipient: Arc<dyn DeathRecipient> = Arc::new(make_recipient());
-        client
-            .as_binder()
-            .link_to_death(Arc::downgrade(&recipient))?;
-        *guard = Some(client.clone());
-        Ok(client)
-    })
 }
 
 pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
@@ -346,7 +302,7 @@ fn encode_application_id(
 }
 
 pub fn get_apex_module_info() -> anyhow::Result<Vec<ApexModuleInfo>> {
-    let apex = get_apex()?;
+    let apex: rsbinder::Strong<dyn IApexService> = get_interface_once("apexservice")?;
     let result: Vec<crate::android::apex::ApexInfo::ApexInfo> =
         apex.getActivePackages().map_err(|e| {
             log::error!("failed to get active packages: {:?}", e);
@@ -365,7 +321,7 @@ pub fn get_apex_module_info() -> anyhow::Result<Vec<ApexModuleInfo>> {
         .map_err(|e| anyhow::anyhow!(err!("ApexModuleInfo conversion failed: {:?}", e)))
 }
 
-pub const AID_USER_OFFSET: u32 = 100000;
+pub use kmr_common::consts::AID_USER_OFFSET;
 
 /// Gets the user id from a uid.
 pub fn multiuser_get_user_id(uid: u32) -> u32 {

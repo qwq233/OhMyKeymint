@@ -32,8 +32,8 @@ use crate::keymaster::keymint_device::{localize_auth_token_for_omk, KeyMintDevic
 use crate::keymaster::permission::{self, require_forwarded_context, KeystorePerm};
 use crate::keymaster::super_key::WipeKeyOption;
 use crate::keymaster::utils::{
-    check_keystore_permission, key_params_to_aidl, watchdog as wd, AndroidUserId, Challenge,
-    SecureUserId,
+    check_keystore_permission, get_interface_once, key_params_to_aidl, watchdog as wd,
+    AndroidUserId, Challenge, SecureUserId,
 };
 use crate::selinux;
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
@@ -53,8 +53,7 @@ use kmr_wire::{
 use log::{error, info};
 use rsbinder::status::Result as BinderResult;
 use rsbinder::{
-    hub, DeathRecipient, ExceptionCode, Interface, Status as BinderStatus, StatusCode, Strong,
-    WIBinder,
+    DeathRecipient, ExceptionCode, Interface, Status as BinderStatus, StatusCode, Strong, WIBinder,
 };
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
@@ -587,7 +586,7 @@ fn get_system_keymint(service: &'static str) -> Result<Strong<dyn IKeyMintDevice
         }
 
         let keymint: Strong<dyn IKeyMintDevice> =
-            hub::get_interface(service).with_context(|| format!("connect {service}"))?;
+            get_interface_once(service).with_context(|| format!("connect {service}"))?;
         let recipient: Arc<dyn DeathRecipient> = Arc::new(SystemKeymintDeath { service });
         keymint
             .as_binder()

@@ -17,6 +17,7 @@ use crate::{
     keymaster::{
         apex::ModuleInfoBundle, async_task::AsyncTask, db::KeymasterDb, enforcements::Enforcements,
         gc::Gc, keymint_device::get_keymint_wrapper, super_key::SuperKeyManager,
+        utils::get_interface_once,
     },
     plat::property_watcher::PropertyWatcher,
     watchdog as wd,
@@ -169,8 +170,7 @@ pub fn get_timestamp_service() -> Result<Strong<dyn ISecureClock>> {
 
 fn connect_secureclock() -> Result<Strong<dyn ISecureClock>> {
     let descriptors = <crate::android::hardware::security::secureclock::ISecureClock::BpSecureClock as ISecureClock>::descriptor();
-    let dev: Strong<dyn ISecureClock> =
-        rsbinder::hub::get_interface(descriptors).context(err!())?;
+    let dev: Strong<dyn ISecureClock> = get_interface_once(descriptors).context(err!())?;
 
     Ok(dev)
 }

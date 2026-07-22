@@ -5,12 +5,12 @@ use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::sha256::BoringSha256;
 use rsbinder::{hub, Strong};
 
+use super::resetprop;
 use crate::android::hardware::security::keymint::{
     IKeyMintDevice::IKeyMintDevice, KeyMintHardwareInfo::KeyMintHardwareInfo,
     SecurityLevel::SecurityLevel,
 };
-
-use super::resetprop;
+use crate::keymaster::utils::get_interface_once;
 
 const KEYMINT_V1: i32 = 100;
 const KEYMINT_V2: i32 = 200;
@@ -169,7 +169,7 @@ fn probe_system_keymint_hardware_info(
     let service = system_keymint_service_name(security_level)
         .ok_or_else(|| anyhow!("unsupported security level for system KeyMint probe"))?;
     let keymint: Strong<dyn IKeyMintDevice> =
-        hub::get_interface(service).with_context(|| format!("connect {service}"))?;
+        get_interface_once(service).with_context(|| format!("connect {service}"))?;
     if keymint.as_binder().as_proxy().is_none() {
         bail!("system KeyMint service {service} resolved to a local binder");
     }
