@@ -17,6 +17,8 @@ on:
 jobs:
   build-boringssl:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
     - name: Clone BoringSSL
       run: |
