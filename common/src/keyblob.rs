@@ -230,7 +230,7 @@ pub trait SecureDeletionSecretManager: Send {
     fn delete_secret(&mut self, slot: SecureDeletionSlot) -> Result<(), Error>;
 
     /// Delete all secure deletion data, including the factory reset secret.
-    fn delete_all(&mut self);
+    fn delete_all(&mut self) -> Result<(), Error>;
 }
 
 /// RAII class to hold a secure deletion slot.  The slot is deleted when the holder is dropped.

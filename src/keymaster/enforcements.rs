@@ -887,4 +887,53 @@ impl Enforcements {
     }
 }
 
-// TODO: Add tests to enforcement module (b/175578618).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+    use crate::android::system::keystore2::IKeystoreSecurityLevel::KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING;
+    use crate::keymaster::super_key::SuperEncryptionType;
+
+    fn auth_bound_app_params() -> Vec<KeyParameter> {
+        vec![KeyParameter::new(
+            KeyParameterValue::UserSecureID(1),
+            SecurityLevel::TRUSTED_ENVIRONMENT,
+        )]
+    }
+
+    #[test]
+    fn auth_bound_app_key_requires_credential_encrypted_super_key() {
+        assert_eq!(
+            Enforcements::super_encryption_required(&Domain::APP, &auth_bound_app_params(), None),
+            SuperEncryptionType::CredentialEncrypted
+        );
+        assert_eq!(
+            Enforcements::super_encryption_required(
+                &Domain::APP,
+                &auth_bound_app_params(),
+                Some(0)
+            ),
+            SuperEncryptionType::CredentialEncrypted
+        );
+    }
+
+    #[test]
+    fn auth_bound_without_lskf_flag_is_the_only_disable_switch() {
+        assert_eq!(
+            Enforcements::super_encryption_required(
+                &Domain::APP,
+                &auth_bound_app_params(),
+                Some(KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING),
+            ),
+            SuperEncryptionType::None
+        );
+    }
+
+    #[test]
+    fn blob_domain_user_secure_id_does_not_require_ce() {
+        assert_eq!(
+            Enforcements::super_encryption_required(&Domain::BLOB, &auth_bound_app_params(), None),
+            SuperEncryptionType::None
+        );
+    }
+}

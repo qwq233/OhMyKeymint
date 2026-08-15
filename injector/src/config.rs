@@ -93,7 +93,7 @@ impl Default for MainConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            log_level: "debug".to_string(),
+            log_level: "info".to_string(),
         }
     }
 }
@@ -548,6 +548,7 @@ fn reload_runtime_config(path: &Path, trigger: WatchTrigger) {
                 let level = config.main.log_level_filter();
                 *guard = Arc::new(config);
                 log::set_max_level(level);
+                crate::ipc::clear_package_cache();
                 log::info!(
                     "reloaded config from {} via {}",
                     path.display(),
@@ -599,20 +600,12 @@ where
 }
 
 pub fn parse_level_filter(value: &str) -> Option<LevelFilter> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "off" => Some(LevelFilter::Off),
-        "error" => Some(LevelFilter::Error),
-        "warn" | "warning" => Some(LevelFilter::Warn),
-        "info" => Some(LevelFilter::Info),
-        "debug" => Some(LevelFilter::Debug),
-        "trace" => Some(LevelFilter::Trace),
-        _ => None,
-    }
+    kmr_common::runtime::logging::parse_level_filter(value)
 }
 
 impl MainConfig {
     pub fn log_level_filter(&self) -> LevelFilter {
-        parse_level_filter(&self.log_level).unwrap_or(LevelFilter::Debug)
+        parse_level_filter(&self.log_level).unwrap_or(LevelFilter::Info)
     }
 }
 

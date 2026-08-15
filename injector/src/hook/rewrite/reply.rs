@@ -27,7 +27,7 @@ fn register_security_level_carrier(
     let target = unsafe { parse_local_binder_target_from_parcel_bytes(&carrier.bytes) }
         .ok_or_else(|| anyhow::anyhow!("failed to parse local security-level carrier target"))?;
     tracker::remember_security_level_target(target, SecurityLevelTargetInfo { security_level });
-    info!(
+    debug!(
         "event=route registered security-level carrier ptr=0x{:x} cookie=0x{:x} security_level={:?} source_method={:?}",
         target.ptr, target.cookie, security_level, source_method
     );

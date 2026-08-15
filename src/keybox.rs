@@ -13,11 +13,11 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use der::Encode;
 use kmr_common::{
     crypto::{ec, rsa, KeyMaterial, Sha256},
-    Error,
+    km_err, Error,
 };
 use kmr_crypto_boring::{ec::BoringEc, mldsa::BoringMlDsa, rsa::BoringRsa, sha256::BoringSha256};
 use kmr_ta::device::{
-    RetrieveCertSigningInfo, SigningAlgorithm, SigningInfoSnapshot, SigningKeyType,
+    RetrieveCertSigningInfo, SigningAlgorithm, SigningInfoSnapshot, SigningKey, SigningKeyType,
 };
 use kmr_wire::keymint;
 use log::{debug, error, info, warn};
@@ -182,6 +182,12 @@ impl KeyBox {
     }
 
     fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error> {
+        if key_type.which == SigningKey::DeviceUnique {
+            return Err(km_err!(
+                CannotAttestIds,
+                "device unique attestation is not provisioned"
+            ));
+        }
         let (signing_key, cert_chain) = match key_type.algo_hint {
             SigningAlgorithm::Rsa => (&self.rsa_info.key, &self.rsa_info.chain),
             SigningAlgorithm::Ec => (&self.ec_info.key, &self.ec_info.chain),
@@ -762,6 +768,13 @@ mod tests {
             KeyAlgorithm::Ec,
         )
         .unwrap();
+
+        assert!(keybox
+            .signing_info(SigningKeyType {
+                which: SigningKey::DeviceUnique,
+                algo_hint: SigningAlgorithm::Ec,
+            })
+            .is_err());
     }
 
     #[test]

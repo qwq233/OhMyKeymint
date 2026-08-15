@@ -501,7 +501,12 @@ impl crate::KeyMintTa {
                         self.is_strongbox(),
                     ) {
                         (false, _) => device::SigningKey::Batch,
-                        (true, true) => device::SigningKey::DeviceUnique,
+                        (true, true) => {
+                            return Err(km_err!(
+                                CannotAttestIds,
+                                "device unique attestation is not provisioned"
+                            ))
+                        }
                         (true, false) => {
                             return Err(km_err!(
                                 InvalidArgument,

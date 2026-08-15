@@ -17,33 +17,61 @@
 
 use kmr_common::{
     crypto,
-    crypto::{Hkdf, Rng},
+    crypto::{Hkdf, Rng, Sha256},
     Error,
 };
-use kmr_crypto_boring::{hmac::BoringHmac, rng::BoringRng};
+use kmr_crypto_boring::{hmac::BoringHmac, rng::BoringRng, sha256::BoringSha256};
 use kmr_ta::device::RetrieveKeyMaterial;
 use rand::{rngs::StdRng, Rng as RandRng, SeedableRng};
+
+/// Domain separator mixed into the StrongBox wrapping-key seed so TEE cannot unwrap
+/// StrongBox keyblobs (and the reverse). The TEE path stays on the raw seed.
+const STRONGBOX_WRAP_DOMAIN: &[u8] = b"omk-strongbox-wrap-v1";
 
 /// Root key retrieval using hard-coded fake keys.
 pub struct Keys {
     root_kek_seed: [u8; 32],
     kak_seed: [u8; 32],
+    wrap_domain: Option<&'static [u8]>,
 }
 
 impl Keys {
-    /// Creates a new `Keys` instance with the given seeds.
+    /// Creates a new TEE `Keys` instance with the given seeds.
     pub fn new(root_kek_seed: [u8; 32], kak_seed: [u8; 32]) -> Self {
         Self {
             root_kek_seed,
             kak_seed,
+            wrap_domain: None,
+        }
+    }
+
+    /// Creates a StrongBox `Keys` instance. Shared-secret/KAK material is unchanged
+    /// so auth tokens still verify across security levels; only key wrapping differs.
+    pub fn strongbox(root_kek_seed: [u8; 32], kak_seed: [u8; 32]) -> Self {
+        Self {
+            root_kek_seed,
+            kak_seed,
+            wrap_domain: Some(STRONGBOX_WRAP_DOMAIN),
         }
     }
 }
 
+fn wrap_seed(root_kek_seed: [u8; 32], wrap_domain: Option<&[u8]>) -> Result<[u8; 32], Error> {
+    let Some(domain) = wrap_domain else {
+        return Ok(root_kek_seed);
+    };
+    let mut input = Vec::with_capacity(root_kek_seed.len() + domain.len());
+    input.extend_from_slice(&root_kek_seed);
+    input.extend_from_slice(domain);
+    BoringSha256.hash(&input)
+}
+
 impl RetrieveKeyMaterial for Keys {
     fn root_kek(&self, _context: &[u8]) -> Result<crypto::OpaqueOr<crypto::hmac::Key>, Error> {
-        // Matches `MASTER_KEY` in system/keymaster/key_blob_utils/software_keyblobs.cpp
-        let mut rng = StdRng::from_seed(self.root_kek_seed);
+        // TEE matches `MASTER_KEY` in system/keymaster/key_blob_utils/software_keyblobs.cpp.
+        // StrongBox uses a domain-separated seed so the two TAs cannot unwrap each other.
+        let seed = wrap_seed(self.root_kek_seed, self.wrap_domain)?;
+        let mut rng = StdRng::from_seed(seed);
         let mut key = [0; 16];
         RandRng::fill_bytes(&mut rng, &mut key);
 
@@ -83,3 +111,48 @@ impl crate::keymint::rpc::DeriveBytes for Derive {
 
 /// RPC artifact retrieval using software fake key.
 pub type RpcArtifacts = crate::keymint::rpc::Artifacts<Derive>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kmr_ta::device::RetrieveKeyMaterial;
+
+    fn unwrap_explicit_hmac(key: crypto::OpaqueOr<crypto::hmac::Key>) -> Vec<u8> {
+        match key {
+            crypto::OpaqueOr::Explicit(ref key) => key.0.clone(),
+            crypto::OpaqueOr::Opaque(_) => panic!("expected explicit HMAC key"),
+        }
+    }
+
+    fn unwrap_explicit_aes(key: crypto::OpaqueOr<crypto::aes::Key>) -> Vec<u8> {
+        match key {
+            crypto::OpaqueOr::Explicit(crypto::aes::Key::Aes256(bytes)) => bytes.to_vec(),
+            crypto::OpaqueOr::Explicit(_) => panic!("expected AES-256 key"),
+            crypto::OpaqueOr::Opaque(_) => panic!("expected explicit AES key"),
+        }
+    }
+
+    #[test]
+    fn strongbox_wrapping_key_differs_from_tee() {
+        let seed = [0x11u8; 32];
+        let kak = [0x22u8; 32];
+        assert_ne!(
+            unwrap_explicit_hmac(Keys::new(seed, kak).root_kek(&[]).unwrap()),
+            unwrap_explicit_hmac(Keys::strongbox(seed, kak).root_kek(&[]).unwrap())
+        );
+        assert_eq!(
+            unwrap_explicit_aes(Keys::new(seed, kak).kak().unwrap()),
+            unwrap_explicit_aes(Keys::strongbox(seed, kak).kak().unwrap())
+        );
+    }
+
+    #[test]
+    fn tee_wrapping_key_is_stable_for_the_same_seed() {
+        let seed = [0x33u8; 32];
+        let kak = [0x44u8; 32];
+        assert_eq!(
+            unwrap_explicit_hmac(Keys::new(seed, kak).root_kek(&[]).unwrap()),
+            unwrap_explicit_hmac(Keys::new(seed, kak).root_kek(&[]).unwrap())
+        );
+    }
+}

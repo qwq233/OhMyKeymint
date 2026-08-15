@@ -14,7 +14,12 @@
 
 use super::*;
 use crate::expect_err;
-use kmr_wire::{keymint::KeyParam, KeySizeInBits};
+use kmr_wire::{
+    keymint::{
+        Algorithm, BlockMode, Digest, EcCurve, KeyParam, KeyPurpose, PaddingMode, SecurityLevel,
+    },
+    KeySizeInBits, RsaExponent,
+};
 use std::vec;
 
 #[test]
@@ -67,6 +72,108 @@ fn test_legacy_serialization() {
         assert!(data.is_empty(), "data left: {}", hex::encode(data));
         assert_eq!(got_params, want_params);
     }
+}
+
+fn strongbox_rsa_params(digest: Digest, key_size: u32) -> Vec<KeyParam> {
+    vec![
+        KeyParam::Algorithm(Algorithm::Rsa),
+        KeyParam::KeySize(KeySizeInBits(key_size)),
+        KeyParam::RsaPublicExponent(RsaExponent(65537)),
+        KeyParam::Purpose(KeyPurpose::Sign),
+        KeyParam::Digest(digest),
+        KeyParam::Padding(PaddingMode::RsaPss),
+    ]
+}
+
+fn strongbox_gen(params: &[KeyParam]) -> Result<(), crate::Error> {
+    extract_key_gen_characteristics(SecureStorage::Unavailable, params, SecurityLevel::Strongbox)
+        .map(|_| ())
+}
+
+#[test]
+fn strongbox_accepts_required_algorithms_and_rejects_tee_only_ones() {
+    assert!(strongbox_gen(&strongbox_rsa_params(Digest::Sha256, 2048)).is_ok());
+    assert!(strongbox_gen(&[
+        KeyParam::Algorithm(Algorithm::Aes),
+        KeyParam::KeySize(KeySizeInBits(256)),
+        KeyParam::Purpose(KeyPurpose::Encrypt),
+        KeyParam::BlockMode(BlockMode::Gcm),
+        KeyParam::Padding(PaddingMode::None),
+        KeyParam::MinMacLength(128),
+    ])
+    .is_ok());
+    assert!(strongbox_gen(&[
+        KeyParam::Algorithm(Algorithm::TripleDes),
+        KeyParam::KeySize(KeySizeInBits(168)),
+        KeyParam::Purpose(KeyPurpose::Encrypt),
+        KeyParam::BlockMode(BlockMode::Ecb),
+        KeyParam::Padding(PaddingMode::None),
+    ])
+    .is_ok());
+    assert!(strongbox_gen(&[
+        KeyParam::Algorithm(Algorithm::Hmac),
+        KeyParam::KeySize(KeySizeInBits(256)),
+        KeyParam::Digest(Digest::Sha256),
+        KeyParam::MinMacLength(256),
+        KeyParam::Purpose(KeyPurpose::Sign),
+    ])
+    .is_ok());
+    assert!(strongbox_gen(&[
+        KeyParam::Algorithm(Algorithm::Ec),
+        KeyParam::EcCurve(EcCurve::P256),
+        KeyParam::Purpose(KeyPurpose::Sign),
+        KeyParam::Digest(Digest::Sha256),
+    ])
+    .is_ok());
+
+    expect_err!(
+        strongbox_gen(&strongbox_rsa_params(Digest::Sha256, 4096)),
+        "unsupported KEY_SIZE"
+    );
+    expect_err!(
+        strongbox_gen(&strongbox_rsa_params(Digest::Sha1, 2048)),
+        "unsupported digest"
+    );
+    expect_err!(
+        strongbox_gen(&[
+            KeyParam::Algorithm(Algorithm::Ec),
+            KeyParam::EcCurve(EcCurve::P384),
+            KeyParam::Purpose(KeyPurpose::Sign),
+            KeyParam::Digest(Digest::Sha256),
+        ]),
+        "invalid curve"
+    );
+    expect_err!(
+        strongbox_gen(&[
+            KeyParam::Algorithm(Algorithm::Aes),
+            KeyParam::KeySize(KeySizeInBits(192)),
+            KeyParam::Purpose(KeyPurpose::Encrypt),
+            KeyParam::BlockMode(BlockMode::Ecb),
+            KeyParam::Padding(PaddingMode::None),
+        ]),
+        "unsupported KEY_SIZE"
+    );
+    expect_err!(
+        strongbox_gen(&[
+            KeyParam::Algorithm(Algorithm::Hmac),
+            KeyParam::KeySize(KeySizeInBits(256)),
+            KeyParam::Digest(Digest::Sha512),
+            KeyParam::MinMacLength(256),
+            KeyParam::Purpose(KeyPurpose::Sign),
+        ]),
+        "unsupported digest"
+    );
+    expect_err!(
+        strongbox_gen(&[
+            KeyParam::Algorithm(Algorithm::Rsa),
+            KeyParam::KeySize(KeySizeInBits(2048)),
+            KeyParam::RsaPublicExponent(RsaExponent(65537)),
+            KeyParam::Purpose(KeyPurpose::Sign),
+            KeyParam::Digest(Digest::Sha256),
+            KeyParam::MaxUsesPerBoot(1),
+        ]),
+        "not allowed in StrongBox"
+    );
 }
 
 #[test]

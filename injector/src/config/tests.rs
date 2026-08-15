@@ -41,7 +41,7 @@ fn config_defaults_and_log_levels_match_contract() {
     assert!(config.main.enabled);
     assert_eq!(config.scoop, default_scoop());
     assert!(config.scoop_details.is_empty());
-    assert_eq!(config.main.log_level_filter(), LevelFilter::Debug);
+    assert_eq!(config.main.log_level_filter(), LevelFilter::Info);
     assert!(config.filter.block_android_package);
     assert!(!config.filter.allow_unknown_package);
     assert!(config.intercept.get_security_level);

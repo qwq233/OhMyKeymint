@@ -113,7 +113,7 @@ pub const USER_UNLOCKED_DEVICE_REQUIRED_P521_SUPER_KEY: SuperKeyType = SuperKeyT
 };
 
 /// Superencryption to apply to a new key.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuperEncryptionType {
     /// Do not superencrypt this key.
     None,

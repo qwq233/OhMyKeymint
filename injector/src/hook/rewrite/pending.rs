@@ -230,7 +230,7 @@ pub(in crate::hook) unsafe fn handle_bc_reply(
         Ok(Some(reply)) => {
             let (kind, method, uid, pid) = pending.reply_log_context();
             install_outbound_reply(connection, tr, reply);
-            info!(
+            debug!(
                 "event=reply rewrote {} {} reply for uid={} pid={} original={{flags=0x{:x}, data_size={}, offsets_size={}, objects={}}} rewritten={{flags=0x{:x}, data_size={}, offsets_size={}, objects={}}}",
                 kind,
                 method,

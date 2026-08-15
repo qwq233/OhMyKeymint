@@ -1197,6 +1197,7 @@ fn bootstrap_auth_token_hmac(ta: &mut KeyMintTa, crypto: &CryptoConfig) -> Resul
 
 fn init_keymint_ta(security_level: SecurityLevel, config: &Config) -> Result<KeyMintTa> {
     let security_level = get_keymint_security_level(security_level)?;
+    let is_strongbox = security_level == kmr_wire::keymint::SecurityLevel::Strongbox;
     let profile = resolve_hardware_profile(get_keymaster_security_level(security_level)?);
 
     let hw_info = HardwareInfo {
@@ -1216,22 +1217,34 @@ fn init_keymint_ta(security_level: SecurityLevel, config: &Config) -> Result<Key
 
     let mut rng = BoringRng;
 
-    let sdd_mgr: Option<Box<dyn kmr_common::keyblob::SecureDeletionSecretManager>> =
+    let sdd_mgr: Option<Box<dyn kmr_common::keyblob::SecureDeletionSecretManager>> = if is_strongbox
+    {
+        Some(Box::new(
+            sdd::HostSddManager::new_with_path(&mut rng, sdd::STRONGBOX_SECURE_DELETION_DATA_FILE)
+                .map_err(|error| anyhow!("{error:?}"))
+                .context(err!("failed to initialize StrongBox secure deletion data"))?,
+        ))
+    } else {
         match sdd::HostSddManager::new(&mut rng) {
             Result::Ok(v) => Some(Box::new(v)),
             Err(e) => {
                 error!("failed to initialize secure deletion data manager: {:?}", e);
                 None
             }
-        };
+        }
+    };
 
-    let clock = clock::StdClock;
     let rsa = BoringRsa::default();
     let ec = BoringEc::default();
     let hkdf: Box<dyn kmr_common::crypto::Hkdf> = Box::new(BoringHmac);
     let imp = kmr_common::crypto::Implementation {
         rng: Box::new(rng),
-        clock: Some(Box::new(clock)),
+        // StrongBox has no local secure clock; operations use TEE timestamp tokens.
+        clock: if is_strongbox {
+            None
+        } else {
+            Some(Box::new(clock::StdClock))
+        },
         compare: Box::new(kmr_crypto_boring::eq::BoringEq),
         aes: Box::new(kmr_crypto_boring::aes::BoringAes),
         des: Box::new(kmr_crypto_boring::des::BoringDes),
@@ -1244,10 +1257,17 @@ fn init_keymint_ta(security_level: SecurityLevel, config: &Config) -> Result<Key
         mldsa: Box::new(kmr_crypto_boring::mldsa::BoringMlDsa),
     };
 
-    let keys: Box<dyn kmr_ta::device::RetrieveKeyMaterial> = Box::new(soft::Keys::new(
-        config.crypto.root_kek_seed,
-        config.crypto.kak_seed,
-    ));
+    let keys: Box<dyn kmr_ta::device::RetrieveKeyMaterial> = if is_strongbox {
+        Box::new(soft::Keys::strongbox(
+            config.crypto.root_kek_seed,
+            config.crypto.kak_seed,
+        ))
+    } else {
+        Box::new(soft::Keys::new(
+            config.crypto.root_kek_seed,
+            config.crypto.kak_seed,
+        ))
+    };
     let rpc: Box<dyn kmr_ta::device::RetrieveRpcArtifacts> = Box::new(soft::RpcArtifacts::new(
         soft::Derive::default(),
         CsrSigningAlgorithm::EdDSA,
@@ -1299,19 +1319,24 @@ fn init_keymint_ta(security_level: SecurityLevel, config: &Config) -> Result<Key
         .map_err(anyhow::Error::msg)
         .context(err!("Failed to parse boot patch level"))?;
 
-    let resp = ta.process_req(PerformOpReq::SetBootInfo(kmr_wire::SetBootInfoRequest {
-        verified_boot_state: if config.trust.verified_boot_state {
-            0
-        } else {
-            2
-        },
-        verified_boot_hash: config.trust.vb_hash.clone().to_vec(),
-        verified_boot_key: config.trust.vb_key.clone().to_vec(),
-        device_boot_locked: config.trust.device_locked,
-        boot_patchlevel,
-    }));
-    if resp.error_code != 0 {
-        return Err(Error::Km(ErrorCode::UNKNOWN_ERROR)).context(err!("Failed to set boot info"));
+    if is_strongbox {
+        deliver_tee_root_of_trust(&mut ta)?;
+    } else {
+        let resp = ta.process_req(PerformOpReq::SetBootInfo(kmr_wire::SetBootInfoRequest {
+            verified_boot_state: if config.trust.verified_boot_state {
+                0
+            } else {
+                2
+            },
+            verified_boot_hash: config.trust.vb_hash.clone().to_vec(),
+            verified_boot_key: config.trust.vb_key.clone().to_vec(),
+            device_boot_locked: config.trust.device_locked,
+            boot_patchlevel,
+        }));
+        if resp.error_code != 0 {
+            return Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
+                .context(err!("Failed to set boot info"));
+        }
     }
 
     let resp = ta.process_req(PerformOpReq::SetHalInfo(hal_info));
@@ -1458,7 +1483,53 @@ pub fn clear_initialized_attestation_caches() {
     }
 }
 
+fn deliver_tee_root_of_trust(strongbox: &mut KeyMintTa) -> Result<()> {
+    let tee = KM_WRAPPER_TEE.get().ok_or_else(|| {
+        anyhow!(err!(
+            "TEE KeyMint is required to deliver StrongBox root of trust"
+        ))
+    })?;
+
+    let challenge_rsp = strongbox.process_req(PerformOpReq::GetRootOfTrustChallenge(
+        GetRootOfTrustChallengeRequest {},
+    ));
+    let challenge = match challenge_rsp.rsp {
+        Some(PerformOpRsp::GetRootOfTrustChallenge(rsp)) => rsp.ret,
+        _ => {
+            return Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
+                .context(err!("Failed to get StrongBox root-of-trust challenge"))
+        }
+    };
+
+    let root_of_trust = {
+        let mut tee = tee.keymint.lock().unwrap();
+        let rot_rsp = tee.process_req(PerformOpReq::GetRootOfTrust(GetRootOfTrustRequest {
+            challenge,
+        }));
+        match rot_rsp.rsp {
+            Some(PerformOpRsp::GetRootOfTrust(rsp)) => rsp.ret,
+            _ => {
+                return Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
+                    .context(err!("Failed to get TEE root of trust for StrongBox"))
+            }
+        }
+    };
+
+    let resp = strongbox.process_req(PerformOpReq::SendRootOfTrust(SendRootOfTrustRequest {
+        root_of_trust,
+    }));
+    if resp.error_code != 0 {
+        return Err(Error::Km(ErrorCode::UNKNOWN_ERROR))
+            .context(err!("Failed to deliver TEE root of trust to StrongBox"));
+    }
+    Ok(())
+}
+
 fn shared_keymint_wrapper_inner(security_level: SecurityLevel) -> Result<Arc<KeyMintWrapperInner>> {
+    if security_level == SecurityLevel::STRONGBOX {
+        // StrongBox root of trust is HMAC-authenticated by the TEE instance.
+        let _ = shared_keymint_wrapper_inner(SecurityLevel::TRUSTED_ENVIRONMENT)?;
+    }
     let wrapper = match security_level {
         SecurityLevel::STRONGBOX => &KM_WRAPPER_STRONGBOX,
         SecurityLevel::TRUSTED_ENVIRONMENT => &KM_WRAPPER_TEE,
@@ -1650,10 +1721,14 @@ mod tests {
         ));
     }
 
-    fn test_crypto() -> kmr_common::crypto::Implementation {
+    fn test_crypto(with_clock: bool) -> kmr_common::crypto::Implementation {
         kmr_common::crypto::Implementation {
             rng: Box::new(BoringRng),
-            clock: Some(Box::new(clock::StdClock)),
+            clock: if with_clock {
+                Some(Box::new(clock::StdClock))
+            } else {
+                None
+            },
             compare: Box::new(kmr_crypto_boring::eq::BoringEq),
             aes: Box::new(kmr_crypto_boring::aes::BoringAes),
             des: Box::new(kmr_crypto_boring::des::BoringDes),
@@ -1668,9 +1743,17 @@ mod tests {
     }
 
     fn test_ta() -> KeyMintTa {
+        test_ta_at(kmr_wire::keymint::SecurityLevel::TrustedEnvironment, true)
+    }
+
+    fn strongbox_test_ta() -> KeyMintTa {
+        test_ta_at(kmr_wire::keymint::SecurityLevel::Strongbox, false)
+    }
+
+    fn test_ta_at(security_level: kmr_wire::keymint::SecurityLevel, with_clock: bool) -> KeyMintTa {
         let hw_info = HardwareInfo {
             version_number: KeyMintDevice::KEY_MINT_V5,
-            security_level: kmr_wire::keymint::SecurityLevel::TrustedEnvironment,
+            security_level,
             impl_name: "test",
             author_name: "test",
             unique_id: "test",
@@ -1696,7 +1779,7 @@ mod tests {
         KeyMintTa::new_allowing_versions(
             hw_info,
             RpcInfo::V3(rpc_info),
-            test_crypto(),
+            test_crypto(with_clock),
             dev,
             vec![KeyMintHalVersion::V5],
         )
@@ -1796,5 +1879,82 @@ mod tests {
             auth_token: None,
         }));
         assert_eq!(second_begin.error_code, ErrorCode::KEY_MAX_OPS_EXCEEDED.0);
+    }
+
+    #[test]
+    fn strongbox_requires_timestamp_token_and_rejects_userspace_boot_info() {
+        let mut ta = strongbox_test_ta();
+        let info = ta.get_hardware_info().unwrap();
+        assert_eq!(
+            info.security_level,
+            kmr_wire::keymint::SecurityLevel::Strongbox
+        );
+        assert!(info.timestamp_token_required);
+        assert_eq!(set_boot_info(&mut ta), ErrorCode::UNIMPLEMENTED.0);
+    }
+
+    #[test]
+    fn strongbox_binds_root_of_trust_from_tee() {
+        let hmac_key = [0x5au8; 32];
+        let mut tee = test_ta();
+        let mut strongbox = strongbox_test_ta();
+        tee.set_device_hmac_key(&hmac_key).unwrap();
+        strongbox.set_device_hmac_key(&hmac_key).unwrap();
+        assert_eq!(set_boot_info(&mut tee), 0);
+
+        let challenge = match strongbox
+            .process_req(PerformOpReq::GetRootOfTrustChallenge(
+                GetRootOfTrustChallengeRequest {},
+            ))
+            .rsp
+        {
+            Some(PerformOpRsp::GetRootOfTrustChallenge(response)) => response.ret,
+            response => panic!("unexpected challenge response: {response:?}"),
+        };
+        let root_of_trust = match tee
+            .process_req(PerformOpReq::GetRootOfTrust(GetRootOfTrustRequest {
+                challenge,
+            }))
+            .rsp
+        {
+            Some(PerformOpRsp::GetRootOfTrust(response)) => response.ret,
+            response => panic!("unexpected TEE root-of-trust response: {response:?}"),
+        };
+        assert_eq!(
+            strongbox
+                .process_req(PerformOpReq::SendRootOfTrust(SendRootOfTrustRequest {
+                    root_of_trust,
+                }))
+                .error_code,
+            0
+        );
+        assert!(!strongbox.patchlevels_are_set());
+        assert_eq!(
+            strongbox
+                .process_req(PerformOpReq::SetHalInfo(SetHalInfoRequest {
+                    os_version: 160000,
+                    os_patchlevel: 202506,
+                    vendor_patchlevel: 20250605,
+                }))
+                .error_code,
+            0
+        );
+        assert!(strongbox.patchlevels_are_set());
+        assert_eq!(
+            strongbox
+                .process_req(PerformOpReq::DeviceGenerateKey(GenerateKeyRequest {
+                    key_params: vec![
+                        KeyParam::Purpose(kmr_wire::keymint::KeyPurpose::Sign),
+                        KeyParam::Algorithm(kmr_wire::keymint::Algorithm::Hmac),
+                        KeyParam::KeySize(KeySizeInBits(256)),
+                        KeyParam::Digest(kmr_wire::keymint::Digest::Sha256),
+                        KeyParam::MinMacLength(128),
+                        KeyParam::NoAuthRequired,
+                    ],
+                    attestation_key: None,
+                }))
+                .error_code,
+            0
+        );
     }
 }

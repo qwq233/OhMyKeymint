@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use log::info;
+use log::debug;
 
 mod native;
 
@@ -242,7 +242,7 @@ pub(crate) fn _ioc_size(cmd: u32) -> usize {
 }
 
 pub(crate) unsafe fn log_write_transaction(command_name: &str, tr: &binder_transaction_data) {
-    info!(
+    debug!(
         "<<< {} | target: {}, code: 0x{:x}, flags: 0x{:x}{}{}, data_size: {}, offsets_size: {}, parcel: {}",
         command_name,
         format_target(tr),

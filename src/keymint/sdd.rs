@@ -12,25 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Secure deletion data manager for Cuttlefish.
-//! This implementetation is "secure" in the sense that the underlying storage can not be accessed
-//! by Android. However, it is does not provide any protections against the host, i.e. anyone with
-//! access to the host can read and alter the contents of deletion data.
+//! Host-file secure deletion data manager.
+//! Secrets live under `/data/misc/keystore/omk/data/` and are not readable by
+//! ordinary Android apps. They are not isolated from a privileged host.
 
 use crate::proto::storage;
+use kmr_common::consts::{KEYSTORE_GID, KEYSTORE_UID};
+use kmr_common::runtime::fs::atomic_replace_preserving_metadata;
 use kmr_common::{crypto, keyblob, km_err, Error};
 use log::error;
 use log::info;
 use prost::Message;
 use std::fs;
 use std::io::BufRead;
-use std::io::Write;
-use std::path;
+use std::path::{Path, PathBuf};
 
-const SECURE_DELETION_DATA_FILE: &str = "/data/misc/keystore/omk/data/keymint.dat";
+pub(crate) const SECURE_DELETION_DATA_FILE: &str = "/data/misc/keystore/omk/data/keymint.dat";
+pub(crate) const STRONGBOX_SECURE_DELETION_DATA_FILE: &str =
+    "/data/misc/keystore/omk/data/keymint-strongbox.dat";
 
-fn read_sdd_file() -> Result<storage::SecureDeletionData, Error> {
-    let f = fs::File::open(SECURE_DELETION_DATA_FILE).map_err(|e| {
+fn read_sdd_file(path: &Path) -> Result<storage::SecureDeletionData, Error> {
+    let f = fs::File::open(path).map_err(|e| {
         km_err!(
             SecureHwCommunicationFailed,
             "failed to open secure deletion data file: {:?}",
@@ -54,42 +56,35 @@ fn read_sdd_file() -> Result<storage::SecureDeletionData, Error> {
     })
 }
 
-fn write_sdd_file(data: &storage::SecureDeletionData) -> Result<(), Error> {
-    fs::create_dir_all(path::Path::new(SECURE_DELETION_DATA_FILE).parent().unwrap()).map_err(
-        |e| {
-            km_err!(
-                SecureHwCommunicationFailed,
-                "failed to create directory for secure deletion data file: {:?}",
-                e
-            )
-        },
-    )?;
-    let mut f = fs::File::create(SECURE_DELETION_DATA_FILE).map_err(|e| {
-        km_err!(
-            SecureHwCommunicationFailed,
-            "failed to create secure deletion data file: {:?}",
-            e
-        )
-    })?;
+fn sdd_file_owner(path: &Path) -> (u32, u32) {
+    if path.starts_with("/data/misc/keystore/omk/data") {
+        (KEYSTORE_UID, KEYSTORE_GID)
+    } else {
+        (unsafe { libc::geteuid() }, unsafe { libc::getegid() })
+    }
+}
+
+fn write_sdd_file(path: &Path, data: &storage::SecureDeletionData) -> Result<(), Error> {
     let mut buf = Vec::with_capacity(data.encoded_len());
     data.encode(&mut buf).map_err(|e| {
         km_err!(
             SecureHwCommunicationFailed,
-            "failed to write to secure deletion data file: {:?}",
+            "failed to encode secure deletion data: {:?}",
             e
         )
     })?;
-    f.write_all(&buf).map_err(|e| {
+    let (uid, gid) = sdd_file_owner(path);
+    atomic_replace_preserving_metadata(path, &buf, 0o600, uid, gid).map_err(|e| {
         km_err!(
             SecureHwCommunicationFailed,
-            "failed to write to secure deletion data file: {:?}",
+            "failed to write secure deletion data file: {:?}",
             e
         )
-    })?;
-    Ok(())
+    })
 }
 
 pub struct HostSddManager {
+    path: PathBuf,
     // Local cache of data stored on disk.
     data: storage::SecureDeletionData,
 }
@@ -128,24 +123,17 @@ impl HostSddManager {
         Ok(())
     }
 
-    fn reinitialize_persisted_state(
-        &mut self,
-        rng: &mut dyn crypto::Rng,
-        reason: &str,
-    ) -> Result<(), Error> {
-        error!("secure deletion data is invalid; reinitializing: {reason}");
-        self.data = storage::SecureDeletionData::default();
-        Self::randomize_factory_secret(&mut self.data, rng);
-        write_sdd_file(&self.data)
-    }
-
     fn init(&mut self, rng: &mut dyn crypto::Rng) -> Result<(), Error> {
         // Restore data from disk if it was previously saved.
-        if path::Path::new(SECURE_DELETION_DATA_FILE).exists() {
+        if self.path.exists() {
             info!("parsing existing secure deletion data file");
-            self.data = read_sdd_file()?;
+            self.data = read_sdd_file(&self.path)?;
             if let Err(reason) = Self::validate_loaded_data(&mut self.data) {
-                return self.reinitialize_persisted_state(rng, &reason);
+                error!("secure deletion data is invalid: {reason}");
+                return Err(km_err!(
+                    SecureHwCommunicationFailed,
+                    "invalid secure deletion data: {reason}"
+                ));
             }
             return Ok(());
         }
@@ -156,11 +144,19 @@ impl HostSddManager {
         Self::randomize_factory_secret(&mut self.data, rng);
 
         // Create secure deletion data file.
-        write_sdd_file(&self.data)
+        write_sdd_file(&self.path, &self.data)
     }
 
     pub fn new(rng: &mut dyn crypto::Rng) -> Result<Self, Error> {
+        Self::new_with_path(rng, SECURE_DELETION_DATA_FILE)
+    }
+
+    pub fn new_with_path(
+        rng: &mut dyn crypto::Rng,
+        path: impl Into<PathBuf>,
+    ) -> Result<Self, Error> {
         let mut sdd_mgr = Self {
+            path: path.into(),
             data: storage::SecureDeletionData::default(),
         };
         sdd_mgr.init(rng).map(|_| sdd_mgr)
@@ -218,7 +214,7 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
         self.data.last_free_slot = slot_id;
 
         // Save the secure deletion secret on disk.
-        match write_sdd_file(&self.data) {
+        match write_sdd_file(&self.path, &self.data) {
             Ok(_) => Ok((keyblob::SecureDeletionSlot(slot_id), sdd)),
             Err(e) => {
                 // Restore cached state.
@@ -258,7 +254,7 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
             .ok_or(km_err!(InvalidKeyBlob, "slot ID not found."))?;
 
         // Save the secure deletion secret on disk.
-        if let Err(e) = write_sdd_file(&self.data) {
+        if let Err(e) = write_sdd_file(&self.path, &self.data) {
             // Restore cached state.
             self.data
                 .secure_deletion_secrets
@@ -269,19 +265,88 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
         Ok(())
     }
 
-    fn delete_all(&mut self) {
+    fn delete_all(&mut self) -> Result<(), Error> {
         info!("deleting all secure deletion secrets");
         self.data = storage::SecureDeletionData::default();
-        if path::Path::new(SECURE_DELETION_DATA_FILE).exists() {
-            // We want to guarantee that if this function returns, all secrets have been
-            // successfully deleted. So, panic if we fail to delete the file.
-            for _ in 0..5 {
-                match fs::remove_file(SECURE_DELETION_DATA_FILE) {
-                    Ok(_) => return,
-                    Err(e) => error!("failed to delete secure deletion data file: {:?}", e),
-                }
-            }
-            panic!("FATAL: Failed to delete secure deletion data file.");
+        if !self.path.exists() {
+            return Ok(());
         }
+        for _ in 0..5 {
+            match fs::remove_file(&self.path) {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => error!("failed to delete secure deletion data file: {:?}", e),
+            }
+        }
+        Err(km_err!(
+            SecureHwCommunicationFailed,
+            "failed to delete secure deletion data file"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kmr_common::keyblob::{SecureDeletionSecretManager, SlotPurpose};
+    use kmr_crypto_boring::rng::BoringRng;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_sdd_path(label: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "omk-sdd-{}-{}-{}.dat",
+            label,
+            std::process::id(),
+            TEST_FILE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn separate_paths_do_not_share_factory_secrets() {
+        let mut rng = BoringRng;
+        let tee_path = temp_sdd_path("tee");
+        let strongbox_path = temp_sdd_path("strongbox");
+        let tee = HostSddManager::new_with_path(&mut rng, &tee_path).unwrap();
+        let strongbox = HostSddManager::new_with_path(&mut rng, &strongbox_path).unwrap();
+        let tee_secret = tee.get_factory_reset_secret().unwrap();
+        let strongbox_secret = strongbox.get_factory_reset_secret().unwrap();
+        assert_ne!(
+            tee_secret.factory_reset_secret,
+            strongbox_secret.factory_reset_secret
+        );
+        let _ = fs::remove_file(tee_path);
+        let _ = fs::remove_file(strongbox_path);
+    }
+
+    #[test]
+    fn delete_all_on_one_path_does_not_wipe_the_other() {
+        let mut rng = BoringRng;
+        let tee_path = temp_sdd_path("tee-keep");
+        let strongbox_path = temp_sdd_path("strongbox-wipe");
+        let mut tee = HostSddManager::new_with_path(&mut rng, &tee_path).unwrap();
+        let mut strongbox = HostSddManager::new_with_path(&mut rng, &strongbox_path).unwrap();
+        let (_slot, tee_sdd) = tee
+            .new_secret(&mut rng, SlotPurpose::KeyGeneration)
+            .unwrap();
+        strongbox.delete_all().unwrap();
+        let tee_after = tee.get_factory_reset_secret().unwrap();
+        assert_eq!(tee_sdd.factory_reset_secret, tee_after.factory_reset_secret);
+        assert!(!strongbox_path.exists());
+        let _ = fs::remove_file(tee_path);
+    }
+
+    #[test]
+    fn invalid_file_is_not_reinitialized() {
+        let path = temp_sdd_path("torn");
+        fs::write(&path, b"not-a-valid-protobuf").unwrap();
+        let mut rng = BoringRng;
+        assert!(HostSddManager::new_with_path(&mut rng, &path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"not-a-valid-protobuf");
+        let _ = fs::remove_file(path);
     }
 }

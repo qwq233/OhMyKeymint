@@ -108,7 +108,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         };
 
         let method = request.method();
-        info!(
+        debug!(
             "event=decision command={} authorization_method={:?} code=0x{:x} uid={} pid={} sid='{}'; mirroring auth state to OMK after system success",
             command_name,
             method,
@@ -243,7 +243,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         } else {
             "mirroring maintenance state to OMK after system success"
         };
-        info!(
+        debug!(
             "event=decision command={} maintenance_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} route={:?} reason={:?}; {}",
             command_name,
             method,
@@ -356,7 +356,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             route_for_service_request(&request, &cfg.intercept)
         };
         if !decision.allowed && !allow_omk_grant {
-            info!(
+            debug!(
                 "event=decision command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?}; routing request to System",
                 command_name,
                 method,
@@ -370,7 +370,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             route = RouteTarget::System;
         }
         if allow_omk_grant {
-            info!(
+            debug!(
                 "event=decision command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=true reason={:?} omk_grant=true",
                 command_name,
                 method,
@@ -410,7 +410,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         };
         let request_rewritten = precomputed_service_reply.is_some();
 
-        info!(
+        debug!(
             "event=decision command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?}",
             command_name,
             method,
@@ -422,7 +422,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             decision.allowed,
             decision.reason,
         );
-        info!(
+        debug!(
             "event=route method={:?} uid={} pid={} route={:?}",
             method, caller.uid, caller.pid, route
         );
@@ -531,7 +531,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             RouteTarget::System
         };
         if !decision.allowed && !allow_unknown_omk_route {
-            info!(
+            debug!(
                 "event=decision command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?}; routing request to System",
                 command_name,
                 method,
@@ -547,7 +547,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             );
         }
 
-        info!(
+        debug!(
             "event=decision command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} scoop_enabled={} omk_derived_route={}",
             command_name,
             method,
@@ -564,7 +564,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             scoop_enabled,
             allow_unknown_omk_route,
         );
-        info!(
+        debug!(
             "event=route security_level_method={:?} uid={} pid={} route={:?} security_level={:?}",
             method, caller.uid, caller.pid, route, target_info.security_level
         );
@@ -643,7 +643,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
 
         let method = request.method();
 
-        info!(
+        debug!(
             "event=decision command={} operation_method={:?} code=0x{:x} uid={} pid={} sid='{}' target=ptr:0x{:x}/cookie:0x{:x}",
             command_name,
             method,
@@ -654,7 +654,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             target.ptr,
             target.cookie,
         );
-        info!(
+        debug!(
             "event=route operation_method={:?} uid={} pid={} route={:?}",
             method, caller.uid, caller.pid, operation_target.route
         );

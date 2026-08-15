@@ -623,6 +623,12 @@ impl KeyMintTa {
     /// be secure; the contents of the information should not be modifiable by a subverted
     /// Android userspace.
     pub fn set_boot_info(&mut self, boot_info: keymint::BootInfo) -> Result<(), Error> {
+        if self.is_strongbox() {
+            return Err(km_err!(
+                Unimplemented,
+                "StrongBox root of trust arrives via sendRootOfTrust"
+            ));
+        }
         if !self.in_early_boot {
             error!("Rejecting attempt to set boot info {boot_info:?} after early boot");
             return Err(km_err!(
@@ -643,19 +649,24 @@ impl KeyMintTa {
             }
         } else {
             info!("Setting boot_info to {boot_info:?}");
-            let rot_info = RootOfTrustInfo {
-                verified_boot_key: boot_info.verified_boot_key.clone(),
-                device_boot_locked: boot_info.device_boot_locked,
-                verified_boot_state: boot_info.verified_boot_state,
-            };
-            self.boot_info = Some(boot_info);
-            self.rot_data = Some(
-                rot_info
-                    .into_vec()
-                    .map_err(|e| km_err!(EncodingError, "failed to encode root-of-trust: {e:?}"))?
-                    .into(),
-            );
+            self.apply_boot_info(boot_info)?;
         }
+        Ok(())
+    }
+
+    fn apply_boot_info(&mut self, boot_info: keymint::BootInfo) -> Result<(), Error> {
+        let rot_info = RootOfTrustInfo {
+            verified_boot_key: boot_info.verified_boot_key.clone(),
+            device_boot_locked: boot_info.device_boot_locked,
+            verified_boot_state: boot_info.verified_boot_state,
+        };
+        self.boot_info = Some(boot_info);
+        self.rot_data = Some(
+            rot_info
+                .into_vec()
+                .map_err(|e| km_err!(EncodingError, "failed to encode root-of-trust: {e:?}"))?
+                .into(),
+        );
         Ok(())
     }
 
@@ -1189,7 +1200,7 @@ impl KeyMintTa {
     fn delete_all_keys(&mut self) -> Result<(), Error> {
         if let Some(sdd_mgr) = &mut self.dev.sdd_mgr {
             error!("secure deleting all keys -- device likely to need factory reset!");
-            sdd_mgr.delete_all();
+            sdd_mgr.delete_all()?;
         }
         Ok(())
     }
@@ -1277,7 +1288,7 @@ impl KeyMintTa {
             .map_err(|_e| km_err!(InvalidArgument, "Failed to CBOR-decode RootOfTrust"))?;
         if self.boot_info.is_none() {
             info!("Setting boot_info to TEE-provided {boot_info:?}");
-            self.boot_info = Some(boot_info);
+            self.apply_boot_info(boot_info)?;
         } else {
             info!("Ignoring TEE-provided RootOfTrust {boot_info:?} as already set");
         }

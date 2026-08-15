@@ -297,6 +297,7 @@ pub fn extract_key_gen_characteristics(
         Algorithm::TripleDes => check_3des_gen_params(params),
         Algorithm::Hmac => check_hmac_gen_params(params, sec_level),
     }?;
+    check_strongbox_digests(params, sec_level)?;
     Ok((
         extract_key_characteristics(secure_storage, algorithm, params, &[], sec_level)?,
         keygen_info,
@@ -330,6 +331,7 @@ pub fn extract_key_import_characteristics(
             check_hmac_import_params(&*imp.hmac, params, sec_level, key_format, key_data)
         }
     }?;
+    check_strongbox_digests(params, sec_level)?;
     Ok((
         extract_key_characteristics(
             secure_storage,
@@ -425,6 +427,30 @@ fn extract_key_characteristics(
         })?;
     }
     Ok(result)
+}
+
+/// StrongBox hardware is required to implement SHA-256. Extra TEE digests are
+/// outside the StrongBox capability set and must be rejected, not silently
+/// accepted.
+fn check_strongbox_digests(params: &[KeyParam], sec_level: SecurityLevel) -> Result<(), Error> {
+    if sec_level != SecurityLevel::Strongbox {
+        return Ok(());
+    }
+    for param in params {
+        if let KeyParam::Digest(digest) = param {
+            match digest {
+                Digest::Sha256 | Digest::None => {}
+                other => {
+                    return Err(km_err!(
+                        UnsupportedDigest,
+                        "unsupported digest {:?} for StrongBox",
+                        other
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Check that an RSA key size is valid.

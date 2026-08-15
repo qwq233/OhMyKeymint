@@ -77,7 +77,7 @@ pub(in crate::hook) unsafe fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_v
     let Some(read_remaining) = original_read_size.checked_sub(input_read_consumed) else {
         return fail_before_ioctl(libc::EINVAL);
     };
-    let mut host_write = Vec::new();
+    let mut host_write = IoctlScratch::acquire();
     if write_remaining > 0 {
         let Some(write_address) =
             (original_write_buffer as usize).checked_add(input_write_consumed)
@@ -87,10 +87,10 @@ pub(in crate::hook) unsafe fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_v
         let Some(_) = (original_write_buffer as usize).checked_add(original_write_size) else {
             return fail_before_ioctl(libc::EFAULT);
         };
-        host_write = match copy_process_buffer(write_address, write_remaining) {
-            Ok(write) => write,
-            Err(error) => return fail_before_ioctl(error),
-        };
+        if let Err(error) = fill_process_buffer(host_write.as_mut(), write_address, write_remaining)
+        {
+            return fail_before_ioctl(error);
+        }
     }
     if read_remaining > 0 {
         let Some(_) = (original_read_buffer as usize).checked_add(input_read_consumed) else {
@@ -109,12 +109,12 @@ pub(in crate::hook) unsafe fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_v
     let mut completion_commands = Vec::new();
     let mut freed_inbound_shadows = Vec::new();
     if write_remaining > 0 {
-        freed_inbound_shadows = rewrite_inbound_free_buffers(connection, &mut host_write);
+        freed_inbound_shadows = rewrite_inbound_free_buffers(connection, host_write.as_mut());
         for (end, _) in &mut freed_inbound_shadows {
             *end += input_write_consumed;
         }
-        if write_buffer_is_safe_to_intercept(&host_write) {
-            completion_commands = parse_write_buffer(fd, &mut host_write);
+        if write_buffer_is_safe_to_intercept(host_write.as_mut()) {
+            completion_commands = parse_write_buffer(fd, host_write.as_mut());
             for (end, _, _, _) in &mut completion_commands {
                 *end += input_write_consumed;
             }
@@ -124,7 +124,7 @@ pub(in crate::hook) unsafe fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_v
                 fd, write_remaining, input_write_consumed
             );
         }
-        bwr.write_buffer = host_write.as_mut_ptr() as libc::c_ulong;
+        bwr.write_buffer = host_write.as_mut().as_mut_ptr() as libc::c_ulong;
     }
     bwr.write_size = write_remaining;
     bwr.write_consumed = 0;
@@ -216,10 +216,11 @@ pub(in crate::hook) unsafe fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_v
         let read_address = (original_read_buffer as usize)
             .checked_add(input_read_consumed)
             .expect("read address was validated before ioctl");
-        match copy_process_buffer(read_address, read_len) {
-            Ok(mut read) => {
-                read_effects = parse_read_buffer(fd, &mut read);
-                if !copy_to_process(read_address, &read) {
+        let mut host_read = IoctlScratch::acquire();
+        match fill_process_buffer(host_read.as_mut(), read_address, read_len) {
+            Ok(()) => {
+                read_effects = parse_read_buffer(fd, host_read.as_mut());
+                if !copy_to_process(read_address, host_read.as_mut()) {
                     warn!(
                         "event=binder failed to copy processed read buffer after ioctl fd={} previous={} consumed={}",
                         fd, input_read_consumed, bwr.read_consumed
@@ -228,7 +229,7 @@ pub(in crate::hook) unsafe fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_v
                 }
                 pending_read = PendingReadCopyback::Processed {
                     address: read_address,
-                    data: read,
+                    data: host_read.take(),
                 };
             }
             Err(_) => {

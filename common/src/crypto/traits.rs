@@ -807,7 +807,8 @@ impl keyblob::SecureDeletionSecretManager for NoOpSdsManager {
         unimpl!();
     }
 
-    fn delete_all(&mut self) {
+    fn delete_all(&mut self) -> Result<(), Error> {
         log_unimpl!();
+        Ok(())
     }
 }

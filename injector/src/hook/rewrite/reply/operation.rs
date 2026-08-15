@@ -44,7 +44,7 @@ pub(super) unsafe fn register_operation_target_from_reply(
             finalized: false,
         },
     );
-    info!(
+    debug!(
         "event=route observed operation carrier ptr=0x{:x} cookie=0x{:x} preferred_route={:?} aad_allowed={}",
         target.ptr,
         target.cookie,

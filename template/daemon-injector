@@ -107,11 +107,47 @@ restart_keystore() {
   fi
 }
 
+IDLE_WAIT_SECS=30
+
+resolve_inotifyd() {
+  if command -v inotifyd >/dev/null 2>&1; then
+    echo inotifyd
+    return 0
+  fi
+  if [ -x /system/bin/inotifyd ]; then
+    echo /system/bin/inotifyd
+    return 0
+  fi
+  return 1
+}
+
+restart_requested() {
+  expand_shared_restart
+  [ -f "$RESTART_FILE" ]
+}
+
+wait_idle() {
+  if restart_requested; then
+    return 0
+  fi
+
+  INOTIFYD=$(resolve_inotifyd) || INOTIFYD=
+  if [ -n "$INOTIFYD" ] && command -v timeout >/dev/null 2>&1; then
+    timeout "$IDLE_WAIT_SECS" "$INOTIFYD" - "$STATE_DIR:nwc" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
+      return 0
+    fi
+  fi
+  sleep "$IDLE_WAIT_SECS"
+}
+
 mkdir -p "$STATE_DIR"
 pending_restart=0
 last_attempt_pid=
 last_attempt_at=0
 retry_cooldown=15
+confirmed_pid=
 
 while true; do
   if ! prepare_injector; then
@@ -121,6 +157,7 @@ while true; do
 
   if consume_restart_request; then
     pending_restart=1
+    confirmed_pid=
     restart_keystore "$(get_keystore_pid)"
     if ! prepare_injector; then
       sleep 5
@@ -131,21 +168,25 @@ while true; do
   pid=$(get_keystore_pid)
   if [ -z "$pid" ]; then
     last_attempt_pid=
+    confirmed_pid=
     sleep 2
     continue
   fi
 
-  if is_injected "$pid"; then
+  if [ "$confirmed_pid" = "$pid" ] || is_injected "$pid"; then
+    confirmed_pid=$pid
     pending_restart=0
     last_attempt_pid=
-    sleep 5
+    wait_idle
     continue
   fi
+
+  confirmed_pid=
 
   if [ "$last_attempt_pid" = "$pid" ] && [ "$pending_restart" -eq 0 ]; then
     now=$(date +%s 2>/dev/null)
     if [ -n "$now" ] && [ "$now" -lt $((last_attempt_at + retry_cooldown)) ]; then
-      sleep 5
+      wait_idle
       continue
     fi
   fi

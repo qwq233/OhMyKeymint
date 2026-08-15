@@ -243,12 +243,8 @@ fn main() {
 
 fn run() -> Result<()> {
     let config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
-    let level = config_file
-        .main
-        .log_level
-        .trim()
-        .parse()
-        .unwrap_or(LevelFilter::Debug);
+    let level = kmr_common::runtime::logging::parse_level_filter(&config_file.main.log_level)
+        .unwrap_or(LevelFilter::Info);
     log::set_max_level(level);
 
     info!("starting OhMyKeymint");

@@ -95,7 +95,15 @@ fn bootstrap_device_ids(config_file: &mut ConfigFile) -> Option<bool> {
         log_device_id_state(device, "telephony auto-fill result");
     }
 
-    (!service_unavailable).then_some(!events.is_empty())
+    completed_device_id_probe(service_unavailable, !events.is_empty())
+}
+
+fn completed_device_id_probe(service_unavailable: bool, changed: bool) -> Option<bool> {
+    if service_unavailable {
+        None
+    } else {
+        Some(changed)
+    }
 }
 
 pub fn resolve_runtime_device_ids() -> Result<Option<DeviceProperty>> {
@@ -608,5 +616,17 @@ mod tests {
     fn mask_identifier_redacts_middle_digits() {
         assert_eq!(mask_identifier("355231937352445"), "35***********45");
         assert_eq!(mask_identifier("A100"), "****");
+    }
+
+    #[test]
+    fn unregistered_binder_leaves_snapshot_retryable() {
+        assert_eq!(completed_device_id_probe(true, false), None);
+        assert_eq!(completed_device_id_probe(true, true), None);
+    }
+
+    #[test]
+    fn completed_one_shot_is_ready_even_when_telephony_fields_stay_empty() {
+        assert_eq!(completed_device_id_probe(false, false), Some(false));
+        assert_eq!(completed_device_id_probe(false, true), Some(true));
     }
 }

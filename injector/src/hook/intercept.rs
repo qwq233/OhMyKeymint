@@ -132,18 +132,60 @@ fn copy_to_process(address: usize, source: &[u8]) -> bool {
     crate::sys::write_process_exact(Pid::this(), address, source).is_ok()
 }
 
-fn zeroed_buffer(size: usize) -> Result<Vec<u8>, c_int> {
-    let mut buffer = Vec::new();
-    buffer.try_reserve_exact(size).map_err(|_| libc::ENOMEM)?;
+const IOCTL_SCRATCH_POOL_LIMIT: usize = 4;
+
+thread_local! {
+    static IOCTL_SCRATCH_POOL: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+}
+
+struct IoctlScratch(Vec<u8>);
+
+impl IoctlScratch {
+    fn acquire() -> Self {
+        Self(IOCTL_SCRATCH_POOL.with(|pool| pool.borrow_mut().pop().unwrap_or_default()))
+    }
+
+    fn as_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.0
+    }
+
+    fn take(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for IoctlScratch {
+    fn drop(&mut self) {
+        let mut buffer = std::mem::take(&mut self.0);
+        buffer.clear();
+        IOCTL_SCRATCH_POOL.with(|pool| {
+            let mut pool = pool.borrow_mut();
+            if pool.len() < IOCTL_SCRATCH_POOL_LIMIT {
+                pool.push(buffer);
+            }
+        });
+    }
+}
+
+fn fill_process_buffer(buffer: &mut Vec<u8>, address: usize, size: usize) -> Result<(), c_int> {
+    buffer.clear();
+    if size == 0 {
+        return Ok(());
+    }
+    buffer.try_reserve(size).map_err(|_| libc::ENOMEM)?;
     buffer.resize(size, 0);
-    Ok(buffer)
+    if copy_from_process(address, buffer) {
+        Ok(())
+    } else {
+        buffer.clear();
+        Err(libc::EFAULT)
+    }
 }
 
 fn copy_process_buffer(address: usize, size: usize) -> Result<Vec<u8>, c_int> {
-    let mut buffer = zeroed_buffer(size)?;
-    copy_from_process(address, &mut buffer)
-        .then_some(buffer)
-        .ok_or(libc::EFAULT)
+    let mut buffer = Vec::new();
+    fill_process_buffer(&mut buffer, address, size)?;
+    Ok(buffer)
 }
 
 fn copy_process_c_string(address: usize) -> Option<String> {

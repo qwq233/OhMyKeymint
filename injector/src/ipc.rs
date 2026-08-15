@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Condvar, Mutex, Once};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant};
 use std::{cmp, thread};
 
@@ -21,6 +21,7 @@ use crate::top::qwq2333::ohmykeymint::IOhMyMaintenanceService::IOhMyMaintenanceS
 
 const RPC_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_READY_RETRY_DELAY: Duration = Duration::from_millis(200);
+const PACKAGE_CACHE_TTL: Duration = Duration::from_secs(30);
 const PM_SERVICE: &str = "sec_key_att_app_id_provider";
 
 thread_local! {
@@ -29,6 +30,8 @@ thread_local! {
 }
 
 static PROCESS_STATE_INIT: Once = Once::new();
+static PACKAGE_CACHE: LazyLock<Mutex<HashMap<u32, PackageCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static RPC_CACHE: Mutex<RpcCacheState> = Mutex::new(RpcCacheState {
     generation: 0,
     cache: None,
@@ -37,6 +40,12 @@ static RPC_CACHE: Mutex<RpcCacheState> = Mutex::new(RpcCacheState {
     last_connect_error: None,
 });
 static RPC_CACHE_READY: Condvar = Condvar::new();
+
+#[derive(Clone)]
+struct PackageCacheEntry {
+    resolution: PackageResolution,
+    expires_at: Instant,
+}
 
 struct RpcCacheState {
     generation: u64,
@@ -409,6 +418,15 @@ where
 }
 
 pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
+    if let Some(cached) = cached_packages(uid) {
+        return cached;
+    }
+    let resolution = resolve_packages_for_uid_uncached(uid);
+    store_package_cache(uid, resolution.clone());
+    resolution
+}
+
+fn resolve_packages_for_uid_uncached(uid: u32) -> PackageResolution {
     ensure_process_state();
     match resolve_package_names_for_uid(uid) {
         Ok(packages) if packages.is_empty() => PackageResolution::Unknown,
@@ -418,6 +436,38 @@ pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
             PackageResolution::Unknown
         }
     }
+}
+
+fn package_cache_lock() -> std::sync::MutexGuard<'static, HashMap<u32, PackageCacheEntry>> {
+    PACKAGE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn cached_packages(uid: u32) -> Option<PackageResolution> {
+    let mut cache = package_cache_lock();
+    let expired = cache
+        .get(&uid)
+        .is_some_and(|entry| Instant::now() >= entry.expires_at);
+    if expired {
+        cache.remove(&uid);
+        return None;
+    }
+    cache.get(&uid).map(|entry| entry.resolution.clone())
+}
+
+fn store_package_cache(uid: u32, resolution: PackageResolution) {
+    package_cache_lock().insert(
+        uid,
+        PackageCacheEntry {
+            resolution,
+            expires_at: Instant::now() + PACKAGE_CACHE_TTL,
+        },
+    );
+}
+
+pub(crate) fn clear_package_cache() {
+    package_cache_lock().clear();
 }
 
 fn resolve_package_names_for_uid(uid: u32) -> Result<Vec<String>> {
@@ -522,6 +572,7 @@ fn is_dead_object_status(status: &Status) -> bool {
 fn clear_pm_cache() {
     PM.with(|slot| *slot.borrow_mut() = None);
     PM_DEATH.with(|slot| *slot.borrow_mut() = None);
+    clear_package_cache();
 }
 
 fn clear_rpc_cache_if(service_name: &'static str, failed: &SIBinder) {

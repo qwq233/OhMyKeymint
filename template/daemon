@@ -47,6 +47,41 @@ consume_restart_request() {
   return 1
 }
 
+IDLE_WAIT_SECS=30
+
+resolve_inotifyd() {
+  if command -v inotifyd >/dev/null 2>&1; then
+    echo inotifyd
+    return 0
+  fi
+  if [ -x /system/bin/inotifyd ]; then
+    echo /system/bin/inotifyd
+    return 0
+  fi
+  return 1
+}
+
+restart_requested() {
+  expand_shared_restart
+  [ -f "$RESTART_FILE" ]
+}
+
+wait_idle() {
+  if restart_requested; then
+    return 0
+  fi
+
+  INOTIFYD=$(resolve_inotifyd) || INOTIFYD=
+  if [ -n "$INOTIFYD" ] && command -v timeout >/dev/null 2>&1; then
+    timeout "$IDLE_WAIT_SECS" "$INOTIFYD" - "$STATE_DIR:nwc" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
+      return 0
+    fi
+  fi
+  sleep "$IDLE_WAIT_SECS"
+}
+
 cd "$MODDIR" || exit 1
 mkdir -p "$STATE_DIR"
 
@@ -73,7 +108,7 @@ while true; do
       fi
       break
     fi
-    sleep 2
+    wait_idle
   done
 
   wait "$child_pid"

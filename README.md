@@ -38,6 +38,9 @@ touch /data/adb/omk/restart.injector
 touch /data/adb/omk/restart.all
 ```
 
+The matching daemon notices the file through a directory watch when that is
+available, and otherwise within thirty seconds.
+
 See the [Configuration Guide](docs/CONFIGURATION.md#how-changes-are-loaded) for
 which changes need a component restart or a full device reboot.
 

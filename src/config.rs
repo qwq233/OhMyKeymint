@@ -654,7 +654,7 @@ impl Default for MainConfig {
     fn default() -> Self {
         Self {
             backend: Backend::Injector,
-            log_level: "debug".to_string(),
+            log_level: "info".to_string(),
             force_skip_system_biometric_hat_verification: false,
         }
     }
@@ -1085,7 +1085,7 @@ mod tests {
 
         let serialized = toml::to_string(&MainConfig::default()).unwrap();
         assert!(serialized.contains(r#"backend = "injector""#));
-        assert!(serialized.contains(r#"log_level = "debug""#));
+        assert!(serialized.contains(r#"log_level = "info""#));
     }
 
     #[test]

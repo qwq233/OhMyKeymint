@@ -53,6 +53,8 @@ not identical:
   regenerated secrets do not restore keys protected by the previous secrets.
 The restart commands are documented in
 [Restarting keymint and injector](../README.md#restarting-keymint-and-injector).
+A restart file is applied through a directory watch when that is available,
+and otherwise within thirty seconds.
 After changing app routing, close and reopen the affected app to avoid mixing
 an already-open operation with the new route. If a process restart is needed
 for a clean boundary, restart the injector only. An injector-only setting
@@ -77,7 +79,7 @@ version = 2
 # The supported service connection. Keep this value unchanged.
 backend = "injector"
 # KeyMint log detail: off, error, warn, info, debug, or trace.
-log_level = "debug"
+log_level = "info"
 # Insecure biometric compatibility switch. Keep false for normal use.
 force_skip_system_biometric_hat_verification = false
 
@@ -149,12 +151,13 @@ alternative runtime backend to select, so this field should be left unchanged.
 #### `log_level`
 
 This controls messages written by keymint. Use one of `"off"`, `"error"`,
-`"warn"`, `"info"`, `"debug"`, or `"trace"`. `"debug"` is the default and is
-the most useful level for a bug report. `"trace"` is more verbose; `"off"`
-suppresses normal logging.
+`"warn"`, `"info"`, `"debug"`, or `"trace"`. `"info"` is the default and
+records startup, configuration, and failures. `"debug"` adds per-request
+detail and is the most useful level for a bug report. `"trace"` is more
+verbose; `"off"` suppresses normal logging.
 
 Changing this field requires a keymint restart. An unrecognized value falls
-back to `debug`, but relying on that fallback can hide a spelling mistake.
+back to `info`, but relying on that fallback can hide a spelling mistake.
 
 #### `force_skip_system_biometric_hat_verification`
 
@@ -435,7 +438,7 @@ scoop = [
 # Master switch for request routing. Keep true for normal use.
 enabled = true
 # Injector log detail: off, error, warn, info, debug, or trace.
-log_level = "debug"
+log_level = "info"
 
 [filter]
 # Enforce scoop and the safety rules below.
@@ -514,11 +517,14 @@ routes.
 This controls injector messages. Accepted values are `"off"`, `"error"`,
 `"warn"`, `"warning"`, `"info"`, `"debug"`, and `"trace"`; `"warning"` is an
 alias for `"warn"`. Matching is case-insensitive, but lowercase values are
-recommended. `"debug"` is the default and the normal choice for a bug report.
+recommended. `"info"` is the default and records startup, injection, and
+routing failures. `"debug"` also records each keystore request decision,
+Binder transaction preview, and reply rewrite, and is the normal choice
+for a bug report.
 
 A valid file change updates the level without restarting the injector. An
 unrecognized string does not make the TOML file invalid; the injector uses
-`debug` instead.
+`info` instead.
 
 ### `[filter]`
 
