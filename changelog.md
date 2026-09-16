@@ -6,3 +6,5 @@ If you insist on using only packages that are FOSS and verified via attestation,
 
 If you encounter any issues, please open an issue or leave comments on discussion zone.
 
+-----
+Update 1: fix some issues for newer kernel.
