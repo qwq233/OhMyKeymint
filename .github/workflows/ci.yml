@@ -41,6 +41,8 @@ jobs:
     - name: Install Android SDK
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
       uses: android-actions/setup-android@v4
+      with:
+        packages: platform-tools
     - name: Install Android NDK and bindgen
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
       run: |
@@ -115,6 +117,8 @@ jobs:
 
     - name: Install Android SDK
       uses: android-actions/setup-android@v4
+      with:
+        packages: platform-tools
     - name: Install Android NDK
       run: |
         echo "y" | sdkmanager --install "ndk;29.0.14206865" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
