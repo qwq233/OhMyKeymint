@@ -6,7 +6,7 @@ RESTART_FILE=$STATE_DIR/restart.keymint
 PEER_RESTART_FILE=$STATE_DIR/restart.injector
 RESTART_ALL_FILE=$STATE_DIR/restart.all
 
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/vendor/lib64/:/system/lib64/:/apex/com.android.runtime/lib64/bionic/"
+export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/system/lib64/:/vendor/lib64/:/apex/com.android.runtime/lib64/bionic/"
 
 find_module_keymint() {
   if [ -f "/data/adb/omk/keymint" ]; then
