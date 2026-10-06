@@ -27,4 +27,4 @@ android_logger = "0.15.1"
 multi_log = "0.1.2"
 
 [build-dependencies]
-rsbinder-aidl = "0.10.0"
+rsbinder-aidl = "0.11.0"
