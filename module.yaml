@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/KernelSU-Modules/tools/main/schemas/module.schema.json
+schemaVersion: 1
+id: oh_my_keymint
+name: Oh My Keymint
+summary: Custom keystore implementation for Android Keystore Spoofer
+description: README.md
+license: custom
+homepage: https://github.com/qwq233/OhMyKeymint
+support: https://github.com/qwq233/OhMyKeymint/issues
+tags: [system, cryptography, attestation, keystore, keymint, integrity]
+metamodule: false
+
+authors:
+  - name: James Clef
+    url: https://github.com/qwq233
+
+compatibility:
+  androidMinApi: 31
+  architectures:
+    - arm64-v8a
+
+release:
+  assetPattern: "OhMyKeymint-release-*.zip"
