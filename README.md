@@ -16,121 +16,16 @@ In theory, this would make it harder for detectors to identify behavior inconsis
 
 1. Install this module.
 
-2. Configure (if you need)
+2. [Configure OMK](docs/CONFIGURATION.md) if needed.
 
 3. Replace template keybox.xml (if you need)
 
 The keybox file should be a **valid** XML file with both EC and RSA chain, which means there should be no extra content in it like watermark or invisible characters.
 
-Configuration file is located at `/data/misc/keystore/omk/config.toml` and `/data/misc/keystore/omk/injector.toml`
-
-### /data/misc/keystore/omk/config.toml
-
-```toml
-[main]
-# Only "injector" is currently enabled.
-backend = "injector"
-# Insecure fallback for broken system TEE biometric HAT verification.
-force_skip_system_biometric_hat_verification = false
-
-# The following values ​​are used to generate the seed for device encryption 
-# and verification. Please be sure to save the following values. If you lose
-# them for some reason, please clear the module database (/data/misc/keystore/omk/data/)
-# DO NOT MODIFY ANY VALUE BELOW IF YOU DO NOT UNDERSTAND WHAT ARE YOU DOING
-[crypto]
-root_kek_seed = "4b61c4b3bdf72bb700c351e020270846fb67ba3885e5fb67547e626af5cc1a7f"
-kak_seed = "d6fa5bb024540928a7d554ab5831a0553dd2f688f5d6cb3cb1645be2ff49e357"
-shared_secret_seed = "3f1a22d9f0fdf7c2e7d2abf8f9465b563c1a7c5adfc443f0b7b327bd35a1d75a"
-shared_secret_nonce = "884ae5e90744bc1c590c4a9959a9c11d1989a9f2b7cc31a50a31c9fc4df7e614"
-# Optional. If omitted, OMK derives the auth-token HMAC key through shared secret.
-# auth_token_hmac_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-[trust]
-os_version = 17
-# Accepted values:
-# - "auto": read and preserve the original build.prop patch level
-# - "latest": use the 5th day of the current month
-# - "YYYY-MM-DD": force an exact patch level
-security_patch = "auto"
-# `vb_key` accepts:
-# - "auto": ro.boot.vbmeta.public_key_digest -> computed top-level vbmeta key digest -> random fallback
-# - "random": generate a fresh 32-byte value for this boot and push it into ro.boot.vbmeta.public_key_digest
-# - "<64 hex chars>": pin an exact 32-byte value
-vb_key = "auto"
-
-# `vb_hash` accepts:
-# - "auto": ro.boot.vbmeta.digest -> original system attestation verifiedBootHash -> random fallback
-# - "random": generate a fresh 32-byte value for this boot and push it into ro.boot.vbmeta.digest
-# - "<64 hex chars>": pin an exact 32-byte value
-vb_hash = "auto"
-
-verified_boot_state = true
-device_locked = true
-
-[device]
-brand = "Google"
-device = "generic"
-product = "generic"
-manufacturer = "Google"
-model = "generic"
-serial = "ABC12345678ABC"
-overrideTelephonyProperties = false
-meid = ""
-imei = ""
-imei2 = ""
-```
-
-OMK writes any successful result back into `config.toml` and leaves still-unavailable
-fields empty.
-
-All `[crypto]` values are 32-byte hex strings. Keep the generated values stable across
-updates; changing them can make existing OMK key material or localized authentication
-tokens unusable. Older configs without `shared_secret_seed` and `shared_secret_nonce`
-are still accepted, and OMK will generate those fields when it rewrites the config.
-
-If `config.toml` becomes invalid, OMK rewrites a canonical default config, renames the broken
-file to `config.toml.bak`, and appends the parse error to the backup.
-
-### /data/misc/keystore/omk/injector.toml
-
-```toml
-# Only packages listed in `scoop` are intercepted.
-
-scoop = [
-  "io.github.vvb2060.keyattestation",
-  "com.google.android.gsf",
-  "com.google.android.gms",
-  "com.android.vending",
-  "com.eltavine.duckdetector",
-]
-
-[main]
-enabled = true
-log_level = "debug"
-
-[filter]
-enabled = true
-deny_packages = []
-block_android_package = true
-allow_unknown_package = false
-
-# Do not edit if you have no idea about the things below
-[intercept]
-get_security_level = true
-get_key_entry = true
-update_subcomponent = true
-list_entries = true
-delete_key = true
-grant = true
-ungrant = true
-get_number_of_entries = true
-list_entries_batched = true
-get_supplementary_attestation_info = true
-
-```
-
-`allow_unknown_package = true` allows callers whose package name cannot be resolved to pass
-the filter instead of being rejected.
+The active files are `/data/misc/keystore/omk/config.toml` and
+`/data/misc/keystore/omk/injector.toml`. Read the
+[Configuration Guide](docs/CONFIGURATION.md) for complete annotated examples,
+field-by-field explanations, safety notes, and restart requirements.
 
 ## Restarting keymint and injector
 
@@ -143,13 +38,8 @@ touch /data/adb/omk/restart.injector
 touch /data/adb/omk/restart.all
 ```
 
-If you switch `[trust].vb_key` or `[trust].vb_hash` from `"random"` back to `"auto"`,
-restart alone is not enough. `auto` resolves `ro.boot.vbmeta.*` first, so the current
-boot keeps using the randomized sysprops until the device reboots and restores the
-original boot properties.
-
-Changing `[trust].security_patch` does not require a restart by itself. OMK hot-applies
-the new value and rebuilds the active KeyMint wrappers in place.
+See the [Configuration Guide](docs/CONFIGURATION.md#how-changes-are-loaded) for
+which changes need a component restart or a full device reboot.
 
 ## License
 
@@ -184,7 +74,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 2. 您不得暗示或明示本软件与其他软件有任何从属关系。
 
-3. 未经本软件作者书面允许，您不得超出合理使用范围或协议许可范围使用本软件的名称。
+3. 除经本软件作者书面许可外，不得将本软件名称或与其近似的名称用于修改版、衍生作
+   品或相关服务的命名、宣传；法律允许的指名性使用除外。本软件的修改版或衍生作品
+   如与本软件存在明显区别，须使用其他名称。例如，包含不属于本软件原版的功能或附
+   属资源，或使用本软件名称可能导致公众误认为该修改版由原项目作者发布、认可或存
+   在关联，即属于此类情形。上述作品须保留本软件的著作权声明、作者署名及许可证文
+   件并以显著方式标注该作品为本软件的衍生作品，且不得暗示本软件作者对其承担任何
+   责任。即使不属于上述须更名情形的修改版或衍生作品，本软件作者认为有必要时，仍
+   有权要求其更名。
 
 4. 除非您所在的司法管辖区的适用法律另行规定，您同意将纠纷或争议提交至中国大陆境
    内有管辖权的人民法院管辖。
