@@ -66,8 +66,8 @@ The values under `[crypto]` below are deliberately non-working redaction
 placeholders. A real active file contains unique generated hexadecimal values.
 Never paste the placeholder values into a device and never replace the values
 already present in a working file. The `[trust]` and `[device]` values are also
-examples; keep the values from the active file unless you intend to change the
-reported identity.
+examples; keep the values from the active file unless the reported identity
+needs to change.
 
 ```toml
 # Configuration format. Keep this at 2.
@@ -301,29 +301,31 @@ reports that the live update failed, restart keymint.
 This controls the 32-byte verified-boot public-key digest:
 
 - `"auto"` first reads `ro.boot.vbmeta.public_key_digest`, then tries to
-  calculate the top-level vbmeta key digest, and uses a random fallback only if
-  neither source is available;
+  calculate the top-level vbmeta key digest, and if neither source is available,
+  generates a value, saves it to `config.toml` as an exact hex value, and reuses
+  that value on later keymint starts;
 - `"random"` generates a new value whenever keymint starts; or
 - a 64-character hexadecimal string pins an exact value.
 
-Keep `"auto"` unless you understand the attestation profile being configured.
-Changing this field requires a keymint restart. If `"random"` was active and
-you change it back to `"auto"`, reboot the whole device so Android restores the
-original boot property before `"auto"` reads it.
+Keep `"auto"` unless an exact attestation profile is required. Changing this
+field requires a keymint restart. If `"random"` was active and the field changes
+back to `"auto"`, reboot the whole device so `"auto"` can resolve from the
+original boot property or pin a stable fallback value.
 
 #### `vb_hash`
 
 This controls the 32-byte verified-boot hash:
 
 - `"auto"` first reads `ro.boot.vbmeta.digest`, then tries the original System
-  attestation hash, and uses a random fallback only if neither source is
-  available;
+  attestation hash, and if neither source is available, generates a value, saves
+  it to `config.toml` as an exact hex value, and reuses that value on later
+  keymint starts;
 - `"random"` generates a new value whenever keymint starts; or
 - a 64-character hexadecimal string pins an exact value.
 
 The same restart rule applies as for `vb_key`: restart keymint after a normal
-change, and reboot the whole device when returning from `"random"` to
-`"auto"`.
+change, and reboot the whole device when returning from `"random"` to `"auto"`
+so the automatic resolver can pin a stable fallback value when needed.
 
 #### `verified_boot_state`
 
@@ -649,8 +651,8 @@ not add them; use `scoop`, `[filter]`, and `[intercept]` instead.
 
 Every valid documented field change is loaded for new requests without a
 device reboot. For `scoop`, `[main].enabled`, `[filter]`, or `[intercept]`
-changes, restart the injector and reopen the affected app when you need a clean
-boundary after a route change. A syntax error, an unknown field, or an
+changes, restart the injector and reopen the affected app when a clean boundary
+is needed after a route change. A syntax error, an unknown field, or an
 unsupported future `version` leaves the last valid runtime configuration
 active; if present at injector startup, it leaves OMK request routing disabled
 until the file is corrected.

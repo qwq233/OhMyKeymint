@@ -76,7 +76,7 @@ pub(crate) struct ResolvedPatchLevels {
     pub write_security_patch: bool,
 }
 
-pub fn bootstrap_vbmeta(config_file: &ConfigFile) -> Result<ResolvedTrust> {
+pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
     let slot_suffix = resetprop::read_string_property("ro.boot.slot_suffix").unwrap_or_default();
     let patches = resolve_patch_levels(&config_file.trust)?;
     let os_version = match config_file.trust.os_version {
@@ -90,6 +90,13 @@ pub fn bootstrap_vbmeta(config_file: &ConfigFile) -> Result<ResolvedTrust> {
         &slot_suffix,
     );
     let vb_hash = resolve_vb_hash(&config_file.trust.vb_hash);
+
+    let pinned = pin_random_fallback_values(config_file, &vb_key, &vb_hash);
+    if pinned {
+        crate::config::persist_config_file(config_file)
+            .context("failed to pin random fallback vbmeta trust values")?;
+        log::info!("Pinned random fallback vbmeta trust values in config.toml");
+    }
 
     sync_sysprops_if_needed(&vb_key, &vb_hash)?;
     if patches.write_security_patch {
@@ -191,6 +198,23 @@ fn resolve_vb_hash(spec: &TrustValueSpec) -> ResolvedField {
             }
         }
     }
+}
+
+fn pin_random_fallback_values(
+    config_file: &mut ConfigFile,
+    vb_key: &ResolvedField,
+    vb_hash: &ResolvedField,
+) -> bool {
+    let mut pinned = false;
+    if vb_key.source == TrustValueSource::RandomFallback {
+        config_file.trust.vb_key = TrustValueSpec::Hex(vb_key.value);
+        pinned = true;
+    }
+    if vb_hash.source == TrustValueSource::RandomFallback {
+        config_file.trust.vb_hash = TrustValueSpec::Hex(vb_hash.value);
+        pinned = true;
+    }
+    pinned
 }
 
 fn random_field(source: TrustValueSource) -> ResolvedField {
@@ -1217,6 +1241,27 @@ ro.vendor.boot_security_patch.extra = ignored
         assert!(TrustValueSource::RandomFallback.needs_sysprop_write());
         assert!(!TrustValueSource::ExplicitHex.needs_sysprop_write());
         assert!(!TrustValueSource::Property.needs_sysprop_write());
+    }
+
+    #[test]
+    fn random_fallback_values_are_pinned_in_config() {
+        let mut config_file = ConfigFile::default();
+        let vb_key = ResolvedField {
+            value: [0x11; 32],
+            source: TrustValueSource::RandomFallback,
+        };
+        let vb_hash = ResolvedField {
+            value: [0x22; 32],
+            source: TrustValueSource::RandomFallback,
+        };
+
+        assert!(pin_random_fallback_values(
+            &mut config_file,
+            &vb_key,
+            &vb_hash
+        ));
+        assert_eq!(config_file.trust.vb_key, TrustValueSpec::Hex([0x11; 32]));
+        assert_eq!(config_file.trust.vb_hash, TrustValueSpec::Hex([0x22; 32]));
     }
 
     fn build_test_vbmeta(

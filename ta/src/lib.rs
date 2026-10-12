@@ -573,8 +573,8 @@ impl KeyMintTa {
     fn update_use_count(&mut self, key_id: KeyId, max_uses: u32) -> Result<(), Error> {
         let mut free_idx = None;
         let mut slot_idx = None;
-        for idx in 0..self.use_count.len() {
-            match &self.use_count[idx] {
+        for (idx, entry) in self.use_count.iter().enumerate() {
+            match entry {
                 None if free_idx.is_none() => free_idx = Some(idx),
                 None => {}
                 Some(UseCount {

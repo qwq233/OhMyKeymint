@@ -242,7 +242,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
+    let mut config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
     let level = config_file
         .main
         .log_level
@@ -262,7 +262,7 @@ fn run() -> Result<()> {
     let _ = rsbinder::ProcessState::init_default();
 
     let resolved_trust =
-        plat::vbmeta::bootstrap_vbmeta(&config_file).context("failed to bootstrap vbmeta")?;
+        plat::vbmeta::bootstrap_vbmeta(&mut config_file).context("failed to bootstrap vbmeta")?;
     prepare_android_storage();
     config::install_runtime_config(config_file, resolved_trust)
         .context("failed to install runtime config")?;
