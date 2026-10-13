@@ -493,13 +493,15 @@ impl KeyMintTa {
                     curr
                 )),
                 Ordering::Equal => Ok(()),
-                Ordering::Greater => Err(km_err!(
-                    InvalidKeyBlob,
-                    "keyblob with future {} {} (current {})",
-                    name,
-                    v,
-                    curr
-                )),
+                // We allow patchlevel upgrades.
+                Ordering::Greater => Ok(()),
+                // Ordering::Greater => Err(km_err!(
+                //     InvalidKeyBlob,
+                //     "keyblob with future {} {} (current {})",
+                //     name,
+                //     v,
+                //     curr
+                // )),
             }
         }
 
