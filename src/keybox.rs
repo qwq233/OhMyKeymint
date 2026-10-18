@@ -100,10 +100,12 @@ impl KeyBox {
             }
         }
 
-        let rsa_entry = rsa_entry.context("missing RSA key entry in keybox.xml")?;
         let ec_entry = ec_entry.context("missing EC key entry in keybox.xml")?;
 
-        let rsa_info = Self::build_rsa_info(rsa_entry)?;
+        let rsa_info = rsa_entry
+            .map(Self::build_rsa_info)
+            .transpose()?
+            .unwrap_or_else(|| Self::new().rsa_info);
         let ec_info = Self::build_ec_info(ec_entry)?;
         let identity_digest = Self::compute_identity_digest(&rsa_info, &ec_info)?;
 
