@@ -14,22 +14,21 @@ cddl-cat = { version = "0.7.1", optional = true }
 ciborium = { version = "0.2.2", default-features = false }
 ciborium-io = "0.2.2"
 coset = "0.4.2"
-der = { version = "0.8.1", features = ["alloc", "derive"] }
+der = { version = "0.8.2", features = ["alloc", "derive"] }
 enumn = "0.1.14"
 kmr-derive = { path = "../derive", version = "0.1.0" }
 kmr-wire = { path = "../wire", version = "0.1.0" }
-libc = "0.2.189"
-log = "0.4.33"
+libc = "0.2.190"
+log = "0.4.34"
 log4rs = "1.4.0"
 pkcs1 = { version = "0.7.5", features = ["alloc"] }
 pkcs8 = "0.11.0"
-rand = "0.10.2"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
 rsproperties = { version = "0.6.0", features = ["builder"] }
 sec1 = { version = "0.8.1", features = ["alloc", "der"] }
 serde = { version = "1.0.229", features = ["derive"] }
-spki = { version = "0.8.0"}
-zeroize = { version = "1.9.0", features = ["alloc", "zeroize_derive"] }
+spki = "0.8.1"
+zeroize = { version = "1.9.1", features = ["alloc", "zeroize_derive"] }
 
 [dev-dependencies]
 hex = "0.4.3"

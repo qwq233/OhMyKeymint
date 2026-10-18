@@ -33,10 +33,10 @@ fn one_way_synthetic_operation_abort_finalizes_mapping() {
     };
 
     let abort_request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
-    let mut abort_tr = transaction_for_parcel(
+    let (mut abort_tr, _abort_data) = transaction_for_parcel(
         target,
         crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
-        &abort_request,
+        abort_request,
     );
     abort_tr.flags |= crate::hook::binder::TF_ONE_WAY;
 
@@ -48,10 +48,10 @@ fn one_way_synthetic_operation_abort_finalizes_mapping() {
 
     let mut update_request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
     update_request.write(&vec![1u8]).unwrap();
-    let update_tr = transaction_for_parcel(
+    let (update_tr, _update_data) = transaction_for_parcel(
         target,
         crate::android::system::keystore2::IKeystoreOperation::transactions::r#update,
-        &update_request,
+        update_request,
     );
     let update_reply =
         unsafe { handle_synthetic_br_transaction(&update_tr, None, "BR_TRANSACTION") }
@@ -63,10 +63,10 @@ fn one_way_synthetic_operation_abort_finalizes_mapping() {
     );
 
     let abort_again_request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
-    let abort_again_tr = transaction_for_parcel(
+    let (abort_again_tr, _abort_again_data) = transaction_for_parcel(
         target,
         crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
-        &abort_again_request,
+        abort_again_request,
     );
     let abort_again_reply =
         unsafe { handle_synthetic_br_transaction(&abort_again_tr, None, "BR_TRANSACTION") }

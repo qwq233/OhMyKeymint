@@ -20,6 +20,6 @@ fn untracked_native_target_is_not_intercepted() {
         cookie: 0x5678,
     };
     let empty = rsbinder::Parcel::new();
-    let tr = transaction_for_parcel(target, rsbinder::FIRST_CALL_TRANSACTION, &empty);
+    let (tr, _data) = transaction_for_parcel(target, rsbinder::FIRST_CALL_TRANSACTION, empty);
     assert!(unsafe { handle_synthetic_br_transaction(&tr, None, "BR_TRANSACTION") }.is_none());
 }

@@ -16,7 +16,7 @@ kmr-common = { path = "../common", version = "0.1.0" }
 kmr-crypto-boring = { path = "../boringssl", version = "0.1.0" }
 kmr-ta = { path = "../ta", version = "0.1.0" }
 kmr-wire = { path = "../wire", version = "0.1.0" }
-log = "0.4.33"
+log = "0.4.34"
 x509-cert = "0.3.0"
 
 [lints.rust]

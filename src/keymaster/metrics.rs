@@ -25,7 +25,7 @@ use crate::keymaster::metrics_store::METRICS_STORE;
 use crate::keymaster::permission::{check_keystore_permission, KeystorePerm};
 use crate::watchdog as wd;
 use anyhow::{Context, Result};
-use rsbinder::status::Result as BinderResult;
+use rsbinder::BinderResult;
 use rsbinder::{BinderFeatures, Interface, Strong};
 
 pub struct Metrics;

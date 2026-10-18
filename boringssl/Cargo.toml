@@ -15,17 +15,17 @@ default = []
 nightly = []
 
 [dependencies]
-foreign-types = "0.3.2"
 kmr-common = { path = "../common", version = "0.1.0" }
 kmr-wire = { path = "../wire", version = "0.1.0" }
-libc = "0.2.189"
-log = "0.4.33"
+libc = "0.2.190"
+log = "0.4.34"
 anyhow = "1.0.104"
-thiserror = "2.0.19"
+thiserror = "2.0.21"
 nix = { version = "0.31.3", features = ["mman"] }
 openssl = { package = "openssl", version = "0.10.81", features = ["unstable_boringssl", "bindgen"] }
 ffi = { package = "openssl-sys", version = "0.9.117", features = ["bindgen"] }
 bssl_sys = { package = "bssl-sys", version = "0.1.0" }
+foreign-types = "0.3.2"
 
 [dev-dependencies]
 kmr-tests = { path = "../tests", version = "0.1.0" }

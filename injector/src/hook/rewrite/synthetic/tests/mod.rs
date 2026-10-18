@@ -37,7 +37,7 @@ impl AospKeystoreSecurityLevel for FakeAospSecurityLevel {
         _arg_operation_parameters:
             &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
         _arg_forced: bool,
-    ) -> rsbinder::status::Result<CreateOperationResponse> {
+    ) -> rsbinder::BinderResult<CreateOperationResponse> {
         Err(StatusCode::UnknownTransaction.into())
     }
 
@@ -48,7 +48,7 @@ impl AospKeystoreSecurityLevel for FakeAospSecurityLevel {
         _arg_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
         _arg_flags: i32,
         _arg_entropy: &[u8],
-    ) -> rsbinder::status::Result<KeyMetadata> {
+    ) -> rsbinder::BinderResult<KeyMetadata> {
         Err(StatusCode::UnknownTransaction.into())
     }
 
@@ -59,7 +59,7 @@ impl AospKeystoreSecurityLevel for FakeAospSecurityLevel {
         _arg_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
         _arg_flags: i32,
         _arg_key_data: &[u8],
-    ) -> rsbinder::status::Result<KeyMetadata> {
+    ) -> rsbinder::BinderResult<KeyMetadata> {
         Err(StatusCode::UnknownTransaction.into())
     }
 
@@ -71,18 +71,18 @@ impl AospKeystoreSecurityLevel for FakeAospSecurityLevel {
         _arg_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
         _arg_authenticators:
             &[crate::android::system::keystore2::AuthenticatorSpec::AuthenticatorSpec],
-    ) -> rsbinder::status::Result<KeyMetadata> {
+    ) -> rsbinder::BinderResult<KeyMetadata> {
         Err(StatusCode::UnknownTransaction.into())
     }
 
     fn r#convertStorageKeyToEphemeral(
         &self,
         _arg_storage_key: &KeyDescriptor,
-    ) -> rsbinder::status::Result<EphemeralStorageKeyResponse> {
+    ) -> rsbinder::BinderResult<EphemeralStorageKeyResponse> {
         Err(StatusCode::UnknownTransaction.into())
     }
 
-    fn r#deleteKey(&self, _arg_key: &KeyDescriptor) -> rsbinder::status::Result<()> {
+    fn r#deleteKey(&self, _arg_key: &KeyDescriptor) -> rsbinder::BinderResult<()> {
         Err(StatusCode::UnknownTransaction.into())
     }
 }

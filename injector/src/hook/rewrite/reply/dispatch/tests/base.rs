@@ -12,7 +12,7 @@ fn base_reply(code: rsbinder::TransactionCode) -> SyntheticReply {
         cookie: 0x5100,
     };
     let empty = rsbinder::Parcel::new();
-    let tr = transaction_for_parcel(target, code, &empty);
+    let (tr, _data) = transaction_for_parcel(target, code, empty);
     unsafe { synthetic_base_transaction_reply(Some(SyntheticTargetKind::Operation), target, &tr) }
         .expect("base transaction handling should not fail")
         .expect("base transaction should produce a reply")
@@ -38,13 +38,12 @@ fn transaction_for_raw_parts(
 }
 
 fn dump_transaction_data(argc: i32, args: &[String]) -> Vec<u8> {
-    let mut tail = rsbinder::Parcel::new();
-    tail.write(&argc).unwrap();
+    let mut tail = rsbinder::to_bytes(&argc).unwrap();
     for arg in args {
-        tail.write(arg).unwrap();
+        tail.extend_from_slice(&rsbinder::to_bytes(arg).unwrap());
     }
 
-    let mut data = vec![0u8; size_of::<flat_binder_object>() + tail.data_size()];
+    let mut data = vec![0u8; size_of::<flat_binder_object>() + tail.len()];
     let object = flat_binder_object {
         hdr: binder_object_header {
             type_: BINDER_TYPE_FD,
@@ -58,7 +57,7 @@ fn dump_transaction_data(argc: i32, args: &[String]) -> Vec<u8> {
         std::ptr::copy_nonoverlapping(
             tail.as_ptr(),
             data.as_mut_ptr().add(size_of::<flat_binder_object>()),
-            tail.data_size(),
+            tail.len(),
         );
     }
     data
@@ -87,7 +86,7 @@ fn synthetic_debug_pid_uses_process_identity_without_interface_token() {
         cookie: 0x5100,
     };
     let empty = rsbinder::Parcel::new();
-    let mut tr = transaction_for_parcel(target, rsbinder::DEBUG_PID_TRANSACTION, &empty);
+    let (mut tr, _data) = transaction_for_parcel(target, rsbinder::DEBUG_PID_TRANSACTION, empty);
     tr.sender_pid = if synthetic_debug_pid() == 2000 {
         2001
     } else {
@@ -133,7 +132,7 @@ fn dump_without_fd_returns_bad_type() {
         cookie: 0x5100,
     };
     let empty = rsbinder::Parcel::new();
-    let tr = transaction_for_parcel(target, rsbinder::DUMP_TRANSACTION, &empty);
+    let (tr, _) = transaction_for_parcel(target, rsbinder::DUMP_TRANSACTION, empty);
     let reply = unsafe {
         synthetic_base_transaction_reply(Some(SyntheticTargetKind::Operation), target, &tr)
     }

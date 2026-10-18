@@ -612,7 +612,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         )
     }
 
-    fn addRngEntropy(&self, data: &[u8]) -> rsbinder::status::Result<()> {
+    fn addRngEntropy(&self, data: &[u8]) -> rsbinder::BinderResult<()> {
         let req = PerformOpReq::DeviceAddRngEntropy(AddRngEntropyRequest {
             data: data.to_vec(),
         });
@@ -625,7 +625,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         attestation_key: Option<
             &crate::android::hardware::security::keymint::AttestationKey::AttestationKey,
         >,
-    ) -> rsbinder::status::Result<
+    ) -> rsbinder::BinderResult<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
         let version_number = resolve_hardware_profile(self.security_level).version_number;
@@ -665,7 +665,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         attestation_key: Option<
             &crate::android::hardware::security::keymint::AttestationKey::AttestationKey,
         >,
-    ) -> rsbinder::status::Result<
+    ) -> rsbinder::BinderResult<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
         let version_number = resolve_hardware_profile(self.security_level).version_number;
@@ -710,7 +710,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         unwrapping_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
         password_sid: i64,
         biometric_sid: i64,
-    ) -> rsbinder::status::Result<
+    ) -> rsbinder::BinderResult<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
         let version_number = resolve_hardware_profile(self.security_level).version_number;
@@ -745,7 +745,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         &self,
         key_blob_to_upgrade: &[u8],
         upgrade_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
-    ) -> rsbinder::status::Result<Vec<u8>> {
+    ) -> rsbinder::BinderResult<Vec<u8>> {
         let version_number = resolve_hardware_profile(self.security_level).version_number;
         let upgrade_params = key_parameters_to_km(upgrade_params, version_number)
             .map_err(key_parameter_conversion_status)?;
@@ -770,16 +770,16 @@ impl IKeyMintDevice for KeyMintWrapper {
         Ok(result)
     }
 
-    fn deleteKey(&self, key_blob: &[u8]) -> rsbinder::status::Result<()> {
+    fn deleteKey(&self, key_blob: &[u8]) -> rsbinder::BinderResult<()> {
         self.delete_Key(key_blob).map_err(map_ks_error)
     }
 
-    fn deleteAllKeys(&self) -> rsbinder::status::Result<()> {
+    fn deleteAllKeys(&self) -> rsbinder::BinderResult<()> {
         let req = PerformOpReq::DeviceDeleteAllKeys(DeleteAllKeysRequest {});
         self.process_status_only(req).map_err(map_ks_error)
     }
 
-    fn destroyAttestationIds(&self) -> rsbinder::status::Result<()> {
+    fn destroyAttestationIds(&self) -> rsbinder::BinderResult<()> {
         let req = PerformOpReq::DeviceDestroyAttestationIds(DestroyAttestationIdsRequest {});
         self.process_status_only(req).map_err(map_ks_error)
     }
@@ -790,11 +790,11 @@ impl IKeyMintDevice for KeyMintWrapper {
         _timestamp_token: Option<
             &crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken,
         >,
-    ) -> rsbinder::status::Result<()> {
+    ) -> rsbinder::BinderResult<()> {
         Result::Err(Status::from(ExceptionCode::UnsupportedOperation))
     }
 
-    fn earlyBootEnded(&self) -> rsbinder::status::Result<()> {
+    fn earlyBootEnded(&self) -> rsbinder::BinderResult<()> {
         EARLY_BOOT_ENDED.store(true, Ordering::Release);
         let req = PerformOpReq::DeviceEarlyBootEnded(EarlyBootEndedRequest {});
         self.process_status_only(req).map_err(map_ks_error)
@@ -803,7 +803,7 @@ impl IKeyMintDevice for KeyMintWrapper {
     fn convertStorageKeyToEphemeral(
         &self,
         storage_key_blob: &[u8],
-    ) -> rsbinder::status::Result<Vec<u8>> {
+    ) -> rsbinder::BinderResult<Vec<u8>> {
         let req =
             PerformOpReq::DeviceConvertStorageKeyToEphemeral(ConvertStorageKeyToEphemeralRequest {
                 storage_key_blob: storage_key_blob.to_vec(),
@@ -824,7 +824,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         key_blob: &[u8],
         app_id: &[u8],
         app_data: &[u8],
-    ) -> rsbinder::status::Result<
+    ) -> rsbinder::BinderResult<
         Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>,
     > {
         let req = PerformOpReq::DeviceGetKeyCharacteristics(GetKeyCharacteristicsRequest {
@@ -853,7 +853,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }).collect()
     }
 
-    fn getRootOfTrustChallenge(&self) -> rsbinder::status::Result<[u8; 16]> {
+    fn getRootOfTrustChallenge(&self) -> rsbinder::BinderResult<[u8; 16]> {
         let req = PerformOpReq::GetRootOfTrustChallenge(GetRootOfTrustChallengeRequest {});
 
         let result = self.inner.keymint.lock().unwrap().process_req(req);
@@ -871,7 +871,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         Ok(result)
     }
 
-    fn getRootOfTrust(&self, challenge: &[u8; 16]) -> rsbinder::status::Result<Vec<u8>> {
+    fn getRootOfTrust(&self, challenge: &[u8; 16]) -> rsbinder::BinderResult<Vec<u8>> {
         let req = PerformOpReq::GetRootOfTrust(GetRootOfTrustRequest {
             challenge: *challenge,
         });
@@ -886,7 +886,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         Ok(result)
     }
 
-    fn sendRootOfTrust(&self, root_of_trust: &[u8]) -> rsbinder::status::Result<()> {
+    fn sendRootOfTrust(&self, root_of_trust: &[u8]) -> rsbinder::BinderResult<()> {
         let req = PerformOpReq::SendRootOfTrust(SendRootOfTrustRequest {
             root_of_trust: root_of_trust.to_vec(),
         });
@@ -896,7 +896,7 @@ impl IKeyMintDevice for KeyMintWrapper {
     fn setAdditionalAttestationInfo(
         &self,
         info: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
-    ) -> rsbinder::status::Result<()> {
+    ) -> rsbinder::BinderResult<()> {
         let version_number = resolve_hardware_profile(self.security_level).version_number;
         let additional_info =
             key_parameters_to_km(info, version_number).map_err(key_parameter_conversion_status)?;

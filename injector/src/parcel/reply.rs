@@ -22,14 +22,15 @@ use super::parcel_from_ipc_parts;
 
 #[derive(Debug)]
 pub struct OwnedReply {
-    parcel: Parcel,
+    data: Vec<u8>,
+    _parcel: Parcel,
     pub offsets: Box<[usize]>,
     pub(crate) native_operation: Option<NativeBinderRetirement>,
 }
 
 impl OwnedReply {
     pub fn data_size(&self) -> usize {
-        self.parcel.data_size()
+        self.data.len()
     }
 
     pub fn offsets_size(&self) -> usize {
@@ -37,11 +38,11 @@ impl OwnedReply {
     }
 
     pub fn data_ptr(&self) -> *const u8 {
-        self.parcel.as_ptr()
+        self.data.as_ptr()
     }
 
     pub fn data_mut_ptr(&mut self) -> *mut u8 {
-        self.parcel.as_mut_ptr()
+        self.data.as_mut_ptr()
     }
 }
 
@@ -163,16 +164,6 @@ pub unsafe fn extract_create_operation_reply_carrier(
     )
 }
 
-pub fn build_get_security_level_reply(
-    binder: Strong<dyn IKeystoreSecurityLevel>,
-) -> Result<OwnedReply> {
-    let mut parcel = Parcel::new();
-    parcel.write(&Status::from(StatusCode::Ok))?;
-    let binder_offset = parcel.data_position();
-    parcel.write(&binder)?;
-    Ok(owned_reply_from_parcel(parcel, [binder_offset]))
-}
-
 pub fn build_get_security_level_reply_with_carrier_bytes(
     carrier_bytes: &[u8],
     carrier_is_object: bool,
@@ -180,10 +171,10 @@ pub fn build_get_security_level_reply_with_carrier_bytes(
     let mut parcel = Parcel::new();
     parcel.write(&Status::from(StatusCode::Ok))?;
     let start = parcel.data_position();
-    let (placeholder_start, placeholder_end) =
+    let (placeholder_start, end) =
         write_none_binder_placeholder::<dyn IKeystoreSecurityLevel>(&mut parcel)?;
     debug_assert_eq!(start, placeholder_start);
-    let binder_len = placeholder_end - placeholder_start;
+    let binder_len = end - start;
     if carrier_bytes.len() != binder_len {
         bail!(
             "get-security-level carrier binder size mismatch: expected {}, got {}",
@@ -192,37 +183,51 @@ pub fn build_get_security_level_reply_with_carrier_bytes(
         );
     }
 
-    let mut reply = owned_reply_from_parcel(parcel, carrier_is_object.then_some(start));
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            carrier_bytes.as_ptr(),
-            reply.data_mut_ptr().add(start),
-            carrier_bytes.len(),
-        );
-    }
-    Ok(reply)
+    let mut data = parcel_bytes(&mut parcel)?;
+    data[start..end].copy_from_slice(carrier_bytes);
+    Ok(owned_reply_from_bytes(
+        parcel,
+        data,
+        carrier_is_object.then_some(start),
+    ))
 }
 
 pub fn build_interface_descriptor_reply(descriptor: &str) -> Result<OwnedReply> {
     let mut parcel = Parcel::new();
     parcel.write(&descriptor.to_string())?;
-    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
+    let data = parcel_bytes(&mut parcel)?;
+    Ok(owned_reply_from_bytes(
+        parcel,
+        data,
+        std::iter::empty::<usize>(),
+    ))
 }
 
 pub fn build_empty_reply() -> OwnedReply {
-    owned_reply_from_parcel(Parcel::new(), std::iter::empty::<usize>())
+    owned_reply_from_bytes(Parcel::new(), Vec::new(), std::iter::empty::<usize>())
 }
 
 pub fn build_raw_i32_reply(value: i32) -> Result<OwnedReply> {
     let mut parcel = Parcel::new();
     parcel.write(&value)?;
-    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
+    let data = parcel_bytes(&mut parcel)?;
+    Ok(owned_reply_from_bytes(
+        parcel,
+        data,
+        std::iter::empty::<usize>(),
+    ))
 }
 
 pub fn build_null_binder_reply() -> Result<OwnedReply> {
     let mut parcel = Parcel::new();
-    <rsbinder::SIBinder as SerializeOption>::serialize_option(None, &mut parcel)?;
-    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
+    let binder: Option<rsbinder::SIBinder> = None;
+    parcel.write(&binder)?;
+    let data = parcel_bytes(&mut parcel)?;
+    Ok(owned_reply_from_bytes(
+        parcel,
+        data,
+        std::iter::empty::<usize>(),
+    ))
 }
 
 pub fn build_local_binder_carrier_bytes(
@@ -251,14 +256,15 @@ pub fn build_local_binder_carrier_bytes(
 }
 
 fn build_sized_parcelable_reply(
-    write_payload: impl FnOnce(&mut Parcel, &mut Option<usize>) -> std::result::Result<(), StatusCode>,
+    write_payload: impl FnOnce(&mut Parcel, &mut Option<usize>) -> rsbinder::Result<()>,
 ) -> Result<OwnedReply> {
     let mut parcel = Parcel::new();
     parcel.write(&Status::from(StatusCode::Ok))?;
     parcel.write(&NON_NULL_PARCELABLE_FLAG)?;
     let mut binder_offset = None;
     parcel.sized_write(|sub_parcel| write_payload(sub_parcel, &mut binder_offset))?;
-    Ok(owned_reply_from_parcel(parcel, binder_offset))
+    let data = parcel_bytes(&mut parcel)?;
+    Ok(owned_reply_from_bytes(parcel, data, binder_offset))
 }
 
 pub fn build_key_entry_reply(reply: KeyEntryResponse) -> Result<OwnedReply> {
@@ -342,7 +348,12 @@ pub fn build_plain_reply<T: Serialize>(value: &T) -> Result<OwnedReply> {
     let mut parcel = Parcel::new();
     parcel.write(&Status::from(StatusCode::Ok))?;
     parcel.write(value)?;
-    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
+    let data = parcel_bytes(&mut parcel)?;
+    Ok(owned_reply_from_bytes(
+        parcel,
+        data,
+        std::iter::empty::<usize>(),
+    ))
 }
 
 pub fn build_void_reply() -> Result<OwnedReply> {
@@ -352,15 +363,47 @@ pub fn build_void_reply() -> Result<OwnedReply> {
 pub fn build_status_reply(status: &Status) -> Result<OwnedReply> {
     let mut parcel = Parcel::new();
     parcel.write(status)?;
-    Ok(owned_reply_from_parcel(parcel, std::iter::empty::<usize>()))
+    let data = parcel_bytes(&mut parcel)?;
+    Ok(owned_reply_from_bytes(
+        parcel,
+        data,
+        std::iter::empty::<usize>(),
+    ))
 }
 
-fn owned_reply_from_parcel(parcel: Parcel, offsets: impl IntoIterator<Item = usize>) -> OwnedReply {
+fn owned_reply_from_bytes(
+    parcel: Parcel,
+    data: Vec<u8>,
+    offsets: impl IntoIterator<Item = usize>,
+) -> OwnedReply {
     OwnedReply {
-        parcel,
+        _parcel: parcel,
+        data,
         offsets: offsets.into_iter().collect(),
         native_operation: None,
     }
+}
+
+fn parcel_bytes(parcel: &mut Parcel) -> Result<Vec<u8>> {
+    let original_position = parcel.data_position();
+    let len = {
+        parcel.set_data_position(0);
+        parcel.data_size()
+    };
+    if !len.is_multiple_of(size_of::<u32>()) {
+        parcel.set_data_position(original_position);
+        bail!("binder parcel length {len} is not word-aligned");
+    }
+
+    let mut bytes = Vec::with_capacity(len);
+    while bytes.len() < len {
+        let chunk: [u8; 4] = parcel
+            .try_into()
+            .map_err(|error| anyhow!("failed to copy binder parcel bytes: {error}"))?;
+        bytes.extend_from_slice(&chunk);
+    }
+    parcel.set_data_position(original_position);
+    Ok(bytes)
 }
 
 fn read_ok_status(parcel: &mut Parcel) -> Result<()> {
@@ -445,14 +488,15 @@ fn build_parcelable_reply_with_carrier_bytes(
     let mut parcel = Parcel::new();
     parcel.write(&Status::from(StatusCode::Ok))?;
     parcel.write(&NON_NULL_PARCELABLE_FLAG)?;
-    let mut binder_offset = None;
-    let mut binder_len = 0usize;
+    let mut span = None;
     parcel.sized_write(|sub_parcel| {
-        let (start, end) = write_body(sub_parcel)?;
-        binder_offset = Some(start);
-        binder_len = end - start;
+        span = Some(write_body(sub_parcel)?);
         Ok(())
     })?;
+    let Some((start, end)) = span else {
+        bail!("{label} carrier binder span was not recorded");
+    };
+    let binder_len = end - start;
     if carrier_bytes.len() != binder_len {
         bail!(
             "{label} carrier binder size mismatch: expected {}, got {}",
@@ -461,17 +505,13 @@ fn build_parcelable_reply_with_carrier_bytes(
         );
     }
 
-    let start =
-        binder_offset.ok_or_else(|| anyhow!("{label} carrier binder offset was not recorded"))?;
-    let mut reply = owned_reply_from_parcel(parcel, carrier_is_object.then_some(start));
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            carrier_bytes.as_ptr(),
-            reply.data_mut_ptr().add(start),
-            carrier_bytes.len(),
-        );
-    }
-    Ok(reply)
+    let mut data = parcel_bytes(&mut parcel)?;
+    data[start..end].copy_from_slice(carrier_bytes);
+    Ok(owned_reply_from_bytes(
+        parcel,
+        data,
+        carrier_is_object.then_some(start),
+    ))
 }
 
 fn write_none_binder_placeholder<T>(parcel: &mut Parcel) -> rsbinder::Result<(usize, usize)>

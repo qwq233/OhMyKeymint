@@ -26,7 +26,8 @@ fn null_operation_carrier_bytes() -> Vec<u8> {
     let mut parcel = Parcel::new();
     let (start, end) =
         write_none_binder_placeholder::<dyn IKeystoreOperation>(&mut parcel).unwrap();
-    unsafe { std::slice::from_raw_parts(parcel.as_ptr().add(start), end - start).to_vec() }
+    let bytes = parcel_bytes(&mut parcel).unwrap();
+    bytes[start..end].to_vec()
 }
 
 fn assert_status_code<T>(result: Result<T>, expected: StatusCode) {

@@ -17,7 +17,7 @@
 use super::*;
 use crate::selinux;
 use anyhow::{anyhow, Context};
-use rsbinder::{status::Result as BinderResult, ExceptionCode, Status as BinderStatus, StatusCode};
+use rsbinder::{BinderResult, ExceptionCode, Status as BinderStatus, StatusCode};
 
 fn nested_nested_rc(rc: ResponseCode) -> anyhow::Result<()> {
     Err(anyhow!(Error::Rc(rc))).context("nested nested rc")

@@ -51,7 +51,7 @@ use kmr_wire::{
     KeySizeInBits,
 };
 use log::{error, info};
-use rsbinder::status::Result as BinderResult;
+use rsbinder::BinderResult;
 use rsbinder::{
     DeathRecipient, ExceptionCode, Interface, Status as BinderStatus, StatusCode, Strong, WIBinder,
 };

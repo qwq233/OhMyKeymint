@@ -846,7 +846,7 @@ impl IOhMyKsService for KeystoreService {
         ctx: Option<&CallerInfo>,
         key: &[u8],
         chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
-    ) -> rsbinder::status::Result<()> {
+    ) -> rsbinder::BinderResult<()> {
         let ctx = require_omk_ctx(ctx, "IOhMyKsService::updateEcKeybox")?;
         self.enforce_keybox_admin(ctx).map_err(into_logged_binder)?;
         let chain: Vec<kmr_wire::keymint::Certificate> = chain
@@ -867,7 +867,7 @@ impl IOhMyKsService for KeystoreService {
         ctx: Option<&CallerInfo>,
         key: &[u8],
         chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
-    ) -> rsbinder::status::Result<()> {
+    ) -> rsbinder::BinderResult<()> {
         let ctx = require_omk_ctx(ctx, "IOhMyKsService::updateRsaKeybox")?;
         self.enforce_keybox_admin(ctx).map_err(into_logged_binder)?;
         let chain: Vec<kmr_wire::keymint::Certificate> = chain

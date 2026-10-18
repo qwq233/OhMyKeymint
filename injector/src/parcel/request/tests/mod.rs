@@ -21,35 +21,43 @@ mod security_level;
 mod serialization;
 mod service;
 
-fn raw_parts(parcel: &mut Parcel) -> (*mut u8, usize, *mut usize, usize) {
-    (
-        parcel.as_ptr() as *mut u8,
-        parcel.data_size(),
-        std::ptr::null_mut(),
-        0,
-    )
+fn raw_parts(parcel: &mut Vec<u8>) -> (*mut u8, usize, *mut usize, usize) {
+    (parcel.as_mut_ptr(), parcel.len(), std::ptr::null_mut(), 0)
 }
 
 fn tx(offset: u32) -> u32 {
     rsbinder::FIRST_CALL_TRANSACTION + offset
 }
 
-fn build_request_with_payload(interface: &str, write_payload: impl FnOnce(&mut Parcel)) -> Parcel {
+fn build_request_with_payload(interface: &str, write_payload: impl FnOnce(&mut Parcel)) -> Vec<u8> {
     build_request_with_marker(interface, rsbinder::INTERFACE_HEADER, write_payload)
+}
+
+fn request_bytes(parcel: &mut Parcel) -> Vec<u8> {
+    let original_position = parcel.data_position();
+    parcel.set_data_position(0);
+    let mut bytes = Vec::new();
+    while bytes.len() < parcel.data_size() {
+        let chunk: [u8; 4] = parcel.try_into().unwrap();
+        bytes.extend_from_slice(&chunk);
+    }
+    bytes.truncate(parcel.data_size());
+    parcel.set_data_position(original_position);
+    bytes
 }
 
 fn build_request_with_marker(
     interface: &str,
     marker: u32,
     write_payload: impl FnOnce(&mut Parcel),
-) -> Parcel {
+) -> Vec<u8> {
     let mut parcel = Parcel::new();
     parcel.write(&0i32).unwrap();
     parcel.write(&0i32).unwrap();
     parcel.write(&marker).unwrap();
     parcel.write(&interface.to_string()).unwrap();
     write_payload(&mut parcel);
-    parcel
+    request_bytes(&mut parcel)
 }
 
 fn parse_maintenance_request_for_android(

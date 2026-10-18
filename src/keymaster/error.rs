@@ -32,7 +32,7 @@ pub use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::keymaster::utils::AppUid;
 use crate::selinux;
 use log::{log, warn, Level};
-use rsbinder::status::Result as BinderResult;
+use rsbinder::BinderResult;
 use rsbinder::{ExceptionCode, Status as BinderStatus, StatusCode};
 use std::cmp::PartialEq;
 

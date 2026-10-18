@@ -44,7 +44,7 @@ impl IKeyMintOperation for KeyMintOperation {
         timeStampToken: Option<
             &crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken,
         >,
-    ) -> rsbinder::status::Result<()> {
+    ) -> rsbinder::BinderResult<()> {
         self.wrapper
             .op_update_aad(self.op_handle, input, authToken, timeStampToken)
             .map_err(map_ks_error)
@@ -57,7 +57,7 @@ impl IKeyMintOperation for KeyMintOperation {
         timeStampToken: Option<
             &crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken,
         >,
-    ) -> rsbinder::status::Result<Vec<u8>> {
+    ) -> rsbinder::BinderResult<Vec<u8>> {
         self.wrapper
             .op_update(self.op_handle, input, authToken, timeStampToken)
             .map_err(map_ks_error)
@@ -72,7 +72,7 @@ impl IKeyMintOperation for KeyMintOperation {
             &crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken,
         >,
         confirmationToken: Option<&[u8]>,
-    ) -> rsbinder::status::Result<Vec<u8>> {
+    ) -> rsbinder::BinderResult<Vec<u8>> {
         self.wrapper
             .op_finish(
                 self.op_handle,
@@ -85,7 +85,7 @@ impl IKeyMintOperation for KeyMintOperation {
             .map_err(map_ks_error)
     }
 
-    fn r#abort(&self) -> rsbinder::status::Result<()> {
+    fn r#abort(&self) -> rsbinder::BinderResult<()> {
         self.wrapper.op_abort(self.op_handle).map_err(map_ks_error)
     }
 }

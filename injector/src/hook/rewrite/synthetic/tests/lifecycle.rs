@@ -163,10 +163,10 @@ fn intercepted_operation_transaction_does_not_replace_acquire_ack() {
         .contains_key(&target));
 
     let request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
-    let tr = transaction_for_parcel(
+    let (tr, _data) = transaction_for_parcel(
         target,
         identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION,
-        &request,
+        request,
     );
     assert!(unsafe { handle_synthetic_br_transaction(&tr, None, "BR_TRANSACTION") }.is_some());
     assert!(OPERATION_PUBLICATIONS

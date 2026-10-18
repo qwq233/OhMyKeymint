@@ -39,7 +39,7 @@ fn synthetic_operation_missing_args_keep_not_enough_data_status() {
         ),
     ] {
         let request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
-        let tr = transaction_for_parcel(target, code, &request);
+        let (tr, _data) = transaction_for_parcel(target, code, request);
         let info = SyntheticTargetInfo {
             kind: SyntheticTargetKind::Operation,
             caller: Some(CallerInfo {
@@ -89,10 +89,10 @@ fn synthetic_operation_trailing_abort_finalizes_operation() {
 
     let mut request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
     request.write(&0x4f4d4bi32).unwrap();
-    let tr = transaction_for_parcel(
+    let (tr, _data) = transaction_for_parcel(
         target,
         crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
-        &request,
+        request,
     );
     let info = SyntheticTargetInfo {
         kind: SyntheticTargetKind::Operation,
@@ -140,10 +140,10 @@ fn synthetic_operation_bad_interface_marker_rejects_abort() {
     );
 
     let request = request_parcel_with_marker(identify::KEYSTORE_OPERATION_INTERFACE, 0);
-    let tr = transaction_for_parcel(
+    let (tr, _data) = transaction_for_parcel(
         target,
         crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
-        &request,
+        request,
     );
     let info = SyntheticTargetInfo {
         kind: SyntheticTargetKind::Operation,
@@ -222,7 +222,7 @@ fn synthetic_operation_dispatch_uses_registered_caller_identity() {
             "abort" => {}
             _ => unreachable!("covered operation test method"),
         }
-        let mut tr = transaction_for_parcel(target, code, &request);
+        let (mut tr, _data) = transaction_for_parcel(target, code, request);
         tr.sender_euid = 99999;
         tr.sender_pid = 3456;
         let info = SyntheticTargetInfo {
@@ -271,10 +271,10 @@ fn tracked_operation_pending_call_uses_transaction_caller_identity() {
 
     let mut request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
     request.write(&vec![1u8]).unwrap();
-    let mut tr = transaction_for_parcel(
+    let (mut tr, _data) = transaction_for_parcel(
         target,
         crate::android::system::keystore2::IKeystoreOperation::transactions::r#update,
-        &request,
+        request,
     );
     tr.sender_euid = 99999;
     tr.sender_pid = 3456;
@@ -313,10 +313,10 @@ fn synthetic_unexpected_null_parse_errors_are_status_replies() {
     for length in [-1i32, -2i32] {
         let mut invalid_input_request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
         invalid_input_request.write(&length).unwrap();
-        let invalid_input_tr = transaction_for_parcel(
+        let (invalid_input_tr, _invalid_input_data) = transaction_for_parcel(
             operation_target,
             crate::android::system::keystore2::IKeystoreOperation::transactions::r#update,
-            &invalid_input_request,
+            invalid_input_request,
         );
         let reply = unsafe {
             build_synthetic_br_transaction_reply(
@@ -337,10 +337,10 @@ fn synthetic_unexpected_null_parse_errors_are_status_replies() {
     };
     let mut invalid_key_request = request_parcel(identify::KEYSTORE_SECURITY_LEVEL_INTERFACE);
     invalid_key_request.write(&2i32).unwrap();
-    let invalid_key_tr = transaction_for_parcel(
+    let (invalid_key_tr, _invalid_key_data) = transaction_for_parcel(
         security_level_target,
         crate::android::system::keystore2::IKeystoreSecurityLevel::transactions::r#deleteKey,
-        &invalid_key_request,
+        invalid_key_request,
     );
     let reply = unsafe {
         build_synthetic_br_transaction_reply(
@@ -368,10 +368,10 @@ fn synthetic_operation_unexpected_interface_returns_bad_type_status() {
         cookie: 0x7678,
     };
     let request = request_parcel(identify::KEYSTORE_SERVICE_INTERFACE);
-    let tr = transaction_for_parcel(
+    let (tr, _data) = transaction_for_parcel(
         target,
         crate::android::system::keystore2::IKeystoreOperation::transactions::r#abort,
-        &request,
+        request,
     );
     let info = SyntheticTargetInfo {
         kind: SyntheticTargetKind::Operation,

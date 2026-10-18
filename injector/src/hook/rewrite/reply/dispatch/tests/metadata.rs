@@ -15,9 +15,9 @@ fn operation_info() -> SyntheticTargetInfo {
 fn metadata_reply(
     target: LocalBinderTarget,
     code: rsbinder::TransactionCode,
-    request: &rsbinder::Parcel,
+    request: rsbinder::Parcel,
 ) -> SyntheticReply {
-    let tr = transaction_for_parcel(target, code, request);
+    let (tr, _data) = transaction_for_parcel(target, code, request);
     unsafe {
         build_synthetic_br_transaction_reply(&tr, target, operation_info(), None, "BR_TRANSACTION")
     }
@@ -34,7 +34,7 @@ fn synthetic_metadata_version_matches_keystore2_contract() {
     let reply = metadata_reply(
         target,
         identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION,
-        &request,
+        request,
     );
     let SyntheticReply::Parcel(mut reply) = reply else {
         panic!("metadata version should return a parcel reply");
@@ -59,7 +59,7 @@ fn synthetic_metadata_rejects_wrong_interface() {
     let reply = metadata_reply(
         target,
         identify::AIDL_GET_INTERFACE_HASH_TRANSACTION,
-        &request,
+        request,
     );
     assert_synthetic_status(reply, StatusCode::BadType);
 }
@@ -78,7 +78,7 @@ fn synthetic_metadata_rejects_bad_interface_marker() {
             cookie: 0xb698 + index as u64,
         };
         let request = request_parcel_with_marker(identify::KEYSTORE_OPERATION_INTERFACE, 0);
-        assert_synthetic_status(metadata_reply(target, code, &request), StatusCode::BadType);
+        assert_synthetic_status(metadata_reply(target, code, request), StatusCode::BadType);
     }
 }
 
@@ -104,7 +104,7 @@ fn synthetic_metadata_accepts_trailing_payload_for_version_and_hash() {
         };
         let mut request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
         request.write(&0x4f4d4bi32).unwrap();
-        let reply = metadata_reply(target, code, &request);
+        let reply = metadata_reply(target, code, request);
         let SyntheticReply::Parcel(mut reply) = reply else {
             panic!("{label} should return a parcel reply");
         };

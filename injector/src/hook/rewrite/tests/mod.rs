@@ -94,14 +94,14 @@ pub(super) struct TestOperationBackend {
 impl Interface for TestOperationBackend {}
 
 impl AospKeystoreOperation for TestOperationBackend {
-    fn r#updateAad(&self, _aad_input: &[u8]) -> rsbinder::status::Result<()> {
+    fn r#updateAad(&self, _aad_input: &[u8]) -> rsbinder::BinderResult<()> {
         match self.update_aad_status.as_ref() {
             Some(status) => Err(status.clone()),
             None => Ok(()),
         }
     }
 
-    fn r#update(&self, _input: &[u8]) -> rsbinder::status::Result<Option<Vec<u8>>> {
+    fn r#update(&self, _input: &[u8]) -> rsbinder::BinderResult<Option<Vec<u8>>> {
         Ok(Some(self.update_output.clone()))
     }
 
@@ -109,11 +109,11 @@ impl AospKeystoreOperation for TestOperationBackend {
         &self,
         _input: Option<&[u8]>,
         _signature: Option<&[u8]>,
-    ) -> rsbinder::status::Result<Option<Vec<u8>>> {
+    ) -> rsbinder::BinderResult<Option<Vec<u8>>> {
         Ok(Some(self.update_output.clone()))
     }
 
-    fn r#abort(&self) -> rsbinder::status::Result<()> {
+    fn r#abort(&self) -> rsbinder::BinderResult<()> {
         self.aborts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -150,22 +150,40 @@ pub(super) fn request_parcel_with_marker(interface: &str, marker: u32) -> rsbind
     parcel
 }
 
+fn parcel_bytes(parcel: &mut rsbinder::Parcel) -> Vec<u8> {
+    let original_position = parcel.data_position();
+    let mut bytes = Vec::new();
+    parcel.set_data_position(0);
+    let mut cursor = parcel.data_position();
+    let len = parcel.data_size();
+    while cursor < len {
+        let chunk: [u8; 4] = parcel.try_into().unwrap();
+        bytes.extend_from_slice(&chunk);
+        cursor += 4;
+    }
+    bytes.truncate(len);
+    parcel.set_data_position(original_position);
+    bytes
+}
+
 pub(super) fn transaction_for_parcel(
     target: LocalBinderTarget,
     code: rsbinder::TransactionCode,
-    parcel: &rsbinder::Parcel,
-) -> binder_transaction_data {
+    parcel: rsbinder::Parcel,
+) -> (binder_transaction_data, Vec<u8>) {
+    let mut parcel = parcel;
+    let data = parcel_bytes(&mut parcel);
     let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
     tr.target.ptr = target.ptr;
-    tr.data.ptr.buffer = parcel.as_ptr() as libc::c_ulong;
+    tr.data.ptr.buffer = data.as_ptr() as libc::c_ulong;
     tr.data.ptr.offsets = 0;
     tr.cookie = target.cookie;
     tr.code = code;
     tr.sender_euid = 10002;
     tr.sender_pid = 2000;
-    tr.data_size = parcel.data_size();
+    tr.data_size = data.len();
     tr.offsets_size = 0;
-    tr
+    (tr, data)
 }
 
 static ROUTE_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
