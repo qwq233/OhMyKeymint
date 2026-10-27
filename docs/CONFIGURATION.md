@@ -38,9 +38,9 @@ not identical:
 
 - A valid `injector.toml` is applied to new requests without a reboot.
 - A valid `config.toml` is read automatically, but only the four patch-level
-  fields and the biometric compatibility switch can take full effect without
-  restarting keymint. The field reference below states when a restart is
-  required.
+  fields, the biometric compatibility switch, and the keybox-retirement switch
+  can take full effect without restarting keymint. The field reference below
+  states when a restart is required.
 - A malformed file saved while its component is running is rejected and the
   last valid in-memory configuration remains active.
 - A malformed `config.toml` present when keymint starts prevents keymint from
@@ -70,8 +70,8 @@ examples; keep the values from the active file unless the reported identity
 needs to change.
 
 ```toml
-# Configuration format. Keep this at 2.
-version = 2
+# Configuration format. Keep this at 3.
+version = 3
 
 [main]
 # The supported service connection. Keep this value unchanged.
@@ -80,6 +80,8 @@ backend = "injector"
 log_level = "debug"
 # Insecure biometric compatibility switch. Keep false for normal use.
 force_skip_system_biometric_hat_verification = false
+# Delete client keys created under a previous keybox identity. On by default.
+retire_stale_keybox_bound_keys = true
 
 [crypto]
 # Redacted placeholders only. Keep the generated 64-character values.
@@ -126,17 +128,18 @@ imei2 = ""
 #### `version`
 
 This identifies the configuration format. The supported value is the integer
-`2`. It is not an Android version or an OMK release number. Do not increment it;
+`3`. It is not an Android version or an OMK release number. Do not increment it;
 the current file should keep this value unchanged. Live reload rejects other
 values and keeps the last valid runtime configuration.
 
-At keymint startup, a missing `version` is treated as `0`. Versions `0` and `1`
-are migrated in place to `2` before the service starts, and `os_version` is set
-to `"auto"` so later Android upgrades are detected on the next keymint start.
-Startup also removes the obsolete `trust_record`. For version `0`, missing
-patch-level fields inherit the configured `security_patch`. Other configured
-and unknown values are preserved. Migration is not performed during live
-reload, so restart keymint to migrate an older file. An unsupported future
+At keymint startup, a missing `version` is treated as `0`. Versions `0`, `1`,
+and `2` are migrated in place to `3` before the service starts. During that
+migration, `os_version` is set to `"auto"` so later Android upgrades are
+detected on the next keymint start, and `retire_stale_keybox_bound_keys` is set
+to `true`. Startup also removes the obsolete `trust_record`. For version `0`,
+missing patch-level fields inherit the configured `security_patch`. Other
+configured and unknown values are preserved. Migration is not performed during
+live reload, so restart keymint to migrate an older file. An unsupported future
 version is never overwritten.
 
 ### `[main]`
@@ -167,6 +170,21 @@ Keep it `false` unless a maintainer is diagnosing a confirmed device-specific
 problem. It does not hide root and is not a general fix for fingerprint or
 lock-screen failures. A valid save applies to new checks without restarting
 keymint.
+
+#### `retire_stale_keybox_bound_keys`
+
+When `true`, changing the active `keybox.xml` deletes client keys that were
+created under the previous keybox identity and attested with that keybox. The
+default is `true`, so a keybox change never leaves keys bound to a stale
+identity.
+
+Set it to `false` only when replacing or rotating keybox material must keep
+existing keys usable. A keybox that rotates periodically with this disabled
+leaves every older key bound to an identity the active keybox no longer
+provides.
+
+The value is read when keybox-bound retirement runs, so a saved change applies
+to the next keybox reload or keymint restart.
 
 ### `[crypto]`
 

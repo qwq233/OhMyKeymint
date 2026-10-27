@@ -20,7 +20,7 @@ In theory, this would make it harder for detectors to identify behavior inconsis
 
 3. Replace template keybox.xml (if you need)
 
-The keybox file should be a **valid** XML file with at least the EC chain; a missing RSA chain uses the bundled AOSP RSA chain. There should be no extra content in it like watermark or invisible characters.
+The keybox file should be a **valid** XML file with at least the EC chain; when no RSA entry is present, attestation for RSA keys is signed with the EC key and its certificate chain. There should be no extra content in it like watermark or invisible characters.
 
 The active files are `/data/misc/keystore/omk/config.toml` and
 `/data/misc/keystore/omk/injector.toml`. Read the

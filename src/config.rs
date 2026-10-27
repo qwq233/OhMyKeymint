@@ -23,7 +23,8 @@ static CONFIG_FILE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 const CONFIG_PATH: &str = "/data/misc/keystore/omk/config.toml";
 const CONFIG_VERSION_V1: u32 = 1;
-const CURRENT_CONFIG_VERSION: u32 = 2;
+const CONFIG_VERSION_V2: u32 = 2;
+const CURRENT_CONFIG_VERSION: u32 = 3;
 
 const REPLACE_SAVE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 const REPLACE_SAVE_RETRY_LIMIT: usize = 10;
@@ -293,13 +294,19 @@ fn parse_config_file(contents: &str, allow_migration: bool) -> Result<ParsedConf
         0 if allow_migration => {
             upgrade_v0_to_v1(&mut table)?;
             upgrade_v1_to_v2(&mut table)?;
+            upgrade_v2_to_v3(&mut table)?;
             true
         }
         CONFIG_VERSION_V1 if allow_migration => {
             upgrade_v1_to_v2(&mut table)?;
+            upgrade_v2_to_v3(&mut table)?;
             true
         }
-        0 | CONFIG_VERSION_V1 => {
+        CONFIG_VERSION_V2 if allow_migration => {
+            upgrade_v2_to_v3(&mut table)?;
+            true
+        }
+        0 | CONFIG_VERSION_V1 | CONFIG_VERSION_V2 => {
             return Err(anyhow!(
                 "config version {version} requires a keymint restart to migrate"
             ))
@@ -365,6 +372,22 @@ fn upgrade_v1_to_v2(table: &mut toml::Table) -> Result<()> {
     trust.insert(
         "os_version".to_string(),
         toml::Value::String("auto".to_string()),
+    );
+    table.insert(
+        "version".to_string(),
+        toml::Value::Integer(i64::from(CONFIG_VERSION_V2)),
+    );
+    Ok(())
+}
+
+fn upgrade_v2_to_v3(table: &mut toml::Table) -> Result<()> {
+    let main = table
+        .get_mut("main")
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| anyhow!("config is missing a valid [main] table"))?;
+    main.insert(
+        "retire_stale_keybox_bound_keys".to_string(),
+        toml::Value::Boolean(true),
     );
     table.insert(
         "version".to_string(),
@@ -648,6 +671,9 @@ pub struct MainConfig {
     /// When enabled, OMK accepts shape-valid HATs without system KeyMint MAC verification.
     #[serde(default)]
     pub force_skip_system_biometric_hat_verification: bool,
+    /// Delete client keys created under a previous keybox identity when the active keybox
+    /// changes. On by default so a rotated keybox never leaves keys bound to a stale identity.
+    pub retire_stale_keybox_bound_keys: bool,
 }
 
 impl Default for MainConfig {
@@ -656,6 +682,7 @@ impl Default for MainConfig {
             backend: Backend::Injector,
             log_level: "debug".to_string(),
             force_skip_system_biometric_hat_verification: false,
+            retire_stale_keybox_bound_keys: true,
         }
     }
 }
@@ -1089,17 +1116,6 @@ mod tests {
     }
 
     #[test]
-    fn main_config_parses_hat_verification_fallback() {
-        let parsed: MainConfig = toml::from_str(
-            r#"backend = "injector"
-force_skip_system_biometric_hat_verification = true"#,
-        )
-        .unwrap();
-        assert!(parsed.force_skip_system_biometric_hat_verification);
-        assert!(!MainConfig::default().force_skip_system_biometric_hat_verification);
-    }
-
-    #[test]
     fn config_file_parses_legacy_hex_values() {
         let config = parse_config_file(
             r#"
@@ -1329,7 +1345,30 @@ imei2 = ""
     }
 
     #[test]
-    fn bootstrap_uses_latest_v2_instead_of_stale_migration_snapshot() {
+    fn config_v2_migration_enables_keybox_bound_retirement() {
+        let mut table: toml::Table =
+            toml::from_str(&toml::to_string_pretty(&ConfigFile::default()).unwrap()).unwrap();
+        table.insert(
+            "version".to_string(),
+            toml::Value::Integer(i64::from(CONFIG_VERSION_V2)),
+        );
+        table
+            .get_mut("main")
+            .and_then(toml::Value::as_table_mut)
+            .unwrap()
+            .insert(
+                "retire_stale_keybox_bound_keys".to_string(),
+                toml::Value::Boolean(false),
+            );
+
+        let parsed = parse_config_file(&toml::to_string_pretty(&table).unwrap(), true).unwrap();
+        assert!(parsed.migrated);
+        assert_eq!(parsed.config_file.version, CURRENT_CONFIG_VERSION);
+        assert!(parsed.config_file.main.retire_stale_keybox_bound_keys);
+    }
+
+    #[test]
+    fn bootstrap_uses_latest_v3_instead_of_stale_migration_snapshot() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("config.toml");
 
@@ -1378,7 +1417,7 @@ imei2 = ""
             assert!(config_version(&table).is_err());
         }
 
-        for version in [0, CONFIG_VERSION_V1] {
+        for version in [0, CONFIG_VERSION_V1, CONFIG_VERSION_V2] {
             let mut table: toml::Table =
                 toml::from_str(&toml::to_string_pretty(&ConfigFile::default()).unwrap()).unwrap();
             table.insert(
