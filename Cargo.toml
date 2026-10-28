@@ -20,7 +20,7 @@ hex = "0.4.3"
 log4rs = "1.4.0"
 log = "0.4.34"
 rsbinder = { version = "0.12.0", features = ["android_12_plus", "rpc"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.0", features = ["bundled"] }
 anyhow = "1.0.104"
 async-trait = "0.1.92"
 tokio = { version = "1.53.3", features = ["macros", "libc"] }
