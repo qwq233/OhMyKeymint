@@ -132,16 +132,6 @@ This identifies the configuration format. The supported value is the integer
 the current file should keep this value unchanged. Live reload rejects other
 values and keeps the last valid runtime configuration.
 
-At keymint startup, a missing `version` is treated as `0`. Versions `0`, `1`,
-and `2` are migrated in place to `3` before the service starts. During that
-migration, `os_version` is set to `"auto"` so later Android upgrades are
-detected on the next keymint start, and `retire_stale_keybox_bound_keys` is set
-to `true`. Startup also removes the obsolete `trust_record`. For version `0`,
-missing patch-level fields inherit the configured `security_patch`. Other
-configured and unknown values are preserved. Migration is not performed during
-live reload, so restart keymint to migrate an older file. An unsupported future
-version is never overwritten.
-
 ### `[main]`
 
 #### `backend`
