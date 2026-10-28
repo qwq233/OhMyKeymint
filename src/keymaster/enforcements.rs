@@ -31,7 +31,7 @@ use crate::global::{get_timestamp_service, ASYNC_TASK, DB, ENFORCEMENTS, SUPER_K
 use crate::keymaster::async_task::AsyncTask;
 use crate::keymaster::authorization::Error as AuthzError;
 use crate::keymaster::boot_key::BootLevel;
-use crate::keymaster::db::{AuthTokenEntry, BootTime};
+use crate::keymaster::db::{AuthTokenEntry, BootTime, KeystoreDB};
 use crate::keymaster::error::{map_binder_status, Error, ErrorCode};
 use crate::keymaster::key_parameter::{KeyParameter, KeyParameterValue};
 use crate::keymaster::super_key::SuperEncryptionType;
@@ -758,7 +758,7 @@ impl Enforcements {
     /// Then present the auth token to the op auth map. If an operation is waiting for this
     /// auth token this fulfills the request and removes the receiver from the map.
     pub fn add_auth_token(&self, hat: HardwareAuthToken) {
-        DB.with(|db| db.borrow_mut().insert_auth_token(&hat));
+        KeystoreDB::insert_auth_token(&hat);
         self.op_auth_map.add_auth_token(hat);
     }
 

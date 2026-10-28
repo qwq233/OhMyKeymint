@@ -103,15 +103,22 @@ impl PerbootDB {
     pub fn auth_tokens_len(&self) -> usize {
         self.auth_tokens.read().unwrap().len()
     }
-    #[cfg(test)]
-    /// For testing, return all auth tokens currently tracked.
-    pub fn get_all_auth_token_entries(&self) -> Vec<AuthTokenEntry> {
-        self.auth_tokens
-            .read()
-            .unwrap()
-            .iter()
-            .cloned()
-            .map(|x| x.0)
-            .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl PerbootDB {
+        /// For testing, return all auth tokens currently tracked.
+        pub fn get_all_auth_token_entries(&self) -> Vec<AuthTokenEntry> {
+            self.auth_tokens
+                .read()
+                .unwrap()
+                .iter()
+                .cloned()
+                .map(|x| x.0)
+                .collect()
+        }
     }
 }

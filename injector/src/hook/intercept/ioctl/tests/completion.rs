@@ -304,7 +304,7 @@ fn undelivered_operation_acquire_is_canceled_but_delivered_acquire_is_retained()
     let _guard = SYNTHETIC_REPLY_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _route_guard = crate::tracker::state_test_guard();
+    let _route_guard = crate::tracker::tests::state_test_guard();
     let fd = 98;
     let connection = binder_state_key(fd);
     let target = LocalBinderTarget {
@@ -345,7 +345,7 @@ fn fatal_partial_write_retains_unconsumed_operation_acquire() {
     let _guard = SYNTHETIC_REPLY_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _route_guard = crate::tracker::state_test_guard();
+    let _route_guard = crate::tracker::tests::state_test_guard();
     let fd = 32;
     let target = LocalBinderTarget {
         ptr: 0x1234,

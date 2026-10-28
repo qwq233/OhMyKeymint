@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) fn target_from_transaction(tr: &binder_transaction_data) -> Option<LocalBinderTarget> {
     let ptr = unsafe { tr.target.ptr };
     if ptr == 0 || tr.cookie == 0 {
@@ -13,9 +16,10 @@ pub(super) fn target_from_transaction(tr: &binder_transaction_data) -> Option<Lo
 
 fn route_for_service_request(
     request: &ParsedServiceRequest,
+    allowed: bool,
     intercept: &config::InterceptConfig,
 ) -> RouteTarget {
-    if identify::is_omk_service_route_enabled(request.method(), intercept) {
+    if allowed && identify::is_omk_service_route_enabled(request.method(), intercept) {
         RouteTarget::Omk
     } else {
         RouteTarget::System
@@ -49,12 +53,6 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         return false;
     }
 
-    let cfg = config::get();
-    if !cfg.main.enabled {
-        debug!("event=decision injector disabled by config");
-        return false;
-    }
-
     let Some(parcel_bytes) = super::super::binder::transaction_data_bytes(tr) else {
         warn!(
             "event=decision null parcel buffer for {} code=0x{:x} uid={} pid={}",
@@ -80,6 +78,13 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
     if !is_known_keystore_interface(&request_interface) {
         return false;
     }
+
+    let cfg = config::get();
+    if !cfg.main.enabled {
+        debug!("event=decision injector disabled by config");
+        return false;
+    }
+
     let caller = CallerInfo {
         uid: i64::from(tr.sender_euid.max(0)),
         sid: caller_sid.unwrap_or_default(),
@@ -119,54 +124,27 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         );
 
         let requires_mirror = authorization_requires_mirror(&request);
-        let failure_policy = authorization_mirror_failure_policy(&request);
-        let mut pending = PendingAuthorizationCall {
-            request,
-            method,
-            caller,
-            mirror_update: None,
-        };
         if requires_mirror && !expects_reply {
-            if failure_policy == MirrorFailurePolicy::BestEffort {
+            if matches!(request, ParsedAuthorizationRequest::AddAuthToken { .. }) {
                 warn!(
-                    "event=mirror cannot confirm one-way best-effort authorization {:?} for uid={} pid={}; preserving System mutation without an OMK mirror",
-                    method, caller_uid, pending.caller.pid
+                    "event=mirror cannot confirm one-way authorization {:?} for uid={} pid={}; preserving System mutation without an OMK mirror",
+                    method, caller_uid, caller.pid
                 );
                 return false;
             }
             warn!(
                 "event=mirror cannot confirm one-way authorization {:?} for uid={} pid={}; blocking System mutation",
-                method, caller_uid, pending.caller.pid
+                method, caller_uid, caller.pid
             );
             block_system_request(tr);
             return true;
         }
-        if requires_mirror {
-            match reserve_mirror_update(MirrorStateKind::Authorization, failure_policy) {
-                Ok(reservation) => pending.mirror_update = Some(reservation),
-                Err(error) if failure_policy == MirrorFailurePolicy::BestEffort => {
-                    warn!(
-                        "event=mirror failed to reserve in-memory best-effort authorization {:?} update for uid={} pid={}: {:#}; preserving System mutation without an OMK mirror",
-                        method, caller_uid, pending.caller.pid, error
-                    );
-                }
-                Err(error) => {
-                    warn!(
-                        "event=mirror failed to reserve in-memory authorization {:?} update for uid={} pid={}: {:#}; blocking System mutation",
-                        method, caller_uid, pending.caller.pid, error
-                    );
-                    block_system_request(tr);
-                    replace_top_pending(
-                        connection,
-                        PendingCall::PrecomputedAuthorization(
-                            pending,
-                            Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
-                        ),
-                    );
-                    return true;
-                }
-            }
-        }
+        let pending = PendingAuthorizationCall {
+            request,
+            method,
+            caller,
+            config: cfg,
+        };
         if expects_reply {
             replace_top_pending(connection, PendingCall::Authorization(pending));
         }
@@ -210,31 +188,23 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             }
             _ => (RouteTarget::System, Vec::new(), None),
         };
-        let mut pending = PendingMaintenanceCall {
+        let pending = PendingMaintenanceCall {
             request,
             caller,
             route,
-            mirror_update: None,
+            config: cfg,
         };
-        let mut precomputed = if pending.route == RouteTarget::Omk
+        let precomputed = if pending.route == RouteTarget::Omk
             && matches!(
                 &pending.request,
                 ParsedMaintenanceRequest::MigrateKeyNamespace { .. }
             ) {
-            match precompute_omk_migrate_reply(&pending) {
-                OmkMigratePrecompute::Reply(reply) => {
-                    block_system_request(tr);
-                    Some(reply)
-                }
-                OmkMigratePrecompute::PreserveSystem => {
-                    pending.route = RouteTarget::System;
-                    None
-                }
-            }
+            block_system_request(tr);
+            Some(precompute_omk_migrate_reply(&pending))
         } else {
             None
         };
-        let mut request_rewritten = precomputed.is_some();
+        let request_rewritten = precomputed.is_some();
         let route_note = if matches!(
             &pending.request,
             ParsedMaintenanceRequest::MigrateKeyNamespace { .. }
@@ -267,25 +237,6 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             block_system_request(tr);
             return true;
         }
-        if requires_mirror {
-            match reserve_mirror_update(
-                MirrorStateKind::Maintenance,
-                MirrorFailurePolicy::FailClosed,
-            ) {
-                Ok(reservation) => pending.mirror_update = Some(reservation),
-                Err(error) => {
-                    warn!(
-                        "event=mirror failed to reserve in-memory maintenance {:?} update for uid={} pid={}: {:#}; blocking System mutation",
-                        method, caller_uid, pending.caller.pid, error
-                    );
-                    block_system_request(tr);
-                    precomputed = Some(PrecomputedMaintenanceReply::Error(
-                        Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
-                    ));
-                    request_rewritten = true;
-                }
-            }
-        }
         if !expects_reply {
             return request_rewritten;
         }
@@ -301,7 +252,6 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
     }
 
     if request_interface == identify::KEYSTORE_SERVICE_INTERFACE {
-        let decision = evaluate_caller(&caller, &cfg);
         let request =
             match parcel::parse_service_request(data, data_size, offsets, offsets_size, tr.code) {
                 Ok(request) => request,
@@ -316,74 +266,15 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
 
         let method = request.method();
         let original_code = tr.code;
-        let allow_omk_grant = match should_allow_omk_grant_service_request_with_probe(
+        let decision = identify::is_omk_service_route_enabled(method, &cfg.intercept)
+            .then(|| evaluate_caller(&caller, &cfg));
+        let route = route_for_service_request(
             &request,
-            &decision,
-            &caller,
-            probe_omk_grant,
-        ) {
-            Ok(allow) => allow,
-            Err(error) => {
-                warn!(
-                    "event=decision OMK grant ownership probe failed for uid={} pid={}: {:#}; returning SYSTEM_ERROR without executing System",
-                    caller.uid, caller.pid, error
-                );
-                block_system_request(tr);
-                if expects_reply {
-                    let pending = PendingServiceCall {
-                        request,
-                        caller,
-                        packages: decision.packages,
-                        route: RouteTarget::Omk,
-                    };
-                    replace_top_pending(
-                        connection,
-                        PendingCall::PrecomputedService(
-                            pending,
-                            PrecomputedServiceReply::Error(Status::new_service_specific_error(
-                                ResponseCode::SYSTEM_ERROR.0,
-                                None,
-                            )),
-                        ),
-                    );
-                }
-                return true;
-            }
-        };
-        let mut route = if allow_omk_grant {
-            RouteTarget::Omk
-        } else {
-            route_for_service_request(&request, &cfg.intercept)
-        };
-        if !decision.allowed && !allow_omk_grant {
-            info!(
-                "event=decision command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?}; routing request to System",
-                command_name,
-                method,
-                original_code,
-                caller.uid,
-                caller.pid,
-                caller.sid,
-                decision.packages,
-                decision.reason,
-            );
-            route = RouteTarget::System;
-        }
-        if allow_omk_grant {
-            info!(
-                "event=decision command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=true reason={:?} omk_grant=true",
-                command_name,
-                method,
-                original_code,
-                caller.uid,
-                caller.pid,
-                caller.sid,
-                decision.packages,
-                decision.reason,
-            );
-        }
+            decision.as_ref().is_some_and(|decision| decision.allowed),
+            &cfg.intercept,
+        );
 
-        let precomputed_service_reply = if route == RouteTarget::Omk
+        let mut precomputed_service_reply = if route == RouteTarget::Omk
             && matches!(
                 method,
                 ServiceMethod::UpdateSubcomponent
@@ -391,36 +282,38 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
                     | ServiceMethod::Ungrant
                     | ServiceMethod::DeleteKey
             ) {
-            match precompute_omk_service_mutator_reply(&request, &caller) {
-                OmkServicePrecompute::Reply(reply) => {
-                    block_system_request(tr);
-                    Some(reply)
+            block_system_request(tr);
+            Some(precompute_omk_service_mutator_reply(&request, &caller))
+        } else if route == RouteTarget::Omk
+            && expects_reply
+            && method != ServiceMethod::GetSecurityLevel
+        {
+            block_system_request(tr);
+            let reply = match build_omk_service_reply(&request, &caller) {
+                Ok(Some(reply)) => reply,
+                Ok(None) => synthetic_fallback_reply(),
+                Err(error) => {
+                    warn!("event=reply failed to precompute OMK service reply: {error:#}");
+                    synthetic_fallback_reply()
                 }
-                OmkServicePrecompute::PreserveSystem => {
-                    info!(
-                        "event=route method={:?} uid={} pid={} route={:?} omk_unavailable=true; preserving original system request",
-                        method, caller.uid, caller.pid, route
-                    );
-                    route = RouteTarget::System;
-                    None
-                }
-            }
+            };
+            Some(PrecomputedServiceReply::Serialized(Box::new(Some(reply))))
         } else {
             None
         };
         let request_rewritten = precomputed_service_reply.is_some();
 
         info!(
-            "event=decision command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?}",
+            "event=decision command={} service_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={:?} reason={:?}",
             command_name,
             method,
             original_code,
             caller.uid,
             caller.pid,
             caller.sid,
-            decision.packages,
-            decision.allowed,
-            decision.reason,
+            decision.as_ref().map(|decision| &decision.packages),
+            decision.as_ref().map(|decision| decision.allowed),
+            decision.as_ref().map(|decision| &decision.reason),
         );
         info!(
             "event=route method={:?} uid={} pid={} route={:?}",
@@ -430,11 +323,13 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         let pending = PendingServiceCall {
             request,
             caller,
-            packages: decision.packages,
+            packages: decision
+                .map(|decision| decision.packages)
+                .unwrap_or_default(),
             route,
         };
         if !expects_reply {
-            if let Some(reply) = precomputed_service_reply.as_ref() {
+            if let Some(reply) = precomputed_service_reply.as_mut() {
                 if let Err(error) = build_precomputed_service_reply(reply) {
                     warn!(
                         "event=route failed to build one-way OMK service {:?} reply for uid={} pid={}: {:#}",
@@ -464,7 +359,6 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
     };
 
     if request_interface == identify::KEYSTORE_SECURITY_LEVEL_INTERFACE {
-        let decision = evaluate_caller(&caller, &cfg);
         let Some(target_info) = tracker::lookup_security_level_target(target) else {
             debug!(
                 "event=decision skipping IKeystoreSecurityLevel request for unmapped target ptr=0x{:x} cookie=0x{:x}",
@@ -491,46 +385,15 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         };
 
         let method = request.method();
-        let allow_unknown_omk_route = match should_allow_omk_grant_security_level_request_with_probe(
-            &request,
-            &decision,
-            &caller,
-            probe_omk_grant,
-        ) {
-            Ok(allow) => allow,
-            Err(error) => {
-                warn!(
-                    "event=decision OMK grant ownership probe failed for uid={} pid={}: {:#}; returning SYSTEM_ERROR without executing System",
-                    caller.uid, caller.pid, error
-                );
-                block_system_request(tr);
-                if expects_reply {
-                    let pending = PendingSecurityLevelCall {
-                        request,
-                        caller,
-                        packages: decision.packages,
-                        route: RouteTarget::Omk,
-                        security_level: target_info.security_level,
-                    };
-                    replace_top_pending(
-                        connection,
-                        PendingCall::PrecomputedSecurityLevel(
-                            pending,
-                            Box::new(Some(synthetic_fallback_reply())),
-                        ),
-                    );
-                }
-                return true;
-            }
-        };
         // Keystore2 shares each security-level Binder between getSecurityLevel and getKeyEntry.
         let scoop_enabled = security_level_scoop_enabled(&cfg.intercept);
-        let route = if allow_unknown_omk_route || decision.allowed && scoop_enabled {
+        let decision = scoop_enabled.then(|| evaluate_caller(&caller, &cfg));
+        let route = if decision.as_ref().is_some_and(|decision| decision.allowed) {
             RouteTarget::Omk
         } else {
             RouteTarget::System
         };
-        if !decision.allowed && !allow_unknown_omk_route {
+        if let Some(decision) = decision.as_ref().filter(|decision| !decision.allowed) {
             info!(
                 "event=decision command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed=false reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?}; routing request to System",
                 command_name,
@@ -548,46 +411,39 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         }
 
         info!(
-            "event=decision command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={} reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} scoop_enabled={} omk_derived_route={}",
+            "event=decision command={} security_level_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} allowed={:?} reason={:?} target=ptr:0x{:x}/cookie:0x{:x} security_level={:?} scoop_enabled={}",
             command_name,
             method,
             tr.code,
             caller.uid,
             caller.pid,
             caller.sid,
-            decision.packages,
-            decision.allowed,
-            decision.reason,
+            decision.as_ref().map(|decision| &decision.packages),
+            decision.as_ref().map(|decision| decision.allowed),
+            decision.as_ref().map(|decision| &decision.reason),
             target.ptr,
             target.cookie,
             target_info.security_level,
             scoop_enabled,
-            allow_unknown_omk_route,
         );
         info!(
             "event=route security_level_method={:?} uid={} pid={} route={:?} security_level={:?}",
             method, caller.uid, caller.pid, route, target_info.security_level
         );
 
-        let mut pending = PendingSecurityLevelCall {
+        let pending = PendingSecurityLevelCall {
             request,
             caller,
-            packages: decision.packages,
+            packages: decision
+                .map(|decision| decision.packages)
+                .unwrap_or_default(),
             route,
             security_level: target_info.security_level,
         };
         if expects_reply && pending.route == RouteTarget::Omk {
             let reply = match build_omk_security_level_reply(&pending, true) {
                 Ok(Some(reply)) => reply,
-                Ok(None) => {
-                    info!(
-                        "event=route security-level {:?} OMK unavailable for uid={} pid={}; preserving original system request",
-                        method, caller_uid, pending.caller.pid
-                    );
-                    pending.route = RouteTarget::System;
-                    replace_top_pending(connection, PendingCall::SecurityLevel(pending));
-                    return false;
-                }
+                Ok(None) => synthetic_fallback_reply(),
                 Err(error) => {
                     warn!(
                         "event=route failed to precompute authoritative OMK security-level {:?} reply for uid={} pid={}: {:#}; returning SYSTEM_ERROR without executing System",
@@ -663,6 +519,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             request,
             caller,
             target,
+            route: operation_target.route,
         };
         if !expects_reply
             && operation_target.route == RouteTarget::Omk
@@ -723,6 +580,3 @@ fn block_system_request(tr: &mut binder_transaction_data) {
     // Keep the parcel intact; the interceptor owns any receive-buffer shadow.
     tr.code = u32::MAX;
 }
-
-#[cfg(test)]
-mod tests;

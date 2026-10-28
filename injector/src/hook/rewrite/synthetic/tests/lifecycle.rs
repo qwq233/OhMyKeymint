@@ -181,13 +181,13 @@ fn intercepted_operation_transaction_does_not_replace_acquire_ack() {
         .expect("operation publication map poisoned")
         .contains_key(&target));
     assert!(lookup_native_binder(target).is_none());
-    assert!(lookup_operation_target(target).is_some());
+    assert!(lookup_native_operation_state(target).is_some());
     assert_eq!(
         lookup_synthetic_target(target),
         Some(SyntheticTargetKind::Operation)
     );
     drop(acquired);
-    assert!(lookup_operation_target(target).is_none());
+    assert!(lookup_native_operation_state(target).is_none());
     assert_eq!(aborts.load(Ordering::SeqCst), 0);
 }
 
@@ -224,10 +224,10 @@ fn local_operation_publication_handoff_releases_initial_strong() {
         .expect("operation publication map poisoned")
         .contains_key(&target));
     assert!(lookup_native_binder(target).is_none());
-    assert!(lookup_operation_target(target).is_some());
+    assert!(lookup_native_operation_state(target).is_some());
     assert_eq!(aborts.load(Ordering::SeqCst), 0);
     drop(acquired);
-    assert!(lookup_operation_target(target).is_none());
+    assert!(lookup_native_operation_state(target).is_none());
     assert_eq!(aborts.load(Ordering::SeqCst), 0);
 }
 
@@ -315,7 +315,7 @@ fn native_retirement_releases_unfinished_publication() {
         .expect("operation publication probe queue poisoned")
         .iter()
         .all(|probe| probe.target != target));
-    assert!(lookup_operation_target(target).is_none());
+    assert!(lookup_native_operation_state(target).is_none());
     assert!(lookup_synthetic_target(target).is_none());
     assert_eq!(aborts.load(Ordering::SeqCst), 0);
 }
@@ -347,7 +347,7 @@ fn terminal_reply_retires_backend_before_native_publication() {
 
     retire_synthetic_operation_retirement(retirement);
     assert_eq!(aborts.load(Ordering::SeqCst), 1);
-    assert!(lookup_operation_target(target).is_none());
+    assert!(lookup_native_operation_state(target).is_none());
     assert!(lookup_synthetic_target(target).is_none());
     assert!(OPERATION_PUBLICATIONS
         .lock()
@@ -365,4 +365,65 @@ fn terminal_reply_retires_backend_before_native_publication() {
     drop_synthetic_operation_retirement(retirement);
     assert_eq!(aborts.load(Ordering::SeqCst), 1);
     assert!(lookup_native_binder(target).is_none());
+}
+
+#[test]
+fn failed_handoff_retires_userdata_after_initial_native_reference_is_released() {
+    ensure_binder_process_state();
+    let _guard = route_state_test_guard();
+    let aborts = Arc::new(AtomicUsize::new(0));
+    let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
+        update_output: vec![1, 2, 3],
+        aborts: Arc::clone(&aborts),
+        update_aad_status: Some(Status::new_service_specific_error(
+            ResponseCode::OPERATION_BUSY.0,
+            None,
+        )),
+    });
+    let (_, retirement) = register_synthetic_operation_carrier(
+        backend,
+        true,
+        &CallerInfo {
+            uid: 10002,
+            sid: String::new(),
+            pid: 2000,
+        },
+    )
+    .unwrap();
+    let native = lookup_native_binder(retirement.target).unwrap();
+    let state = lookup_native_operation_state(retirement.target).unwrap();
+    let mut busy = build_native_operation_reply(
+        &ParsedOperationRequest::UpdateAad { aad_input: vec![1] },
+        &state,
+    )
+    .unwrap();
+    let (data, size, offsets, offsets_size) = raw_parts(&mut busy);
+    // SAFETY: The owned reply keeps these data and offsets buffers live for
+    // parsing.
+    let status = unsafe { parcel::parse_reply_status(data, size, offsets, offsets_size) }.unwrap();
+    assert_eq!(
+        status.service_specific_error(),
+        ResponseCode::OPERATION_BUSY.0
+    );
+    assert!(!state.is_finalized());
+    finish_local_operation_publication(retirement);
+    assert!(lookup_native_binder(retirement.target).is_none());
+    retire_synthetic_operation_retirement(retirement);
+    assert!(state.is_finalized());
+    assert_eq!(aborts.load(Ordering::SeqCst), 1);
+    let mut late =
+        build_native_operation_reply(&ParsedOperationRequest::Update { input: vec![1] }, &state)
+            .unwrap();
+    let (data, size, offsets, offsets_size) = raw_parts(&mut late);
+    // SAFETY: The owned reply keeps these data and offsets buffers live for
+    // parsing.
+    let status = unsafe { parcel::parse_reply_status(data, size, offsets, offsets_size) }.unwrap();
+    assert_eq!(
+        status.service_specific_error(),
+        crate::android::hardware::security::keymint::ErrorCode::ErrorCode::INVALID_OPERATION_HANDLE
+            .0
+    );
+    drop(native);
+    drop(state);
+    assert_eq!(aborts.load(Ordering::SeqCst), 1);
 }

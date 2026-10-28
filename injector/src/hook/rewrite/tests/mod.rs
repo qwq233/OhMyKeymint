@@ -1,3 +1,13 @@
+pub(super) use super::pending::tests::take_top_pending;
+pub(in crate::hook) use super::pending::tests::{
+    pending_reply_frame_claims_for_test, pending_reply_frame_count_for_test,
+    reset_pending_reply_frames_for_test,
+};
+pub(super) use super::reply::tests::handle_synthetic_br_transaction;
+pub(in crate::hook) use super::synthetic::tests::register_operation_publication_for_test;
+pub(super) use super::synthetic::tests::{
+    lookup_native_operation_state, lookup_synthetic_target_info,
+};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -192,21 +202,20 @@ pub(in crate::hook) fn route_state_test_guard() -> (
     std::sync::MutexGuard<'static, ()>,
     std::sync::MutexGuard<'static, ()>,
 ) {
-    let tracker_guard = tracker::state_test_guard();
+    let tracker_guard = tracker::tests::state_test_guard();
     let route_guard = ROUTE_STATE_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    super::mirror::reset_mirror_state_for_tests();
     reset_route_state_for_tests();
     (tracker_guard, route_guard)
 }
 
 pub(super) fn reset_route_state_for_tests() {
-    tracker::clear_state_for_tests();
+    tracker::tests::clear_state_for_tests();
     clear_operation_state_for_tests();
-    super::pending::reset_pending_state_for_tests();
+    super::pending::tests::reset_pending_state_for_tests();
 }
 
 pub(super) fn clear_operation_state_for_tests() {
-    super::synthetic::reset_state_for_tests();
+    super::synthetic::tests::reset_state_for_tests();
 }

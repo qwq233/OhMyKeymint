@@ -75,7 +75,7 @@ fn binder_exception(ex: ExceptionCode) -> BinderResult<()> {
 
 #[test]
 fn keystore_error_test() -> anyhow::Result<(), String> {
-    crate::keymaster::utils::init_test_logging();
+    crate::keymaster::utils::tests::init_test_logging();
     // All Error::Rc(x) get mapped on a service specific error
     // code of x.
     for rc in ResponseCode::LOCKED.0..ResponseCode::BACKEND_BUSY.0 {

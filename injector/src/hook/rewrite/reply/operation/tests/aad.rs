@@ -27,6 +27,7 @@ fn system_invalid_update_aad_preserves_native_reply() {
             pid: 2000,
         },
         target,
+        route: RouteTarget::Omk,
     })
     .expect("updateAad rewrite should succeed");
     assert!(
@@ -58,7 +59,7 @@ fn omk_invalid_update_aad_returns_business_error() {
         OperationTargetInfo {
             route: RouteTarget::Omk,
             aad_allowed: false,
-            backend: Some(backend),
+            backend: Some(Arc::new(backend)),
             finalized: false,
         },
     );
@@ -73,6 +74,7 @@ fn omk_invalid_update_aad_returns_business_error() {
             pid: 2000,
         },
         target,
+        route: RouteTarget::Omk,
     })
     .expect("updateAad rewrite should succeed")
     .expect("OMK invalid updateAad should return an OMK-owned reply");
@@ -109,7 +111,7 @@ fn omk_route_operation_transaction_error_uses_omk_status_mapping() {
         OperationTargetInfo {
             route: RouteTarget::Omk,
             aad_allowed: false,
-            backend: Some(backend),
+            backend: Some(Arc::new(backend)),
             finalized: false,
         },
     );
@@ -124,6 +126,7 @@ fn omk_route_operation_transaction_error_uses_omk_status_mapping() {
             pid: 2000,
         },
         target,
+        route: RouteTarget::Omk,
     })
     .expect("transaction status should be normalized into a reply")
     .expect("OMK transaction status should return an OMK-owned reply");

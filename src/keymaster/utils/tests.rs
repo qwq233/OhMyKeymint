@@ -24,6 +24,52 @@ use anyhow::Result;
 use kmr_wire::keymint::{KeyParam, MlDsaVariant};
 use kmr_wire::{KeySizeInBits, ValueNotRecognized};
 
+/// Merges and filters two lists of key descriptors. The first input list, legacy_descriptors,
+/// is assumed to not be sorted or filtered. As such, all key descriptors in that list whose
+/// alias is less than, or equal to, start_past_alias (if provided) will be removed.
+/// This list will then be merged with the second list, db_descriptors. The db_descriptors list
+/// is assumed to be sorted and filtered so the output list will be sorted prior to returning.
+/// The returned value is a list of KeyDescriptor objects whose alias is greater than
+/// start_past_alias, sorted and de-duplicated.
+fn merge_and_filter_key_entry_lists(
+    legacy_descriptors: &[KeyDescriptor],
+    db_descriptors: &[KeyDescriptor],
+    start_past_alias: Option<&str>,
+) -> Vec<KeyDescriptor> {
+    let mut result: Vec<KeyDescriptor> = match start_past_alias {
+        Some(past_alias) => legacy_descriptors
+            .iter()
+            .filter(|kd| {
+                if let Some(alias) = &kd.alias {
+                    alias.as_str() > past_alias
+                } else {
+                    false
+                }
+            })
+            .cloned()
+            .collect(),
+        None => legacy_descriptors.to_vec(),
+    };
+
+    result.extend_from_slice(db_descriptors);
+    result.sort_unstable();
+    result.dedup();
+    result
+}
+
+pub(crate) fn init_test_logging() {
+    init_test_logging_at(log::LevelFilter::Debug);
+}
+
+/// Enable logging in unit tests at a specific level
+fn init_test_logging_at(max_level: log::LevelFilter) {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_tag("keystore2_test")
+            .with_max_level(max_level),
+    );
+}
+
 #[test]
 fn check_device_attestation_permissions_test() -> Result<()> {
     check_device_attestation_permissions().or_else(|error| {

@@ -3564,8 +3564,9 @@ impl KeystoreDB {
     }
 
     /// Insert or replace the auth token based on (user_id, auth_id, auth_type)
-    pub fn insert_auth_token(&mut self, auth_token: &HardwareAuthToken) {
-        self.perboot
+    /// This only accesses per-boot memory and does not open SQLite.
+    pub fn insert_auth_token(auth_token: &HardwareAuthToken) {
+        perboot::PERBOOT_DB
             .insert_auth_token_entry(AuthTokenEntry::new(auth_token.clone(), BootTime::now()))
     }
 

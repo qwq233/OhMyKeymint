@@ -144,8 +144,8 @@ fn install_hooks() -> Result<()> {
     if close_committed == 0 {
         bail!("Failed to commit any binder close hooks");
     }
+
     intercept::start_operation_publication_worker().map_err(|error| anyhow!(error))?;
-    rewrite::start_mirror_recovery_worker().map_err(|error| anyhow!(error))?;
     info!(
         "committed {} binder ioctl hook(s) and {} close hook(s)",
         ioctl_committed, close_committed

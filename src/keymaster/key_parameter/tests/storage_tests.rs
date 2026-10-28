@@ -206,8 +206,8 @@ fn test_to_sql_bool() -> Result<()> {
     Ok(())
 }
 
-#[test]
 /// Test Tag::Invalid
+#[test]
 fn test_invalid_tag() -> Result<()> {
     let db = init_db()?;
     insert_into_keyparameter(&db, 1, 0, &123, 1)?;

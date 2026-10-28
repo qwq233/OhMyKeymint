@@ -1,4 +1,8 @@
 use super::*;
+use std::sync::OnceLock;
+
+#[cfg(test)]
+pub(super) mod tests;
 
 static KEYSTORE2_AIDL_METADATA: OnceLock<Result<Keystore2AidlMetadata, String>> = OnceLock::new();
 
@@ -32,7 +36,7 @@ fn synthetic_parse_error_status_code(error: &anyhow::Error) -> StatusCode {
 fn synthetic_parse_error_reply(status: StatusCode) -> anyhow::Result<SyntheticReply> {
     if status == StatusCode::UnexpectedNull {
         return Ok(synthetic_parcel_reply(parcel::build_status_reply(
-            &Status::from(status),
+            &Status::from(ExceptionCode::NullPointer),
         )?));
     }
     Ok(SyntheticReply::Status(status.into()))
@@ -248,16 +252,26 @@ pub(in crate::hook::rewrite) fn can_execute_one_way(kind: SyntheticTargetKind, c
     }
 }
 
-pub(in crate::hook) unsafe fn handle_synthetic_br_transaction(
+pub(in crate::hook) unsafe fn handle_native_br_transaction(
     tr: &binder_transaction_data,
+    kind: SyntheticTargetKind,
+    state: Option<&NativeOperationState>,
     caller_sid: Option<String>,
     command_name: &str,
-) -> Option<SyntheticReply> {
-    let target = target_from_transaction(tr)?;
-    let info = lookup_synthetic_target_info(target)?;
-    let kind = info.kind;
+) -> SyntheticReply {
+    let Some(target) = target_from_transaction(tr) else {
+        return SyntheticReply::Status(StatusCode::BadValue.into());
+    };
 
-    let result = build_synthetic_br_transaction_reply(tr, target, info, caller_sid, command_name);
+    let result = build_native_br_transaction_reply(
+        tr,
+        target,
+        kind,
+        state,
+        state.map(|state| &state.caller),
+        caller_sid,
+        command_name,
+    );
     let reply = match result {
         Ok(reply) => reply,
         Err(error) => {
@@ -277,23 +291,25 @@ pub(in crate::hook) unsafe fn handle_synthetic_br_transaction(
             }
         }
     };
-    Some(reply)
+    reply
 }
 
-unsafe fn build_synthetic_br_transaction_reply(
+unsafe fn build_native_br_transaction_reply(
     tr: &binder_transaction_data,
     target: LocalBinderTarget,
-    info: SyntheticTargetInfo,
+    kind: SyntheticTargetKind,
+    state: Option<&NativeOperationState>,
+    fallback: Option<&CallerInfo>,
     caller_sid: Option<String>,
     command_name: &str,
 ) -> anyhow::Result<SyntheticReply> {
     let expects_reply = (tr.flags & crate::hook::binder::TF_ONE_WAY) == 0;
-    if !expects_reply && !can_execute_one_way(info.kind, tr.code) {
+    if !expects_reply && !can_execute_one_way(kind, tr.code) {
         return Ok(SyntheticReply::NoReply);
     }
 
     let reply =
-        build_synthetic_br_transaction_reply_inner(tr, target, info, caller_sid, command_name)?;
+        execute_native_transaction(tr, target, kind, state, fallback, caller_sid, command_name)?;
     if expects_reply {
         Ok(reply)
     } else {
@@ -301,14 +317,15 @@ unsafe fn build_synthetic_br_transaction_reply(
     }
 }
 
-unsafe fn build_synthetic_br_transaction_reply_inner(
+unsafe fn execute_native_transaction(
     tr: &binder_transaction_data,
     target: LocalBinderTarget,
-    info: SyntheticTargetInfo,
+    kind: SyntheticTargetKind,
+    state: Option<&NativeOperationState>,
+    fallback: Option<&CallerInfo>,
     caller_sid: Option<String>,
     command_name: &str,
 ) -> anyhow::Result<SyntheticReply> {
-    let kind = info.kind;
     if let Some(reply) = synthetic_base_transaction_reply(Some(kind), target, tr)? {
         return Ok(reply);
     }
@@ -385,8 +402,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
     let fallback = match kind {
         SyntheticTargetKind::SecurityLevel => None,
         SyntheticTargetKind::Operation => Some(
-            info.caller
-                .as_ref()
+            fallback
                 .ok_or_else(|| anyhow::anyhow!("missing synthetic operation caller fallback"))?,
         ),
     };
@@ -420,13 +436,7 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
                 ResponseCode::SYSTEM_ERROR.0,
             )?));
         }
-        let allow_omk_grant = should_allow_omk_grant_security_level_request_with_probe(
-            &request,
-            &decision,
-            &caller,
-            probe_omk_grant,
-        )?;
-        if !decision.allowed && !allow_omk_grant {
+        if !decision.allowed {
             info!(
                 "event=synthetic rejected {} security-level {:?} uid={} pid={} sid='{}' target=ptr:0x{:x}/cookie:0x{:x} packages={:?} reason={:?}",
                 command_name,
@@ -498,14 +508,24 @@ unsafe fn build_synthetic_br_transaction_reply_inner(
         command_name, method, caller.uid, caller.pid, target.ptr, target.cookie,
     );
 
-    let pending = PendingOperationCall {
-        request,
-        caller,
-        target,
-    };
-    let reply = build_operation_reply_rewrite(&pending)?;
-    Ok(synthetic_reply_from_outbound(reply))
+    if let Some(state) = state {
+        return Ok(synthetic_parcel_reply(build_native_operation_reply(
+            &request, state,
+        )?));
+    }
+    #[cfg(test)]
+    {
+        let pending = PendingOperationCall {
+            request,
+            caller,
+            target,
+            route: RouteTarget::Omk,
+        };
+        let reply = build_operation_reply_rewrite(&pending)?;
+        Ok(synthetic_reply_from_outbound(reply))
+    }
+    #[cfg(not(test))]
+    {
+        anyhow::bail!("missing native operation state")
+    }
 }
-
-#[cfg(test)]
-mod tests;

@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+pub(super) mod tests;
+
 #[derive(Default)]
 pub(super) struct BinderFdLifecycleState {
     pub(super) generation: u64,
@@ -186,17 +189,6 @@ fn ensure_binder_fd_lifecycle(
     lifecycle
 }
 
-#[cfg(test)]
-fn binder_fd_lifecycle(fd: c_int) -> Arc<BinderFdLifecycle> {
-    let mut registry = binder_fd_registry();
-    ensure_binder_fd_lifecycle(&mut registry, fd)
-}
-
-#[cfg(test)]
-fn existing_binder_fd_lifecycle(fd: c_int) -> Option<Arc<BinderFdLifecycle>> {
-    binder_fd_registry().by_fd.get(&fd).cloned()
-}
-
 pub(super) fn binder_fd_token(fd: c_int) -> BinderFdToken {
     let mut registry = binder_fd_registry();
     let lifecycle = ensure_binder_fd_lifecycle(&mut registry, fd);
@@ -210,19 +202,6 @@ pub(super) fn binder_fd_token(fd: c_int) -> BinderFdToken {
         generation,
         connection: lifecycle.connection,
     }
-}
-
-#[cfg(test)]
-pub(super) fn binder_fd_token_is_current(token: BinderFdToken) -> bool {
-    existing_binder_fd_lifecycle(token.fd).is_some_and(|lifecycle| {
-        lifecycle.connection == token.connection
-            && lifecycle
-                .state
-                .lock()
-                .expect("binder fd lifecycle poisoned")
-                .generation
-                == token.generation
-    })
 }
 
 pub(super) fn binder_connection_cleanup_ready(connection: BinderStateKey) -> bool {
@@ -285,11 +264,6 @@ pub(super) fn invalidate_binder_fd_token(token: BinderFdToken) -> Option<BinderS
     }
     registry.by_fd.remove(&token.fd);
     retire_unaliased_lifecycle(&mut registry, &lifecycle).then_some(lifecycle.connection)
-}
-
-#[cfg(test)]
-pub(super) fn invalidate_binder_fd(fd: c_int) {
-    let _ = invalidate_binder_fd_token(binder_fd_token(fd));
 }
 
 pub(super) unsafe fn close_with_binder_fd_lifecycle<F>(fd: c_int, close: F) -> c_int
@@ -579,6 +553,3 @@ pub(in crate::hook) unsafe fn new_fcntl(fd: c_int, command: c_int, arg: libc::c_
         fcntl(fd, command, arg)
     }
 }
-
-#[cfg(test)]
-mod tests;

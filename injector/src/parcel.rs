@@ -1,19 +1,19 @@
-use std::mem::size_of;
-
-use anyhow::{anyhow, bail, Context, Result};
-use rsbinder::{Parcel, StatusCode};
-
 use crate::hook::binder::{flat_binder_object, BINDER_TYPE_FD};
 use crate::identify::{
     KEYSTORE_AUTHORIZATION_INTERFACE, KEYSTORE_MAINTENANCE_INTERFACE, KEYSTORE_OPERATION_INTERFACE,
     KEYSTORE_SECURITY_LEVEL_INTERFACE, KEYSTORE_SERVICE_INTERFACE,
 };
-
-mod reply;
-mod request;
+use anyhow::{anyhow, bail, Context, Result};
+use rsbinder::{Parcel, StatusCode};
+use std::mem::size_of;
 
 pub use reply::*;
 pub use request::*;
+
+mod reply;
+mod request;
+#[cfg(test)]
+mod tests;
 
 /// # Safety
 ///
@@ -237,6 +237,3 @@ fn contains_utf16_token(parcel: &[u8], token: &str) -> bool {
         .windows(encoded.len())
         .any(|window| window == encoded)
 }
-
-#[cfg(test)]
-mod tests;

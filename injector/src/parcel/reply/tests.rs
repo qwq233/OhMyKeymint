@@ -42,6 +42,33 @@ fn assert_status_code<T>(result: Result<T>, expected: StatusCode) {
 }
 
 #[test]
+fn data_only_replies_match_parcel_encoding() {
+    for value in [None, Some(Vec::new()), Some(vec![0x5a; 65536])] {
+        let mut original = Parcel::new();
+        original.write(&Status::from(StatusCode::Ok)).unwrap();
+        original.write(&value).unwrap();
+        let expected = parcel_bytes(&mut original).unwrap();
+        let mut actual = build_plain_reply(&value).unwrap();
+        assert_eq!(actual.data, expected);
+        assert_eq!(
+            parse_owned_success_reply::<Option<Vec<u8>>>(&mut actual).unwrap(),
+            value
+        );
+    }
+    for status in [
+        Status::from(StatusCode::Ok),
+        Status::new_service_specific_error(-38, None),
+    ] {
+        let mut original = Parcel::new();
+        original.write(&status).unwrap();
+        assert_eq!(
+            build_status_reply(&status).unwrap().data,
+            parcel_bytes(&mut original).unwrap()
+        );
+    }
+}
+
+#[test]
 fn key_entry_reply_round_trip_without_binder() {
     let response = KeyEntryResponse {
         r#iSecurityLevel: None,

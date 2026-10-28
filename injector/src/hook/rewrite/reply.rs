@@ -1,15 +1,17 @@
 use super::*;
 
+pub(super) use dispatch::can_execute_one_way;
+pub(in crate::hook) use dispatch::handle_native_br_transaction;
+use operation::*;
+pub(super) use operation::{
+    build_native_operation_reply, build_no_carrier_create_operation_reply,
+    build_operation_reply_rewrite,
+};
+
 mod dispatch;
 mod operation;
-
-use operation::*;
-
-pub(super) use dispatch::can_execute_one_way;
-pub(in crate::hook) use dispatch::handle_synthetic_br_transaction;
-pub(super) use operation::{
-    build_no_carrier_create_operation_reply, build_operation_reply_rewrite,
-};
+#[cfg(test)]
+pub(super) mod tests;
 
 fn register_security_level_carrier(
     carrier: &parcel::ReplyBinderCarrier,
@@ -55,7 +57,7 @@ fn error_status(error: &anyhow::Error) -> Option<&Status> {
         .find_map(|cause| cause.downcast_ref::<Status>())
 }
 
-fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<OutboundReply> {
+pub(super) fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<OutboundReply> {
     if let Some(status) = error_status(error) {
         return build_omk_status_reply(status);
     }
@@ -66,9 +68,7 @@ fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<OutboundReply>
     // Error::BinderTransaction -> SYSTEM_ERROR unconditionally, ignoring the code
     // itself (error.rs map_binder_status_code/error_to_serialized_error); it
     // never returns a raw transport status_t nor a code-specific parcel.
-    // OMK-unavailable codes are already filtered out earlier by
-    // omk_unavailable_error. Errors without any status collapse to SYSTEM_ERROR
-    // the same way.
+    // Errors without any status collapse to SYSTEM_ERROR the same way.
     Ok(synthetic_fallback_reply())
 }
 
@@ -87,47 +87,16 @@ pub(super) fn precomputed_omk_error_reply(error: &anyhow::Error) -> Status {
     Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None)
 }
 
-fn build_omk_error_reply_or_preserve_system(
-    error: &anyhow::Error,
-) -> anyhow::Result<Option<OutboundReply>> {
-    if omk_unavailable_error(error) {
-        Ok(None)
-    } else {
-        build_omk_error_reply(error).map(Some)
-    }
-}
-
-fn build_omk_status_reply_or_preserve_system(
-    status: &Status,
-) -> anyhow::Result<Option<OutboundReply>> {
-    if omk_unavailable_status(status) {
-        Ok(None)
-    } else {
-        build_omk_status_reply(status).map(Some)
-    }
-}
-
 fn omk_error_reply_for_method(
     method: &str,
     caller: &CallerInfo,
     error: &anyhow::Error,
 ) -> anyhow::Result<Option<OutboundReply>> {
-    match build_omk_error_reply_or_preserve_system(error)? {
-        Some(reply) => {
-            warn!(
-                "event=reply OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
-                method, caller.uid, caller.pid, error
-            );
-            Ok(Some(reply))
-        }
-        None => {
-            warn!(
-                "event=reply OMK {} unavailable for uid={} pid={}: {:#}; preserving original system reply",
-                method, caller.uid, caller.pid, error
-            );
-            Ok(None)
-        }
-    }
+    warn!(
+        "event=reply OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
+        method, caller.uid, caller.pid, error
+    );
+    build_omk_error_reply(error).map(Some)
 }
 
 fn omk_status_reply_for_method(
@@ -135,22 +104,11 @@ fn omk_status_reply_for_method(
     caller: &CallerInfo,
     status: &Status,
 ) -> anyhow::Result<Option<OutboundReply>> {
-    match build_omk_status_reply_or_preserve_system(status)? {
-        Some(reply) => {
-            warn!(
-                "event=reply OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
-                method, caller.uid, caller.pid, status
-            );
-            Ok(Some(reply))
-        }
-        None => {
-            warn!(
-                "event=reply OMK {} unavailable for uid={} pid={}: {:#}; preserving original system reply",
-                method, caller.uid, caller.pid, status
-            );
-            Ok(None)
-        }
-    }
+    warn!(
+        "event=reply OMK {} failed for uid={} pid={}: {:#}; returning OMK error",
+        method, caller.uid, caller.pid, status
+    );
+    build_omk_status_reply(status).map(Some)
 }
 
 pub(super) fn build_service_specific_reply(code: i32) -> anyhow::Result<parcel::OwnedReply> {
@@ -193,7 +151,7 @@ unsafe fn malformed_system_success_reply(
 }
 
 pub(super) fn build_precomputed_service_reply(
-    precomputed: &PrecomputedServiceReply,
+    precomputed: &mut PrecomputedServiceReply,
 ) -> anyhow::Result<OutboundReply> {
     match precomputed {
         PrecomputedServiceReply::UpdateSubcomponentSuccess => Ok(parcel::build_void_reply()?),
@@ -204,6 +162,9 @@ pub(super) fn build_precomputed_service_reply(
             Ok(parcel::build_void_reply()?)
         }
         PrecomputedServiceReply::Error(status) => build_omk_status_reply(status),
+        PrecomputedServiceReply::Serialized(reply) => reply
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("precomputed service reply already consumed")),
     }
 }
 
@@ -238,14 +199,14 @@ pub(super) fn build_no_carrier_omk_key_entry_reply(
 
 fn build_direct_omk_security_level_reply(
     security_level: crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel,
-    pending: &PendingServiceCall,
+    caller: &CallerInfo,
 ) -> anyhow::Result<Option<OutboundReply>> {
-    match ipc::with_omk_retry(|omk| Ok(omk.r#getSecurityLevel(security_level)?)) {
+    match ipc::with_omk_once(|omk| Ok(omk.r#getSecurityLevel(security_level)?)) {
         Ok(_level) => {
             let carrier = register_synthetic_security_level_carrier(
                 security_level,
                 ServiceMethod::GetSecurityLevel,
-                &pending.caller,
+                caller,
             )?;
             Ok(Some(
                 parcel::build_get_security_level_reply_with_carrier_bytes(
@@ -254,7 +215,7 @@ fn build_direct_omk_security_level_reply(
                 )?,
             ))
         }
-        Err(error) => omk_error_reply_for_method("getSecurityLevel", &pending.caller, &error),
+        Err(error) => omk_error_reply_for_method("getSecurityLevel", caller, &error),
     }
 }
 
@@ -341,32 +302,27 @@ pub(super) unsafe fn build_service_reply_rewrite(
         }
     }
 
-    if let Err(error) = ensure_mirror_state_recovered() {
-        warn!(
-            "event=route OMK service {:?} blocked by unresolved mirror recovery for uid={} pid={}: {:#}",
-            pending.request.method(), pending.caller.uid, pending.caller.pid, error
-        );
-        return Ok(Some(synthetic_fallback_reply()));
-    }
+    build_omk_service_reply(&pending.request, &pending.caller)
+}
 
-    let caller = &pending.caller;
+pub(super) fn build_omk_service_reply(
+    request: &ParsedServiceRequest,
+    caller: &CallerInfo,
+) -> anyhow::Result<Option<OutboundReply>> {
     let _guard = BypassGuard::enter();
 
-    match &pending.request {
+    match request {
         ParsedServiceRequest::GetSecurityLevel { security_level } => {
-            build_direct_omk_security_level_reply(*security_level, pending)
+            build_direct_omk_security_level_reply(*security_level, caller)
         }
         ParsedServiceRequest::GetKeyEntry { key } => {
-            let entry = match ipc::with_omk_retry(|omk| Ok(omk.r#getKeyEntry(Some(caller), key)?)) {
+            let entry = match ipc::with_omk_once(|omk| Ok(omk.r#getKeyEntry(Some(caller), key)?)) {
                 Ok(entry) => entry,
                 Err(error) => {
-                    return omk_error_reply_for_method("getKeyEntry", &pending.caller, &error);
+                    return omk_error_reply_for_method("getKeyEntry", caller, &error);
                 }
             };
-            Ok(Some(build_no_carrier_omk_key_entry_reply(
-                entry,
-                &pending.caller,
-            )?))
+            Ok(Some(build_no_carrier_omk_key_entry_reply(entry, caller)?))
         }
         ParsedServiceRequest::UpdateSubcomponent {
             key,
@@ -382,17 +338,13 @@ pub(super) unsafe fn build_service_reply_rewrite(
                 )?)
             }) {
                 Ok(()) => Ok(Some(parcel::build_void_reply()?)),
-                Err(error) => {
-                    omk_error_reply_for_method("updateSubcomponent", &pending.caller, &error)
-                }
+                Err(error) => omk_error_reply_for_method("updateSubcomponent", caller, &error),
             }
         }
         ParsedServiceRequest::ListEntries { domain, nspace } => {
-            match ipc::with_omk_retry(|omk| {
-                Ok(omk.r#listEntries(Some(caller), *domain, *nspace)?)
-            }) {
+            match ipc::with_omk_once(|omk| Ok(omk.r#listEntries(Some(caller), *domain, *nspace)?)) {
                 Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?)),
-                Err(error) => omk_error_reply_for_method("listEntries", &pending.caller, &error),
+                Err(error) => omk_error_reply_for_method("listEntries", caller, &error),
             }
         }
         ParsedServiceRequest::Grant {
@@ -404,24 +356,22 @@ pub(super) unsafe fn build_service_reply_rewrite(
                 Ok(omk.r#grant(Some(caller), key, *grantee_uid, *access_vector)?)
             }) {
                 Ok(omk_grant) => omk_grant,
-                Err(error) => return omk_error_reply_for_method("grant", &pending.caller, &error),
+                Err(error) => return omk_error_reply_for_method("grant", caller, &error),
             };
             Ok(Some(parcel::build_plain_reply(&omk_grant)?))
         }
         ParsedServiceRequest::Ungrant { key, grantee_uid } => {
             match ipc::with_omk_once(|omk| Ok(omk.r#ungrant(Some(caller), key, *grantee_uid)?)) {
                 Ok(()) => Ok(Some(parcel::build_void_reply()?)),
-                Err(error) => omk_error_reply_for_method("ungrant", &pending.caller, &error),
+                Err(error) => omk_error_reply_for_method("ungrant", caller, &error),
             }
         }
         ParsedServiceRequest::GetNumberOfEntries { domain, nspace } => {
-            match ipc::with_omk_retry(|omk| {
+            match ipc::with_omk_once(|omk| {
                 Ok(omk.r#getNumberOfEntries(Some(caller), *domain, *nspace)?)
             }) {
                 Ok(count) => Ok(Some(parcel::build_plain_reply(&count)?)),
-                Err(error) => {
-                    omk_error_reply_for_method("getNumberOfEntries", &pending.caller, &error)
-                }
+                Err(error) => omk_error_reply_for_method("getNumberOfEntries", caller, &error),
             }
         }
         ParsedServiceRequest::ListEntriesBatched {
@@ -429,7 +379,7 @@ pub(super) unsafe fn build_service_reply_rewrite(
             nspace,
             starting_past_alias,
         } => {
-            match ipc::with_omk_retry(|omk| {
+            match ipc::with_omk_once(|omk| {
                 Ok(omk.r#listEntriesBatched(
                     Some(caller),
                     *domain,
@@ -438,25 +388,21 @@ pub(super) unsafe fn build_service_reply_rewrite(
                 )?)
             }) {
                 Ok(entries) => Ok(Some(parcel::build_plain_reply(&entries)?)),
-                Err(error) => {
-                    omk_error_reply_for_method("listEntriesBatched", &pending.caller, &error)
-                }
+                Err(error) => omk_error_reply_for_method("listEntriesBatched", caller, &error),
             }
         }
         ParsedServiceRequest::GetSupplementaryAttestationInfo { tag } => {
-            match ipc::with_omk_retry(|omk| Ok(omk.r#getSupplementaryAttestationInfo(*tag)?)) {
+            match ipc::with_omk_once(|omk| Ok(omk.r#getSupplementaryAttestationInfo(*tag)?)) {
                 Ok(info) => Ok(Some(parcel::build_plain_reply(&info)?)),
-                Err(error) => omk_error_reply_for_method(
-                    "getSupplementaryAttestationInfo",
-                    &pending.caller,
-                    &error,
-                ),
+                Err(error) => {
+                    omk_error_reply_for_method("getSupplementaryAttestationInfo", caller, &error)
+                }
             }
         }
         ParsedServiceRequest::DeleteKey { key } => {
             match ipc::with_omk_once(|omk| Ok(omk.r#deleteKey(Some(caller), key)?)) {
                 Ok(()) => Ok(Some(parcel::build_void_reply()?)),
-                Err(error) => omk_error_reply_for_method("deleteKey", &pending.caller, &error),
+                Err(error) => omk_error_reply_for_method("deleteKey", caller, &error),
             }
         }
     }
@@ -506,17 +452,10 @@ pub(super) fn build_omk_security_level_reply(
     pending: &PendingSecurityLevelCall,
     publish_operation_carrier: bool,
 ) -> anyhow::Result<Option<OutboundReply>> {
-    if let Err(error) = ensure_mirror_state_recovered() {
-        warn!(
-            "event=route OMK security-level {:?} blocked by unresolved mirror recovery for uid={} pid={}: {:#}",
-            pending.request.method(), pending.caller.uid, pending.caller.pid, error
-        );
-        return Ok(Some(synthetic_fallback_reply()));
-    }
     let caller = &pending.caller;
     let _guard = BypassGuard::enter();
     let omk_level =
-        match ipc::with_omk_retry(|omk| Ok(omk.r#getOhMySecurityLevel(pending.security_level)?)) {
+        match ipc::with_omk_once(|omk| Ok(omk.r#getOhMySecurityLevel(pending.security_level)?)) {
             Ok(level) => level,
             Err(error) => {
                 let method = format!("security-level lookup {:?}", pending.security_level);
@@ -624,6 +563,3 @@ pub(super) fn build_omk_security_level_reply(
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

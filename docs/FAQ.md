@@ -382,6 +382,16 @@ The app may require the lock-screen PIN or password instead of a fingerprint,
 or the authorization may have expired before the operation started. A log such
 as `KEY_USER_NOT_AUTHENTICATED` does not always mean OMK is broken.
 
+After System accepts an authentication or maintenance update, the injector
+forwards it to OMK once before returning the System reply. Auth tokens use a
+separate RPC session from key operations and lifecycle updates. Business RPC
+sessions use up to four connections; auth-token and lifecycle sessions each use
+one. Failed updates are discarded without retries or a global recovery gate.
+A mirror failure returns an OMK error for a caller allowed by the filter and
+preserves the System reply for other callers. A stalled synchronous RPC can still
+wait without a separate timeout. Authentication and lock-state checks apply when
+the operation runs.
+
 Authenticate in the way the app requests and retry promptly. Keep
 `force_skip_system_biometric_hat_verification` at `false` unless a maintainer
 is diagnosing a confirmed device-specific compatibility problem.

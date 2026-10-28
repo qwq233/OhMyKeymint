@@ -1,79 +1,67 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::fmt;
-use std::sync::{Arc, Condvar, Mutex, Once};
-use std::time::{Duration, Instant};
-use std::{cmp, thread};
-
-use anyhow::{Context, Result};
-use kmr_common::rpc;
-use log::{debug, warn};
-use rsbinder::rpc::RpcSession;
-use rsbinder::{
-    hub, DeathRecipient, ExceptionCode, FromIBinder, SIBinder, Status, StatusCode, Strong, WIBinder,
-};
-
 use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
 use crate::filter::PackageResolution;
 use crate::top::qwq2333::ohmykeymint::IOhMyAuthorizationService::IOhMyAuthorizationService;
 use crate::top::qwq2333::ohmykeymint::IOhMyKsService::IOhMyKsService;
 use crate::top::qwq2333::ohmykeymint::IOhMyMaintenanceService::IOhMyMaintenanceService;
+use anyhow::{Context, Result};
+use kmr_common::rpc;
+use log::{debug, warn};
+use rsbinder::rpc::{RpcClientConfig, RpcSession};
+use rsbinder::{
+    hub, DeathRecipient, ExceptionCode, FromIBinder, Status, StatusCode, Strong, WIBinder,
+};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Once};
+use std::thread::LocalKey;
 
-const RPC_READY_TIMEOUT: Duration = Duration::from_secs(10);
-const RPC_READY_RETRY_DELAY: Duration = Duration::from_millis(200);
+#[cfg(test)]
+mod tests;
+
 const PM_SERVICE: &str = "sec_key_att_app_id_provider";
+
+type CachedRpcClient<T> = Option<Arc<RpcClient<T>>>;
 
 thread_local! {
     static PM: RefCell<Option<Strong<dyn IKeyAttestationApplicationIdProvider>>> = const { RefCell::new(None) };
     static PM_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
+    static LOCAL_SERVICE: RefCell<CachedRpcClient<Strong<dyn IOhMyKsService>>> = RefCell::default();
+    static LOCAL_AUTH_TOKEN: RefCell<CachedRpcClient<Strong<dyn IOhMyAuthorizationService>>> = RefCell::default();
+    static LOCAL_LIFECYCLE: RefCell<CachedRpcClient<LifecycleServices>> = RefCell::default();
 }
 
 static PROCESS_STATE_INIT: Once = Once::new();
-static RPC_CACHE: Mutex<RpcCacheState> = Mutex::new(RpcCacheState {
-    generation: 0,
-    cache: None,
-    connecting: None,
-    next_connect_attempt: 0,
-    last_connect_error: None,
-});
-static RPC_CACHE_READY: Condvar = Condvar::new();
 
-struct RpcCacheState {
-    generation: u64,
-    cache: Option<RpcCache>,
-    connecting: Option<u64>,
-    next_connect_attempt: u64,
-    last_connect_error: Option<Arc<anyhow::Error>>,
+static RPC_CACHE: Mutex<RpcCache> = Mutex::new(RpcCache {
+    service: None,
+    auth_token: None,
+    lifecycle: None,
+});
+static SERVICE_CONNECT: Mutex<()> = Mutex::new(());
+static AUTH_TOKEN_CONNECT: Mutex<()> = Mutex::new(());
+static LIFECYCLE_CONNECT: Mutex<()> = Mutex::new(());
+
+struct RpcClient<T> {
+    session: RpcSession,
+    service: T,
+    active: AtomicBool,
+}
+
+impl<T> RpcClient<T> {
+    fn is_current(&self) -> bool {
+        self.active.load(Ordering::Acquire) && !self.session.is_ended()
+    }
+}
+
+struct LifecycleServices {
+    authorization: Strong<dyn IOhMyAuthorizationService>,
+    maintenance: Strong<dyn IOhMyMaintenanceService>,
 }
 
 struct RpcCache {
-    session: RpcSession,
-    services: HashMap<&'static str, SIBinder>,
-}
-
-#[derive(Clone)]
-struct SharedRpcConnectError(Arc<anyhow::Error>);
-
-impl fmt::Debug for SharedRpcConnectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self.0.as_ref(), f)
-    }
-}
-
-impl fmt::Display for SharedRpcConnectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self.0.as_ref(), f)
-    }
-}
-
-impl std::error::Error for SharedRpcConnectError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.0.as_ref().as_ref())
-    }
-}
-
-fn shared_rpc_connect_error(error: &Arc<anyhow::Error>) -> anyhow::Error {
-    anyhow::Error::new(SharedRpcConnectError(Arc::clone(error)))
+    service: CachedRpcClient<Strong<dyn IOhMyKsService>>,
+    auth_token: CachedRpcClient<Strong<dyn IOhMyAuthorizationService>>,
+    lifecycle: CachedRpcClient<LifecycleServices>,
 }
 
 struct PmDeathRecipient;
@@ -92,191 +80,167 @@ pub fn ensure_process_state() {
     });
 }
 
-pub fn install_direct_rpc_session() -> Result<()> {
+fn with_rpc_client<T: 'static, R>(
+    connect: impl FnOnce() -> Result<RpcSession>,
+    cache: &Mutex<RpcCache>,
+    connecting: &Mutex<()>,
+    local: &'static LocalKey<RefCell<CachedRpcClient<T>>>,
+    slot: fn(&mut RpcCache) -> &mut CachedRpcClient<T>,
+    resolve: impl FnOnce(&RpcSession) -> Result<T>,
+    f: impl FnOnce(&T) -> Result<R>,
+) -> Result<R> {
     ensure_process_state();
-    let cache = connect_rpc_session("failed to connect OMK RPC socket")?;
-    let old = {
-        let mut state = RPC_CACHE.lock().expect("RPC cache poisoned");
-        state.generation = state.generation.wrapping_add(1);
-        state.last_connect_error = None;
-        state.cache.replace(cache)
+    let get_cached = || {
+        let (client, retired) = {
+            let mut cache = cache.lock().expect("RPC cache poisoned");
+            let slot = slot(&mut cache);
+            let retired = if slot.as_ref().is_some_and(|client| !client.is_current()) {
+                slot.take()
+            } else {
+                None
+            };
+            (slot.as_ref().map(Arc::clone), retired)
+        };
+        drop(retired);
+        client
     };
-    RPC_CACHE_READY.notify_all();
-    drop(old);
-    Ok(())
-}
-
-fn connect_rpc_session(connect_context: &'static str) -> Result<RpcCache> {
-    let start = Instant::now();
-    loop {
-        match connect_rpc_session_once(connect_context) {
-            Ok(session) => return Ok(session),
-            Err(error) if start.elapsed() >= RPC_READY_TIMEOUT => {
-                return Err(error).context("OMK RPC server did not become ready in time");
-            }
-            Err(_) => thread::sleep(cmp::min(
-                RPC_READY_RETRY_DELAY,
-                RPC_READY_TIMEOUT.saturating_sub(start.elapsed()),
-            )),
+    let invoke = |client: &Arc<RpcClient<T>>| {
+        let result = f(&client.service);
+        if client.session.is_ended()
+            || result
+                .as_ref()
+                .err()
+                .is_some_and(is_rpc_cache_invalidating_error)
+        {
+            client.active.store(false, Ordering::Release);
+            let retired = {
+                let mut cache = cache.lock().expect("RPC cache poisoned");
+                let slot = slot(&mut cache);
+                if slot
+                    .as_ref()
+                    .is_some_and(|cached| Arc::ptr_eq(cached, client))
+                {
+                    slot.take()
+                } else {
+                    None
+                }
+            };
+            drop(retired);
         }
-    }
-}
-
-fn connect_rpc_session_once(connect_context: &'static str) -> Result<RpcCache> {
-    let session = RpcSession::setup_unix_client_android13plus(rpc::SOCKET, rpc::WIRE_MAX_VERSION)
-        .context(connect_context)?;
-    let service = session.get_service(rpc::SERVICE).context(connect_context)?;
-    Ok(RpcCache {
-        session,
-        services: HashMap::from([(rpc::SERVICE, service)]),
+        result
+    };
+    local.with(|local| {
+        if let Ok(cached) = local.try_borrow() {
+            if let Some(client) = cached.as_ref().filter(|client| client.is_current()) {
+                return invoke(client);
+            }
+        }
+        let client = match get_cached() {
+            Some(client) => client,
+            None => {
+                let _connecting = connecting.lock().expect("RPC connector poisoned");
+                match get_cached() {
+                    Some(client) => client,
+                    None => {
+                        let session = connect()?;
+                        let service = resolve(&session)?;
+                        let client = Arc::new(RpcClient {
+                            session,
+                            service,
+                            active: AtomicBool::new(true),
+                        });
+                        {
+                            let mut cache = cache.lock().expect("RPC cache poisoned");
+                            *slot(&mut cache) = Some(Arc::clone(&client));
+                        }
+                        client
+                    }
+                }
+            }
+        };
+        // A reentrant call may borrow the old TLS entry; its slow path must not replace it.
+        let retired = local
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut cached| cached.replace(Arc::clone(&client)));
+        drop(retired);
+        invoke(&client)
     })
 }
 
-fn ensure_rpc_cache(connect_context: &'static str) -> Result<()> {
-    loop {
-        let (generation, attempt) = {
-            let mut state = RPC_CACHE.lock().expect("RPC cache poisoned");
-            if state.cache.is_some() {
-                return Ok(());
-            }
-            if let Some(attempt) = state.connecting {
-                state = RPC_CACHE_READY
-                    .wait_while(state, |state| {
-                        state.cache.is_none() && state.connecting == Some(attempt)
-                    })
-                    .expect("RPC cache poisoned");
-                if state.cache.is_some() {
-                    return Ok(());
-                }
-                if state.connecting != Some(attempt) {
-                    if let Some(error) = state.last_connect_error.as_ref() {
-                        return Err(shared_rpc_connect_error(error));
-                    }
-                }
-                drop(state);
-                continue;
-            }
-
-            let attempt = state.next_connect_attempt;
-            state.next_connect_attempt = state.next_connect_attempt.wrapping_add(1);
-            state.connecting = Some(attempt);
-            (state.generation, attempt)
-        };
-
-        let candidate = connect_rpc_session(connect_context);
-        let mut state = RPC_CACHE.lock().expect("RPC cache poisoned");
-        if state.connecting == Some(attempt) {
-            state.connecting = None;
-        }
-        let mut stale_cache = None;
-        let outcome = if state.cache.is_none() && state.generation == generation {
-            match candidate {
-                Ok(cache) => {
-                    state.cache = Some(cache);
-                    state.generation = state.generation.wrapping_add(1);
-                    state.last_connect_error = None;
-                    Some(Ok(()))
-                }
-                Err(error) => {
-                    let error = Arc::new(error);
-                    state.last_connect_error = Some(Arc::clone(&error));
-                    Some(Err(shared_rpc_connect_error(&error)))
-                }
-            }
-        } else {
-            if let Ok(cache) = candidate {
-                stale_cache = Some(cache);
-            }
-            None
-        };
-        RPC_CACHE_READY.notify_all();
-        drop(state);
-        drop(stale_cache);
-        if let Some(outcome) = outcome {
-            return outcome;
-        }
-    }
+fn connect_rpc_session(outgoing_connections: u32) -> Result<RpcSession> {
+    RpcSession::setup_client_android13plus_with_config(
+        RpcClientConfig::unix(std::path::Path::new(rpc::SOCKET), rpc::WIRE_MAX_VERSION)
+            .outgoing_connections(outgoing_connections),
+    )
+    .context("failed to connect OMK RPC socket")
 }
 
-fn get_rpc_binder<T>(
-    service_name: &'static str,
-    connect_context: &'static str,
-    refresh: bool,
-) -> Result<Strong<T>>
-where
-    T: FromIBinder + ?Sized + 'static,
-{
-    let mut reconnected = false;
-    loop {
-        ensure_rpc_cache(connect_context)?;
-        let (session, identity, cached) = {
-            let state = RPC_CACHE.lock().expect("RPC cache poisoned");
-            let Some(cache) = state.cache.as_ref() else {
-                continue;
-            };
-            (
-                cache.session.clone(),
-                cache
-                    .services
-                    .get(rpc::SERVICE)
-                    .expect("RPC cache missing base service")
-                    .clone(),
-                cache.services.get(service_name).cloned(),
-            )
-        };
+pub fn with_omk_once<T>(f: impl FnOnce(&Strong<dyn IOhMyKsService>) -> Result<T>) -> Result<T> {
+    with_rpc_client(
+        || connect_rpc_session(num_cpus::get() as u32),
+        &RPC_CACHE,
+        &SERVICE_CONNECT,
+        &LOCAL_SERVICE,
+        |cache| &mut cache.service,
+        |session| {
+            session
+                .get_interface(rpc::SERVICE)
+                .context("failed to connect to omk service")
+        },
+        f,
+    )
+}
 
-        if let Some(binder) = cached.filter(|_| !refresh) {
-            let client = <T as FromIBinder>::try_from(binder).context(connect_context)?;
-            let state = RPC_CACHE.lock().expect("RPC cache poisoned");
-            if state
-                .cache
-                .as_ref()
-                .and_then(|cache| cache.services.get(rpc::SERVICE))
-                == Some(&identity)
-            {
-                return Ok(client);
-            }
-            continue;
-        }
+pub fn with_omk_auth_token_once<T>(
+    f: impl FnOnce(&Strong<dyn IOhMyAuthorizationService>) -> Result<T>,
+) -> Result<T> {
+    with_rpc_client(
+        || connect_rpc_session(1),
+        &RPC_CACHE,
+        &AUTH_TOKEN_CONNECT,
+        &LOCAL_AUTH_TOKEN,
+        |cache| &mut cache.auth_token,
+        |session| {
+            session
+                .get_interface(rpc::AUTHORIZATION_SERVICE)
+                .context("failed to connect to omk_authorization service")
+        },
+        f,
+    )
+}
 
-        let result = session.get_service(service_name);
-        let mut state = RPC_CACHE.lock().expect("RPC cache poisoned");
-        if state
-            .cache
-            .as_ref()
-            .and_then(|cache| cache.services.get(rpc::SERVICE))
-            != Some(&identity)
-        {
-            drop(state);
-            continue;
-        }
+fn with_lifecycle_once<T>(f: impl FnOnce(&LifecycleServices) -> Result<T>) -> Result<T> {
+    with_rpc_client(
+        || connect_rpc_session(1),
+        &RPC_CACHE,
+        &LIFECYCLE_CONNECT,
+        &LOCAL_LIFECYCLE,
+        |cache| &mut cache.lifecycle,
+        |session| {
+            Ok(LifecycleServices {
+                authorization: session
+                    .get_interface(rpc::AUTHORIZATION_SERVICE)
+                    .context("failed to connect to omk_authorization service")?,
+                maintenance: session
+                    .get_interface(rpc::MAINTENANCE_SERVICE)
+                    .context("failed to connect to omk_maintenance service")?,
+            })
+        },
+        f,
+    )
+}
 
-        match result {
-            Ok(binder) => {
-                let client =
-                    <T as FromIBinder>::try_from(binder.clone()).context(connect_context)?;
-                let cache = state.cache.as_mut().expect("RPC cache identity matched");
-                let old = cache.services.insert(service_name, binder);
-                drop(state);
-                drop(old);
-                return Ok(client);
-            }
-            Err(StatusCode::NameNotFound) => {
-                return Err(StatusCode::NameNotFound).context(connect_context);
-            }
-            Err(error) => {
-                state.generation = state.generation.wrapping_add(1);
-                let old = state.cache.take();
-                drop(state);
-                drop(old);
-                if reconnected {
-                    return Err(error).context(connect_context);
-                }
-                reconnected = true;
-                warn!("cached RPC session failed before transaction ({error:#}); reconnecting");
-            }
-        }
-    }
+pub fn with_omk_authorization_once<T>(
+    f: impl FnOnce(&Strong<dyn IOhMyAuthorizationService>) -> Result<T>,
+) -> Result<T> {
+    with_lifecycle_once(|services| f(&services.authorization))
+}
+
+pub fn with_omk_maintenance_once<T>(
+    f: impl FnOnce(&Strong<dyn IOhMyMaintenanceService>) -> Result<T>,
+) -> Result<T> {
+    with_lifecycle_once(|services| f(&services.maintenance))
 }
 
 fn with_binder_retry<T, B, Get, Clear, Retry, F>(
@@ -308,104 +272,6 @@ where
         }
         Err(error) => Err(error),
     }
-}
-
-fn with_binder_once<T, B, Get, Clear, Stale, F>(
-    get: Get,
-    clear: Clear,
-    stale: Stale,
-    f: F,
-) -> Result<T>
-where
-    B: FromIBinder + ?Sized,
-    Get: FnOnce() -> Result<Strong<B>>,
-    Clear: FnOnce(&Strong<B>),
-    Stale: FnOnce(&anyhow::Error) -> bool,
-    F: FnOnce(&Strong<B>) -> Result<T>,
-{
-    let client = get()?;
-    let result = f(&client);
-    if result.as_ref().err().is_some_and(stale) {
-        clear(&client);
-    }
-    result
-}
-
-pub fn get_omk() -> Result<Strong<dyn IOhMyKsService>> {
-    get_rpc_binder(rpc::SERVICE, "failed to connect to omk service", false)
-}
-
-pub fn with_omk_retry<T, F>(mut f: F) -> Result<T>
-where
-    F: FnMut(&Strong<dyn IOhMyKsService>) -> Result<T>,
-{
-    with_binder_retry(
-        "omk",
-        get_omk,
-        |client| {
-            clear_rpc_cache_if(rpc::SERVICE, &client.as_binder());
-        },
-        is_rpc_cache_invalidating_error,
-        &mut f,
-    )
-}
-
-pub fn with_omk_once<T, F>(f: F) -> Result<T>
-where
-    F: FnOnce(&Strong<dyn IOhMyKsService>) -> Result<T>,
-{
-    with_binder_once(
-        || get_rpc_binder(rpc::SERVICE, "failed to connect to omk service", true),
-        |client| {
-            clear_rpc_cache_if(rpc::SERVICE, &client.as_binder());
-        },
-        is_rpc_cache_invalidating_error,
-        f,
-    )
-}
-
-fn get_omk_authorization_fresh() -> Result<Strong<dyn IOhMyAuthorizationService>> {
-    get_rpc_binder(
-        rpc::AUTHORIZATION_SERVICE,
-        "failed to connect to omk_authorization service",
-        true,
-    )
-}
-
-pub fn with_omk_authorization_once<T, F>(f: F) -> Result<T>
-where
-    F: FnOnce(&Strong<dyn IOhMyAuthorizationService>) -> Result<T>,
-{
-    with_binder_once(
-        get_omk_authorization_fresh,
-        |client| {
-            clear_rpc_cache_if(rpc::AUTHORIZATION_SERVICE, &client.as_binder());
-        },
-        is_rpc_cache_invalidating_error,
-        f,
-    )
-}
-
-fn get_omk_maintenance_fresh() -> Result<Strong<dyn IOhMyMaintenanceService>> {
-    get_rpc_binder(
-        rpc::MAINTENANCE_SERVICE,
-        "failed to connect to omk_maintenance service",
-        true,
-    )
-}
-
-pub fn with_omk_maintenance_once<T, F>(f: F) -> Result<T>
-where
-    F: FnOnce(&Strong<dyn IOhMyMaintenanceService>) -> Result<T>,
-{
-    with_binder_once(
-        get_omk_maintenance_fresh,
-        |client| {
-            clear_rpc_cache_if(rpc::MAINTENANCE_SERVICE, &client.as_binder());
-        },
-        is_rpc_cache_invalidating_error,
-        f,
-    )
 }
 
 pub fn resolve_packages_for_uid(uid: u32) -> PackageResolution {
@@ -523,23 +389,3 @@ fn clear_pm_cache() {
     PM.with(|slot| *slot.borrow_mut() = None);
     PM_DEATH.with(|slot| *slot.borrow_mut() = None);
 }
-
-fn clear_rpc_cache_if(service_name: &'static str, failed: &SIBinder) {
-    let old = {
-        let mut state = RPC_CACHE.lock().expect("RPC cache poisoned");
-        let still_failed = state
-            .cache
-            .as_ref()
-            .and_then(|cache| cache.services.get(service_name))
-            == Some(failed);
-        still_failed.then(|| {
-            state.generation = state.generation.wrapping_add(1);
-            state.cache.take()
-        })
-    }
-    .flatten();
-    drop(old);
-}
-
-#[cfg(test)]
-mod tests;

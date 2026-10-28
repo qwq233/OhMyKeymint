@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 fn operation_error_finalizes(status: &Status) -> bool {
     status.exception_code() != ExceptionCode::ServiceSpecific
         || status.service_specific_error() != ResponseCode::OPERATION_BUSY.0
@@ -40,7 +43,7 @@ pub(super) unsafe fn register_operation_target_from_reply(
         OperationTargetInfo {
             route,
             aad_allowed,
-            backend,
+            backend: backend.map(Arc::new),
             finalized: false,
         },
     );
@@ -124,6 +127,11 @@ pub(in crate::hook::rewrite) fn build_no_carrier_create_operation_reply(
 pub(in crate::hook::rewrite) fn build_operation_reply_rewrite(
     pending: &PendingOperationCall,
 ) -> anyhow::Result<Option<OutboundReply>> {
+    #[cfg(test)]
+    if let Some(state) = crate::hook::rewrite::tests::lookup_native_operation_state(pending.target)
+    {
+        return build_native_operation_reply(&pending.request, &state).map(Some);
+    }
     let Some(target) = lookup_operation_target(pending.target) else {
         if lookup_synthetic_target(pending.target) == Some(SyntheticTargetKind::Operation) {
             debug!(
@@ -145,14 +153,6 @@ pub(in crate::hook::rewrite) fn build_operation_reply_rewrite(
         return Ok(None);
     }
 
-    if let Err(error) = ensure_mirror_state_recovered() {
-        warn!(
-            "event=route OMK operation {:?} blocked by unresolved mirror recovery for uid={} pid={}: {:#}",
-            pending.request.method(), pending.caller.uid, pending.caller.pid, error
-        );
-        return Ok(Some(synthetic_fallback_reply()));
-    }
-
     let Some(backend) = target.backend else {
         if target.finalized {
             if matches!(pending.request, ParsedOperationRequest::Abort) {
@@ -166,11 +166,44 @@ pub(in crate::hook::rewrite) fn build_operation_reply_rewrite(
         }
         anyhow::bail!("missing OMK operation backend mapping");
     };
+    let reply =
+        build_backend_operation_reply(&pending.request, &backend, target.aad_allowed, |status| {
+            if status.is_none() && matches!(pending.request, ParsedOperationRequest::Abort) {
+                forget_operation_target(pending.target);
+            } else {
+                mark_operation_target_finalized(pending.target);
+            }
+        })?;
+    Ok(Some(reply))
+}
+
+pub(in crate::hook::rewrite) fn build_native_operation_reply(
+    request: &ParsedOperationRequest,
+    state: &NativeOperationState,
+) -> anyhow::Result<OutboundReply> {
+    if state.is_finalized() {
+        return invalid_operation_handle_reply();
+    }
+    build_backend_operation_reply(request, &state.backend, state.aad_allowed, |status| {
+        if status.is_some_and(|status| status.exception_code() != ExceptionCode::ServiceSpecific) {
+            state.retire();
+        } else {
+            state.finalized.store(true, Ordering::Release);
+        }
+    })
+}
+
+fn build_backend_operation_reply(
+    request: &ParsedOperationRequest,
+    backend: &AospOperationBinder,
+    aad_allowed: bool,
+    mut finalize: impl FnMut(Option<&Status>),
+) -> anyhow::Result<OutboundReply> {
     let _guard = BypassGuard::enter();
 
-    let reply = match &pending.request {
+    let reply = match request {
         ParsedOperationRequest::UpdateAad { aad_input } => {
-            if !target.aad_allowed {
+            if !aad_allowed {
                 debug!(
                     "event=reply OMK-owned updateAad rejected on a non-AAD-capable operation; returning OMK status reply"
                 );
@@ -179,7 +212,7 @@ pub(in crate::hook::rewrite) fn build_operation_reply_rewrite(
                 Ok(()) => parcel::build_void_reply()?,
                 Err(status) => {
                     if operation_error_finalizes(&status) {
-                        mark_operation_target_finalized(pending.target);
+                        finalize(Some(&status));
                     }
                     build_omk_status_reply(&status)?
                 }
@@ -189,7 +222,7 @@ pub(in crate::hook::rewrite) fn build_operation_reply_rewrite(
             Ok(output) => parcel::build_plain_reply(&output)?,
             Err(status) => {
                 if operation_error_finalizes(&status) {
-                    mark_operation_target_finalized(pending.target);
+                    finalize(Some(&status));
                 }
                 build_omk_status_reply(&status)?
             }
@@ -197,12 +230,12 @@ pub(in crate::hook::rewrite) fn build_operation_reply_rewrite(
         ParsedOperationRequest::Finish { input, signature } => {
             match backend.r#finish(input.as_deref(), signature.as_deref()) {
                 Ok(output) => {
-                    mark_operation_target_finalized(pending.target);
+                    finalize(None);
                     parcel::build_plain_reply(&output)?
                 }
                 Err(status) => {
                     if operation_error_finalizes(&status) {
-                        mark_operation_target_finalized(pending.target);
+                        finalize(Some(&status));
                     }
                     build_omk_status_reply(&status)?
                 }
@@ -210,20 +243,17 @@ pub(in crate::hook::rewrite) fn build_operation_reply_rewrite(
         }
         ParsedOperationRequest::Abort => match backend.r#abort() {
             Ok(()) => {
-                forget_operation_target(pending.target);
+                finalize(None);
                 parcel::build_void_reply()?
             }
             Err(status) => {
                 if operation_error_finalizes(&status) {
-                    mark_operation_target_finalized(pending.target);
+                    finalize(Some(&status));
                 }
                 build_omk_status_reply(&status)?
             }
         },
     };
 
-    Ok(Some(reply))
+    Ok(reply)
 }
-
-#[cfg(test)]
-mod tests;

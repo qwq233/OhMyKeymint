@@ -1,3 +1,4 @@
+use super::{parse_typed_request, RequestEnvelope};
 use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
 use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
 use crate::android::hardware::security::keymint::Tag::Tag;
@@ -16,7 +17,8 @@ use crate::identify::{
 };
 use anyhow::{bail, Result};
 
-use super::{parse_typed_request, RequestEnvelope};
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone)]
 pub enum ParsedAuthorizationRequest {
@@ -625,6 +627,3 @@ pub unsafe fn parse_operation_request(
         OperationMethod::Abort => ParsedOperationRequest::Abort,
     })
 }
-
-#[cfg(test)]
-mod tests;

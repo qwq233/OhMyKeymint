@@ -1529,43 +1529,21 @@ impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ConfigFile, ResolvedTrust, TrustValueSource};
-    use std::sync::Once;
+    use crate::keymaster::keymint_device::tests as keymint_tests;
     use tempfile::TempDir;
 
-    static CONFIG_INIT: Once = Once::new();
-
-    fn install_test_config() {
-        CONFIG_INIT.call_once(|| {
-            crate::config::install_runtime_config(
-                ConfigFile::default(),
-                ResolvedTrust {
-                    os_version: 16,
-                    security_patch: "2025-06-05".to_string(),
-                    os_patchlevel: "2025-06-05".to_string(),
-                    vendor_patchlevel: "2025-06-05".to_string(),
-                    boot_patchlevel: "2025-06-05".to_string(),
-                    vb_key: [0; 32],
-                    vb_hash: [0; 32],
-                    vb_key_source: TrustValueSource::ExplicitHex,
-                    vb_hash_source: TrustValueSource::ExplicitHex,
-                    verified_boot_state: true,
-                    device_locked: true,
-                },
-            )
-            .unwrap();
-        });
-    }
-
     fn test_security_level() -> (TempDir, KeystoreSecurityLevel) {
-        crate::keymaster::utils::init_test_logging();
-        install_test_config();
+        crate::keymaster::utils::tests::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
-        let security_level = KeystoreSecurityLevel::new(
-            SecurityLevel::TRUSTED_ENVIRONMENT,
-            IdRotationState::new(temp_dir.path()),
-        )
-        .unwrap();
+        let keymint = keymint_tests::wrapper(keymint_tests::test_ta());
+        let hw_info = keymint.getHardwareInfo().unwrap();
+        let security_level = KeystoreSecurityLevel {
+            security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
+            keymint,
+            hw_info,
+            operation_db: OperationDb::new(),
+            id_rotation_state: IdRotationState::new(temp_dir.path()),
+        };
         (temp_dir, security_level)
     }
 

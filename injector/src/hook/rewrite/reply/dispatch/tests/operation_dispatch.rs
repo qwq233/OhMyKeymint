@@ -19,7 +19,7 @@ fn synthetic_operation_missing_args_keep_not_enough_data_status() {
         OperationTargetInfo {
             route: RouteTarget::Omk,
             aad_allowed: true,
-            backend: Some(backend),
+            backend: Some(Arc::new(backend)),
             finalized: false,
         },
     );
@@ -48,6 +48,7 @@ fn synthetic_operation_missing_args_keep_not_enough_data_status() {
                 pid: 2000,
             }),
             native_generation: None,
+            operation: None,
         };
 
         let reply = unsafe {
@@ -82,7 +83,7 @@ fn synthetic_operation_trailing_abort_finalizes_operation() {
         OperationTargetInfo {
             route: RouteTarget::Omk,
             aad_allowed: true,
-            backend: Some(backend),
+            backend: Some(Arc::new(backend)),
             finalized: false,
         },
     );
@@ -102,6 +103,7 @@ fn synthetic_operation_trailing_abort_finalizes_operation() {
             pid: 2000,
         }),
         native_generation: None,
+        operation: None,
     };
 
     let reply =
@@ -134,7 +136,7 @@ fn synthetic_operation_bad_interface_marker_rejects_abort() {
         OperationTargetInfo {
             route: RouteTarget::Omk,
             aad_allowed: true,
-            backend: Some(backend),
+            backend: Some(Arc::new(backend)),
             finalized: false,
         },
     );
@@ -153,6 +155,7 @@ fn synthetic_operation_bad_interface_marker_rejects_abort() {
             pid: 2000,
         }),
         native_generation: None,
+        operation: None,
     };
 
     let reply =
@@ -207,7 +210,7 @@ fn synthetic_operation_dispatch_uses_registered_caller_identity() {
             OperationTargetInfo {
                 route: RouteTarget::Omk,
                 aad_allowed: true,
-                backend: Some(backend),
+                backend: Some(Arc::new(backend)),
                 finalized: false,
             },
         );
@@ -233,6 +236,7 @@ fn synthetic_operation_dispatch_uses_registered_caller_identity() {
                 pid: 2000,
             }),
             native_generation: None,
+            operation: None,
         };
 
         let reply = unsafe {
@@ -309,6 +313,7 @@ fn synthetic_unexpected_null_parse_errors_are_status_replies() {
             pid: 2000,
         }),
         native_generation: None,
+        operation: None,
     };
     for length in [-1i32, -2i32] {
         let mut invalid_input_request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
@@ -350,6 +355,7 @@ fn synthetic_unexpected_null_parse_errors_are_status_replies() {
                 kind: SyntheticTargetKind::SecurityLevel,
                 caller: None,
                 native_generation: None,
+                operation: None,
             },
             None,
             "BR_TRANSACTION",
@@ -381,6 +387,7 @@ fn synthetic_operation_unexpected_interface_returns_bad_type_status() {
             pid: 2000,
         }),
         native_generation: None,
+        operation: None,
     };
 
     let reply =

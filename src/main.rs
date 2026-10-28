@@ -170,6 +170,7 @@ fn create_rpc_server() -> Result<Arc<RpcServer>> {
     let server = server.context("failed to bind OMK RPC socket")?;
     clear_result?;
     server.set_android13plus(rpc::WIRE_MAX_VERSION);
+    server.set_max_threads(num_cpus::get() as u32);
     std::fs::set_permissions(rpc::SOCKET, std::fs::Permissions::from_mode(0o660))
         .context("failed to chmod OMK RPC socket")?;
 

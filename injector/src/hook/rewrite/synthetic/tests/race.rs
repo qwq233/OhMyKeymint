@@ -14,6 +14,7 @@ fn stale_operation_retirement_does_not_remove_reused_target_generation() {
                 kind: SyntheticTargetKind::Operation,
                 caller: None,
                 native_generation: Some(first.generation),
+                operation: None,
             },
         );
     drop_synthetic_operation_retirement(first);
@@ -40,6 +41,7 @@ fn stale_operation_retirement_does_not_remove_reused_target_generation() {
                 kind: SyntheticTargetKind::Operation,
                 caller: None,
                 native_generation: Some(second.generation),
+                operation: None,
             },
         );
     mark_operation_publication_completed(second, binder_token(15));

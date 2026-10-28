@@ -1,24 +1,21 @@
 use super::*;
 
-mod read;
-mod write;
-
-#[cfg(test)]
-mod test_support;
-
 use read::{
     complete_operation_acquire, complete_operation_publication, record_transaction_completion,
 };
-#[cfg(test)]
-use read::{complete_transaction_submission, observe_operation_acquire};
 pub(in crate::hook::intercept) use read::{flush_native_binder_lifecycle, parse_read_buffer};
 use write::{
     abort_prepared_bc_replies, complete_prepared_bc_reply, mark_inbound_free_buffers_consumed,
-    parse_write_buffer, rewrite_inbound_free_buffers, write_buffer_is_safe_to_intercept,
+    parse_prepared_write_buffer, prepare_write_buffer, rewrite_inbound_free_buffers,
 };
 pub(in crate::hook::intercept) use write::{
     abort_prepared_bc_replies_for_connection, complete_inbound_free_buffers,
 };
+
+mod read;
+#[cfg(test)]
+mod tests;
+mod write;
 
 pub(in crate::hook) unsafe fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_void) -> c_int {
     let mut old_ioctl_ptr = OLD_IOCTL.load(Ordering::Relaxed);
@@ -113,8 +110,11 @@ pub(in crate::hook) unsafe fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_v
         for (end, _) in &mut freed_inbound_shadows {
             *end += input_write_consumed;
         }
-        if write_buffer_is_safe_to_intercept(&host_write) {
-            completion_commands = parse_write_buffer(fd, &mut host_write);
+        if let Some(mut prepared) =
+            prepare_write_buffer(fd, &host_write, /* inspect_all= */ false)
+        {
+            completion_commands =
+                parse_prepared_write_buffer(fd, &mut host_write, Some(&mut prepared));
             for (end, _, _, _) in &mut completion_commands {
                 *end += input_write_consumed;
             }
@@ -285,6 +285,3 @@ pub(in crate::hook) unsafe fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_v
     *libc::__errno() = ioctl_errno;
     ret
 }
-
-#[cfg(test)]
-mod tests;

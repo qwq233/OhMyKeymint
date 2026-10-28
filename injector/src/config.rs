@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
+#[cfg(test)]
+mod tests;
+
 pub const DEFAULT_CONFIG_PATH: &str = "/data/misc/keystore/omk/injector.toml";
 const CURRENT_CONFIG_VERSION: u32 = 1;
 const REPLACE_SAVE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
@@ -377,11 +380,6 @@ fn render_config(config: &InjectorConfig) -> io::Result<String> {
     Ok(contents)
 }
 
-#[cfg(test)]
-fn parse_config(contents: &str) -> Result<InjectorConfig, String> {
-    parse_versioned_config(contents, true).map(|(config, _)| config)
-}
-
 fn parse_versioned_config(
     contents: &str,
     allow_migration: bool,
@@ -543,11 +541,14 @@ fn reload_runtime_config(path: &Path, trigger: WatchTrigger) {
         return;
     };
     if let Some(lock) = CONFIG.get() {
+        let level = config.main.log_level_filter();
+        let next = Arc::new(config);
         match lock.write() {
             Ok(mut guard) => {
-                let level = config.main.log_level_filter();
-                *guard = Arc::new(config);
+                let previous = std::mem::replace(&mut *guard, next);
                 log::set_max_level(level);
+                drop(guard);
+                drop(previous);
                 log::info!(
                     "reloaded config from {} via {}",
                     path.display(),
@@ -623,6 +624,3 @@ impl InjectorConfig {
         self
     }
 }
-
-#[cfg(test)]
-mod tests;

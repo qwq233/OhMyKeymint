@@ -1,14 +1,15 @@
+use crate::sys;
+use anyhow::{anyhow, bail, Context, Result};
+use log::{debug, info};
+use nix::unistd::Pid;
+use rand::TryRng;
 use std::ffi::{c_void, CString};
 use std::mem::{offset_of, size_of};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Context, Result};
-use log::{debug, info};
-use nix::unistd::Pid;
-use rand::TryRng;
-
-use crate::sys;
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Copy)]
 pub(super) struct RemoteFdHandoffAddrs {
@@ -585,6 +586,3 @@ where
     }
     Ok(fd)
 }
-
-#[cfg(test)]
-mod tests;

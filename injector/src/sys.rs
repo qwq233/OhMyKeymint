@@ -1,5 +1,3 @@
-use std::ffi::c_void;
-
 use anyhow::{anyhow, bail, Context, Result};
 use libc::iovec;
 use log::{debug, error, trace, warn};
@@ -8,6 +6,10 @@ use nix::{
     sys::wait::{WaitPidFlag, WaitStatus},
     unistd::Pid,
 };
+use std::ffi::c_void;
+
+#[cfg(test)]
+mod tests;
 
 #[cfg(any(
     target_arch = "aarch64",
@@ -579,6 +581,3 @@ pub fn remote_call(
     let session = remote_pre_call(pid, func_addr, return_addr, args)?;
     remote_post_call(pid, session)
 }
-
-#[cfg(test)]
-mod tests;

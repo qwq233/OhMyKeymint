@@ -1,28 +1,21 @@
-mod payload_fd;
-
-use std::ffi::{c_void, CString};
-use std::os::fd::AsRawFd;
-use std::path::Path;
-use std::thread;
-use std::time::{Duration, Instant};
-
+use crate::sys::wait_pid;
+use crate::{sys, utils};
 use anyhow::{anyhow, bail, Context, Result};
-use kmr_common::{rpc, selinux};
+use kmr_common::selinux;
 use log::{debug, error, info, warn};
 use nix::{sys::signal::Signal, unistd::Pid};
-use rand::TryRng;
-
 use payload_fd::{
     log_loader_abi, open_remote_payload_fd_from_path, send_fd_to_remote, RemoteFdHandoffAddrs,
 };
+use rand::TryRng;
+use std::ffi::{c_void, CString};
+use std::os::fd::AsRawFd;
+use std::path::Path;
 
-use crate::sys::wait_pid;
-use crate::{sys, utils};
+mod payload_fd;
 
 const ANDROID_DLEXT_USE_LIBRARY_FD: u64 = 0x10;
 const REMOTE_PAYLOAD_STATE_PATH: &str = "/data/adb/omk/injector.payload";
-const READY_TIMEOUT: Duration = Duration::from_secs(10);
-const READY_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 #[repr(C)]
 struct android_dlextinfo {
@@ -80,22 +73,7 @@ fn persist_remote_payload_state(pid: Pid, payload_identifier: &str) -> Result<()
     Ok(())
 }
 
-fn wait_for_rpc_socket() -> Result<()> {
-    let start = Instant::now();
-
-    while start.elapsed() < READY_TIMEOUT {
-        if Path::new(rpc::SOCKET).exists() {
-            return Ok(());
-        }
-        thread::sleep(READY_RETRY_DELAY);
-    }
-
-    bail!("OMK RPC socket did not appear in time");
-}
-
 pub fn inject_library(pid: Pid) -> Result<()> {
-    wait_for_rpc_socket()?;
-
     let self_path = utils::current_exe_path()?;
 
     nix::sys::ptrace::attach(pid).with_context(|| format!("Failed to attach to process {pid}"))?;

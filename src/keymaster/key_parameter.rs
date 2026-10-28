@@ -113,18 +113,6 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-mod generated_key_parameter_tests;
-
-#[cfg(test)]
-mod basic_tests;
-
-#[cfg(test)]
-mod storage_tests;
-
-#[cfg(test)]
-mod wire_tests;
-
 /// This trait is used to associate a primitive to any type that can be stored inside a
 /// KeyParameterValue, especially the AIDL enum types, e.g., keymint::{Algorithm, Digest, ...}.
 /// This allows for simplifying the macro rules, e.g., for reading from the SQL database.
@@ -796,21 +784,31 @@ macro_rules! implement_key_parameter_value {
             implement_new_from_sql!($enum_name; $($vname$(($vtype))? $tag_name),*);
             implement_get_tag!($enum_name; $($vname$(($vtype))? $tag_name),*);
             implement_from_tag_primitive_pair!($enum_name; $($vname$(($vtype))? $tag_name),*);
+        }
 
-            #[cfg(test)]
-            fn make_field_matches_tag_type_test_vector() -> Vec<KmKeyParameter> {
-                vec![$(KmKeyParameter{
-                    tag: Tag::$tag_name,
-                    value: KmKeyParameterValue::$field_name(Default::default())}
-                ),*]
-            }
+        #[cfg(test)]
+        mod tests {
+            use super::*;
 
-            #[cfg(test)]
-            fn make_key_parameter_defaults_vector() -> Vec<KeyParameter> {
-                vec![$(KeyParameter{
-                    value: KeyParameterValue::$vname$((<$vtype as Default>::default()))?,
-                    security_level: SecurityLevel(100),
-                }),*]
+            mod basic_tests;
+            mod generated_key_parameter_tests;
+            mod storage_tests;
+            mod wire_tests;
+
+            impl $enum_name {
+                fn make_field_matches_tag_type_test_vector() -> Vec<KmKeyParameter> {
+                    vec![$(KmKeyParameter{
+                        tag: Tag::$tag_name,
+                        value: KmKeyParameterValue::$field_name(Default::default())}
+                    ),*]
+                }
+
+                fn make_key_parameter_defaults_vector() -> Vec<KeyParameter> {
+                    vec![$(KeyParameter{
+                        value: KeyParameterValue::$vname$((<$vtype as Default>::default()))?,
+                        security_level: SecurityLevel(100),
+                    }),*]
+                }
             }
         }
 

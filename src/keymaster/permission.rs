@@ -40,9 +40,7 @@ use std::sync::{LazyLock, OnceLock};
 #[cfg(not(test))]
 use crate::selinux::getcon;
 #[cfg(test)]
-fn getcon() -> anyhow::Result<selinux::Context> {
-    selinux::Context::new("u:object_r:keystore:s0")
-}
+use tests::{getcon, keystore_target_context};
 
 // Panicking here is allowed because keystore cannot function without this backend
 // and it would happen early and indicate a gross misconfiguration of the device.
@@ -78,11 +76,6 @@ fn runtime_service_context() -> Option<&'static str> {
 #[cfg(not(test))]
 fn keystore_target_context() -> anyhow::Result<selinux::Context> {
     selinux::Context::new(AOSP_KEYSTORE_TARGET_CONTEXT)
-}
-
-#[cfg(test)]
-fn keystore_target_context() -> anyhow::Result<selinux::Context> {
-    getcon()
 }
 
 fn sid_matches_context(sid: &CStr, context: &str) -> bool {
@@ -732,6 +725,15 @@ mod tests {
         android_permission_check_path, sid_matches_context, trusted_forwarding_sid,
         AndroidPermissionCheckPath,
     };
+    use crate::selinux;
+
+    pub(super) fn getcon() -> anyhow::Result<selinux::Context> {
+        selinux::Context::new("u:object_r:keystore:s0")
+    }
+
+    pub(super) fn keystore_target_context() -> anyhow::Result<selinux::Context> {
+        getcon()
+    }
 
     #[test]
     fn android_permission_path_uses_legacy_controller_before_android_15() {

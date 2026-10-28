@@ -110,11 +110,10 @@ fn no_carrier_create_operation_registers_native_mapping_and_caller() {
         lookup_synthetic_target(target),
         Some(SyntheticTargetKind::Operation)
     );
-    let target_info =
-        lookup_operation_target(target).expect("synthetic operation target should be tracked");
-    assert_eq!(target_info.route, RouteTarget::Omk);
+    let target_info = lookup_native_operation_state(target)
+        .expect("synthetic operation target should be tracked");
     assert!(target_info.aad_allowed);
-    assert!(target_info.backend.is_some());
+    assert!(!target_info.is_finalized());
     let synthetic_info =
         lookup_synthetic_target_info(target).expect("synthetic target should be tracked");
     let synthetic_caller = synthetic_info
@@ -140,6 +139,7 @@ fn synthetic_operation_carrier_forwards_update() {
             pid: 2000,
         },
         target,
+        route: RouteTarget::Omk,
     })
     .expect("synthetic update rewrite should succeed")
     .expect("synthetic update should return an OMK-owned reply");
@@ -162,6 +162,7 @@ fn synthetic_operation_abort_keeps_tombstone_returning_invalid_handle() {
             pid: 2000,
         },
         target,
+        route: RouteTarget::Omk,
     })
     .expect("synthetic abort rewrite should succeed")
     .expect("synthetic abort should return an OMK-owned reply");
@@ -170,7 +171,9 @@ fn synthetic_operation_abort_keeps_tombstone_returning_invalid_handle() {
         .expect("synthetic abort reply should deserialize");
     assert!(status.is_ok());
     assert_eq!(aborts.load(Ordering::SeqCst), 1);
-    assert!(lookup_operation_target(target).is_none());
+    assert!(lookup_native_operation_state(target)
+        .unwrap()
+        .is_finalized());
     assert_eq!(
         lookup_synthetic_target(target),
         Some(SyntheticTargetKind::Operation)
@@ -186,6 +189,7 @@ fn synthetic_operation_abort_keeps_tombstone_returning_invalid_handle() {
             pid: 2000,
         },
         target,
+        route: RouteTarget::Omk,
     })
     .expect("stale synthetic update rewrite should succeed")
     .expect("stale synthetic update should return a native-style error");
@@ -276,7 +280,7 @@ fn synthetic_operation_release_aborts_once_and_clears_mapping() {
         .expect("operation carrier should register");
     let target = carrier_target(&carrier);
 
-    assert!(lookup_operation_target(target).is_some());
+    assert!(lookup_native_operation_state(target).is_some());
     assert_eq!(
         lookup_synthetic_target(target),
         Some(SyntheticTargetKind::Operation)
@@ -285,7 +289,7 @@ fn synthetic_operation_release_aborts_once_and_clears_mapping() {
     observe_synthetic_operation_release(target);
     assert_eq!(aborts.load(Ordering::SeqCst), 1);
     assert!(
-        lookup_operation_target(target).is_none(),
+        lookup_native_operation_state(target).is_none(),
         "release should clear the live operation mapping"
     );
     assert!(lookup_synthetic_target(target).is_none());

@@ -27,7 +27,7 @@ fn omk_grant_blocker_preserves_inbound_binder_buffer() {
 }
 
 #[test]
-fn grant_and_ungrant_preserve_system_only_when_omk_unavailable() {
+fn grant_and_ungrant_return_system_error_when_omk_unavailable() {
     let _guard = route_state_test_guard();
     let request = ParsedServiceRequest::Grant {
         key: sample_key_descriptor(),
@@ -47,7 +47,13 @@ fn grant_and_ungrant_preserve_system_only_when_omk_unavailable() {
         |_, _, _| panic!("grant requests must not call ungrant"),
     );
 
-    assert!(matches!(result, OmkServicePrecompute::PreserveSystem));
+    let PrecomputedServiceReply::Error(status) = result else {
+        panic!("OMK transport failure must return an error");
+    };
+    assert_eq!(
+        status.service_specific_error(),
+        ResponseCode::SYSTEM_ERROR.0
+    );
 
     let request = ParsedServiceRequest::Ungrant {
         key: sample_key_descriptor(),
@@ -66,7 +72,13 @@ fn grant_and_ungrant_preserve_system_only_when_omk_unavailable() {
         |_, _, _| Err(anyhow::Error::new(Status::from(StatusCode::NotEnoughData))),
     );
 
-    assert!(matches!(result, OmkServicePrecompute::PreserveSystem));
+    let PrecomputedServiceReply::Error(status) = result else {
+        panic!("OMK transport failure must return an error");
+    };
+    assert_eq!(
+        status.service_specific_error(),
+        ResponseCode::SYSTEM_ERROR.0
+    );
 }
 
 #[test]
@@ -93,7 +105,7 @@ fn grant_precompute_returns_reachable_omk_business_error() {
         |_, _, _| panic!("grant requests must not call ungrant"),
     );
 
-    let OmkServicePrecompute::Reply(PrecomputedServiceReply::Error(status)) = result else {
+    let PrecomputedServiceReply::Error(status) = result else {
         panic!("reachable OMK business error should be precomputed as an authoritative status");
     };
     assert_eq!(
@@ -110,7 +122,7 @@ fn service_route_respects_intercept_configuration() {
 
     for request in sample_service_requests() {
         assert_eq!(
-            route_for_service_request(&request, &intercept),
+            route_for_service_request(&request, true, &intercept),
             RouteTarget::Omk,
             "{:?} should use the OMK backend when the method is enabled",
             request.method()
@@ -121,7 +133,7 @@ fn service_route_respects_intercept_configuration() {
 
     for request in sample_service_requests() {
         assert_eq!(
-            route_for_service_request(&request, &intercept),
+            route_for_service_request(&request, true, &intercept),
             RouteTarget::System,
             "{:?} should use the system backend when the method is disabled",
             request.method()
@@ -139,178 +151,29 @@ fn service_route_respects_intercept_configuration() {
 }
 
 #[test]
-fn service_route_uses_omk_for_key_id() {
-    let key = KeyDescriptor {
-        domain: Domain::KEY_ID,
-        nspace: 123,
-        alias: None,
-        blob: None,
-    };
-
-    assert_eq!(
-        route_for_service_request(
-            &ParsedServiceRequest::GetKeyEntry { key },
-            &config::InterceptConfig::default(),
-        ),
-        RouteTarget::Omk
-    );
-}
-
-#[test]
-fn unconfirmed_grant_readback_stays_rejected() {
-    let _guard = route_state_test_guard();
-    let decision = crate::filter::FilterDecision {
-        allowed: false,
-        reason: crate::filter::FilterReason::RejectedNotInScope,
-        packages: vec!["com.grantee".to_string()],
-    };
-    let caller = CallerInfo {
-        uid: 10002,
-        sid: String::new(),
-        pid: 2000,
-    };
-    let grant = KeyDescriptor {
-        domain: Domain::GRANT,
-        nspace: 123,
-        alias: None,
-        blob: None,
-    };
-
-    assert!(!should_allow_omk_grant_service_request_with_probe(
-        &ParsedServiceRequest::GetKeyEntry { key: grant },
-        &decision,
-        &caller,
-        |_, _| Ok(false),
-    )
-    .expect("unconfirmed grant lookup should succeed"));
-    assert!(!should_allow_omk_grant_service_request_with_probe(
-        &ParsedServiceRequest::GetKeyEntry {
-            key: sample_key_descriptor(),
-        },
-        &decision,
-        &caller,
-        |_, _| -> anyhow::Result<bool> { panic!("non-GRANT descriptors must not be probed") },
-    )
-    .expect("non-GRANT lookup should succeed"));
-}
-
-#[test]
-fn soft_rejected_grant_probe_error_is_fail_closed() {
-    let _guard = route_state_test_guard();
-    let grant = KeyDescriptor {
-        domain: Domain::GRANT,
-        nspace: 123,
-        alias: None,
-        blob: None,
-    };
-    let decision = crate::filter::FilterDecision {
-        allowed: false,
-        reason: crate::filter::FilterReason::RejectedUnknownPackage,
-        packages: vec![],
-    };
-    let caller = CallerInfo {
-        uid: 10002,
-        sid: String::new(),
-        pid: 2000,
-    };
-
-    let error = should_allow_omk_grant_service_request_with_probe(
-        &ParsedServiceRequest::GetKeyEntry { key: grant },
-        &decision,
-        &caller,
-        |_, _| Err(anyhow::anyhow!("reachable probe failure")),
-    )
-    .expect_err("non-unavailable probe errors must block System fallback");
-
-    assert!(error.to_string().contains("reachable probe failure"));
-}
-
-#[test]
-fn soft_rejected_grant_positive_probe_works_for_service_and_security_level() {
-    let _guard = route_state_test_guard();
-    let grant = KeyDescriptor {
-        domain: Domain::GRANT,
-        nspace: 123,
-        alias: None,
-        blob: None,
-    };
-    let decision = crate::filter::FilterDecision {
-        allowed: false,
-        reason: crate::filter::FilterReason::RejectedUnknownPackage,
-        packages: vec![],
-    };
-    let caller = CallerInfo {
-        uid: 10002,
-        sid: String::new(),
-        pid: 2000,
-    };
-
-    assert!(should_allow_omk_grant_service_request_with_probe(
-        &ParsedServiceRequest::GetKeyEntry { key: grant.clone() },
-        &decision,
-        &caller,
-        |probe_caller, probe_grant| {
-            assert_eq!(probe_caller.uid, caller.uid);
-            assert_eq!(probe_grant, &grant);
-            Ok(true)
-        },
-    )
-    .expect("positive grant probe should succeed"));
-
-    let grant = KeyDescriptor {
-        domain: Domain::GRANT,
-        nspace: 321,
-        alias: None,
-        blob: None,
-    };
-    let decision = crate::filter::FilterDecision {
-        allowed: false,
-        reason: crate::filter::FilterReason::RejectedNotInScope,
-        packages: vec!["com.grantee".to_string()],
-    };
-
-    assert!(should_allow_omk_grant_security_level_request_with_probe(
-        &ParsedSecurityLevelRequest::CreateOperation {
-            key: grant.clone(),
-            operation_parameters: vec![],
-            forced: false,
-        },
-        &decision,
-        &caller,
-        |probe_caller, probe_grant| {
-            assert_eq!(probe_caller.uid, caller.uid);
-            assert_eq!(probe_grant, &grant);
-            Ok(true)
-        },
-    )
-    .expect("positive grant probe should succeed"));
-}
-
-#[test]
-fn denylisted_grant_readback_does_not_probe_omk() {
-    let _guard = route_state_test_guard();
-    let grant = KeyDescriptor {
-        domain: Domain::GRANT,
-        nspace: 123,
-        alias: None,
-        blob: None,
-    };
-    let decision = crate::filter::FilterDecision {
-        allowed: false,
-        reason: crate::filter::FilterReason::RejectedByDenylist,
-        packages: vec!["com.blocked".to_string()],
-    };
-    let caller = CallerInfo {
-        uid: 10002,
-        sid: String::new(),
-        pid: 2000,
-    };
-
-    assert!(!should_allow_omk_grant_service_request_with_probe(
-        &ParsedServiceRequest::GetKeyEntry { key: grant },
-        &decision,
-        &caller,
-        |_, _| -> anyhow::Result<bool> { panic!("denylisted callers must not probe OMK grants") },
-    )
-    .expect("denylisted grant lookup should succeed"));
+fn descriptor_domain_does_not_bypass_scope_or_intercept() {
+    for domain in [Domain::APP, Domain::KEY_ID, Domain::GRANT] {
+        let request = ParsedServiceRequest::GetKeyEntry {
+            key: KeyDescriptor {
+                domain,
+                nspace: 123,
+                alias: None,
+                blob: None,
+            },
+        };
+        for allowed in [false, true] {
+            for enabled in [false, true] {
+                let mut intercept = disabled_intercept_config();
+                intercept.get_key_entry = enabled;
+                assert_eq!(
+                    route_for_service_request(&request, allowed, &intercept),
+                    if allowed && enabled {
+                        RouteTarget::Omk
+                    } else {
+                        RouteTarget::System
+                    }
+                );
+            }
+        }
+    }
 }

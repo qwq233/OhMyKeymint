@@ -109,10 +109,7 @@ pub extern "C" fn entry(handle: *const c_void) -> bool {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string()),
     );
-    if let Err(error) = ipc::install_direct_rpc_session() {
-        error!("failed to initialize OMK RPC session: {error:#}");
-        return false;
-    }
+    ipc::ensure_process_state();
     if let Err(error) = hook::init_hook() {
         error!("failed to initialize binder ioctl hook: {error:#}");
         return false;

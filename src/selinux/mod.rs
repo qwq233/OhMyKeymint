@@ -35,12 +35,12 @@ use std::os::raw::c_char;
 use std::ptr;
 use std::sync;
 
-mod sys;
-
 use self::sys as selinux;
 pub use selinux::pid_t;
 use selinux::SELABEL_CTX_ANDROID_KEYSTORE2_KEY;
 use selinux::SELINUX_CB_LOG;
+
+mod sys;
 
 static SELINUX_LOG_INIT: sync::Once = sync::Once::new();
 

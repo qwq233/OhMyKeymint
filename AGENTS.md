@@ -128,6 +128,10 @@
   cargo test --target aarch64-linux-android --workspace --no-run
   ```
 
+- Always follow [Rust Style Guide](https://doc.rust-lang.org/style-guide/index.html)
+  and [Google Style Guides](https://google.github.io/styleguide/rustguide.html). Prefer Google's
+  style if there's any conflicts.
+
 - When an authorized aarch64 Android device is available, execute every generated workspace test
   binary on-device. If the device is unavailable, report that the device gate was not run; do not
   present host-side compilation as full validation. Documentation-only changes do not require code

@@ -58,7 +58,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Newtype holding an integer that represents an Android user ID, corresponding to a user/human
 /// profile (i.e. *not* to a specific UNIX uid assigned to a particular app).
@@ -996,40 +996,6 @@ pub const AID_USER_OFFSET: u32 = user_utils::AID_USER_OFFSET;
 /// keystore generates for its own use.
 pub const AID_KEYSTORE: AppUid = AppUid(RAW_AID_KEYSTORE as i64);
 
-/// Merges and filters two lists of key descriptors. The first input list, legacy_descriptors,
-/// is assumed to not be sorted or filtered. As such, all key descriptors in that list whose
-/// alias is less than, or equal to, start_past_alias (if provided) will be removed.
-/// This list will then be merged with the second list, db_descriptors. The db_descriptors list
-/// is assumed to be sorted and filtered so the output list will be sorted prior to returning.
-/// The returned value is a list of KeyDescriptor objects whose alias is greater than
-/// start_past_alias, sorted and de-duplicated.
-#[cfg(test)]
-fn merge_and_filter_key_entry_lists(
-    legacy_descriptors: &[KeyDescriptor],
-    db_descriptors: &[KeyDescriptor],
-    start_past_alias: Option<&str>,
-) -> Vec<KeyDescriptor> {
-    let mut result: Vec<KeyDescriptor> = match start_past_alias {
-        Some(past_alias) => legacy_descriptors
-            .iter()
-            .filter(|kd| {
-                if let Some(alias) = &kd.alias {
-                    alias.as_str() > past_alias
-                } else {
-                    false
-                }
-            })
-            .cloned()
-            .collect(),
-        None => legacy_descriptors.to_vec(),
-    };
-
-    result.extend_from_slice(db_descriptors);
-    result.sort_unstable();
-    result.dedup();
-    result
-}
-
 pub(crate) fn estimate_safe_amount_to_return(
     domain: Domain,
     namespace: i64,
@@ -1482,24 +1448,4 @@ pub fn self_renice(niceness: i32) {
         info!("setting niceness {niceness} from current {current}");
         setpriority(niceness)
     }
-}
-
-/// Enable logging in unit tests.
-#[cfg(test)]
-pub fn init_test_logging() {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_tag("keystore2_test")
-            .with_max_level(log::LevelFilter::Debug),
-    );
-}
-
-/// Enable logging in unit tests at a specific level
-#[cfg(test)]
-pub fn init_test_logging_at(max_level: log::LevelFilter) {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_tag("keystore2_test")
-            .with_max_level(max_level),
-    );
 }

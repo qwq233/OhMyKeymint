@@ -5,6 +5,9 @@ use crate::android::system::keystore2::IKeystoreSecurityLevel::transactions as s
 use crate::android::system::keystore2::IKeystoreService::transactions as service_tx;
 use crate::config::InterceptConfig;
 
+#[cfg(test)]
+mod tests;
+
 pub const KEYSTORE_AUTHORIZATION_INTERFACE: &str =
     "android.security.authorization.IKeystoreAuthorization";
 pub const KEYSTORE_MAINTENANCE_INTERFACE: &str =
@@ -292,6 +295,3 @@ pub fn is_omk_service_route_enabled(method: ServiceMethod, intercept: &Intercept
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

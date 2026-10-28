@@ -1,11 +1,4 @@
-use std::mem::size_of;
-
-use anyhow::{anyhow, bail, Context, Result};
-use rsbinder::{
-    Deserialize, FromIBinder, Parcel, Serialize, SerializeOption, Status, StatusCode, Strong,
-    NON_NULL_PARCELABLE_FLAG,
-};
-
+use super::parcel_from_ipc_parts;
 use crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse;
 use crate::android::system::keystore2::IKeystoreOperation::IKeystoreOperation;
 use crate::android::system::keystore2::IKeystoreSecurityLevel::IKeystoreSecurityLevel;
@@ -17,8 +10,15 @@ use crate::hook::binder::{
     NativeBinderRetirement, BINDER_TYPE_BINDER, BINDER_TYPE_HANDLE, BINDER_TYPE_WEAK_BINDER,
     BINDER_TYPE_WEAK_HANDLE,
 };
+use anyhow::{anyhow, bail, Context, Result};
+use rsbinder::{
+    Deserialize, FromIBinder, Parcel, Serialize, SerializeOption, Status, StatusCode, Strong,
+    NON_NULL_PARCELABLE_FLAG,
+};
+use std::mem::size_of;
 
-use super::parcel_from_ipc_parts;
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug)]
 pub struct OwnedReply {
@@ -345,12 +345,16 @@ pub fn build_create_operation_reply_with_carrier_bytes(
 }
 
 pub fn build_plain_reply<T: Serialize>(value: &T) -> Result<OwnedReply> {
-    let mut parcel = Parcel::new();
-    parcel.write(&Status::from(StatusCode::Ok))?;
-    parcel.write(value)?;
-    let data = parcel_bytes(&mut parcel)?;
+    struct PlainReply<'a, T>(&'a T);
+    impl<T: Serialize> Serialize for PlainReply<'_, T> {
+        fn serialize(&self, parcel: &mut Parcel) -> rsbinder::Result<()> {
+            parcel.write(&Status::from(StatusCode::Ok))?;
+            parcel.write(self.0)
+        }
+    }
+    let data = rsbinder::to_bytes(&PlainReply(value))?;
     Ok(owned_reply_from_bytes(
-        parcel,
+        Parcel::with_capacity(0),
         data,
         std::iter::empty::<usize>(),
     ))
@@ -361,11 +365,9 @@ pub fn build_void_reply() -> Result<OwnedReply> {
 }
 
 pub fn build_status_reply(status: &Status) -> Result<OwnedReply> {
-    let mut parcel = Parcel::new();
-    parcel.write(status)?;
-    let data = parcel_bytes(&mut parcel)?;
+    let data = rsbinder::to_bytes(status)?;
     Ok(owned_reply_from_bytes(
-        parcel,
+        Parcel::with_capacity(0),
         data,
         std::iter::empty::<usize>(),
     ))
@@ -524,6 +526,3 @@ where
     let end = parcel.data_position();
     Ok((start, end))
 }
-
-#[cfg(test)]
-mod tests;

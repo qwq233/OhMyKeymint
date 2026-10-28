@@ -1,5 +1,8 @@
 use super::super::*;
 
+#[cfg(test)]
+mod tests;
+
 fn prepared_bc_reply(fd: c_int, reply_index: usize) -> Option<PreparedBcReply> {
     let connection = binder_state_key(fd);
     PREPARED_BC_REPLIES.with(|prepared| {
@@ -68,39 +71,81 @@ pub(in crate::hook::intercept) fn abort_prepared_bc_replies_for_connection(
     }
 }
 
-pub(super) unsafe fn write_buffer_is_safe_to_intercept(write: &[u8]) -> bool {
+pub(super) struct PreparedWrite {
+    reply_payloads: VecDeque<Option<TransactionPayloadShadow>>,
+    log_payloads: bool,
+}
+
+pub(super) unsafe fn prepare_write_buffer(
+    fd: c_int,
+    write: &[u8],
+    inspect_all: bool,
+) -> Option<PreparedWrite> {
+    let connection = binder_state_key(fd);
+    let log_payloads = log::log_enabled!(log::Level::Info);
+    let mut reply_payloads = VecDeque::new();
     let mut offset = 0usize;
+    let mut reply_count = 0usize;
+    let mut pending_index = 0usize;
     while offset < write.len() {
         if write.len() - offset < size_of::<u32>() {
-            return false;
+            return None;
         }
-        let cmd = std::ptr::read_unaligned(write.as_ptr().add(offset) as *const u32);
+        // SAFETY: The length check above covers the entire command word; read_unaligned
+        // does not require the byte buffer to be u32-aligned.
+        let cmd = unsafe { std::ptr::read_unaligned(write.as_ptr().add(offset) as *const u32) };
         offset += size_of::<u32>();
         let cmd_size = _ioc_size(cmd);
         if cmd_size > write.len() - offset {
-            return false;
+            return None;
         }
-        let command_end = offset + cmd_size;
-        let cmd_nr = _ioc_nr(cmd);
-        if _ioc_dir(cmd) == 1 && matches!(cmd_nr, BC_REPLY_NR | BC_REPLY_SG_NR) {
-            let expected_size = if cmd_nr == BC_REPLY_SG_NR {
+        if _ioc_dir(cmd) == 1 && matches!(_ioc_nr(cmd), BC_REPLY_NR | BC_REPLY_SG_NR) {
+            let expected_size = if _ioc_nr(cmd) == BC_REPLY_SG_NR {
                 size_of::<binder_transaction_data_sg>()
             } else {
                 size_of::<binder_transaction_data>()
             };
             if cmd_size != expected_size {
-                return false;
+                return None;
             }
-            let tr = std::ptr::read_unaligned(
-                write.as_ptr().add(offset) as *const binder_transaction_data
+            let prepared = prepared_bc_reply(fd, reply_count);
+            let tr = prepared.map_or_else(
+                || {
+                    // SAFETY: The size checks cover this integer-only ABI record, and
+                    // read_unaligned accepts the byte buffer.
+                    unsafe {
+                        std::ptr::read_unaligned(
+                            write.as_ptr().add(offset).cast::<binder_transaction_data>(),
+                        )
+                    }
+                },
+                |prepared| prepared.transaction,
             );
-            if TransactionPayloadShadow::read(&tr).is_none() {
-                return false;
+            let trusted = prepared.is_some()
+                || pending_reply_has_trusted_payload(connection, pending_index, &tr);
+            let needs_payload = inspect_all
+                || log_payloads
+                || !trusted
+                || prepared.is_none() && pending_reply_requires_payload(connection, pending_index);
+            let payload = if needs_payload {
+                // SAFETY: tr is initialized; read checks embedded addresses via process-copy
+                // operations instead of dereferencing them.
+                Some(unsafe { TransactionPayloadShadow::read(&tr) }?)
+            } else {
+                None
+            };
+            reply_payloads.push_back(payload);
+            reply_count += 1;
+            if prepared.is_none() {
+                pending_index += 1;
             }
         }
-        offset = command_end;
+        offset += cmd_size;
     }
-    true
+    Some(PreparedWrite {
+        reply_payloads,
+        log_payloads,
+    })
 }
 
 pub(super) unsafe fn rewrite_inbound_free_buffers(
@@ -178,9 +223,10 @@ pub(in crate::hook::intercept) fn complete_inbound_free_buffers(
     }
 }
 
-pub(super) unsafe fn parse_write_buffer(
+pub(super) unsafe fn parse_prepared_write_buffer(
     fd: c_int,
     write: &mut [u8],
+    mut preflight: Option<&mut PreparedWrite>,
 ) -> Vec<(usize, Option<usize>, bool, Option<NativeBinderRetirement>)> {
     let base = write.as_mut_ptr();
     let total_size = write.len();
@@ -234,23 +280,30 @@ pub(super) unsafe fn parse_write_buffer(
                         if let Some(prepared) = prepared {
                             tr = prepared.transaction;
                         }
-                        let mut shadow = None;
-                        let inspectable = if let Some(mut payload) =
+                        let log_payloads = preflight
+                            .as_ref()
+                            .map_or(log::log_enabled!(log::Level::Info), |prepared| {
+                                prepared.log_payloads
+                            });
+                        let mut shadow = if is_reply {
+                            match preflight.as_mut() {
+                                Some(prepared) => prepared
+                                    .reply_payloads
+                                    .pop_front()
+                                    .expect("prevalidated reply snapshot"),
+                                None => TransactionPayloadShadow::read(&tr),
+                            }
+                        } else if log_payloads {
                             TransactionPayloadShadow::read(&tr)
-                        {
-                            payload.install(&mut tr);
-                            shadow = Some(payload);
-                            true
                         } else {
-                            warn!(
-                                "event=binder skipped unsafe {} parcel fd={} data_size={} offsets_size={}",
-                                if is_reply { "reply" } else { "transaction" },
-                                fd,
-                                tr.data_size,
-                                tr.offsets_size
-                            );
-                            false
+                            None
                         };
+                        let original_payload_readable = shadow.is_some();
+                        let inspectable =
+                            original_payload_readable || is_reply && preflight.is_some();
+                        if let Some(shadow) = shadow.as_mut() {
+                            shadow.install(&mut tr);
+                        }
                         let label = match cmd_nr {
                             BC_TRANSACTION_NR => "BC_TRANSACTION",
                             BC_REPLY_NR => "BC_REPLY",
@@ -259,11 +312,15 @@ pub(super) unsafe fn parse_write_buffer(
                             _ => unreachable!(),
                         };
                         let frame_id = if is_reply && prepared.is_none() && inspectable {
-                            Some(handle_bc_reply(binder_state_key(fd), &mut tr))
+                            Some(handle_bc_reply(
+                                binder_state_key(fd),
+                                &mut tr,
+                                original_payload_readable,
+                            ))
                         } else {
                             None
                         };
-                        if inspectable {
+                        if log_payloads && original_payload_readable {
                             log_write_transaction(label, &tr);
                         }
                         if let Some(shadow) = shadow.as_ref() {
@@ -331,6 +388,3 @@ pub(super) unsafe fn parse_write_buffer(
 
     completion_commands
 }
-
-#[cfg(test)]
-mod tests;

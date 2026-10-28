@@ -1,7 +1,10 @@
+use crate::hook::intercept::tests::{
+    finish_local_operation_publication, register_operation_publication_for_test,
+    reset_binder_fd_for_test, route_state_test_guard, SYNTHETIC_REPLY_TEST_LOCK,
+};
 use std::sync::{Barrier, LazyLock};
 use std::time::Duration;
 
-use super::super::{reset_binder_fd_for_test, SYNTHETIC_REPLY_TEST_LOCK};
 use super::*;
 
 mod pinning;
@@ -43,4 +46,29 @@ fn publication_deadline_wait_does_not_need_an_ioctl_wakeup() {
         .expect("publication probe should be ready after its deadline");
     assert_eq!(probe.target, target);
     finish_local_operation_publication(retirement);
+}
+
+fn binder_fd_lifecycle(fd: c_int) -> Arc<BinderFdLifecycle> {
+    let mut registry = binder_fd_registry();
+    ensure_binder_fd_lifecycle(&mut registry, fd)
+}
+
+fn existing_binder_fd_lifecycle(fd: c_int) -> Option<Arc<BinderFdLifecycle>> {
+    binder_fd_registry().by_fd.get(&fd).cloned()
+}
+
+pub(in crate::hook::intercept) fn binder_fd_token_is_current(token: BinderFdToken) -> bool {
+    existing_binder_fd_lifecycle(token.fd).is_some_and(|lifecycle| {
+        lifecycle.connection == token.connection
+            && lifecycle
+                .state
+                .lock()
+                .expect("binder fd lifecycle poisoned")
+                .generation
+                == token.generation
+    })
+}
+
+pub(in crate::hook::intercept) fn invalidate_binder_fd(fd: c_int) {
+    let _ = invalidate_binder_fd_token(binder_fd_token(fd));
 }

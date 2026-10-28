@@ -301,3 +301,7 @@ fn replace_save_retry_only_retries_read_failures() {
     assert!(matches!(error, LoadError::Parse(_)));
     assert!(sleeps.is_empty());
 }
+
+fn parse_config(contents: &str) -> Result<InjectorConfig, String> {
+    parse_versioned_config(contents, true).map(|(config, _)| config)
+}

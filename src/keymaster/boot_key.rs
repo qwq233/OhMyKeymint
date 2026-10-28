@@ -322,54 +322,6 @@ impl BootLevelKeyCache {
     }
 }
 
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_output_is_consistent() -> Result<()> {
-        let initial_key = b"initial key";
-        let mut blkc = BootLevelKeyCache::new(ZVec::try_from(initial_key as &[u8])?);
-        assert!(blkc.level_accessible(BootLevel(0)));
-        assert!(blkc.level_accessible(BootLevel(9)));
-        assert!(blkc.level_accessible(BootLevel(10)));
-        assert!(blkc.level_accessible(BootLevel(100)));
-        let v0 = blkc.aes_key(BootLevel(0)).unwrap().unwrap();
-        let v10 = blkc.aes_key(BootLevel(10)).unwrap().unwrap();
-        assert_eq!(Some(&v0), blkc.aes_key(BootLevel(0))?.as_ref());
-        assert_eq!(Some(&v10), blkc.aes_key(BootLevel(10))?.as_ref());
-        blkc.advance_boot_level(BootLevel(5))?;
-        assert!(!blkc.level_accessible(BootLevel(0)));
-        assert!(blkc.level_accessible(BootLevel(9)));
-        assert!(blkc.level_accessible(BootLevel(10)));
-        assert!(blkc.level_accessible(BootLevel(100)));
-        assert_eq!(None, blkc.aes_key(BootLevel(0))?);
-        assert_eq!(Some(&v10), blkc.aes_key(BootLevel(10))?.as_ref());
-        blkc.advance_boot_level(BootLevel(10))?;
-        assert!(!blkc.level_accessible(BootLevel(0)));
-        assert!(!blkc.level_accessible(BootLevel(9)));
-        assert!(blkc.level_accessible(BootLevel(10)));
-        assert!(blkc.level_accessible(BootLevel(100)));
-        assert_eq!(None, blkc.aes_key(BootLevel(0))?);
-        assert_eq!(Some(&v10), blkc.aes_key(BootLevel(10))?.as_ref());
-        blkc.advance_boot_level(BootLevel(0))?;
-        assert!(!blkc.level_accessible(BootLevel(0)));
-        assert!(!blkc.level_accessible(BootLevel(9)));
-        assert!(blkc.level_accessible(BootLevel(10)));
-        assert!(blkc.level_accessible(BootLevel(100)));
-        assert_eq!(None, blkc.aes_key(BootLevel(0))?);
-        assert_eq!(Some(v10), blkc.aes_key(BootLevel(10))?);
-        blkc.finish();
-        assert!(!blkc.level_accessible(BootLevel(0)));
-        assert!(!blkc.level_accessible(BootLevel(9)));
-        assert!(!blkc.level_accessible(BootLevel(10)));
-        assert!(!blkc.level_accessible(BootLevel(100)));
-        assert_eq!(None, blkc.aes_key(BootLevel(0))?);
-        assert_eq!(None, blkc.aes_key(BootLevel(10))?);
-        Ok(())
-    }
-}
-
 /// Boot-level keys produced by the accidental KDF used by older OMK builds.
 pub(crate) struct LegacyBootLevelKeyCache {
     current: BootLevel,
@@ -433,8 +385,51 @@ impl LegacyBootLevelKeyCache {
 }
 
 #[cfg(test)]
-mod omk_test {
+mod tests {
     use super::*;
+
+    #[test]
+    fn test_output_is_consistent() -> Result<()> {
+        let initial_key = b"initial key";
+        let mut blkc = BootLevelKeyCache::new(ZVec::try_from(initial_key as &[u8])?);
+        assert!(blkc.level_accessible(BootLevel(0)));
+        assert!(blkc.level_accessible(BootLevel(9)));
+        assert!(blkc.level_accessible(BootLevel(10)));
+        assert!(blkc.level_accessible(BootLevel(100)));
+        let v0 = blkc.aes_key(BootLevel(0)).unwrap().unwrap();
+        let v10 = blkc.aes_key(BootLevel(10)).unwrap().unwrap();
+        assert_eq!(Some(&v0), blkc.aes_key(BootLevel(0))?.as_ref());
+        assert_eq!(Some(&v10), blkc.aes_key(BootLevel(10))?.as_ref());
+        blkc.advance_boot_level(BootLevel(5))?;
+        assert!(!blkc.level_accessible(BootLevel(0)));
+        assert!(blkc.level_accessible(BootLevel(9)));
+        assert!(blkc.level_accessible(BootLevel(10)));
+        assert!(blkc.level_accessible(BootLevel(100)));
+        assert_eq!(None, blkc.aes_key(BootLevel(0))?);
+        assert_eq!(Some(&v10), blkc.aes_key(BootLevel(10))?.as_ref());
+        blkc.advance_boot_level(BootLevel(10))?;
+        assert!(!blkc.level_accessible(BootLevel(0)));
+        assert!(!blkc.level_accessible(BootLevel(9)));
+        assert!(blkc.level_accessible(BootLevel(10)));
+        assert!(blkc.level_accessible(BootLevel(100)));
+        assert_eq!(None, blkc.aes_key(BootLevel(0))?);
+        assert_eq!(Some(&v10), blkc.aes_key(BootLevel(10))?.as_ref());
+        blkc.advance_boot_level(BootLevel(0))?;
+        assert!(!blkc.level_accessible(BootLevel(0)));
+        assert!(!blkc.level_accessible(BootLevel(9)));
+        assert!(blkc.level_accessible(BootLevel(10)));
+        assert!(blkc.level_accessible(BootLevel(100)));
+        assert_eq!(None, blkc.aes_key(BootLevel(0))?);
+        assert_eq!(Some(v10), blkc.aes_key(BootLevel(10))?);
+        blkc.finish();
+        assert!(!blkc.level_accessible(BootLevel(0)));
+        assert!(!blkc.level_accessible(BootLevel(9)));
+        assert!(!blkc.level_accessible(BootLevel(10)));
+        assert!(!blkc.level_accessible(BootLevel(100)));
+        assert_eq!(None, blkc.aes_key(BootLevel(0))?);
+        assert_eq!(None, blkc.aes_key(BootLevel(10))?);
+        Ok(())
+    }
 
     #[test]
     fn legacy_cache_is_independent() -> Result<()> {

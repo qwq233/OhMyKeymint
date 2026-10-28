@@ -182,7 +182,7 @@ fn persistent_node_query_errors_back_off_without_retiring_backend() {
         .expect("operation publication map poisoned")
         .contains_key(&retirement.target));
     assert_eq!(aborts.load(Ordering::SeqCst), 0);
-    assert!(lookup_operation_target(retirement.target).is_some());
+    assert!(lookup_native_operation_state(retirement.target).is_some());
     assert_eq!(
         lookup_synthetic_target(retirement.target),
         Some(SyntheticTargetKind::Operation)
@@ -195,7 +195,7 @@ fn persistent_node_query_errors_back_off_without_retiring_backend() {
     );
     drop_synthetic_operation_retirement(retirement);
     assert_eq!(aborts.load(Ordering::SeqCst), 1);
-    assert!(lookup_operation_target(retirement.target).is_none());
+    assert!(lookup_native_operation_state(retirement.target).is_none());
     assert!(lookup_synthetic_target(retirement.target).is_none());
     assert!(lookup_native_binder(retirement.target).is_none());
 }

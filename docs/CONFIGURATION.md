@@ -501,11 +501,9 @@ rejects one of the packages in the group. Adding or removing a package does not
 move or convert keys between System and OMK; an app may lose access to keys it
 created through the other route.
 
-There is one narrow granted-key exception. An app outside `scoop`, or one whose
-package name cannot be resolved, can still use a key-access grant that OMK
-confirms belongs to an OMK key. This keeps a key deliberately shared by another
-app usable without giving the receiving app general OMK access. Android-blocked
-and deny-listed callers do not receive this exception.
+Key descriptors, including `KEY_ID` and `GRANT`, do not change the selected
+backend. A caller must pass the filter and enable the relevant intercept route
+to use OMK, including when using a key shared by another app.
 
 ### `[main]`
 
@@ -543,10 +541,6 @@ With the filter enabled, OMK evaluates a caller in this order:
 
 This order matters for packages that share an Android identity: a deny rule
 wins over a matching entry in `scoop`.
-
-After this normal filter decision, the narrow OMK-owned grant exception
-described under `scoop` can preserve access for an unknown or out-of-scope app.
-It does not override the Android-package block or `deny_packages`.
 
 #### `enabled`
 
@@ -594,9 +588,9 @@ allowed by the filter, `true` routes that operation to OMK and `false` leaves
 that operation on System. These switches do not migrate existing keys or make
 System-created key references usable by OMK.
 
-The OMK-owned grant exception is separate from ordinary package routing. A
-request carrying a confirmed OMK grant may return to OMK even when the
-receiving app is outside `scoop`, so the granted key remains usable.
+An operation selected for OMK returns its OMK result or an AOSP-compatible error.
+Connection and transaction failures end the current request without retries or
+switching to System. A later independent request may establish a new connection.
 
 Keep all switches `true` for normal use. Mixing System and OMK operations for
 the same app can cause missing-key errors, inconsistent lists, or failed

@@ -1,30 +1,36 @@
-use std::ffi::{c_char, c_void, CStr};
-use std::mem::size_of;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    OnceLock,
-};
-
-use anyhow::{anyhow, bail, Context, Result};
-use log::{error, warn};
-
 use super::{
     binder_transaction_data, binder_transaction_data_data, binder_transaction_data_data_ptr,
     binder_transaction_data_target, flat_binder_object,
     parse_local_binder_target_from_parcel_bytes, vintf_stability_wire, LocalBinderTarget,
     BINDER_TYPE_BINDER, FLAT_BINDER_FLAG_TXN_SECURITY_CTX, TF_ONE_WAY,
 };
+use crate::hook::rewrite::{NativeOperationState, SyntheticTargetKind};
+use anyhow::{anyhow, bail, Context, Result};
+use log::{error, warn};
+use std::ffi::{c_char, c_void, CStr};
+use std::mem::size_of;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+};
+
+#[cfg(test)]
+mod tests;
 
 struct NativeBinderUserData {
+    kind: NativeBinderKind,
+    operation: OnceLock<Arc<NativeOperationState>>,
     target: OnceLock<LocalBinderTarget>,
     retirement_generation: std::sync::atomic::AtomicU64,
     retire_on_destroy: AtomicBool,
 }
 
 impl NativeBinderUserData {
-    fn new() -> Self {
+    fn new(kind: NativeBinderKind) -> Self {
         Self {
+            kind,
+            operation: OnceLock::new(),
             target: OnceLock::new(),
             retirement_generation: std::sync::atomic::AtomicU64::new(0),
             retire_on_destroy: AtomicBool::new(false),
@@ -119,6 +125,17 @@ pub(crate) struct NativeBinder {
 }
 
 impl NativeBinder {
+    pub(in crate::hook) fn set_operation_state(
+        &self,
+        state: Arc<NativeOperationState>,
+    ) -> Result<()> {
+        // SAFETY: self._binder keeps the Binder and its boxed userdata alive for this
+        // borrow; OnceLock synchronizes the shared state update.
+        unsafe { &*(self.user_data as *const NativeBinderUserData) }
+            .operation
+            .set(state)
+            .map_err(|_| anyhow!("native operation state was already initialized"))
+    }
     pub(crate) fn target(&self) -> LocalBinderTarget {
         self.target
     }
@@ -310,11 +327,11 @@ unsafe fn native_binder_on_transact_inner(
         }
     };
     let user_data = (api.binder_get_user_data)(binder) as *const NativeBinderUserData;
-    let Some(target) = user_data
-        .as_ref()
-        .and_then(|data| data.target.get())
-        .copied()
-    else {
+    // SAFETY: Binder keeps its boxed userdata alive throughout this callback.
+    let Some(user_data) = (unsafe { user_data.as_ref() }) else {
+        return rsbinder::StatusCode::InvalidOperation.into();
+    };
+    let Some(target) = user_data.target.get().copied() else {
         error!("native synthetic Binder callback has no registered target");
         return rsbinder::StatusCode::InvalidOperation.into();
     };
@@ -392,15 +409,32 @@ unsafe fn native_binder_on_transact_inner(
             },
         },
     };
-    let reply = crate::hook::rewrite::handle_synthetic_br_transaction(
+    let reply = crate::hook::rewrite::handle_native_br_transaction(
         &tr,
+        match user_data.kind {
+            NativeBinderKind::SecurityLevel => SyntheticTargetKind::SecurityLevel,
+            NativeBinderKind::Operation => SyntheticTargetKind::Operation,
+        },
+        user_data.operation.get().map(Arc::as_ref),
         calling_sid,
         "native onTransact",
-    )
-    .unwrap_or(crate::hook::rewrite::SyntheticReply::Status(
-        rsbinder::StatusCode::UnknownTransaction.into(),
-    ));
-    write_native_binder_reply(api, output, output_platform, reply)
+    );
+    let status = write_native_binder_reply(api, output, output_platform, reply);
+    // SAFETY: libbinder owns output_platform for this callback. The null check
+    // below guards each parcel API call, which only inspects the live parcel.
+    unsafe {
+        if status == 0
+            && !output_platform.is_null()
+            && (api.platform_parcel_objects_count)(output_platform) == 0
+        {
+            crate::hook::rewrite::remember_native_reply(
+                target,
+                (api.platform_parcel_data)(output_platform) as usize,
+                (api.platform_parcel_data_size)(output_platform),
+            );
+        }
+    }
+    status
 }
 
 unsafe fn write_platform_bytes(api: &NativeBinderApi, parcel: *mut c_void, bytes: &[u8]) -> i32 {
@@ -646,7 +680,7 @@ fn create_native_binder_with_api(
     api: &NativeBinderApi,
     kind: NativeBinderKind,
 ) -> Result<NativeBinder> {
-    let user_data = Box::into_raw(Box::new(NativeBinderUserData::new()));
+    let user_data = Box::into_raw(Box::new(NativeBinderUserData::new(kind)));
     let class = match kind {
         NativeBinderKind::SecurityLevel => api.security_level_class,
         NativeBinderKind::Operation => api.operation_class,
@@ -771,6 +805,3 @@ pub(crate) fn create_native_security_level_binder() -> Result<NativeBinder> {
 pub(crate) fn create_native_operation_binder() -> Result<NativeBinder> {
     create_native_binder_with_api(native_binder_api()?, NativeBinderKind::Operation)
 }
-
-#[cfg(test)]
-mod tests;

@@ -9,6 +9,7 @@ fn operation_info() -> SyntheticTargetInfo {
             pid: 2000,
         }),
         native_generation: None,
+        operation: None,
     }
 }
 

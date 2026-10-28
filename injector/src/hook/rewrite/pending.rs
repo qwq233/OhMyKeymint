@@ -1,17 +1,20 @@
 use super::*;
 
+#[cfg(test)]
+pub(super) mod tests;
+
 pub(super) struct PendingAuthorizationCall {
     pub(super) request: ParsedAuthorizationRequest,
     pub(super) method: AuthorizationMethod,
     pub(super) caller: CallerInfo,
-    pub(super) mirror_update: Option<MirrorUpdateReservation>,
+    pub(super) config: Arc<config::InjectorConfig>,
 }
 
 pub(super) struct PendingMaintenanceCall {
     pub(super) request: ParsedMaintenanceRequest,
     pub(super) caller: CallerInfo,
     pub(super) route: RouteTarget,
-    pub(super) mirror_update: Option<MirrorUpdateReservation>,
+    pub(super) config: Arc<config::InjectorConfig>,
 }
 
 pub(super) struct PendingServiceCall {
@@ -34,9 +37,11 @@ pub(super) struct PendingOperationCall {
     pub(super) request: ParsedOperationRequest,
     pub(super) caller: CallerInfo,
     pub(super) target: LocalBinderTarget,
+    pub(super) route: RouteTarget,
 }
 
 pub(super) enum PrecomputedServiceReply {
+    Serialized(Box<Option<OutboundReply>>),
     UpdateSubcomponentSuccess,
     GrantSuccess(KeyDescriptor),
     UngrantSuccess,
@@ -49,19 +54,8 @@ pub(super) enum PrecomputedMaintenanceReply {
     Error(Status),
 }
 
-pub(super) enum OmkServicePrecompute {
-    Reply(PrecomputedServiceReply),
-    PreserveSystem,
-}
-
-pub(super) enum OmkMigratePrecompute {
-    Reply(PrecomputedMaintenanceReply),
-    PreserveSystem,
-}
-
 pub(super) enum PendingCall {
     Authorization(PendingAuthorizationCall),
-    PrecomputedAuthorization(PendingAuthorizationCall, Status),
     Maintenance(PendingMaintenanceCall),
     PrecomputedMaintenance(PendingMaintenanceCall, PrecomputedMaintenanceReply),
     Service(PendingServiceCall),
@@ -76,12 +70,14 @@ struct PendingReplyFrame {
     connection: BinderStateKey,
     pending: Option<PendingCall>,
     claimed: bool,
+    native_target: Option<LocalBinderTarget>,
+    native_reply: Option<(usize, usize)>,
 }
 
 impl PendingCall {
     fn reply_log_context(&self) -> (&'static str, String, i64, i64) {
         match self {
-            Self::Authorization(call) | Self::PrecomputedAuthorization(call, _) => (
+            Self::Authorization(call) => (
                 "authorization",
                 format!("{:?}", call.method),
                 call.caller.uid,
@@ -116,15 +112,21 @@ impl PendingCall {
 }
 
 thread_local! {
-    static PENDING_REPLY_QUEUE: RefCell<Vec<PendingReplyFrame>> = RefCell::default();
-    static OUTBOUND_REPLY_BUFFERS: RefCell<Vec<(BinderStateKey, parcel::OwnedReply)>> = RefCell::default();
+    static NEXT_PENDING_REPLY_FRAME_ID: Cell<u64> = Cell::default();
 }
 
-static NEXT_PENDING_REPLY_FRAME_ID: AtomicU64 = AtomicU64::new(1);
+thread_local! {
+    static PENDING_REPLY_QUEUE: RefCell<Vec<PendingReplyFrame>> = RefCell::default();
+}
+
+thread_local! {
+    static OUTBOUND_REPLY_BUFFERS: RefCell<Vec<(BinderStateKey, parcel::OwnedReply)>> = RefCell::default();
+}
 
 pub(in crate::hook) unsafe fn handle_bc_reply(
     connection: BinderStateKey,
     tr: &mut binder_transaction_data,
+    original_payload_readable: bool,
 ) -> Option<u64> {
     let (frame_id, pending) = PENDING_REPLY_QUEUE.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -142,7 +144,8 @@ pub(in crate::hook) unsafe fn handle_bc_reply(
     let original_data_size = tr.data_size;
     let original_offsets_size = tr.offsets_size;
     let original_flags = tr.flags;
-    let original_objects = describe_transaction_objects(tr);
+    let original_objects = (original_payload_readable && log::log_enabled!(log::Level::Info))
+        .then(|| describe_transaction_objects(tr));
 
     let result = match &mut pending {
         PendingCall::Authorization(call) => {
@@ -151,13 +154,6 @@ pub(in crate::hook) unsafe fn handle_bc_reply(
                 call.method, call.caller.uid, call.caller.pid
             );
             build_authorization_reply_mirror(tr, call)
-        }
-        PendingCall::PrecomputedAuthorization(call, status) => {
-            debug!(
-                "event=reply handling precomputed authorization {:?} uid={} pid={}",
-                call.method, call.caller.uid, call.caller.pid
-            );
-            build_omk_status_reply(status).map(Some)
         }
         PendingCall::Maintenance(call) => {
             debug!(
@@ -228,9 +224,10 @@ pub(in crate::hook) unsafe fn handle_bc_reply(
 
     match result {
         Ok(Some(reply)) => {
-            let (kind, method, uid, pid) = pending.reply_log_context();
             install_outbound_reply(connection, tr, reply);
-            info!(
+            if log::log_enabled!(log::Level::Info) {
+                let (kind, method, uid, pid) = pending.reply_log_context();
+                info!(
                 "event=reply rewrote {} {} reply for uid={} pid={} original={{flags=0x{:x}, data_size={}, offsets_size={}, objects={}}} rewritten={{flags=0x{:x}, data_size={}, offsets_size={}, objects={}}}",
                 kind,
                 method,
@@ -239,12 +236,13 @@ pub(in crate::hook) unsafe fn handle_bc_reply(
                 original_flags,
                 original_data_size,
                 original_offsets_size,
-                original_objects,
+                original_objects.as_deref().unwrap_or_default(),
                 tr.flags,
                 tr.data_size,
                 tr.offsets_size,
                 describe_transaction_objects(tr),
             );
+            }
         }
         Ok(None) => {
             let observed = match &pending {
@@ -287,16 +285,21 @@ pub(in crate::hook) unsafe fn handle_bc_reply(
 
 fn pending_preserves_system_on_rewrite_failure(pending: &PendingCall) -> bool {
     match pending {
-        PendingCall::Authorization(_) => true,
-        PendingCall::PrecomputedAuthorization(_, _) => false,
-        PendingCall::Maintenance(call) => call.route != RouteTarget::Omk,
+        PendingCall::Authorization(call) => {
+            !authorization_requires_mirror(&call.request)
+                || mirror_preserves_system_on_failure(&call.caller, &call.config)
+        }
+        PendingCall::Maintenance(call) => {
+            call.route != RouteTarget::Omk
+                && (!maintenance_requires_mirror(&call.request)
+                    || mirror_preserves_system_on_failure(&call.caller, &call.config))
+        }
         PendingCall::PrecomputedMaintenance(_, _) => false,
         PendingCall::Service(call) => call.route != RouteTarget::Omk,
         PendingCall::PrecomputedService(_, _) => false,
         PendingCall::SecurityLevel(call) => call.route != RouteTarget::Omk,
         PendingCall::PrecomputedSecurityLevel(_, _) => false,
-        PendingCall::Operation(call) => lookup_operation_target(call.target)
-            .is_some_and(|target| target.route == RouteTarget::System),
+        PendingCall::Operation(call) => call.route == RouteTarget::System,
     }
 }
 
@@ -325,14 +328,89 @@ unsafe fn install_outbound_reply(
 }
 
 pub(in crate::hook) fn push_pending_frame(connection: BinderStateKey) {
+    push_reply_frame(connection, None);
+}
+
+pub(in crate::hook) fn push_native_pending_frame(
+    connection: BinderStateKey,
+    target: LocalBinderTarget,
+) {
+    push_reply_frame(connection, Some(target));
+}
+
+fn push_reply_frame(connection: BinderStateKey, native_target: Option<LocalBinderTarget>) {
     PENDING_REPLY_QUEUE.with(|slot| {
         slot.borrow_mut().push(PendingReplyFrame {
-            id: NEXT_PENDING_REPLY_FRAME_ID.fetch_add(1, Ordering::Relaxed),
+            id: NEXT_PENDING_REPLY_FRAME_ID.with(|next| {
+                let id = next.get().wrapping_add(1);
+                next.set(id);
+                id
+            }),
             connection,
             pending: None,
             claimed: false,
+            native_target,
+            native_reply: None,
         });
     });
+}
+
+pub(in crate::hook) fn remember_native_reply(target: LocalBinderTarget, data: usize, size: usize) {
+    PENDING_REPLY_QUEUE.with(|slot| {
+        if let Some(frame) = slot
+            .borrow_mut()
+            .iter_mut()
+            .rev()
+            .find(|frame| !frame.claimed && frame.native_target == Some(target))
+        {
+            frame.native_reply = Some((data, size));
+        }
+    });
+}
+
+pub(in crate::hook) fn pending_reply_has_trusted_payload(
+    connection: BinderStateKey,
+    reply_index: usize,
+    tr: &binder_transaction_data,
+) -> bool {
+    tr.offsets_size == 0
+        && tr.flags & super::super::binder::TF_STATUS_CODE == 0
+        && PENDING_REPLY_QUEUE.with(|slot| {
+            slot.borrow()
+                .iter()
+                .rev()
+                .filter(|frame| frame.connection == connection && !frame.claimed)
+                .nth(reply_index)
+                .is_some_and(|frame| {
+                    // SAFETY: Both Binder union variants initialize the leading c_ulong word.
+                    // Reading it does not dereference the payload.
+                    let buffer = unsafe { tr.data.ptr.buffer } as usize;
+                    frame.native_reply == Some((buffer, tr.data_size))
+                })
+        })
+}
+
+pub(in crate::hook) fn pending_reply_requires_payload(
+    connection: BinderStateKey,
+    reply_index: usize,
+) -> bool {
+    PENDING_REPLY_QUEUE.with(|slot| {
+        slot.borrow()
+            .iter()
+            .rev()
+            .filter(|frame| frame.connection == connection && !frame.claimed)
+            .nth(reply_index)
+            .and_then(|frame| frame.pending.as_ref())
+            .is_some_and(|pending| {
+                matches!(
+                    pending,
+                    PendingCall::Authorization(_)
+                        | PendingCall::Maintenance(_)
+                        | PendingCall::Service(_)
+                        | PendingCall::SecurityLevel(_)
+                )
+            })
+    })
 }
 
 pub(super) fn replace_top_pending(connection: BinderStateKey, pending: PendingCall) {
@@ -346,17 +424,6 @@ pub(super) fn replace_top_pending(connection: BinderStateKey, pending: PendingCa
             frame.pending = Some(pending);
         }
     });
-}
-
-#[cfg(test)]
-pub(super) fn take_top_pending(connection: BinderStateKey) -> Option<Option<PendingCall>> {
-    PENDING_REPLY_QUEUE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let position = slot
-            .iter()
-            .rposition(|frame| frame.connection == connection)?;
-        Some(slot.remove(position).pending)
-    })
 }
 
 fn remove_pending_reply_frame(frame_id: u64) {
@@ -417,46 +484,3 @@ pub(in crate::hook) fn clear_binder_fd_thread_state(connection: BinderStateKey) 
     });
     clear_outbound_reply_buffers(connection);
 }
-
-#[cfg(test)]
-pub(in crate::hook) fn reset_pending_reply_frames_for_test(
-    connection: BinderStateKey,
-    count: usize,
-) {
-    PENDING_REPLY_QUEUE.with(|slot| slot.borrow_mut().clear());
-    for _ in 0..count {
-        push_pending_frame(connection);
-    }
-}
-
-#[cfg(test)]
-pub(in crate::hook) fn pending_reply_frame_count_for_test(connection: BinderStateKey) -> usize {
-    PENDING_REPLY_QUEUE.with(|slot| {
-        slot.borrow()
-            .iter()
-            .filter(|frame| frame.connection == connection)
-            .count()
-    })
-}
-
-#[cfg(test)]
-pub(in crate::hook) fn pending_reply_frame_claims_for_test(
-    connection: BinderStateKey,
-) -> Vec<bool> {
-    PENDING_REPLY_QUEUE.with(|slot| {
-        slot.borrow()
-            .iter()
-            .filter(|frame| frame.connection == connection)
-            .map(|frame| frame.claimed)
-            .collect()
-    })
-}
-
-#[cfg(test)]
-pub(super) fn reset_pending_state_for_tests() {
-    PENDING_REPLY_QUEUE.with(|slot| slot.borrow_mut().clear());
-    OUTBOUND_REPLY_BUFFERS.with(|slot| slot.borrow_mut().clear());
-}
-
-#[cfg(test)]
-mod tests;

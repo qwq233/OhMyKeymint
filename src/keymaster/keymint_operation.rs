@@ -1,4 +1,3 @@
-use kmr_wire::keymint::KeyParam;
 use rsbinder::Interface;
 
 use crate::{
@@ -10,8 +9,6 @@ use crate::{
 
 pub struct KeyMintOperation {
     wrapper: KeyMintWrapper,
-    pub challenge: i64,
-    pub params: Vec<KeyParam>,
     // Extra for internal use: returned by bottom half of KeyMint implementation, used on
     // all subsequent operation methods to identify the operation.
     pub op_handle: i64,
@@ -20,18 +17,8 @@ pub struct KeyMintOperation {
 impl Interface for KeyMintOperation {}
 
 impl KeyMintOperation {
-    pub fn new(
-        wrapper: KeyMintWrapper,
-        challenge: i64,
-        params: Vec<KeyParam>,
-        op_handle: i64,
-    ) -> Self {
-        KeyMintOperation {
-            wrapper,
-            challenge,
-            params,
-            op_handle,
-        }
+    pub fn new(wrapper: KeyMintWrapper, op_handle: i64) -> Self {
+        KeyMintOperation { wrapper, op_handle }
     }
 }
 

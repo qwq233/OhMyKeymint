@@ -25,6 +25,7 @@ toml = "1.1.8"
 rand = "0.10.3"
 android_logger = "0.15.1"
 multi_log = "0.1.2"
+num_cpus = "1.17.0"
 
 [build-dependencies]
 rsbinder-aidl = "0.12.0"

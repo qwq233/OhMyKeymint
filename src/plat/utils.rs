@@ -1,13 +1,3 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-
-use der::asn1::SetOfVec;
-use der::Encode;
-use kmr_common::crypto::Sha256;
-use kmr_crypto_boring::sha256::BoringSha256;
-use log::{debug, error};
-use rsbinder::DeathRecipient;
-
 use crate::android::apex::IApexService::IApexService;
 use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
 use crate::android::security::keystore::KeyAttestationApplicationId::KeyAttestationApplicationId;
@@ -19,6 +9,16 @@ use crate::err;
 use crate::keymaster::apex::ApexModuleInfo;
 use crate::keymaster::error::KsError;
 use crate::keymaster::utils::get_interface_once;
+use der::asn1::SetOfVec;
+use der::Encode;
+use kmr_common::crypto::Sha256;
+use kmr_crypto_boring::sha256::BoringSha256;
+use log::{debug, error};
+use rsbinder::DeathRecipient;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+pub use kmr_common::consts::AID_USER_OFFSET;
 
 thread_local! {
     static PM: Mutex<Option<rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider>>> = Mutex::new(None);
@@ -320,8 +320,6 @@ pub fn get_apex_module_info() -> anyhow::Result<Vec<ApexModuleInfo>> {
         .collect::<anyhow::Result<Vec<ApexModuleInfo>>>()
         .map_err(|e| anyhow::anyhow!(err!("ApexModuleInfo conversion failed: {:?}", e)))
 }
-
-pub use kmr_common::consts::AID_USER_OFFSET;
 
 /// Gets the user id from a uid.
 pub fn multiuser_get_user_id(uid: u32) -> u32 {

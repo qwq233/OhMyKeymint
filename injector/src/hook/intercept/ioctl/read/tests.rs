@@ -1,7 +1,8 @@
+use crate::hook::intercept::fd::tests::invalidate_binder_fd;
+use crate::hook::intercept::tests::{reset_binder_fd_for_test, SYNTHETIC_REPLY_TEST_LOCK};
 use std::collections::VecDeque;
 
-use super::super::super::{reset_binder_fd_for_test, SYNTHETIC_REPLY_TEST_LOCK};
-use super::super::test_support::drain_transaction_completions;
+use super::super::tests::drain_transaction_completions;
 use super::*;
 
 static NODE_QUERY_RESULTS: Mutex<VecDeque<Result<binder_node_debug_info, c_int>>> =

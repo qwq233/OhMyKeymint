@@ -1,6 +1,8 @@
+use crate::config::FilterConfig;
 use kmr_common::consts::{AID_APP_START, AID_USER_OFFSET};
 
-use crate::config::FilterConfig;
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone)]
 pub enum PackageResolution {
@@ -92,6 +94,3 @@ pub fn evaluate(
         packages,
     }
 }
-
-#[cfg(test)]
-mod tests;

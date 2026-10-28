@@ -40,15 +40,6 @@ pub(super) fn register_operation_publication(target: LocalBinderTarget) -> anyho
     Ok(generation)
 }
 
-#[cfg(test)]
-pub(in crate::hook) fn register_operation_publication_for_test(
-    target: LocalBinderTarget,
-) -> NativeBinderRetirement {
-    let generation =
-        register_operation_publication(target).expect("test operation publication should register");
-    NativeBinderRetirement { target, generation }
-}
-
 fn finish_operation_publication(
     publications: &mut HashMap<LocalBinderTarget, OperationPublication>,
     retirement: NativeBinderRetirement,

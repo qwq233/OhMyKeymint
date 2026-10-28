@@ -1,9 +1,10 @@
-use std::sync::Mutex;
-
+use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::transactions;
 use anyhow::{bail, Context, Result};
 use rsbinder::{hub, Parcel, SIBinder, Status};
+use std::sync::Mutex;
 
-use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::transactions;
+#[cfg(test)]
+mod tests;
 
 const PROVIDER_SERVICE: &str = "sec_key_att_app_id_provider";
 const LEGACY_PROVIDER_DESCRIPTOR: &str =
@@ -163,6 +164,3 @@ fn read_nullable_parcelable_flag(parcel: &mut Parcel, label: &str) -> Result<boo
         _ => bail!("invalid legacy {label} parcelable flag: {flag}"),
     }
 }
-
-#[cfg(test)]
-mod tests;

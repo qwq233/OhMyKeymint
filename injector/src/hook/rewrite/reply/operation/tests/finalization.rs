@@ -18,7 +18,7 @@ fn omk_route_finish_rejects_late_cleanup_abort() {
         OperationTargetInfo {
             route: RouteTarget::Omk,
             aad_allowed: true,
-            backend: Some(backend),
+            backend: Some(Arc::new(backend)),
             finalized: false,
         },
     );
@@ -34,6 +34,7 @@ fn omk_route_finish_rejects_late_cleanup_abort() {
             pid: 2000,
         },
         target,
+        route: RouteTarget::Omk,
     })
     .expect("finish rewrite should succeed")
     .expect("OMK finish should return an OMK-owned reply");
@@ -58,6 +59,7 @@ fn omk_route_finish_rejects_late_cleanup_abort() {
             pid: 2000,
         },
         target,
+        route: RouteTarget::Omk,
     })
     .expect("cleanup abort rewrite should succeed")
     .expect("cleanup abort should return an OMK-owned reply");
@@ -113,7 +115,7 @@ fn omk_route_abort_clears_operation_mapping() {
         OperationTargetInfo {
             route: RouteTarget::Omk,
             aad_allowed: true,
-            backend: Some(backend),
+            backend: Some(Arc::new(backend)),
             finalized: false,
         },
     );
@@ -126,6 +128,7 @@ fn omk_route_abort_clears_operation_mapping() {
             pid: 2000,
         },
         target,
+        route: RouteTarget::Omk,
     })
     .expect("abort rewrite should succeed")
     .expect("OMK abort should return an OMK-owned reply");
