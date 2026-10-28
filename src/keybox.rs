@@ -576,7 +576,7 @@ fn is_fallback_continuation(keybox: &KeyBox, contents: &str) -> bool {
         keybox,
         contents,
         KEYBOX_RUNTIME_LOADED.load(Ordering::Acquire),
-        db_retirement_allowed(),
+        KEYBOX_DB_RETIRE_ALLOWED.load(Ordering::Acquire),
         current_identity,
     )
 }
