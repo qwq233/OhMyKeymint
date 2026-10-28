@@ -215,8 +215,8 @@ keybox that you use.
 
 OMK requires one complete EC entry and accepts an optional complete RSA entry.
 For any entry that is present, the private key must match its certificate
-chain. When an RSA entry is absent, RSA attestation uses the bundled AOSP RSA
-entry. The file must also be clean XML, without watermarks, comments inserted
+chain. When an RSA entry is absent, attestation for RSA keys is signed with the
+EC key and its certificate chain. The file must also be clean XML, without watermarks, comments inserted
 into key data, invisible characters, or other extra content.
 
 A file working in another module does not prove that it is valid. Some other
@@ -246,6 +246,11 @@ Some apps bind their login or encryption keys to the attestation identity that
 was active when the keys were created. After a keybox change, those apps may
 require sign-in, identity verification, or device registration again. This
 cannot always be avoided.
+
+OMK deletes those keys by default. If
+[`main.retire_stale_keybox_bound_keys`](CONFIGURATION.md#retire_stale_keybox_bound_keys)
+is disabled, the keybox change instead keeps client keys created under the
+previous keybox identity.
 
 Change a keybox only when you have time to re-register important apps. Back up
 first, but do not delete the whole OMK data directory.

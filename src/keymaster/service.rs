@@ -129,8 +129,8 @@ impl KeystoreService {
 
     fn retire_stale_keybox_bound_entries(&self) -> Result<usize> {
         if !keybox::db_retirement_allowed() {
-            log::warn!(
-                "Skipping stale keybox-bound entry retirement while keybox fallback is active."
+            log::debug!(
+                "Skipping stale keybox-bound entry retirement (disabled or keybox fallback active)."
             );
             return Ok(0);
         }
