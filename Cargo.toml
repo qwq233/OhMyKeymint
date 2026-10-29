@@ -2,7 +2,7 @@
 name = "OhMyKeymint"
 version = "1.2.0"
 edition = "2021"
-license = "AGPL-3.0-or-later"
+license = "GLA-4.0-or-later"
 
 [[bin]]
 name = "keymint"
@@ -20,7 +20,7 @@ hex = "0.4.3"
 log4rs = "1.4.0"
 log = "0.4.34"
 rsbinder = { version = "0.12.0", features = ["android_12_plus", "rpc"] }
-rusqlite = { version = "0.41.0", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 anyhow = "1.0.104"
 async-trait = "0.1.92"
 tokio = { version = "1.53.3", features = ["macros", "libc"] }

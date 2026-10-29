@@ -47,7 +47,7 @@ jobs:
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
       run: |
         cargo install bindgen-cli
-        echo "y" | sdkmanager --install "ndk;29.0.14206865" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        echo "y" | sdkmanager --install "ndk;30.0.16248370" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
         echo "y" | sdkmanager --install "ndk-bundle" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
         echo "y" | sdkmanager --install "cmake;4.1.2" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
 
@@ -64,11 +64,12 @@ jobs:
         export PATH="~/.cargo/bin:$PATH"
         $ANDROID_SDK_ROOT/cmake/4.1.2/bin/cmake -GNinja -B build \
           -DRUST_BINDINGS=aarch64-linux-android \
-          -DCMAKE_SYSROOT=$ANDROID_SDK_ROOT/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/sysroot/ \
-          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_SDK_ROOT/ndk/29.0.14206865/build/cmake/android.toolchain.cmake \
+          -DCMAKE_SYSROOT=$ANDROID_SDK_ROOT/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot/ \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_SDK_ROOT/ndk/30.0.16248370/build/cmake/android.toolchain.cmake \
+          -DCMAKE_C_FLAGS=-mno-outline-atomics \
+          -DCMAKE_CXX_FLAGS=-mno-outline-atomics \
           -DANDROID_ABI=arm64-v8a \
-          -DANDROID_PLATFORM=android-21 \
-          -DANDROID_STL=c++_shared
+          -DANDROID_PLATFORM=android-33
         ninja -j$(nproc) -C build
     - name: Tar BoringSSL
       run: |
@@ -121,7 +122,7 @@ jobs:
         packages: platform-tools
     - name: Install Android NDK
       run: |
-        echo "y" | sdkmanager --install "ndk;29.0.14206865" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        echo "y" | sdkmanager --install "ndk;30.0.16248370" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
     - name: Install protoc
       run: |
         sudo apt-get update
@@ -138,7 +139,7 @@ jobs:
         tar xf boringssl.tar.gz
         python scripts/setup_cargo_config.py \
           --force \
-          --ndk-root "$ANDROID_SDK_ROOT/ndk/29.0.14206865" \
+          --ndk-root "$ANDROID_SDK_ROOT/ndk/30.0.16248370" \
           --host-tag linux-x86_64
         cat >> .cargo/config.toml <<EOF
 

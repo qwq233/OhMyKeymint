@@ -2,7 +2,7 @@
 name = "injector"
 version = "1.2.0"
 edition = "2021"
-license = "AGPL-3.0-or-later"
+license = "GLA-4.0-or-later"
 build = "build.rs"
 
 [[bin]]

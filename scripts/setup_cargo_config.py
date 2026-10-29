@@ -148,7 +148,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--api-level",
         type=int,
-        default=26,
+        default=33,
         help="Android API level embedded in clang wrapper names. Default: 26.",
     )
     parser.add_argument(
