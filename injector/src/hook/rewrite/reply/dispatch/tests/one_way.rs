@@ -10,11 +10,7 @@ fn one_way_synthetic_operation_abort_finalizes_mapping() {
         aborts: aborts.clone(),
         update_aad_status: None,
     });
-    let caller = CallerInfo {
-        uid: 10002,
-        sid: "u:r:untrusted_app:s0:c123,c456".into(),
-        pid: 2000,
-    };
+    let caller = CallerInfo { uid: 10002, sid: "u:r:untrusted_app:s0:c123,c456".into(), pid: 2000 };
     let (carrier, _) = register_synthetic_operation_carrier(backend, true, &caller)
         .expect("operation carrier should register");
     let target = carrier_target(&carrier);
@@ -25,10 +21,7 @@ fn one_way_synthetic_operation_abort_finalizes_mapping() {
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
         let status = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
             .expect("status reply should parse");
-        assert_eq!(
-            status.exception_code(),
-            rsbinder::ExceptionCode::ServiceSpecific
-        );
+        assert_eq!(status.exception_code(), rsbinder::ExceptionCode::ServiceSpecific);
         status.service_specific_error()
     };
 

@@ -62,12 +62,7 @@ impl ModuleInfoBundle {
             .map_err(|e| anyhow::anyhow!("failed to hash DER-encoded APEX modules: {e:?}"))?
             .to_vec();
 
-        Ok(Self {
-            modules,
-            encoded_der,
-            sha256,
-            source,
-        })
+        Ok(Self { modules, encoded_der, sha256, source })
     }
 }
 
@@ -133,10 +128,7 @@ pub fn parse_active_modules_xml(xml: &str) -> Result<Vec<ApexModuleInfo>> {
 
 pub fn encode_module_info(module_info: &[ApexModuleInfo]) -> Result<Vec<u8>, der::Error> {
     let mut names = BTreeSet::new();
-    if module_info
-        .iter()
-        .any(|module| !names.insert(module.package_name.as_bytes()))
-    {
+    if module_info.iter().any(|module| !names.insert(module.package_name.as_bytes())) {
         return Err(der::ErrorKind::Failed.into());
     }
     SetOfVec::<ApexModuleInfo>::from_iter(module_info.iter().cloned())?.to_der()
@@ -171,10 +163,7 @@ mod tests {
 
         assert_eq!(
             modules,
-            vec![
-                test_module("com.android.alpha", 1),
-                test_module("com.android.gamma", 3)
-            ]
+            vec![test_module("com.android.alpha", 1), test_module("com.android.gamma", 3)]
         );
     }
 
@@ -212,10 +201,7 @@ mod tests {
     #[test]
     fn bundle_der_and_hash_match() {
         let bundle = ModuleInfoBundle::from_modules(
-            vec![
-                test_module("com.android.beta", 2),
-                test_module("com.android.alpha", 1),
-            ],
+            vec![test_module("com.android.beta", 2), test_module("com.android.alpha", 1)],
             ModuleInfoSource::ApexInfoList,
         )
         .unwrap();

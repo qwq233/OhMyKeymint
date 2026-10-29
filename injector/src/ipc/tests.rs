@@ -8,15 +8,9 @@ fn binder_status_classification() {
     let status = Status::from(StatusCode::Ok);
     assert!(!is_dead_object_status(&status));
 
-    for status in [
-        StatusCode::DeadObject,
-        StatusCode::RpcError,
-        StatusCode::NotEnoughData,
-    ] {
+    for status in [StatusCode::DeadObject, StatusCode::RpcError, StatusCode::NotEnoughData] {
         assert!(is_stale_rpc_status_code(status));
-        assert!(is_rpc_cache_invalidating_error(&anyhow::Error::new(
-            Status::from(status)
-        )));
+        assert!(is_rpc_cache_invalidating_error(&anyhow::Error::new(Status::from(status))));
         assert!(is_rpc_cache_invalidating_error(&anyhow::Error::new(status)));
     }
 
@@ -27,9 +21,7 @@ fn binder_status_classification() {
         StatusCode::Errno(libc::EPIPE),
     ] {
         assert!(is_rpc_cache_invalidating_status_code(status));
-        assert!(is_rpc_cache_invalidating_error(&anyhow::Error::new(
-            Status::from(status)
-        )));
+        assert!(is_rpc_cache_invalidating_error(&anyhow::Error::new(Status::from(status))));
         assert!(is_rpc_cache_invalidating_error(&anyhow::Error::new(status)));
     }
 
@@ -47,11 +39,8 @@ fn binder_status_classification() {
 
 struct AuthStub;
 
-static TEST_CACHE: Mutex<RpcCache> = Mutex::new(RpcCache {
-    service: None,
-    auth_token: None,
-    lifecycle: None,
-});
+static TEST_CACHE: Mutex<RpcCache> =
+    Mutex::new(RpcCache { service: None, auth_token: None, lifecycle: None });
 static TEST_CONNECT: Mutex<()> = Mutex::new(());
 thread_local! {
     static TEST_AUTH: RefCell<CachedRpcClient<Strong<dyn IOhMyAuthorizationService>>> = RefCell::default();
@@ -128,15 +117,9 @@ fn rpc_cache_serializes_connection_and_preserves_new_client_after_reentrant_fail
         true
     });
     server
-        .add_service(
-            rpc::AUTHORIZATION_SERVICE,
-            rsbinder::Binder::new(AuthStub).as_binder(),
-        )
+        .add_service(rpc::AUTHORIZATION_SERVICE, rsbinder::Binder::new(AuthStub).as_binder())
         .unwrap();
-    let _server = TestServer {
-        accept: Some(server.run_background()),
-        server,
-    };
+    let _server = TestServer { accept: Some(server.run_background()), server };
     let barrier = std::sync::Barrier::new(8);
     let identities = std::thread::scope(|scope| {
         let handles = (0..8)
@@ -152,46 +135,22 @@ fn rpc_cache_serializes_connection_and_preserves_new_client_after_reentrant_fail
                 })
             })
             .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect::<Vec<_>>()
+        handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
     });
     assert!(identities.iter().all(|identity| *identity == identities[0]));
     assert_eq!(accepted.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        with_test_auth(&path, |auth| Ok(auth.r#getLastAuthTime(None, 7, &[])?)).unwrap(),
-        1
-    );
-    let previous = TEST_CACHE
-        .lock()
-        .unwrap()
-        .auth_token
-        .as_ref()
-        .unwrap()
-        .clone();
+    assert_eq!(with_test_auth(&path, |auth| Ok(auth.r#getLastAuthTime(None, 7, &[])?)).unwrap(), 1);
+    let previous = TEST_CACHE.lock().unwrap().auth_token.as_ref().unwrap().clone();
     let result: Result<()> = with_test_auth(&path, |_| {
         previous.active.store(false, Ordering::Release);
-        assert_eq!(
-            with_test_auth(&path, |auth| Ok(auth.r#getLastAuthTime(None, 7, &[])?))?,
-            1
-        );
+        assert_eq!(with_test_auth(&path, |auth| Ok(auth.r#getLastAuthTime(None, 7, &[])?))?, 1);
         Err(anyhow::Error::new(StatusCode::DeadObject))
     });
     assert!(result.is_err());
-    let current = TEST_CACHE
-        .lock()
-        .unwrap()
-        .auth_token
-        .as_ref()
-        .unwrap()
-        .clone();
+    let current = TEST_CACHE.lock().unwrap().auth_token.as_ref().unwrap().clone();
     assert!(!Arc::ptr_eq(&current, &previous));
     assert!(current.is_current());
-    assert_eq!(
-        with_test_auth(&path, |auth| Ok(auth.r#getLastAuthTime(None, 7, &[])?)).unwrap(),
-        1
-    );
+    assert_eq!(with_test_auth(&path, |auth| Ok(auth.r#getLastAuthTime(None, 7, &[])?)).unwrap(), 1);
     TEST_AUTH.with(|local| assert!(Arc::ptr_eq(local.borrow().as_ref().unwrap(), &current)));
     let retired = TEST_AUTH.with(|local| local.borrow_mut().take());
     drop(retired);

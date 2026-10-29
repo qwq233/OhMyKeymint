@@ -58,9 +58,7 @@ unsafe extern "C" fn capture_reply_ioctl(_fd: c_int, request: c_int, arg: *mut c
     }
 
     if captured.is_some() {
-        *CAPTURED_REPLY_DATA
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = captured;
+        *CAPTURED_REPLY_DATA.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = captured;
     }
     bwr.write_consumed = bwr.write_size;
     0

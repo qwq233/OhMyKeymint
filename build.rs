@@ -24,9 +24,7 @@ fn main() {
         .join("\n");
 
     std::fs::write(&mod_file, mod_content).unwrap();
-    let _ = Command::new("rustfmt")
-        .args([&mod_file, &format!("{}/storage.rs", out_dir)])
-        .status();
+    let _ = Command::new("rustfmt").args([&mod_file, &format!("{}/storage.rs", out_dir)]).status();
 
     let mut aidl = rsbinder_aidl::Builder::new()
         .include_dir(PathBuf::from("aidl/android/system/keystore2"))

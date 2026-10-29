@@ -61,9 +61,8 @@ impl KeyMintTa {
     /// structure in ProtectedData.aidl for IRPC HAL version 2 and as per `UdsCerts` structure in
     /// IRPC HAL version 3.
     pub fn uds_certs(&self) -> Result<Vec<u8>, Error> {
-        let dice_info = self
-            .get_dice_info()
-            .ok_or_else(|| rpc_err!(Failed, "DICE info not available."))?;
+        let dice_info =
+            self.get_dice_info().ok_or_else(|| rpc_err!(Failed, "DICE info not available."))?;
         try_to_vec(&dice_info.pub_dice_artifacts.uds_certs)
     }
 
@@ -76,10 +75,7 @@ impl KeyMintTa {
     fn rpc_device_info_cbor(&self) -> Result<Value, Error> {
         // First make sure all the relevant info is available.
         let ids = self.get_attestation_ids().ok_or_else(|| {
-            km_err!(
-                AttestationIdsNotProvisioned,
-                "attestation ID info not available"
-            )
+            km_err!(AttestationIdsNotProvisioned, "attestation ID info not available")
         })?;
         let boot_info = self
             .boot_info
@@ -96,11 +92,7 @@ impl KeyMintTa {
         let model = String::from_utf8_lossy(&ids.model);
         let device = String::from_utf8_lossy(&ids.device);
 
-        let bootloader_state = if boot_info.device_boot_locked {
-            "locked"
-        } else {
-            "unlocked"
-        };
+        let bootloader_state = if boot_info.device_boot_locked { "locked" } else { "unlocked" };
         let vbmeta_digest = cbor::value::Value::Bytes(try_to_vec(&boot_info.verified_boot_hash)?);
         let vb_state = match boot_info.verified_boot_state {
             VerifiedBootState::Verified => "green",
@@ -112,10 +104,7 @@ impl KeyMintTa {
             SecurityLevel::TrustedEnvironment => "tee",
             SecurityLevel::Strongbox => "strongbox",
             l => {
-                return Err(km_err!(
-                    HardwareTypeUnavailable,
-                    "security level {l:?} not supported"
-                ))
+                return Err(km_err!(HardwareTypeUnavailable, "security level {l:?} not supported"))
             }
         };
 
@@ -135,32 +124,14 @@ impl KeyMintTa {
             (Value::from("device"), Value::from(device.into_owned())),
             (Value::from("product"), Value::from(product.into_owned())),
             (Value::from("vb_state"), Value::from(vb_state)),
-            (
-                Value::from("os_version"),
-                Value::from(hal_info.os_version.to_string()),
-            ),
-            (
-                Value::from("manufacturer"),
-                Value::from(manufacturer.into_owned()),
-            ),
+            (Value::from("os_version"), Value::from(hal_info.os_version.to_string())),
+            (Value::from("manufacturer"), Value::from(manufacturer.into_owned())),
             (Value::from("vbmeta_digest"), vbmeta_digest),
             (Value::from("security_level"), Value::from(security_level)),
-            (
-                Value::from("boot_patch_level"),
-                Value::from(boot_info.boot_patchlevel),
-            ),
-            (
-                Value::from("bootloader_state"),
-                Value::from(bootloader_state),
-            ),
-            (
-                Value::from("system_patch_level"),
-                Value::from(hal_info.os_patchlevel),
-            ),
-            (
-                Value::from("vendor_patch_level"),
-                Value::from(hal_info.vendor_patchlevel),
-            ),
+            (Value::from("boot_patch_level"), Value::from(boot_info.boot_patchlevel)),
+            (Value::from("bootloader_state"), Value::from(bootloader_state)),
+            (Value::from("system_patch_level"), Value::from(hal_info.os_patchlevel)),
+            (Value::from("vendor_patch_level"), Value::from(hal_info.vendor_patchlevel)),
         ]);
         Ok(info)
     }
@@ -206,12 +177,7 @@ impl KeyMintTa {
                 None,
                 test_mode,
             )?,
-            _ => {
-                return Err(km_err!(
-                    InvalidKeyBlob,
-                    "expected key material of type variant EC."
-                ))
-            }
+            _ => return Err(km_err!(InvalidKeyBlob, "expected key material of type variant EC.")),
         };
         let pub_cose_key_encoded = pub_cose_key.to_vec().map_err(CborError::from)?;
         let maced_pub_key =
@@ -220,9 +186,7 @@ impl KeyMintTa {
                 if test_mode == rpc::TestMode(true) {
                     return hmac_sha256(&*self.imp.hmac, &[0; 32], data);
                 }
-                self.dev
-                    .rpc
-                    .compute_hmac_sha256(&*self.imp.hmac, &*self.imp.hkdf, data)
+                self.dev.rpc.compute_hmac_sha256(&*self.imp.hmac, &*self.imp.hkdf, data)
             })?;
 
         let key_result = self.finish_keyblob_creation(
@@ -233,12 +197,7 @@ impl KeyMintTa {
             keyblob::SlotPurpose::KeyGeneration,
         )?;
 
-        Ok((
-            MacedPublicKey {
-                maced_key: maced_pub_key,
-            },
-            key_result.key_blob,
-        ))
+        Ok((MacedPublicKey { maced_key: maced_pub_key }, key_result.key_blob))
     }
 
     pub(crate) fn generate_cert_req(
@@ -249,16 +208,10 @@ impl KeyMintTa {
         _challenge: &[u8],
     ) -> Result<(DeviceInfo, ProtectedData, Vec<u8>), Error> {
         if self.rpc_info.get_version() > IRPC_V2 {
-            return Err(rpc_err!(
-                Removed,
-                "generate_cert_req is not supported in IRPC V3+ HAL."
-            ));
+            return Err(rpc_err!(Removed, "generate_cert_req is not supported in IRPC V3+ HAL."));
         }
         let _device_info = self.rpc_device_info()?;
-        Err(km_err!(
-            Unimplemented,
-            "GenerateCertificateRequest is only required for RKP before v3"
-        ))
+        Err(km_err!(Unimplemented, "GenerateCertificateRequest is only required for RKP before v3"))
     }
 
     pub(crate) fn generate_cert_req_v2(
@@ -310,16 +263,11 @@ impl KeyMintTa {
                 || rpc_err!(Failed, "no payload found in a MacedPublicKey"),
                 |expected_tag, data| -> Result<(), Error> {
                     let computed_tag =
-                        self.dev
-                            .rpc
-                            .compute_hmac_sha256(&*self.imp.hmac, &*self.imp.hkdf, data)?;
+                        self.dev.rpc.compute_hmac_sha256(&*self.imp.hmac, &*self.imp.hkdf, data)?;
                     if self.imp.compare.eq(expected_tag, &computed_tag) {
                         Ok(())
                     } else {
-                        Err(rpc_err!(
-                            InvalidMac,
-                            "invalid tag found in a MacedPublicKey"
-                        ))
+                        Err(rpc_err!(InvalidMac, "invalid tag found in a MacedPublicKey"))
                     }
                 },
             )?;
@@ -334,16 +282,13 @@ impl KeyMintTa {
         ]);
         let csr_payload_data = serialize_cbor(&csr_payload)?;
         // Construct the payload for `SignedData`
-        let signed_data_payload = Value::Array(vec![
-            Value::Bytes(challenge.to_vec()),
-            Value::Bytes(csr_payload_data),
-        ]);
+        let signed_data_payload =
+            Value::Array(vec![Value::Bytes(challenge.to_vec()), Value::Bytes(csr_payload_data)]);
         let signed_data_payload_data = serialize_cbor(&signed_data_payload)?;
 
         // Process DICE info.
-        let dice_info = self
-            .get_dice_info()
-            .ok_or_else(|| rpc_err!(Failed, "DICE info not available."))?;
+        let dice_info =
+            self.get_dice_info().ok_or_else(|| rpc_err!(Failed, "DICE info not available."))?;
         let uds_certs = read_to_value(&dice_info.pub_dice_artifacts.uds_certs)?;
         let dice_cert_chain = read_to_value(&dice_info.pub_dice_artifacts.dice_cert_chain)?;
 
@@ -372,9 +317,7 @@ fn build_maced_pub_key<F>(pub_cose_key: Vec<u8>, compute_mac: F) -> Result<Vec<u
 where
     F: FnOnce(&[u8]) -> Result<Vec<u8>, Error>,
 {
-    let protected = HeaderBuilder::new()
-        .algorithm(iana::Algorithm::HMAC_256_256)
-        .build();
+    let protected = HeaderBuilder::new().algorithm(iana::Algorithm::HMAC_256_256).build();
     let cose_mac_0 = CoseMac0Builder::new()
         .protected(protected)
         .payload(pub_cose_key)

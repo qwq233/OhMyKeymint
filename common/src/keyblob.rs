@@ -258,13 +258,7 @@ impl<'a> SlotHolder<'a> {
         purpose: SlotPurpose,
     ) -> Result<(Self, SecureDeletionData), Error> {
         let (slot, sdd) = mgr.new_secret(rng, purpose)?;
-        Ok((
-            Self {
-                mgr,
-                slot: Some(slot),
-            },
-            sdd,
-        ))
+        Ok((Self { mgr, slot: Some(slot) }, sdd))
     }
 
     /// Acquire ownership of the secure deletion slot.
@@ -338,11 +332,7 @@ impl PlaintextKeyBlob {
         if contains_tag_value!(self.characteristics_at(sec_level)?, Purpose, purpose) {
             Ok(())
         } else {
-            Err(km_err!(
-                IncompatiblePurpose,
-                "purpose {:?} not supported by keyblob",
-                purpose
-            ))
+            Err(km_err!(IncompatiblePurpose, "purpose {:?} not supported by keyblob", purpose))
         }
     }
 }
@@ -367,12 +357,7 @@ pub fn encrypt(
     let requires_sdd = plaintext_keyblob
         .characteristics_at(sec_level)?
         .iter()
-        .any(|param| {
-            matches!(
-                param,
-                KeyParam::RollbackResistance | KeyParam::UsageCountLimit(1)
-            )
-        });
+        .any(|param| matches!(param, KeyParam::RollbackResistance | KeyParam::UsageCountLimit(1)));
     let (slot_holder, sdd) = match (requires_sdd, sdd_mgr) {
         (true, Some(sdd_mgr)) => {
             // Reserve a slot and store it in a [`SlotHolder`] so that it will definitely be
@@ -399,22 +384,12 @@ pub fn encrypt(
     let characteristics = plaintext_keyblob.characteristics;
     let mut key_derivation_input = [0u8; 32];
     rng.fill_bytes(&mut key_derivation_input[..]);
-    let kek = derive_kek(
-        kdf,
-        root_key,
-        &key_derivation_input,
-        characteristics.clone(),
-        hidden,
-        sdd,
-    )?;
+    let kek =
+        derive_kek(kdf, root_key, &key_derivation_input, characteristics.clone(), hidden, sdd)?;
 
     // Encrypt the plaintext key material into a `Cose_Encrypt0` structure.
     let cose_encrypt = coset::CoseEncrypt0Builder::new()
-        .protected(
-            coset::HeaderBuilder::new()
-                .algorithm(coset::iana::Algorithm::A256GCM)
-                .build(),
-        )
+        .protected(coset::HeaderBuilder::new().algorithm(coset::iana::Algorithm::A256GCM).build())
         .try_create_ciphertext::<_, Error>(
             &plaintext_keyblob.key_material.into_vec()?,
             &[],
@@ -490,8 +465,7 @@ pub fn decrypt(
     op.update_aad(&extended_aad)?;
     let mut pt_data = op.update(&cose_encrypt.ciphertext.unwrap_or_default())?;
     pt_data.try_extend_from_slice(
-        &op.finish()
-            .map_err(|e| km_err!(InvalidKeyBlob, "failed to decrypt keyblob: {:?}", e))?,
+        &op.finish().map_err(|e| km_err!(InvalidKeyBlob, "failed to decrypt keyblob: {:?}", e))?,
     )?;
 
     Ok(PlaintextKeyBlob {

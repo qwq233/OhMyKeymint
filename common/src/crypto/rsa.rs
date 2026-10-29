@@ -135,10 +135,7 @@ impl OpaqueOr<Key> {
         let pub_key = rsa.subject_public_key(self)?;
         buf.try_extend_from_slice(&pub_key)?;
         Ok(SubjectPublicKeyInfo {
-            algorithm: AlgorithmIdentifier {
-                oid: X509_OID,
-                parameters: Some(der::AnyRef::NULL),
-            },
+            algorithm: AlgorithmIdentifier { oid: X509_OID, parameters: Some(der::AnyRef::NULL) },
             subject_public_key: BitStringRef::from_bytes(buf)
                 .map_err(|e| km_err!(UnknownError, "invalid bitstring: {e:?}"))?,
         })
@@ -170,10 +167,7 @@ impl DecryptionMode {
             PaddingMode::RsaOaep => {
                 let msg_digest = tag::get_digest(params)?;
                 let mgf_digest = tag::get_mgf_digest(params)?;
-                Ok(DecryptionMode::OaepPadding {
-                    msg_digest,
-                    mgf_digest,
-                })
+                Ok(DecryptionMode::OaepPadding { msg_digest, mgf_digest })
             }
             PaddingMode::RsaPkcs115Encrypt => Ok(DecryptionMode::Pkcs1_1_5Padding),
             _ => Err(km_err!(
@@ -258,9 +252,5 @@ pub fn import_pkcs1_key(
     pub_exponent_arr[offset..].copy_from_slice(pub_exponent_bytes);
     let pub_exponent = u64::from_be_bytes(pub_exponent_arr);
 
-    Ok((
-        KeyMaterial::Rsa(key.into()),
-        KeySizeInBits(key_size),
-        RsaExponent(pub_exponent),
-    ))
+    Ok((KeyMaterial::Rsa(key.into()), KeySizeInBits(key_size), RsaExponent(pub_exponent)))
 }

@@ -103,21 +103,13 @@ impl crypto::AccumulatingOperation for BoringAesCmacOperation {
         // Safety: `self.ctx` is non-null and valid; `output_len` is correct size of `output`
         // buffer.
         let result = unsafe {
-            ffi::CMAC_Final(
-                self.ctx.0,
-                output.as_mut_ptr(),
-                &mut output_len as *mut usize,
-            )
+            ffi::CMAC_Final(self.ctx.0, output.as_mut_ptr(), &mut output_len as *mut usize)
         };
         if result != 1 {
             return Err(openssl_last_err());
         }
         if output_len != crypto::aes::BLOCK_SIZE {
-            return Err(km_err!(
-                BoringSslError,
-                "Unexpected CMAC output size of {}",
-                output_len
-            ));
+            return Err(km_err!(BoringSslError, "Unexpected CMAC output size of {}", output_len));
         }
         Ok(output)
     }

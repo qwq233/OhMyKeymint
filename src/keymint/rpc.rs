@@ -172,33 +172,19 @@ impl<T: DeriveBytes + Send> Artifacts<T> {
         // Construct `DiceChainEntryPayload`
         let dice_chain_entry_payload = Value::Map(vec_try![
             // Issuer
-            (
-                Value::Integer(1.into()),
-                Value::Text(String::from("Issuer"))
-            ),
+            (Value::Integer(1.into()), Value::Text(String::from("Issuer"))),
             // Subject
-            (
-                Value::Integer(2.into()),
-                Value::Text(String::from("Subject"))
-            ),
+            (Value::Integer(2.into()), Value::Text(String::from("Subject"))),
             // Subject public key
-            (
-                Value::Integer((-4670552).into()),
-                Value::Bytes(cose_key_cbor_data)
-            ),
+            (Value::Integer((-4670552).into()), Value::Bytes(cose_key_cbor_data)),
             // Key Usage field contains a CBOR byte string of the bits which correspond
             // to `keyCertSign` as per RFC 5280 Section 4.2.1.3 (in little-endian byte order)
-            (
-                Value::Integer((-4670553).into()),
-                Value::Bytes(vec_try![0x20]?)
-            ),
+            (Value::Integer((-4670553).into()), Value::Bytes(vec_try![0x20]?)),
         ]?);
         let dice_chain_entry_payload_data = kmr_ta::rkp::serialize_cbor(&dice_chain_entry_payload)?;
 
         // Construct `DiceChainEntry`
-        let protected = HeaderBuilder::new()
-            .algorithm(self.signing_cose_algo())
-            .build();
+        let protected = HeaderBuilder::new().algorithm(self.signing_cose_algo()).build();
         let dice_chain_entry = CoseSign1Builder::new()
             .protected(protected)
             .payload(dice_chain_entry_payload_data)
@@ -218,10 +204,8 @@ impl<T: DeriveBytes + Send> Artifacts<T> {
         // Construct `UdsCerts` as an empty CBOR map
         let uds_certs_data = kmr_ta::rkp::serialize_cbor(&Value::Map(Vec::new()))?;
 
-        let pub_dice_artifacts = PubDiceArtifacts {
-            dice_cert_chain: dice_cert_chain_data,
-            uds_certs: uds_certs_data,
-        };
+        let pub_dice_artifacts =
+            PubDiceArtifacts { dice_cert_chain: dice_cert_chain_data, uds_certs: uds_certs_data };
 
         let dice_info = DiceInfo {
             pub_dice_artifacts,

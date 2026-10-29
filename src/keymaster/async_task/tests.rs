@@ -35,9 +35,7 @@ fn test_shelf() {
     struct Elf {
         pub name: String,
     }
-    let e1 = Elf {
-        name: "Glorfindel".to_string(),
-    };
+    let e1 = Elf { name: "Glorfindel".to_string() };
     assert_eq!(shelf.put(e1), None);
 
     // The String value is still on the shelf.
@@ -177,9 +175,7 @@ fn test_async_task_idle() {
     done_receiver.recv().unwrap();
     // Now that the last low-priority job has completed, the idle task should
     // fire pretty much immediately.
-    idle_done_receiver
-        .recv_timeout(Duration::from_millis(50))
-        .unwrap();
+    idle_done_receiver.recv_timeout(Duration::from_millis(50)).unwrap();
 
     // Idle callback not executed again even if we wait for a while.
     assert_eq!(
@@ -200,9 +196,7 @@ fn test_async_task_idle() {
         Err(RecvTimeoutError::Timeout)
     );
     done_receiver.recv().unwrap();
-    idle_done_receiver
-        .recv_timeout(Duration::from_millis(50))
-        .unwrap();
+    idle_done_receiver.recv_timeout(Duration::from_millis(50)).unwrap();
 }
 
 #[test]
@@ -261,34 +255,14 @@ fn test_async_task_idle_queues_job() {
 
     // Once we queue a normal job, things start.
     at.queue_hi(|_shelf| {});
-    assert_eq!(
-        0,
-        idle_receiver
-            .recv_timeout(Duration::from_millis(200))
-            .unwrap()
-    );
+    assert_eq!(0, idle_receiver.recv_timeout(Duration::from_millis(200)).unwrap());
 
     // The idle callback queues a job, and completion of that job
     // means the task is going idle again...so the idle callback will
     // be called repeatedly.
-    assert_eq!(
-        1,
-        idle_receiver
-            .recv_timeout(Duration::from_millis(100))
-            .unwrap()
-    );
-    assert_eq!(
-        2,
-        idle_receiver
-            .recv_timeout(Duration::from_millis(100))
-            .unwrap()
-    );
-    assert_eq!(
-        3,
-        idle_receiver
-            .recv_timeout(Duration::from_millis(100))
-            .unwrap()
-    );
+    assert_eq!(1, idle_receiver.recv_timeout(Duration::from_millis(100)).unwrap());
+    assert_eq!(2, idle_receiver.recv_timeout(Duration::from_millis(100)).unwrap());
+    assert_eq!(3, idle_receiver.recv_timeout(Duration::from_millis(100)).unwrap());
 }
 
 #[test]

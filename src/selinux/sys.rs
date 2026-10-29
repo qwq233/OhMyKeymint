@@ -108,9 +108,7 @@ pub unsafe fn selinux_set_callback(callback_type: c_int, cb: selinux_callback) {
         let Some(log_callback) = lib.selinux_log_callback else {
             return;
         };
-        selinux_callback {
-            func_log: Some(log_callback),
-        }
+        selinux_callback { func_log: Some(log_callback) }
     } else {
         cb
     };
@@ -249,10 +247,7 @@ unsafe fn optional_symbol<T: Copy>(handle: *mut c_void, name: &CStr) -> Option<T
 
 fn existing_keystore2_key_context_options() -> Vec<selinux_opt> {
     const PATHS: &[&[&CStr]] = &[
-        &[
-            c"/system/etc/selinux/plat_keystore2_key_contexts",
-            c"/plat_keystore2_key_contexts",
-        ],
+        &[c"/system/etc/selinux/plat_keystore2_key_contexts", c"/plat_keystore2_key_contexts"],
         &[
             c"/system_ext/etc/selinux/system_ext_keystore2_key_contexts",
             c"/system_ext_keystore2_key_contexts",
@@ -261,10 +256,7 @@ fn existing_keystore2_key_context_options() -> Vec<selinux_opt> {
             c"/product/etc/selinux/product_keystore2_key_contexts",
             c"/product_keystore2_key_contexts",
         ],
-        &[
-            c"/vendor/etc/selinux/vendor_keystore2_key_contexts",
-            c"/vendor_keystore2_key_contexts",
-        ],
+        &[c"/vendor/etc/selinux/vendor_keystore2_key_contexts", c"/vendor_keystore2_key_contexts"],
     ];
 
     PATHS
@@ -273,10 +265,7 @@ fn existing_keystore2_key_context_options() -> Vec<selinux_opt> {
             alts.iter()
                 .copied()
                 .find(|path| unsafe { libc::access(path.as_ptr(), libc::R_OK) == 0 })
-                .map(|path| selinux_opt {
-                    type_: SELABEL_OPT_PATH,
-                    value: path.as_ptr(),
-                })
+                .map(|path| selinux_opt { type_: SELABEL_OPT_PATH, value: path.as_ptr() })
         })
         .collect()
 }

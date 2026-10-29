@@ -36,20 +36,21 @@ fn merge_and_filter_key_entry_lists(
     db_descriptors: &[KeyDescriptor],
     start_past_alias: Option<&str>,
 ) -> Vec<KeyDescriptor> {
-    let mut result: Vec<KeyDescriptor> = match start_past_alias {
-        Some(past_alias) => legacy_descriptors
-            .iter()
-            .filter(|kd| {
-                if let Some(alias) = &kd.alias {
-                    alias.as_str() > past_alias
-                } else {
-                    false
-                }
-            })
-            .cloned()
-            .collect(),
-        None => legacy_descriptors.to_vec(),
-    };
+    let mut result: Vec<KeyDescriptor> =
+        match start_past_alias {
+            Some(past_alias) => legacy_descriptors
+                .iter()
+                .filter(|kd| {
+                    if let Some(alias) = &kd.alias {
+                        alias.as_str() > past_alias
+                    } else {
+                        false
+                    }
+                })
+                .cloned()
+                .collect(),
+            None => legacy_descriptors.to_vec(),
+        };
 
     result.extend_from_slice(db_descriptors);
     result.sort_unstable();
@@ -64,9 +65,7 @@ pub(crate) fn init_test_logging() {
 /// Enable logging in unit tests at a specific level
 fn init_test_logging_at(max_level: log::LevelFilter) {
     android_logger::init_once(
-        android_logger::Config::default()
-            .with_tag("keystore2_test")
-            .with_max_level(max_level),
+        android_logger::Config::default().with_tag("keystore2_test").with_max_level(max_level),
     );
 }
 
@@ -94,10 +93,7 @@ fn user_auth_type_accepts_aidl_authenticator_union() {
 
 #[test]
 fn user_auth_type_rejects_integer_union() {
-    let param = KmKeyParameter {
-        tag: Tag::USER_AUTH_TYPE,
-        value: KeyParameterValue::Integer(2),
-    };
+    let param = KmKeyParameter { tag: Tag::USER_AUTH_TYPE, value: KeyParameterValue::Integer(2) };
 
     assert!(param.to_km().is_err());
 }
@@ -122,10 +118,7 @@ fn ml_dsa_variant_accepts_aidl_variant_union() {
         ),
     };
 
-    assert_eq!(
-        param.to_km().unwrap(),
-        KeyParam::MlDsaVariant(MlDsaVariant::MlDsa65)
-    );
+    assert_eq!(param.to_km().unwrap(), KeyParam::MlDsaVariant(MlDsaVariant::MlDsa65));
 }
 
 #[test]
@@ -145,12 +138,7 @@ fn enum_key_parameters_reject_integer_union() {
 
     for tag in cases {
         assert!(
-            KmKeyParameter {
-                tag,
-                value: KeyParameterValue::Integer(0),
-            }
-            .to_km()
-            .is_err(),
+            KmKeyParameter { tag, value: KeyParameterValue::Integer(0) }.to_km().is_err(),
             "{tag:?}"
         );
     }
@@ -159,14 +147,8 @@ fn enum_key_parameters_reject_integer_union() {
 #[test]
 fn unknown_key_parameter_tags_are_dropped() {
     let params = [
-        KmKeyParameter {
-            tag: Tag(0x6f00_0001),
-            value: KeyParameterValue::Integer(0),
-        },
-        KmKeyParameter {
-            tag: Tag::KEY_SIZE,
-            value: KeyParameterValue::Integer(256),
-        },
+        KmKeyParameter { tag: Tag(0x6f00_0001), value: KeyParameterValue::Integer(0) },
+        KmKeyParameter { tag: Tag::KEY_SIZE, value: KeyParameterValue::Integer(256) },
     ];
 
     assert_eq!(
@@ -223,25 +205,15 @@ fn key_parameters_follow_keymint_profile() {
         tag: Tag::ATTESTATION_ID_SECOND_IMEI,
         value: KeyParameterValue::Blob(vec![1]),
     }];
-    assert!(
-        key_parameters_to_km(&second_imei, KeyMintDevice::KEY_MINT_V2)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(key_parameters_to_km(&second_imei, KeyMintDevice::KEY_MINT_V2).unwrap().is_empty());
     assert_eq!(
         key_parameters_to_km(&second_imei, KeyMintDevice::KEY_MINT_V3).unwrap(),
         vec![KeyParam::AttestationIdSecondImei(vec![1])]
     );
 
-    let module_hash = [KmKeyParameter {
-        tag: Tag::MODULE_HASH,
-        value: KeyParameterValue::Blob(vec![2]),
-    }];
-    assert!(
-        key_parameters_to_km(&module_hash, KeyMintDevice::KEY_MINT_V3)
-            .unwrap()
-            .is_empty()
-    );
+    let module_hash =
+        [KmKeyParameter { tag: Tag::MODULE_HASH, value: KeyParameterValue::Blob(vec![2]) }];
+    assert!(key_parameters_to_km(&module_hash, KeyMintDevice::KEY_MINT_V3).unwrap().is_empty());
     assert_eq!(
         key_parameters_to_km(&module_hash, KeyMintDevice::KEY_MINT_V4).unwrap(),
         vec![KeyParam::ModuleHash(vec![2])]
@@ -256,10 +228,7 @@ fn key_params_to_aidl_follow_keymint_profile() {
     )
     .unwrap();
     assert_eq!(ml_dsa.tag, Tag::INVALID);
-    assert_eq!(
-        ml_dsa.value,
-        KeyParameterValue::Integer(MlDsaVariant::MlDsa65 as i32)
-    );
+    assert_eq!(ml_dsa.value, KeyParameterValue::Integer(MlDsaVariant::MlDsa65 as i32));
 
     let ml_dsa = key_param_to_aidl(
         KeyParam::MlDsaVariant(MlDsaVariant::MlDsa65),
@@ -274,19 +243,15 @@ fn key_params_to_aidl_follow_keymint_profile() {
         )
     );
 
-    let second_imei = key_param_to_aidl(
-        KeyParam::AttestationIdSecondImei(vec![1]),
-        KeyMintDevice::KEY_MINT_V2,
-    )
-    .unwrap();
+    let second_imei =
+        key_param_to_aidl(KeyParam::AttestationIdSecondImei(vec![1]), KeyMintDevice::KEY_MINT_V2)
+            .unwrap();
     assert_eq!(second_imei.tag, Tag::INVALID);
     assert_eq!(second_imei.value, KeyParameterValue::Blob(vec![1]));
 
-    let second_imei = key_param_to_aidl(
-        KeyParam::AttestationIdSecondImei(vec![1]),
-        KeyMintDevice::KEY_MINT_V3,
-    )
-    .unwrap();
+    let second_imei =
+        key_param_to_aidl(KeyParam::AttestationIdSecondImei(vec![1]), KeyMintDevice::KEY_MINT_V3)
+            .unwrap();
     assert_eq!(second_imei.tag, Tag::ATTESTATION_ID_SECOND_IMEI);
     assert_eq!(second_imei.value, KeyParameterValue::Blob(vec![1]));
 
@@ -313,27 +278,12 @@ fn invalid_enum_values_use_upstream_error_codes() {
     ));
 
     let cases = [
-        (
-            ValueNotRecognized::KeyPurpose,
-            ErrorCode::UNSUPPORTED_PURPOSE,
-        ),
-        (
-            ValueNotRecognized::Algorithm,
-            ErrorCode::UNSUPPORTED_ALGORITHM,
-        ),
-        (
-            ValueNotRecognized::BlockMode,
-            ErrorCode::UNSUPPORTED_BLOCK_MODE,
-        ),
-        (
-            ValueNotRecognized::PaddingMode,
-            ErrorCode::UNSUPPORTED_PADDING_MODE,
-        ),
+        (ValueNotRecognized::KeyPurpose, ErrorCode::UNSUPPORTED_PURPOSE),
+        (ValueNotRecognized::Algorithm, ErrorCode::UNSUPPORTED_ALGORITHM),
+        (ValueNotRecognized::BlockMode, ErrorCode::UNSUPPORTED_BLOCK_MODE),
+        (ValueNotRecognized::PaddingMode, ErrorCode::UNSUPPORTED_PADDING_MODE),
         (ValueNotRecognized::Digest, ErrorCode::UNSUPPORTED_DIGEST),
-        (
-            ValueNotRecognized::KeyFormat,
-            ErrorCode::UNSUPPORTED_KEY_FORMAT,
-        ),
+        (ValueNotRecognized::KeyFormat, ErrorCode::UNSUPPORTED_KEY_FORMAT),
         (ValueNotRecognized::EcCurve, ErrorCode::UNSUPPORTED_EC_CURVE),
         (
             ValueNotRecognized::MlDsaVariant,
@@ -350,16 +300,10 @@ fn invalid_enum_values_use_upstream_error_codes() {
 #[test]
 fn unsupported_known_key_parameters_return_tag_error() {
     let cases = [
-        (
-            Tag::HARDWARE_TYPE,
-            KeyParameterValue::SecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT),
-        ),
+        (Tag::HARDWARE_TYPE, KeyParameterValue::SecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT)),
         (Tag::MIN_SECONDS_BETWEEN_OPS, KeyParameterValue::Integer(30)),
         (Tag::UNIQUE_ID, KeyParameterValue::Blob(vec![1])),
-        (
-            Tag::IDENTITY_CREDENTIAL_KEY,
-            KeyParameterValue::BoolValue(true),
-        ),
+        (Tag::IDENTITY_CREDENTIAL_KEY, KeyParameterValue::BoolValue(true)),
         (Tag::ASSOCIATED_DATA, KeyParameterValue::Blob(vec![2])),
         (Tag::CONFIRMATION_TOKEN, KeyParameterValue::Blob(vec![3])),
     ];
@@ -382,53 +326,26 @@ fn bool_key_parameters_require_true_bool_union() {
         (Tag::EARLY_BOOT_ONLY, KeyParam::EarlyBootOnly),
         (Tag::NO_AUTH_REQUIRED, KeyParam::NoAuthRequired),
         (Tag::ALLOW_WHILE_ON_BODY, KeyParam::AllowWhileOnBody),
-        (
-            Tag::TRUSTED_USER_PRESENCE_REQUIRED,
-            KeyParam::TrustedUserPresenceRequired,
-        ),
-        (
-            Tag::TRUSTED_CONFIRMATION_REQUIRED,
-            KeyParam::TrustedConfirmationRequired,
-        ),
-        (
-            Tag::UNLOCKED_DEVICE_REQUIRED,
-            KeyParam::UnlockedDeviceRequired,
-        ),
-        (
-            Tag::DEVICE_UNIQUE_ATTESTATION,
-            KeyParam::DeviceUniqueAttestation,
-        ),
+        (Tag::TRUSTED_USER_PRESENCE_REQUIRED, KeyParam::TrustedUserPresenceRequired),
+        (Tag::TRUSTED_CONFIRMATION_REQUIRED, KeyParam::TrustedConfirmationRequired),
+        (Tag::UNLOCKED_DEVICE_REQUIRED, KeyParam::UnlockedDeviceRequired),
+        (Tag::DEVICE_UNIQUE_ATTESTATION, KeyParam::DeviceUniqueAttestation),
         (Tag::STORAGE_KEY, KeyParam::StorageKey),
         (Tag::RESET_SINCE_ID_ROTATION, KeyParam::ResetSinceIdRotation),
     ];
 
     for (tag, expected) in cases {
         assert_eq!(
-            KmKeyParameter {
-                tag,
-                value: KeyParameterValue::BoolValue(true),
-            }
-            .to_km()
-            .unwrap(),
+            KmKeyParameter { tag, value: KeyParameterValue::BoolValue(true) }.to_km().unwrap(),
             expected,
             "{tag:?}"
         );
         assert!(
-            KmKeyParameter {
-                tag,
-                value: KeyParameterValue::BoolValue(false),
-            }
-            .to_km()
-            .is_err(),
+            KmKeyParameter { tag, value: KeyParameterValue::BoolValue(false) }.to_km().is_err(),
             "{tag:?}"
         );
         assert!(
-            KmKeyParameter {
-                tag,
-                value: KeyParameterValue::Integer(0),
-            }
-            .to_km()
-            .is_err(),
+            KmKeyParameter { tag, value: KeyParameterValue::Integer(0) }.to_km().is_err(),
             "{tag:?}"
         );
     }
@@ -449,13 +366,7 @@ fn create_key_descriptors_from_aliases(key_aliases: &[&str]) -> Vec<KeyDescripto
 fn aliases_from_key_descriptors(key_descriptors: &[KeyDescriptor]) -> Vec<String> {
     key_descriptors
         .iter()
-        .map(|kd| {
-            if let Some(alias) = &kd.alias {
-                String::from(alias)
-            } else {
-                String::from("")
-            }
-        })
+        .map(|kd| if let Some(alias) = &kd.alias { String::from(alias) } else { String::from("") })
         .collect::<Vec<String>>()
 }
 
@@ -464,18 +375,9 @@ fn test_safe_amount_to_return() -> Result<()> {
     let key_aliases = vec!["key1", "key2", "key3"];
     let key_descriptors = create_key_descriptors_from_aliases(&key_aliases);
 
-    assert_eq!(
-        estimate_safe_amount_to_return(Domain::APP, 1017, None, &key_descriptors, 20),
-        1
-    );
-    assert_eq!(
-        estimate_safe_amount_to_return(Domain::APP, 1017, None, &key_descriptors, 50),
-        2
-    );
-    assert_eq!(
-        estimate_safe_amount_to_return(Domain::APP, 1017, None, &key_descriptors, 100),
-        3
-    );
+    assert_eq!(estimate_safe_amount_to_return(Domain::APP, 1017, None, &key_descriptors, 20), 1);
+    assert_eq!(estimate_safe_amount_to_return(Domain::APP, 1017, None, &key_descriptors, 50), 2);
+    assert_eq!(estimate_safe_amount_to_return(Domain::APP, 1017, None, &key_descriptors, 100), 3);
     Ok(())
 }
 
@@ -487,10 +389,7 @@ fn test_merge_and_sort_lists_without_filtering() -> Result<()> {
     let db_key_descriptors = create_key_descriptors_from_aliases(&db_key_aliases);
     let result =
         merge_and_filter_key_entry_lists(&legacy_key_descriptors, &db_key_descriptors, None);
-    assert_eq!(
-        aliases_from_key_descriptors(&result),
-        vec!["key_a", "key_b", "key_c", "key_d"]
-    );
+    assert_eq!(aliases_from_key_descriptors(&result), vec!["key_a", "key_b", "key_c", "key_d"]);
     Ok(())
 }
 
@@ -505,10 +404,7 @@ fn test_merge_and_sort_lists_with_filtering() -> Result<()> {
         &db_key_descriptors,
         Some("key_b"),
     );
-    assert_eq!(
-        aliases_from_key_descriptors(&result),
-        vec!["key_c", "key_e", "key_f", "key_g"]
-    );
+    assert_eq!(aliases_from_key_descriptors(&result), vec!["key_c", "key_e", "key_f", "key_g"]);
     Ok(())
 }
 
@@ -523,42 +419,27 @@ fn test_merge_and_sort_lists_with_filtering_and_dups() -> Result<()> {
         &db_key_descriptors,
         Some("key_c"),
     );
-    assert_eq!(
-        aliases_from_key_descriptors(&result),
-        vec!["key_d", "key_e", "key_f", "key_g"]
-    );
+    assert_eq!(aliases_from_key_descriptors(&result), vec!["key_d", "key_e", "key_f", "key_g"]);
     Ok(())
 }
 
 #[test]
 fn test_list_key_parameters_with_filter_on_security_sensitive_info() -> Result<()> {
     let params = vec![
-        KmKeyParameter {
-            tag: Tag::APPLICATION_ID,
-            value: KeyParameterValue::Integer(0),
-        },
-        KmKeyParameter {
-            tag: Tag::APPLICATION_DATA,
-            value: KeyParameterValue::Integer(0),
-        },
+        KmKeyParameter { tag: Tag::APPLICATION_ID, value: KeyParameterValue::Integer(0) },
+        KmKeyParameter { tag: Tag::APPLICATION_DATA, value: KeyParameterValue::Integer(0) },
         KmKeyParameter {
             tag: Tag::CERTIFICATE_NOT_AFTER,
             value: KeyParameterValue::DateTime(UNDEFINED_NOT_AFTER),
         },
-        KmKeyParameter {
-            tag: Tag::CERTIFICATE_NOT_BEFORE,
-            value: KeyParameterValue::DateTime(0),
-        },
+        KmKeyParameter { tag: Tag::CERTIFICATE_NOT_BEFORE, value: KeyParameterValue::DateTime(0) },
     ];
     let wanted = vec![
         KmKeyParameter {
             tag: Tag::CERTIFICATE_NOT_AFTER,
             value: KeyParameterValue::DateTime(UNDEFINED_NOT_AFTER),
         },
-        KmKeyParameter {
-            tag: Tag::CERTIFICATE_NOT_BEFORE,
-            value: KeyParameterValue::DateTime(0),
-        },
+        KmKeyParameter { tag: Tag::CERTIFICATE_NOT_BEFORE, value: KeyParameterValue::DateTime(0) },
     ];
 
     assert_eq!(log_security_safe_params(&params), wanted);
@@ -570,10 +451,7 @@ fn test_app_info_for_uid() -> Result<()> {
     init_test_logging();
     assert_eq!(
         app_info_for_uid(AppUid(999_999)),
-        AppInfo {
-            target_sdk: None,
-            is_system_app: false
-        }
+        AppInfo { target_sdk: None, is_system_app: false }
     );
 
     // Try retrieving some system uids; these generally map to a "shared:<pkgname>" that does not
@@ -591,46 +469,19 @@ fn test_app_info_for_uid() -> Result<()> {
 
 #[test]
 fn test_package_manager_native_layout() {
-    assert_eq!(
-        package_manager_native_layout(Some(12)),
-        PackageManagerNativeLayout::Android12To14
-    );
-    assert_eq!(
-        package_manager_native_layout(Some(14)),
-        PackageManagerNativeLayout::Android12To14
-    );
-    assert_eq!(
-        package_manager_native_layout(Some(15)),
-        PackageManagerNativeLayout::Android15Or16
-    );
-    assert_eq!(
-        package_manager_native_layout(Some(16)),
-        PackageManagerNativeLayout::Android15Or16
-    );
-    assert_eq!(
-        package_manager_native_layout(Some(17)),
-        PackageManagerNativeLayout::Android17
-    );
-    assert_eq!(
-        package_manager_native_layout(Some(18)),
-        PackageManagerNativeLayout::Android17
-    );
-    assert_eq!(
-        package_manager_native_layout(None),
-        PackageManagerNativeLayout::Android15Or16
-    );
+    assert_eq!(package_manager_native_layout(Some(12)), PackageManagerNativeLayout::Android12To14);
+    assert_eq!(package_manager_native_layout(Some(14)), PackageManagerNativeLayout::Android12To14);
+    assert_eq!(package_manager_native_layout(Some(15)), PackageManagerNativeLayout::Android15Or16);
+    assert_eq!(package_manager_native_layout(Some(16)), PackageManagerNativeLayout::Android15Or16);
+    assert_eq!(package_manager_native_layout(Some(17)), PackageManagerNativeLayout::Android17);
+    assert_eq!(package_manager_native_layout(Some(18)), PackageManagerNativeLayout::Android17);
+    assert_eq!(package_manager_native_layout(None), PackageManagerNativeLayout::Android15Or16);
     assert_eq!(
         legacy_pm_transactions(PackageManagerNativeLayout::Android12To14),
-        (
-            rsbinder::FIRST_CALL_TRANSACTION + 5,
-            rsbinder::FIRST_CALL_TRANSACTION + 4
-        )
+        (rsbinder::FIRST_CALL_TRANSACTION + 5, rsbinder::FIRST_CALL_TRANSACTION + 4)
     );
     assert_eq!(
         legacy_pm_transactions(PackageManagerNativeLayout::Android15Or16),
-        (
-            rsbinder::FIRST_CALL_TRANSACTION + 6,
-            rsbinder::FIRST_CALL_TRANSACTION + 5
-        )
+        (rsbinder::FIRST_CALL_TRANSACTION + 6, rsbinder::FIRST_CALL_TRANSACTION + 5)
     );
 }

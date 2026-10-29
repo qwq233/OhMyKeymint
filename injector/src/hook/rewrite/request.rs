@@ -8,10 +8,7 @@ pub(super) fn target_from_transaction(tr: &binder_transaction_data) -> Option<Lo
     if ptr == 0 || tr.cookie == 0 {
         return None;
     }
-    Some(LocalBinderTarget {
-        ptr,
-        cookie: tr.cookie,
-    })
+    Some(LocalBinderTarget { ptr, cookie: tr.cookie })
 }
 
 fn route_for_service_request(
@@ -139,12 +136,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             block_system_request(tr);
             return true;
         }
-        let pending = PendingAuthorizationCall {
-            request,
-            method,
-            caller,
-            config: cfg,
-        };
+        let pending = PendingAuthorizationCall { request, method, caller, config: cfg };
         if expects_reply {
             replace_top_pending(connection, PendingCall::Authorization(pending));
         }
@@ -177,42 +169,29 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             ParsedMaintenanceRequest::MigrateKeyNamespace { .. } => {
                 let decision = evaluate_caller(&caller, &cfg);
                 (
-                    if decision.allowed {
-                        RouteTarget::Omk
-                    } else {
-                        RouteTarget::System
-                    },
+                    if decision.allowed { RouteTarget::Omk } else { RouteTarget::System },
                     decision.packages,
                     Some(decision.reason),
                 )
             }
             _ => (RouteTarget::System, Vec::new(), None),
         };
-        let pending = PendingMaintenanceCall {
-            request,
-            caller,
-            route,
-            config: cfg,
-        };
+        let pending = PendingMaintenanceCall { request, caller, route, config: cfg };
         let precomputed = if pending.route == RouteTarget::Omk
-            && matches!(
-                &pending.request,
-                ParsedMaintenanceRequest::MigrateKeyNamespace { .. }
-            ) {
+            && matches!(&pending.request, ParsedMaintenanceRequest::MigrateKeyNamespace { .. })
+        {
             block_system_request(tr);
             Some(precompute_omk_migrate_reply(&pending))
         } else {
             None
         };
         let request_rewritten = precomputed.is_some();
-        let route_note = if matches!(
-            &pending.request,
-            ParsedMaintenanceRequest::MigrateKeyNamespace { .. }
-        ) {
-            "using caller scoop decision as authoritative business path"
-        } else {
-            "mirroring maintenance state to OMK after system success"
-        };
+        let route_note =
+            if matches!(&pending.request, ParsedMaintenanceRequest::MigrateKeyNamespace { .. }) {
+                "using caller scoop decision as authoritative business path"
+            } else {
+                "mirroring maintenance state to OMK after system success"
+            };
         info!(
             "event=decision command={} maintenance_method={:?} code=0x{:x} uid={} pid={} sid='{}' packages={:?} route={:?} reason={:?}; {}",
             command_name,
@@ -241,10 +220,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             return request_rewritten;
         }
         if let Some(reply) = precomputed {
-            replace_top_pending(
-                connection,
-                PendingCall::PrecomputedMaintenance(pending, reply),
-            );
+            replace_top_pending(connection, PendingCall::PrecomputedMaintenance(pending, reply));
         } else {
             replace_top_pending(connection, PendingCall::Maintenance(pending));
         }
@@ -323,9 +299,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         let pending = PendingServiceCall {
             request,
             caller,
-            packages: decision
-                .map(|decision| decision.packages)
-                .unwrap_or_default(),
+            packages: decision.map(|decision| decision.packages).unwrap_or_default(),
             route,
         };
         if !expects_reply {
@@ -434,9 +408,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         let pending = PendingSecurityLevelCall {
             request,
             caller,
-            packages: decision
-                .map(|decision| decision.packages)
-                .unwrap_or_default(),
+            packages: decision.map(|decision| decision.packages).unwrap_or_default(),
             route,
             security_level: target_info.security_level,
         };
@@ -515,12 +487,8 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             method, caller.uid, caller.pid, operation_target.route
         );
 
-        let pending = PendingOperationCall {
-            request,
-            caller,
-            target,
-            route: operation_target.route,
-        };
+        let pending =
+            PendingOperationCall { request, caller, target, route: operation_target.route };
         if !expects_reply
             && operation_target.route == RouteTarget::Omk
             && can_execute_one_way(SyntheticTargetKind::Operation, tr.code)
@@ -533,10 +501,7 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         return false;
     }
 
-    debug!(
-        "event=decision skipping unsupported keystore interface request code=0x{:x}",
-        tr.code
-    );
+    debug!("event=decision skipping unsupported keystore interface request code=0x{:x}", tr.code);
 
     false
 }

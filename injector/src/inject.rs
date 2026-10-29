@@ -45,16 +45,14 @@ fn finish_injection_result(result: Result<()>, cleanup_errors: Vec<anyhow::Error
         error!("injection cleanup failed: {cleanup_error:#}");
     }
 
-    let cleanup_message = cleanup_errors
-        .iter()
-        .map(|error| format!("{error:#}"))
-        .collect::<Vec<_>>()
-        .join("; ");
+    let cleanup_message =
+        cleanup_errors.iter().map(|error| format!("{error:#}")).collect::<Vec<_>>().join("; ");
     match result {
         Ok(()) => Err(anyhow!("injection cleanup failed: {cleanup_message}")),
-        Err(error) => Err(error.context(format!(
-            "injection failed and cleanup also failed: {cleanup_message}"
-        ))),
+        Err(error) => {
+            Err(error
+                .context(format!("injection failed and cleanup also failed: {cleanup_message}")))
+        }
     }
 }
 
@@ -62,10 +60,7 @@ fn persist_remote_payload_state(pid: Pid, payload_identifier: &str) -> Result<()
     let path = Path::new(REMOTE_PAYLOAD_STATE_PATH);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create injector payload state directory {}",
-                parent.display()
-            )
+            format!("failed to create injector payload state directory {}", parent.display())
         })?;
     }
     std::fs::write(path, format!("{} {}\n", pid, payload_identifier))
@@ -166,13 +161,11 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
                 regs.uregs[13] as usize
             }
         };
-        let tentative_sp = sp
-            .checked_sub(data.len())
-            .context("stack underflow while reserving remote storage")?;
+        let tentative_sp =
+            sp.checked_sub(data.len()).context("stack underflow while reserving remote storage")?;
         let new_sp = tentative_sp & !0xf;
-        let write_base = new_sp
-            .checked_add(data.len())
-            .context("aligned remote stack write overflow")?;
+        let write_base =
+            new_sp.checked_add(data.len()).context("aligned remote stack write overflow")?;
         // Keep the remote scratch allocations 16-byte aligned like the reference
         // injector. Ancillary socket control buffers are sensitive to layout.
         let new_sp = sys::push_stack(pid, write_base, data)?;
@@ -259,21 +252,13 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         let close_res = sys::remote_call(pid, close_addr, libc_return_addr, &[fd as usize])?;
         if close_res != 0 {
             let err = get_remote_errno().unwrap_or(0);
-            bail!(
-                "Remote close failed for fd {}: result={} errno={}",
-                fd,
-                close_res,
-                err
-            );
+            bail!("Remote close failed for fd {}: result={} errno={}", fd, close_res, err);
         }
         Ok(())
     };
 
     let local_lib_file = std::fs::File::open(self_path).with_context(|| {
-        format!(
-            "Failed to open deployed payload image {}",
-            self_path.display()
-        )
+        format!("Failed to open deployed payload image {}", self_path.display())
     })?;
     let local_lib_fd = local_lib_file.as_raw_fd();
     info!(
@@ -376,22 +361,15 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     }
     let entry_symbol = std::ffi::CString::new("entry")?;
     let remote_entry_symbol_ptr = push_to_remote_stack(entry_symbol.as_bytes_with_nul())?;
-    let injector_entry = sys::remote_call(
-        pid,
-        dlsym_addr,
-        libc_return_addr,
-        &[handle, remote_entry_symbol_ptr],
-    )?;
+    let injector_entry =
+        sys::remote_call(pid, dlsym_addr, libc_return_addr, &[handle, remote_entry_symbol_ptr])?;
     if injector_entry == 0 {
         if let Some(error_message) = read_remote_dlerror()? {
             error!("dlsym(entry) failed: {}", error_message);
         }
         bail!("Failed to find 'entry' symbol in injected image");
     }
-    debug!(
-        "resolved remote entry via dlsym address=0x{:x}",
-        injector_entry
-    );
+    debug!("resolved remote entry via dlsym address=0x{:x}", injector_entry);
 
     let entry_result = sys::remote_call(pid, injector_entry, libc_return_addr, &[handle])?;
     if entry_result == 0 {
@@ -399,10 +377,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     }
 
     if let Err(error) = persist_remote_payload_state(pid, &payload_identifier) {
-        warn!(
-            "failed to persist payload identifier state for pid {}: {:#}",
-            pid, error
-        );
+        warn!("failed to persist payload identifier state for pid {}: {:#}", pid, error);
     }
 
     info!("remote entry returned successfully");

@@ -13,11 +13,7 @@ fn raw_parts(reply: &mut OwnedReply) -> (*mut u8, usize, *mut usize, usize) {
     (
         reply.data_mut_ptr(),
         reply.data_size(),
-        if reply.offsets.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            reply.offsets.as_mut_ptr()
-        },
+        if reply.offsets.is_empty() { std::ptr::null_mut() } else { reply.offsets.as_mut_ptr() },
         reply.offsets_size(),
     )
 }
@@ -35,9 +31,7 @@ fn assert_status_code<T>(result: Result<T>, expected: StatusCode) {
         Ok(_) => panic!("request should fail"),
         Err(error) => error,
     };
-    let status = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<StatusCode>().copied());
+    let status = error.chain().find_map(|cause| cause.downcast_ref::<StatusCode>().copied());
     assert_eq!(status, Some(expected));
 }
 
@@ -50,21 +44,12 @@ fn data_only_replies_match_parcel_encoding() {
         let expected = parcel_bytes(&mut original).unwrap();
         let mut actual = build_plain_reply(&value).unwrap();
         assert_eq!(actual.data, expected);
-        assert_eq!(
-            parse_owned_success_reply::<Option<Vec<u8>>>(&mut actual).unwrap(),
-            value
-        );
+        assert_eq!(parse_owned_success_reply::<Option<Vec<u8>>>(&mut actual).unwrap(), value);
     }
-    for status in [
-        Status::from(StatusCode::Ok),
-        Status::new_service_specific_error(-38, None),
-    ] {
+    for status in [Status::from(StatusCode::Ok), Status::new_service_specific_error(-38, None)] {
         let mut original = Parcel::new();
         original.write(&status).unwrap();
-        assert_eq!(
-            build_status_reply(&status).unwrap().data,
-            parcel_bytes(&mut original).unwrap()
-        );
+        assert_eq!(build_status_reply(&status).unwrap().data, parcel_bytes(&mut original).unwrap());
     }
 }
 
@@ -92,10 +77,7 @@ fn key_entry_reply_round_trip_without_binder() {
         unsafe { parse_success_reply(data, data_size, offsets, offsets_size) }.unwrap();
     assert!(parsed.r#iSecurityLevel.is_none());
     assert_eq!(parsed.r#metadata.r#key.nspace, 42);
-    assert_eq!(
-        parsed.r#metadata.r#certificate.as_deref(),
-        Some(&[1, 2, 3][..])
-    );
+    assert_eq!(parsed.r#metadata.r#certificate.as_deref(), Some(&[1, 2, 3][..]));
 }
 
 #[test]
@@ -106,10 +88,7 @@ fn create_operation_reply_rejects_missing_binder() {
         r#parameters: None,
         r#upgradedBlob: Some(vec![9, 8, 7]),
     };
-    assert_status_code(
-        build_create_operation_reply(response),
-        StatusCode::UnexpectedNull,
-    );
+    assert_status_code(build_create_operation_reply(response), StatusCode::UnexpectedNull);
 }
 
 #[test]
@@ -133,15 +112,12 @@ fn create_operation_carrier_reply_preserves_operation_challenge() {
     let mut parcel = unsafe { parcel_from_ipc_parts(data, data_size, offsets, offsets_size) };
     read_ok_status(&mut parcel).unwrap();
     read_non_null_parcelable_flag(&mut parcel, "create-operation").unwrap();
-    let parsed: (
-        Option<OperationChallenge>,
-        Option<KeyParameters>,
-        Option<Vec<u8>>,
-    ) = read_sized_reply_payload(&mut parcel, "create-operation test payload", |sub_parcel| {
-        read_reply_binder_carrier(sub_parcel, data)?;
-        Ok((sub_parcel.read()?, sub_parcel.read()?, sub_parcel.read()?))
-    })
-    .unwrap();
+    let parsed: (Option<OperationChallenge>, Option<KeyParameters>, Option<Vec<u8>>) =
+        read_sized_reply_payload(&mut parcel, "create-operation test payload", |sub_parcel| {
+            read_reply_binder_carrier(sub_parcel, data)?;
+            Ok((sub_parcel.read()?, sub_parcel.read()?, sub_parcel.read()?))
+        })
+        .unwrap();
     assert_eq!(parsed.0.map(|challenge| challenge.challenge), Some(0x5678));
     let parsed_nonce = parsed.1.as_ref().and_then(|parameters| {
         parameters.keyParameter.iter().find_map(|parameter| {

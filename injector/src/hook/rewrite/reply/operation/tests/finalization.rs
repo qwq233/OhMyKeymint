@@ -4,10 +4,7 @@ use super::*;
 fn omk_route_finish_rejects_late_cleanup_abort() {
     let _guard = route_state_test_guard();
     let aborts = Arc::new(AtomicUsize::new(0));
-    let target = LocalBinderTarget {
-        ptr: 0x1234,
-        cookie: 0x5678,
-    };
+    let target = LocalBinderTarget { ptr: 0x1234, cookie: 0x5678 };
     let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
         update_output: vec![5, 6, 7],
         aborts: aborts.clone(),
@@ -24,15 +21,8 @@ fn omk_route_finish_rejects_late_cleanup_abort() {
     );
 
     let reply = build_operation_reply_rewrite(&PendingOperationCall {
-        request: ParsedOperationRequest::Finish {
-            input: Some(vec![1, 2, 3]),
-            signature: None,
-        },
-        caller: CallerInfo {
-            uid: 1000,
-            sid: String::new(),
-            pid: 2000,
-        },
+        request: ParsedOperationRequest::Finish { input: Some(vec![1, 2, 3]), signature: None },
+        caller: CallerInfo { uid: 1000, sid: String::new(), pid: 2000 },
         target,
         route: RouteTarget::Omk,
     })
@@ -53,11 +43,7 @@ fn omk_route_finish_rejects_late_cleanup_abort() {
 
     let cleanup_reply = build_operation_reply_rewrite(&PendingOperationCall {
         request: ParsedOperationRequest::Abort,
-        caller: CallerInfo {
-            uid: 1000,
-            sid: String::new(),
-            pid: 2000,
-        },
+        caller: CallerInfo { uid: 1000, sid: String::new(), pid: 2000 },
         target,
         route: RouteTarget::Omk,
     })
@@ -76,10 +62,7 @@ fn omk_route_finish_rejects_late_cleanup_abort() {
     }
     .expect("cleanup abort reply should deserialize");
 
-    assert_eq!(
-        cleanup_status.exception_code(),
-        rsbinder::ExceptionCode::ServiceSpecific
-    );
+    assert_eq!(cleanup_status.exception_code(), rsbinder::ExceptionCode::ServiceSpecific);
     assert_eq!(
         cleanup_status.service_specific_error(),
         crate::android::hardware::security::keymint::ErrorCode::ErrorCode::INVALID_OPERATION_HANDLE
@@ -101,10 +84,7 @@ fn omk_route_abort_clears_operation_mapping() {
     ensure_binder_process_state();
     let _guard = route_state_test_guard();
     let aborts = Arc::new(AtomicUsize::new(0));
-    let target = LocalBinderTarget {
-        ptr: 0x1234,
-        cookie: 0x5678,
-    };
+    let target = LocalBinderTarget { ptr: 0x1234, cookie: 0x5678 };
     let backend = BnKeystoreOperation::new_binder(TestOperationBackend {
         update_output: vec![5, 6, 7],
         aborts: aborts.clone(),
@@ -122,11 +102,7 @@ fn omk_route_abort_clears_operation_mapping() {
 
     let reply = build_operation_reply_rewrite(&PendingOperationCall {
         request: ParsedOperationRequest::Abort,
-        caller: CallerInfo {
-            uid: 1000,
-            sid: String::new(),
-            pid: 2000,
-        },
+        caller: CallerInfo { uid: 1000, sid: String::new(), pid: 2000 },
         target,
         route: RouteTarget::Omk,
     })
@@ -139,8 +115,5 @@ fn omk_route_abort_clears_operation_mapping() {
 
     assert!(status.is_ok());
     assert_eq!(aborts.load(Ordering::SeqCst), 1);
-    assert!(
-        lookup_operation_target(target).is_none(),
-        "abort should clear the operation mapping"
-    );
+    assert!(lookup_operation_target(target).is_none(), "abort should clear the operation mapping");
 }

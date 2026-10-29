@@ -176,13 +176,7 @@ impl WatchdogState {
         // Sort the groups by start time of the most recent (.last()) of each group.
         // It is panic safe to use unwrap() here because we never add empty vectors to
         // the map.
-        groups.sort_by(|v1, v2| {
-            v1.last()
-                .unwrap()
-                .1
-                .started
-                .cmp(&v2.last().unwrap().1.started)
-        });
+        groups.sort_by(|v1, v2| v1.last().unwrap().1.started.cmp(&v2.last().unwrap().1.started));
 
         for g in groups.iter() {
             for (i, r) in g.iter() {
@@ -245,10 +239,7 @@ impl WatchdogState {
 
     fn arm(&mut self, index: Index, record: Record) {
         if self.records.insert(index.clone(), record).is_some() {
-            log::warn!(
-                "Recursive watchdog record at \"{:?}\" replaces previous record.",
-                index
-            );
+            log::warn!("Recursive watchdog record at \"{:?}\" replaces previous record.", index);
         }
     }
 }
@@ -292,11 +283,7 @@ impl Watchdog {
             return None;
         };
         wd.arm(context, id, deadline);
-        Some(WatchPoint {
-            id,
-            wd,
-            not_send: Default::default(),
-        })
+        Some(WatchPoint { id, wd, not_send: Default::default() })
     }
 
     /// Create a new watch point. If the WatchPoint is not dropped before the timeout
@@ -324,11 +311,7 @@ impl Watchdog {
     ) {
         let tid = thread::current().id();
         let index = Index { tid, id };
-        let record = Record {
-            started: Instant::now(),
-            deadline,
-            context,
-        };
+        let record = Record { started: Instant::now(), deadline, context };
 
         let (ref condvar, ref state) = *self.state;
 

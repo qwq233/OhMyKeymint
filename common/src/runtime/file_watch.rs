@@ -175,10 +175,7 @@ where
             let name_start = offset + std::mem::size_of::<libc::inotify_event>();
             let name_end = name_start + event.len as usize;
             let name_bytes = &buffer[name_start..name_end.min(read as usize)];
-            let name = name_bytes
-                .split(|byte| *byte == 0)
-                .next()
-                .unwrap_or_default();
+            let name = name_bytes.split(|byte| *byte == 0).next().unwrap_or_default();
 
             if (event.mask & libc::IN_Q_OVERFLOW) != 0 || name == watched_name.as_slice() {
                 if let Some(candidate) = WatchTrigger::from_inotify_mask(event.mask) {
@@ -203,11 +200,10 @@ mod tests {
 
     #[test]
     fn higher_priority_trigger_is_retained() {
-        let selected = std::cmp::min_by_key(
-            WatchTrigger::CloseWrite,
-            WatchTrigger::ReplaceSave,
-            |trigger| trigger.priority(),
-        );
+        let selected =
+            std::cmp::min_by_key(WatchTrigger::CloseWrite, WatchTrigger::ReplaceSave, |trigger| {
+                trigger.priority()
+            });
 
         assert_eq!(selected, WatchTrigger::CloseWrite);
     }

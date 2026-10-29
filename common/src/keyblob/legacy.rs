@@ -49,10 +49,7 @@ pub enum AuthEncryptedBlobFormat {
 impl AuthEncryptedBlobFormat {
     /// Indicate whether this format requires secure deletion support.
     pub fn requires_secure_deletion(&self) -> bool {
-        matches!(
-            self,
-            Self::AesGcmWithSecureDeletion | Self::AesGcmWithSecureDeletionVersioned
-        )
+        matches!(self, Self::AesGcmWithSecureDeletion | Self::AesGcmWithSecureDeletionVersioned)
     }
     /// Indicate whether this format is versioned.
     pub fn is_versioned(&self) -> bool {
@@ -115,18 +112,10 @@ impl EncryptedKeyBlob {
         result.extend_from_slice(&self.tag);
         if self.format.is_versioned() {
             let kdf_version = self.kdf_version.ok_or_else(|| {
-                km_err!(
-                    InvalidKeyBlob,
-                    "keyblob of format {:?} missing kdf_version",
-                    self.format
-                )
+                km_err!(InvalidKeyBlob, "keyblob of format {:?} missing kdf_version", self.format)
             })?;
             let addl_info = self.addl_info.ok_or_else(|| {
-                km_err!(
-                    InvalidKeyBlob,
-                    "keyblob of format {:?} missing addl_info",
-                    self.format
-                )
+                km_err!(InvalidKeyBlob, "keyblob of format {:?} missing addl_info", self.format)
             })? as u32;
             result.extend_from_slice(&kdf_version.to_ne_bytes());
             result.extend_from_slice(&addl_info.to_ne_bytes());
@@ -173,13 +162,7 @@ impl EncryptedKeyBlob {
         let key_slot = match data.len() {
             0 => None,
             4 => Some(consume_u32(&mut data)?),
-            _ => {
-                return Err(km_err!(
-                    InvalidKeyBlob,
-                    "unexpected remaining length {}",
-                    data.len()
-                ))
-            }
+            _ => return Err(km_err!(InvalidKeyBlob, "unexpected remaining length {}", data.len())),
         };
 
         Ok(EncryptedKeyBlob {
@@ -244,11 +227,7 @@ impl KeyBlob {
         comparator: E,
     ) -> Result<Self, Error> {
         if data.len() < (Self::MAC_LEN + 4 + 4 + 4) {
-            return Err(km_err!(
-                InvalidKeyBlob,
-                "blob not long enough (len = {})",
-                data.len()
-            ));
+            return Err(km_err!(InvalidKeyBlob, "blob not long enough (len = {})", data.len()));
         }
 
         // Check the HMAC in the last 8 bytes before doing anything else.
@@ -260,11 +239,7 @@ impl KeyBlob {
 
         let version = consume_u8(&mut data)?;
         if version != KEY_BLOB_VERSION {
-            return Err(km_err!(
-                InvalidKeyBlob,
-                "unexpected blob version {}",
-                version
-            ));
+            return Err(km_err!(InvalidKeyBlob, "unexpected blob version {}", version));
         }
         let key_material = consume_vec(&mut data)?;
         let hw_enforced = crate::tag::legacy::deserialize(&mut data)?;
@@ -275,11 +250,7 @@ impl KeyBlob {
         if !rest.is_empty() {
             return Err(km_err!(InvalidKeyBlob, "extra data (len {})", rest.len()));
         }
-        Ok(KeyBlob {
-            key_material,
-            hw_enforced,
-            sw_enforced,
-        })
+        Ok(KeyBlob { key_material, hw_enforced, sw_enforced })
     }
 
     /// Compute the authentication HMAC for a KeyBlob. This is built as:

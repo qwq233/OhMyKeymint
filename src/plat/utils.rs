@@ -110,14 +110,9 @@ pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreSe
     let service: rsbinder::Strong<dyn IKeystoreService> = get_interface_once(KEYSTORE_SERVICE)
         .map_err(|error| anyhow::anyhow!("failed to connect to {KEYSTORE_SERVICE}: {error:?}"))?;
     let generation = KEYSTORE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
-    let recipient = Arc::new(KeystoreDeathRecipient {
-        died: AtomicBool::new(false),
-        generation,
-    });
+    let recipient = Arc::new(KeystoreDeathRecipient { died: AtomicBool::new(false), generation });
     let death_recipient: Arc<dyn DeathRecipient> = recipient.clone();
-    service
-        .as_binder()
-        .link_to_death(Arc::downgrade(&death_recipient))?;
+    service.as_binder().link_to_death(Arc::downgrade(&death_recipient))?;
     if recipient.died.load(Ordering::Acquire) || !keystore_service_is_alive(&service) {
         return Err(anyhow::anyhow!(
             "connected to {KEYSTORE_SERVICE} but binder died during initialization"
@@ -147,9 +142,7 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
             versionCode: 1,
             ..Default::default()
         };
-        KeyAttestationApplicationId {
-            packageInfos: vec![info],
-        }
+        KeyAttestationApplicationId { packageInfos: vec![info] }
     } else {
         get_application_id_from_provider(uid)?
     };
@@ -170,12 +163,8 @@ fn get_application_id_from_provider(uid: u32) -> anyhow::Result<KeyAttestationAp
             let pm = get_pm()?;
             let current_uid = unsafe { libc::getuid() };
             let current_euid = unsafe { libc::geteuid() };
-            debug!(
-                "calling AAID provider as uid={} euid={}",
-                current_uid, current_euid
-            );
-            pm.getKeyAttestationApplicationId(uid as i32)
-                .map_err(anyhow::Error::new)
+            debug!("calling AAID provider as uid={} euid={}", current_uid, current_euid);
+            pm.getKeyAttestationApplicationId(uid as i32).map_err(anyhow::Error::new)
         };
 
         match result {
@@ -211,26 +200,20 @@ fn get_application_id_from_provider(uid: u32) -> anyhow::Result<KeyAttestationAp
 
 fn is_transaction_failed_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause
-            .downcast_ref::<rsbinder::Status>()
-            .is_some_and(|status| {
-                status.exception_code() == rsbinder::ExceptionCode::TransactionFailed
-            })
-            || cause
-                .downcast_ref::<rsbinder::StatusCode>()
-                .is_some_and(|status| *status == rsbinder::StatusCode::DeadObject)
+        cause.downcast_ref::<rsbinder::Status>().is_some_and(|status| {
+            status.exception_code() == rsbinder::ExceptionCode::TransactionFailed
+        }) || cause
+            .downcast_ref::<rsbinder::StatusCode>()
+            .is_some_and(|status| *status == rsbinder::StatusCode::DeadObject)
     })
 }
 
 fn is_get_attestation_application_id_failed(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause
-            .downcast_ref::<rsbinder::Status>()
-            .is_some_and(|status| {
-                status.exception_code() == rsbinder::ExceptionCode::ServiceSpecific
-                    && status.service_specific_error()
-                        == ERROR_GET_ATTESTATION_APPLICATION_ID_FAILED
-            })
+        cause.downcast_ref::<rsbinder::Status>().is_some_and(|status| {
+            status.exception_code() == rsbinder::ExceptionCode::ServiceSpecific
+                && status.service_specific_error() == ERROR_GET_ATTESTATION_APPLICATION_ID_FAILED
+        })
     })
 }
 
@@ -262,10 +245,7 @@ fn encode_application_id(
         package_info_records.push(package_info);
     }
     let package_info_set = SetOfVec::from_iter(package_info_records).map_err(|e| {
-        anyhow::anyhow!(err!(
-            "Failed to encode AttestationApplicationId package infos: {:?}",
-            e
-        ))
+        anyhow::anyhow!(err!("Failed to encode AttestationApplicationId package infos: {:?}", e))
     })?;
 
     let mut signature_digests = Vec::new();
@@ -344,9 +324,7 @@ mod tests {
     use der::Decode;
 
     fn signature(data: &[u8]) -> Signature {
-        Signature {
-            data: data.to_vec(),
-        }
+        Signature { data: data.to_vec() }
     }
 
     fn package(
@@ -394,10 +372,9 @@ mod tests {
             ));
         }
 
-        let der = encode_application_id(KeyAttestationApplicationId {
-            packageInfos: package_infos,
-        })
-        .expect("AAID should encode");
+        let der =
+            encode_application_id(KeyAttestationApplicationId { packageInfos: package_infos })
+                .expect("AAID should encode");
         let parsed =
             DerAttestationApplicationId::from_der(&der).expect("encoded AAID should parse");
 
@@ -408,12 +385,10 @@ mod tests {
 
     #[test]
     fn aaid_encoder_uses_aosp_signature_size_limit() {
-        let signatures = (0..35)
-            .map(|idx| signature(format!("signature-{idx}").as_bytes()))
-            .collect();
-        let app_id = KeyAttestationApplicationId {
-            packageInfos: vec![package("a", 1, signatures)],
-        };
+        let signatures =
+            (0..35).map(|idx| signature(format!("signature-{idx}").as_bytes())).collect();
+        let app_id =
+            KeyAttestationApplicationId { packageInfos: vec![package("a", 1, signatures)] };
 
         let der = encode_application_id(app_id).expect("AAID should encode");
         let parsed =
@@ -434,13 +409,6 @@ mod tests {
         let parsed =
             DerAttestationApplicationId::from_der(&der).expect("encoded AAID should parse");
 
-        assert_eq!(
-            parsed
-                .package_info_records
-                .get(0)
-                .expect("package info")
-                .version,
-            u64::MAX
-        );
+        assert_eq!(parsed.package_info_records.get(0).expect("package info").version, u64::MAX);
     }
 }

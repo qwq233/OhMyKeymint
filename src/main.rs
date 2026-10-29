@@ -116,22 +116,14 @@ fn prepare_android_storage() {
     }
 
     if let Err(e) = crate::keybox::ensure_keybox_file(root_path!("keybox.xml")) {
-        storage_warn(format!(
-            "Failed to seed OMK keybox {}: {e:?}",
-            root_path!("keybox.xml")
-        ));
+        storage_warn(format!("Failed to seed OMK keybox {}: {e:?}", root_path!("keybox.xml")));
     }
 
-    for file in [
-        root_path!("keymint.log.lock"),
-        root_path!("injector.log.lock"),
-    ] {
+    for file in [root_path!("keymint.log.lock"), root_path!("injector.log.lock")] {
         match std::fs::remove_file(file) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => storage_warn(format!(
-                "Failed to remove legacy OMK lock file {file}: {e:?}"
-            )),
+            Err(e) => storage_warn(format!("Failed to remove legacy OMK lock file {file}: {e:?}")),
         }
     }
 
@@ -244,12 +236,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let mut config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
-    let level = config_file
-        .main
-        .log_level
-        .trim()
-        .parse()
-        .unwrap_or(LevelFilter::Debug);
+    let level = config_file.main.log_level.trim().parse().unwrap_or(LevelFilter::Debug);
     log::set_max_level(level);
 
     info!("starting OhMyKeymint");

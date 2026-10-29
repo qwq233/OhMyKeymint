@@ -155,11 +155,9 @@ pub fn characteristics_valid(characteristics: &[KeyParam]) -> Result<(), Error> 
         let tag = param.tag();
         dup_checker.add(tag)?;
         if info(tag)?.characteristic == Characteristic::NotKeyCharacteristic {
-            return Err(km_err!(
-                InvalidKeyBlob,
-                "tag {:?} is not a valid key characteristic",
-                tag,
-            ));
+            return Err(
+                km_err!(InvalidKeyBlob, "tag {:?} is not a valid key characteristic", tag,),
+            );
         }
     }
     Ok(())
@@ -240,19 +238,11 @@ pub fn characteristics_at(
         if result.is_none() {
             result = Some(&chars.authorizations);
         } else {
-            return Err(km_err!(
-                InvalidKeyBlob,
-                "multiple key characteristics at {:?}",
-                sec_level
-            ));
+            return Err(km_err!(InvalidKeyBlob, "multiple key characteristics at {:?}", sec_level));
         }
     }
     result.ok_or_else(|| {
-        km_err!(
-            InvalidKeyBlob,
-            "no parameters at security level {:?} found",
-            sec_level
-        )
+        km_err!(InvalidKeyBlob, "no parameters at security level {:?} found", sec_level)
     })
 }
 
@@ -331,13 +321,7 @@ pub fn extract_key_import_characteristics(
         }
     }?;
     Ok((
-        extract_key_characteristics(
-            secure_storage,
-            algorithm,
-            params,
-            &deduced_params,
-            sec_level,
-        )?,
+        extract_key_characteristics(secure_storage, algorithm, params, &deduced_params, sec_level)?,
         key_material,
     ))
 }
@@ -360,21 +344,14 @@ fn extract_key_characteristics(
 
         // Input params should not contain anything that KeyMint adds itself.
         if AUTO_ADDED_CHARACTERISTICS.contains(&tag) {
-            return Err(km_err!(
-                InvalidTag,
-                "KeyMint-added tag included on key generation/import"
-            ));
+            return Err(km_err!(InvalidTag, "KeyMint-added tag included on key generation/import"));
         }
 
         if sec_level == SecurityLevel::Strongbox
             && [Tag::MaxUsesPerBoot, Tag::RollbackResistance].contains(&tag)
         {
             // StrongBox does not support tags that require per-key storage.
-            return Err(km_err!(
-                InvalidTag,
-                "tag {:?} not allowed in StrongBox",
-                param.tag()
-            ));
+            return Err(km_err!(InvalidTag, "tag {:?} not allowed in StrongBox", param.tag()));
         }
 
         match param {
@@ -414,10 +391,7 @@ fn extract_key_characteristics(
     keystore_chars.sort_by(legacy::param_compare);
 
     let mut result = Vec::new();
-    result.try_push(KeyCharacteristics {
-        security_level: sec_level,
-        authorizations: chars,
-    })?;
+    result.try_push(KeyCharacteristics { security_level: sec_level, authorizations: chars })?;
     if !keystore_chars.is_empty() {
         result.try_push(KeyCharacteristics {
             security_level: SecurityLevel::Keystore,
@@ -437,11 +411,7 @@ fn check_rsa_key_size(key_size: KeySizeInBits, sec_level: SecurityLevel) -> Resu
         KeySizeInBits(2048) => Ok(()),
         KeySizeInBits(3072) if sec_level != SecurityLevel::Strongbox => Ok(()),
         KeySizeInBits(4096) if sec_level != SecurityLevel::Strongbox => Ok(()),
-        _ => Err(km_err!(
-            UnsupportedKeySize,
-            "unsupported KEY_SIZE {:?} bits for RSA",
-            key_size
-        )),
+        _ => Err(km_err!(UnsupportedKeySize, "unsupported KEY_SIZE {:?} bits for RSA", key_size)),
     }
 }
 
@@ -582,13 +552,15 @@ fn check_mldsa_gen_params(
 pub fn primary_purpose(params: &[KeyParam]) -> Result<KeyPurpose, Error> {
     params
         .iter()
-        .find_map(|param| {
-            if let KeyParam::Purpose(purpose) = param {
-                Some(*purpose)
-            } else {
-                None
-            }
-        })
+        .find_map(
+            |param| {
+                if let KeyParam::Purpose(purpose) = param {
+                    Some(*purpose)
+                } else {
+                    None
+                }
+            },
+        )
         .ok_or_else(|| km_err!(IncompatiblePurpose, "no purpose found for key!"))
 }
 
@@ -610,15 +582,9 @@ fn check_ec_import_params(
             // Raw key import must specify the curve (and the only valid option is Curve25519
             // currently).
             if primary_purpose(params)? == KeyPurpose::AgreeKey {
-                (
-                    ec.import_raw_x25519_key(key_data, params)?,
-                    EcCurve::Curve25519,
-                )
+                (ec.import_raw_x25519_key(key_data, params)?, EcCurve::Curve25519)
             } else {
-                (
-                    ec.import_raw_ed25519_key(key_data, params)?,
-                    EcCurve::Curve25519,
-                )
+                (ec.import_raw_ed25519_key(key_data, params)?, EcCurve::Curve25519)
             }
         }
         KeyFormat::Pkcs8 => {
@@ -636,10 +602,7 @@ fn check_ec_import_params(
                 }
                 KeyMaterial::Ec(EcCurve::Curve25519, CurveType::Xdh, _) => {
                     if primary_purpose(params)? != KeyPurpose::AgreeKey {
-                        return Err(km_err!(
-                            IncompatiblePurpose,
-                            "can't use XDH key for signing"
-                        ));
+                        return Err(km_err!(IncompatiblePurpose, "can't use XDH key for signing"));
                     }
                     EcCurve::Curve25519
                 }
@@ -706,11 +669,7 @@ fn check_ec_params(
     sec_level: SecurityLevel,
 ) -> Result<Option<KeyPurpose>, Error> {
     if sec_level == SecurityLevel::Strongbox && curve != EcCurve::P256 {
-        return Err(km_err!(
-            UnsupportedEcCurve,
-            "invalid curve ({:?}) for StrongBox",
-            curve
-        ));
+        return Err(km_err!(UnsupportedEcCurve, "invalid curve ({:?}) for StrongBox", curve));
     }
 
     // Key size is not needed, but if present should match the curve.
@@ -827,10 +786,7 @@ fn check_mldsa_import_params(
 /// Check the parameter validity for an ML-DSA key that is about to be generated or imported.
 fn check_mldsa_params(params: &[KeyParam], sec_level: SecurityLevel) -> Result<(), Error> {
     if sec_level == SecurityLevel::Strongbox {
-        return Err(km_err!(
-            UnsupportedAlgorithm,
-            "ML-DSA not supported for StrongBox"
-        ));
+        return Err(km_err!(UnsupportedAlgorithm, "ML-DSA not supported for StrongBox"));
     }
 
     let mut seen_attest = false;
@@ -997,11 +953,7 @@ fn check_hmac_params(
     }
     let digest = get_tag_value!(params, Digest, ErrorCode::UnsupportedDigest)?;
     if digest == Digest::None {
-        return Err(km_err!(
-            UnsupportedDigest,
-            "unsupported digest {:?}",
-            digest
-        ));
+        return Err(km_err!(UnsupportedDigest, "unsupported digest {:?}", digest));
     }
 
     let min_mac_len = get_tag_value!(params, MinMacLength, ErrorCode::MissingMinMacLength)?;
@@ -1066,23 +1018,14 @@ fn reject_incompatible_auth(params: &[KeyParam]) -> Result<(), Error> {
 
     if seen_no_auth {
         if seen_user_secure_id {
-            return Err(km_err!(
-                InvalidTag,
-                "found both NO_AUTH_REQUIRED and USER_SECURE_ID"
-            ));
+            return Err(km_err!(InvalidTag, "found both NO_AUTH_REQUIRED and USER_SECURE_ID"));
         }
         if seen_auth_type {
-            return Err(km_err!(
-                InvalidTag,
-                "found both NO_AUTH_REQUIRED and USER_AUTH_TYPE"
-            ));
+            return Err(km_err!(InvalidTag, "found both NO_AUTH_REQUIRED and USER_AUTH_TYPE"));
         }
     }
     if seen_user_secure_id && !seen_auth_type {
-        return Err(km_err!(
-            InvalidTag,
-            "found USER_SECURE_ID but no USER_AUTH_TYPE"
-        ));
+        return Err(km_err!(InvalidTag, "found USER_SECURE_ID but no USER_AUTH_TYPE"));
     }
     Ok(())
 }
@@ -1108,10 +1051,7 @@ pub fn check_rsa_wrapping_key_params(
 ) -> Result<DecryptionMode, Error> {
     // Check the purpose of the wrapping key
     if !contains_tag_value!(chars, Purpose, KeyPurpose::WrapKey) {
-        return Err(km_err!(
-            IncompatiblePurpose,
-            "no wrap key purpose for the wrapping key"
-        ));
+        return Err(km_err!(IncompatiblePurpose, "no wrap key purpose for the wrapping key"));
     }
     let padding_mode = get_tag_value!(params, Padding, ErrorCode::IncompatiblePaddingMode)?;
     if padding_mode != PaddingMode::RsaOaep {
@@ -1131,10 +1071,7 @@ pub fn check_rsa_wrapping_key_params(
     }
     let opt_mgf_digest = get_opt_tag_value!(params, RsaOaepMgfDigest)?;
     if opt_mgf_digest == Some(&Digest::None) {
-        return Err(km_err!(
-            UnsupportedMgfDigest,
-            "MGF digest cannot be NONE for RSA-OAEP"
-        ));
+        return Err(km_err!(UnsupportedMgfDigest, "MGF digest cannot be NONE for RSA-OAEP"));
     }
 
     if !contains_tag_value!(chars, Padding, padding_mode) {
@@ -1167,10 +1104,7 @@ pub fn check_rsa_wrapping_key_params(
     }
     let mgf_digest = opt_mgf_digest.unwrap_or(&Digest::Sha1);
 
-    let rsa_oaep_decrypt_mode = DecryptionMode::OaepPadding {
-        msg_digest,
-        mgf_digest: *mgf_digest,
-    };
+    let rsa_oaep_decrypt_mode = DecryptionMode::OaepPadding { msg_digest, mgf_digest: *mgf_digest };
     Ok(rsa_oaep_decrypt_mode)
 }
 

@@ -168,18 +168,14 @@ pub fn runtime_telephony_features() -> Result<TelephonyFeatures> {
 }
 
 pub(crate) fn is_binder_service_unavailable(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<BinderServiceUnavailable>().is_some())
+    error.chain().any(|cause| cause.downcast_ref::<BinderServiceUnavailable>().is_some())
 }
 
 fn with_helper<T>(call: impl FnOnce(&mut ResetpropHelperClient) -> Result<T>) -> Result<T> {
-    let helper = HELPER
-        .get()
-        .ok_or_else(|| anyhow!("privileged resetprop helper is unavailable"))?;
-    let mut helper = helper
-        .lock()
-        .map_err(|_| anyhow!("privileged resetprop helper lock poisoned"))?;
+    let helper =
+        HELPER.get().ok_or_else(|| anyhow!("privileged resetprop helper is unavailable"))?;
+    let mut helper =
+        helper.lock().map_err(|_| anyhow!("privileged resetprop helper lock poisoned"))?;
     call(&mut helper)
 }
 
@@ -202,10 +198,7 @@ pub fn find_resetprop_command() -> Result<ResetpropCommand> {
             .find(|candidate| candidate.exists())
             .map(|candidate| candidate.to_string_lossy().into_owned())
     }) {
-        return Ok(ResetpropCommand {
-            program,
-            prepend_arg: None,
-        });
+        return Ok(ResetpropCommand { program, prepend_arg: None });
     }
 
     for (program, prepend_arg) in RESETPROP_FALLBACKS {
@@ -239,10 +232,7 @@ fn execute_write_and_verify(command: &ResetpropCommand, property: &str, value: &
     if actual.eq_ignore_ascii_case(value) {
         Ok(())
     } else {
-        bail!(
-            "property verification failed for {property}: expected {value}, got {}",
-            actual
-        )
+        bail!("property verification failed for {property}: expected {value}, got {}", actual)
     }
 }
 
@@ -290,19 +280,14 @@ impl ResetpropHelperClient {
         self.stream
             .write_all(request.as_bytes())
             .context("failed to send privileged helper request")?;
-        self.stream
-            .flush()
-            .context("failed to flush privileged helper request")?;
+        self.stream.flush().context("failed to flush privileged helper request")?;
 
         let mut response = String::new();
         let mut reader = BufReader::new(
-            self.stream
-                .try_clone()
-                .context("failed to clone privileged helper stream")?,
+            self.stream.try_clone().context("failed to clone privileged helper stream")?,
         );
-        let read = reader
-            .read_line(&mut response)
-            .context("failed to read privileged helper response")?;
+        let read =
+            reader.read_line(&mut response).context("failed to read privileged helper response")?;
         if read == 0 {
             bail!("privileged helper closed unexpectedly");
         }
@@ -329,18 +314,12 @@ fn execute_phone_identifier(kind: PhoneIdentifierKind, slot: i32) -> Result<Opti
             Some(GET_DEVICE_ID_FOR_PHONE_TRANSACTION),
             "device ID",
         ),
-        PhoneIdentifierKind::Imei => (
-            PHONE_SERVICE,
-            PHONE_DESCRIPTOR,
-            Some(transactions.get_imei_for_slot),
-            "IMEI",
-        ),
-        PhoneIdentifierKind::Meid => (
-            PHONE_SERVICE,
-            PHONE_DESCRIPTOR,
-            transactions.get_meid_for_slot,
-            "MEID",
-        ),
+        PhoneIdentifierKind::Imei => {
+            (PHONE_SERVICE, PHONE_DESCRIPTOR, Some(transactions.get_imei_for_slot), "IMEI")
+        }
+        PhoneIdentifierKind::Meid => {
+            (PHONE_SERVICE, PHONE_DESCRIPTOR, transactions.get_meid_for_slot, "MEID")
+        }
     };
     let Some(transaction) = transaction else {
         return Ok(None);
@@ -351,14 +330,12 @@ fn execute_phone_identifier(kind: PhoneIdentifierKind, slot: i32) -> Result<Opti
     if descriptor != expected_descriptor {
         bail!("{service} descriptor mismatch: {descriptor}");
     }
-    let proxy = binder
-        .as_proxy()
-        .with_context(|| format!("{service} binder was unexpectedly local"))?;
+    let proxy =
+        binder.as_proxy().with_context(|| format!("{service} binder was unexpectedly local"))?;
     let mut data = proxy
         .prepare_transact(true)
         .with_context(|| format!("failed to prepare {label} transaction"))?;
-    data.write(&slot)
-        .with_context(|| format!("failed to write {label} slot"))?;
+    data.write(&slot).with_context(|| format!("failed to write {label} slot"))?;
     data.write(ANDROID_PACKAGE)
         .with_context(|| format!("failed to write {label} calling package"))?;
     data.write(ANDROID_PACKAGE)
@@ -370,16 +347,14 @@ fn execute_phone_identifier(kind: PhoneIdentifierKind, slot: i32) -> Result<Opti
         .with_context(|| format!("{label} returned no reply"))?;
     reply.set_data_position(0);
 
-    let status: Status = reply
-        .read()
-        .with_context(|| format!("failed to decode {label} reply status"))?;
+    let status: Status =
+        reply.read().with_context(|| format!("failed to decode {label} reply status"))?;
     if !status.is_ok() {
         bail!("{label} returned non-ok status: {status}");
     }
 
-    let Some(value): Option<String> = reply
-        .read()
-        .with_context(|| format!("failed to decode {label} value"))?
+    let Some(value): Option<String> =
+        reply.read().with_context(|| format!("failed to decode {label} value"))?
     else {
         return Ok(None);
     };
@@ -405,16 +380,11 @@ fn execute_has_system_feature(feature: &str) -> Result<bool> {
     if descriptor != PACKAGE_MANAGER_NATIVE_DESCRIPTOR {
         bail!("PackageManager descriptor mismatch: {descriptor}");
     }
-    let proxy = binder
-        .as_proxy()
-        .context("PackageManager binder was unexpectedly local")?;
-    let mut data = proxy
-        .prepare_transact(true)
-        .context("failed to prepare PackageManager transaction")?;
-    data.write(feature)
-        .context("failed to write PackageManager feature name")?;
-    data.write(&0_i32)
-        .context("failed to write PackageManager feature version")?;
+    let proxy = binder.as_proxy().context("PackageManager binder was unexpectedly local")?;
+    let mut data =
+        proxy.prepare_transact(true).context("failed to prepare PackageManager transaction")?;
+    data.write(feature).context("failed to write PackageManager feature name")?;
+    data.write(&0_i32).context("failed to write PackageManager feature version")?;
 
     let mut reply = proxy
         .submit_transact(
@@ -426,15 +396,12 @@ fn execute_has_system_feature(feature: &str) -> Result<bool> {
         .context("PackageManager hasSystemFeature returned no reply")?;
     reply.set_data_position(0);
 
-    let status: Status = reply
-        .read()
-        .context("failed to decode PackageManager hasSystemFeature status")?;
+    let status: Status =
+        reply.read().context("failed to decode PackageManager hasSystemFeature status")?;
     if !status.is_ok() {
         bail!("PackageManager hasSystemFeature returned non-ok status: {status}");
     }
-    reply
-        .read()
-        .context("failed to decode PackageManager hasSystemFeature result")
+    reply.read().context("failed to decode PackageManager hasSystemFeature result")
 }
 
 fn has_system_feature_transaction(android_major: Option<i32>) -> rsbinder::TransactionCode {
@@ -473,17 +440,13 @@ fn parse_phone_identifier_request(line: &str) -> Option<(PhoneIdentifierKind, &s
 
 fn parse_feature_request(line: &str) -> Option<&str> {
     let feature = line.strip_prefix("HAS_FEATURE\t")?;
-    matches!(
-        feature,
-        TELEPHONY_FEATURE | TELEPHONY_GSM_FEATURE | TELEPHONY_CDMA_FEATURE
-    )
-    .then_some(feature)
+    matches!(feature, TELEPHONY_FEATURE | TELEPHONY_GSM_FEATURE | TELEPHONY_CDMA_FEATURE)
+        .then_some(feature)
 }
 
 fn helper_error_response(error: &anyhow::Error) -> String {
-    if let Some(error) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<BinderServiceUnavailable>())
+    if let Some(error) =
+        error.chain().find_map(|cause| cause.downcast_ref::<BinderServiceUnavailable>())
     {
         format!("UNAVAILABLE\t{}\n", error.0)
     } else {
@@ -492,18 +455,15 @@ fn helper_error_response(error: &anyhow::Error) -> String {
 }
 
 fn helper_loop(stream: UnixStream, command: Option<ResetpropCommand>) -> Result<()> {
-    let reader_stream = stream
-        .try_clone()
-        .context("failed to clone resetprop helper socket")?;
+    let reader_stream = stream.try_clone().context("failed to clone resetprop helper socket")?;
     let mut reader = BufReader::new(reader_stream);
     let mut writer = stream;
     let mut line = String::new();
 
     loop {
         line.clear();
-        let read = reader
-            .read_line(&mut line)
-            .context("failed to read resetprop helper request")?;
+        let read =
+            reader.read_line(&mut line).context("failed to read resetprop helper request")?;
         if read == 0 {
             return Ok(());
         }
@@ -539,9 +499,7 @@ fn helper_loop(stream: UnixStream, command: Option<ResetpropCommand>) -> Result<
         writer
             .write_all(response.as_bytes())
             .context("failed to write resetprop helper response")?;
-        writer
-            .flush()
-            .context("failed to flush resetprop helper response")?;
+        writer.flush().context("failed to flush resetprop helper response")?;
     }
 }
 
@@ -566,10 +524,7 @@ mod tests {
     fn telephony_transactions_match_android_12_through_17() {
         use rsbinder::FIRST_CALL_TRANSACTION;
 
-        assert_eq!(
-            GET_DEVICE_ID_FOR_PHONE_TRANSACTION,
-            FIRST_CALL_TRANSACTION + 3
-        );
+        assert_eq!(GET_DEVICE_ID_FOR_PHONE_TRANSACTION, FIRST_CALL_TRANSACTION + 3);
         for (version, offset) in [(12, 12), (13, 12), (14, 9), (15, 10), (16, 10), (17, 13)] {
             assert_eq!(
                 has_system_feature_transaction(Some(version)),
@@ -585,10 +540,7 @@ mod tests {
             (17, 132, None),
         ] {
             let transactions = telephony_transactions_for(Some(version));
-            assert_eq!(
-                transactions.get_imei_for_slot,
-                FIRST_CALL_TRANSACTION + imei
-            );
+            assert_eq!(transactions.get_imei_for_slot, FIRST_CALL_TRANSACTION + imei);
             assert_eq!(
                 transactions.get_meid_for_slot,
                 meid.map(|offset| FIRST_CALL_TRANSACTION + offset)
@@ -598,20 +550,10 @@ mod tests {
 
     #[test]
     fn feature_helper_accepts_only_telephony_features() {
-        for feature in [
-            TELEPHONY_FEATURE,
-            TELEPHONY_GSM_FEATURE,
-            TELEPHONY_CDMA_FEATURE,
-        ] {
-            assert_eq!(
-                parse_feature_request(&format!("HAS_FEATURE\t{feature}")),
-                Some(feature)
-            );
+        for feature in [TELEPHONY_FEATURE, TELEPHONY_GSM_FEATURE, TELEPHONY_CDMA_FEATURE] {
+            assert_eq!(parse_feature_request(&format!("HAS_FEATURE\t{feature}")), Some(feature));
         }
-        assert_eq!(
-            parse_feature_request("HAS_FEATURE\tandroid.hardware.camera"),
-            None
-        );
+        assert_eq!(parse_feature_request("HAS_FEATURE\tandroid.hardware.camera"), None);
         assert_eq!(parse_feature_request("HAS_FEATURE"), None);
     }
 
@@ -619,16 +561,10 @@ mod tests {
     fn service_unavailable_response_round_trips() {
         let (client_stream, mut helper_stream) = UnixStream::pair().unwrap();
         let unavailable: anyhow::Error = BinderServiceUnavailable(PHONE_SERVICE.to_string()).into();
-        helper_stream
-            .write_all(helper_error_response(&unavailable).as_bytes())
-            .unwrap();
+        helper_stream.write_all(helper_error_response(&unavailable).as_bytes()).unwrap();
 
-        let mut client = ResetpropHelperClient {
-            stream: client_stream,
-        };
-        let error = client
-            .get_phone_identifier(PhoneIdentifierKind::Imei, 0)
-            .unwrap_err();
+        let mut client = ResetpropHelperClient { stream: client_stream };
+        let error = client.get_phone_identifier(PhoneIdentifierKind::Imei, 0).unwrap_err();
 
         assert!(is_binder_service_unavailable(&error));
         assert_eq!(error.to_string(), "service phone unavailable");
@@ -636,16 +572,10 @@ mod tests {
 
     #[test]
     fn service_lookup_only_retries_missing_or_transport_failures() {
-        assert_eq!(
-            require_binder_service(PHONE_SERVICE, Ok(Some(7_u8))).unwrap(),
-            7
-        );
+        assert_eq!(require_binder_service(PHONE_SERVICE, Ok(Some(7_u8))).unwrap(), 7);
 
-        let unavailable: [rsbinder::Result<Option<()>>; 3] = [
-            Ok(None),
-            Err(StatusCode::DeadObject),
-            Err(StatusCode::NotEnoughData),
-        ];
+        let unavailable: [rsbinder::Result<Option<()>>; 3] =
+            [Ok(None), Err(StatusCode::DeadObject), Err(StatusCode::NotEnoughData)];
         for lookup in unavailable {
             let error = require_binder_service(PHONE_SERVICE, lookup).unwrap_err();
             assert!(is_binder_service_unavailable(&error));
@@ -662,9 +592,7 @@ mod tests {
         ] {
             let error = require_binder_service::<()>(PHONE_SERVICE, Err(status)).unwrap_err();
             assert!(!is_binder_service_unavailable(&error));
-            assert!(error
-                .chain()
-                .any(|cause| cause.downcast_ref::<StatusCode>() == Some(&status)));
+            assert!(error.chain().any(|cause| cause.downcast_ref::<StatusCode>() == Some(&status)));
             assert!(helper_error_response(&error).starts_with("ERR\t"));
         }
     }

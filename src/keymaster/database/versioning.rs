@@ -26,11 +26,7 @@ fn create_or_get_version(tx: &Transaction, current_version: u32) -> Result<u32> 
     .context("In create_or_get_version: Failed to create version table.")?;
 
     let version = tx
-        .query_row(
-            "SELECT version FROM persistent.version WHERE id = 0;",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT version FROM persistent.version WHERE id = 0;", [], |row| row.get(0))
         .optional()
         .context("In create_or_get_version: Failed to read version.")?;
 
@@ -59,11 +55,8 @@ fn create_or_get_version(tx: &Transaction, current_version: u32) -> Result<u32> 
             0
         };
 
-        tx.execute(
-            "INSERT INTO persistent.version (id, version) VALUES(0, ?);",
-            params![version],
-        )
-        .context("In create_or_get_version: Failed to insert initial version.")?;
+        tx.execute("INSERT INTO persistent.version (id, version) VALUES(0, ?);", params![version])
+            .context("In create_or_get_version: Failed to insert initial version.")?;
         version
     };
     Ok(version)
@@ -71,10 +64,7 @@ fn create_or_get_version(tx: &Transaction, current_version: u32) -> Result<u32> 
 
 pub(crate) fn update_version(tx: &Transaction, new_version: u32) -> Result<()> {
     let updated = tx
-        .execute(
-            "UPDATE persistent.version SET version = ? WHERE id = 0;",
-            params![new_version],
-        )
+        .execute("UPDATE persistent.version SET version = ? WHERE id = 0;", params![new_version])
         .context("In update_version: Failed to update row.")?;
     if updated == 1 {
         Ok(())
@@ -88,9 +78,7 @@ where
     F: Fn(&Transaction) -> Result<u32> + 'static,
 {
     if upgraders.len() < current_version as usize {
-        return Err(anyhow!(
-            "In upgrade_database: Insufficient upgraders provided."
-        ));
+        return Err(anyhow!("In upgrade_database: Insufficient upgraders provided."));
     }
     let mut db_version = create_or_get_version(tx, current_version)
         .context("In upgrade_database: Failed to get database version.")?;
@@ -112,8 +100,7 @@ mod test {
     #[test]
     fn upgrade_database_test() {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute("ATTACH DATABASE 'file::memory:' as persistent;", [])
-            .unwrap();
+        conn.execute("ATTACH DATABASE 'file::memory:' as persistent;", []).unwrap();
 
         let upgraders: Vec<_> = (0..30_u32)
             .map(move |i| {
@@ -145,10 +132,8 @@ mod test {
             }
             for from in 1..29 {
                 for to in from..30 {
-                    conn.execute("DROP TABLE IF EXISTS persistent.version;", [])
-                        .unwrap();
-                    conn.execute("DROP TABLE IF EXISTS persistent.test;", [])
-                        .unwrap();
+                    conn.execute("DROP TABLE IF EXISTS persistent.version;", []).unwrap();
+                    conn.execute("DROP TABLE IF EXISTS persistent.test;", []).unwrap();
                     conn.execute(
                         "CREATE TABLE IF NOT EXISTS persistent.test (
                             id INTEGER PRIMARY KEY,
@@ -158,16 +143,14 @@ mod test {
                     .unwrap();
 
                     {
-                        let tx = conn
-                            .transaction_with_behavior(TransactionBehavior::Immediate)
-                            .unwrap();
+                        let tx =
+                            conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
                         create_or_get_version(&tx, from).unwrap();
                         tx.commit().unwrap();
                     }
                     {
-                        let tx = conn
-                            .transaction_with_behavior(TransactionBehavior::Immediate)
-                            .unwrap();
+                        let tx =
+                            conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
                         upgrade_database(&tx, to, &upgraders).unwrap();
                         tx.commit().unwrap();
                     }
@@ -206,12 +189,9 @@ mod test {
     #[test]
     fn create_or_get_version_new_database() {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute("ATTACH DATABASE 'file::memory:' as persistent;", [])
-            .unwrap();
+        conn.execute("ATTACH DATABASE 'file::memory:' as persistent;", []).unwrap();
         {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
             let version = create_or_get_version(&tx, 3).unwrap();
             tx.commit().unwrap();
             assert_eq!(version, 3);
@@ -231,26 +211,20 @@ mod test {
         // There is exactly one row in the version table.
         assert_eq!(
             Ok(1),
-            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row
-                .get(0))
+            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row.get(0))
         );
 
         // The version must be set to 3
         assert_eq!(
             Ok(3),
-            conn.query_row(
-                "SELECT version from persistent.version WHERE id = 0;",
-                [],
-                |row| row.get(0)
-            )
+            conn.query_row("SELECT version from persistent.version WHERE id = 0;", [], |row| row
+                .get(0))
         );
 
         // Will subsequent calls to create_or_get_version still return the same version even
         // if the current version changes.
         {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
             let version = create_or_get_version(&tx, 5).unwrap();
             tx.commit().unwrap();
             assert_eq!(version, 3);
@@ -259,24 +233,19 @@ mod test {
         // There is still exactly one row in the version table.
         assert_eq!(
             Ok(1),
-            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row
-                .get(0))
+            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row.get(0))
         );
 
         // Bump the version.
         {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
             update_version(&tx, 5).unwrap();
             tx.commit().unwrap();
         }
 
         // Now the version should have changed.
         {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
             let version = create_or_get_version(&tx, 7).unwrap();
             tx.commit().unwrap();
             assert_eq!(version, 5);
@@ -285,26 +254,21 @@ mod test {
         // There is still exactly one row in the version table.
         assert_eq!(
             Ok(1),
-            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row
-                .get(0))
+            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row.get(0))
         );
 
         // The version must be set to 5
         assert_eq!(
             Ok(5),
-            conn.query_row(
-                "SELECT version from persistent.version WHERE id = 0;",
-                [],
-                |row| row.get(0)
-            )
+            conn.query_row("SELECT version from persistent.version WHERE id = 0;", [], |row| row
+                .get(0))
         );
     }
 
     #[test]
     fn create_or_get_version_legacy_database() {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute("ATTACH DATABASE 'file::memory:' as persistent;", [])
-            .unwrap();
+        conn.execute("ATTACH DATABASE 'file::memory:' as persistent;", []).unwrap();
         // A legacy (version 0) database is detected if the keyentry table exists but no
         // version table.
         conn.execute(
@@ -321,9 +285,7 @@ mod test {
         .unwrap();
 
         {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
             let version = create_or_get_version(&tx, 3).unwrap();
             tx.commit().unwrap();
             // In the legacy case, version 0 must be returned.
@@ -344,26 +306,20 @@ mod test {
         // There is exactly one row in the version table.
         assert_eq!(
             Ok(1),
-            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row
-                .get(0))
+            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row.get(0))
         );
 
         // The version must be set to 0
         assert_eq!(
             Ok(0),
-            conn.query_row(
-                "SELECT version from persistent.version WHERE id = 0;",
-                [],
-                |row| row.get(0)
-            )
+            conn.query_row("SELECT version from persistent.version WHERE id = 0;", [], |row| row
+                .get(0))
         );
 
         // Will subsequent calls to create_or_get_version still return the same version even
         // if the current version changes.
         {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
             let version = create_or_get_version(&tx, 5).unwrap();
             tx.commit().unwrap();
             assert_eq!(version, 0);
@@ -372,24 +328,19 @@ mod test {
         // There is still exactly one row in the version table.
         assert_eq!(
             Ok(1),
-            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row
-                .get(0))
+            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row.get(0))
         );
 
         // Bump the version.
         {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
             update_version(&tx, 5).unwrap();
             tx.commit().unwrap();
         }
 
         // Now the version should have changed.
         {
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
             let version = create_or_get_version(&tx, 7).unwrap();
             tx.commit().unwrap();
             assert_eq!(version, 5);
@@ -398,18 +349,14 @@ mod test {
         // There is still exactly one row in the version table.
         assert_eq!(
             Ok(1),
-            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row
-                .get(0))
+            conn.query_row("SELECT COUNT(id) from persistent.version;", [], |row| row.get(0))
         );
 
         // The version must be set to 5
         assert_eq!(
             Ok(5),
-            conn.query_row(
-                "SELECT version from persistent.version WHERE id = 0;",
-                [],
-                |row| row.get(0)
-            )
+            conn.query_row("SELECT version from persistent.version WHERE id = 0;", [], |row| row
+                .get(0))
         );
     }
 }

@@ -4,10 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) fn clear_state_for_tests() {
-    SECURITY_LEVEL_TARGETS
-        .lock()
-        .expect("security level target map poisoned")
-        .clear();
+    SECURITY_LEVEL_TARGETS.lock().expect("security level target map poisoned").clear();
 }
 
 pub(crate) fn state_test_guard() -> MutexGuard<'static, ()> {

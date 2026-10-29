@@ -52,9 +52,7 @@ pub(super) fn build_omk_status_reply(status: &Status) -> anyhow::Result<Outbound
 }
 
 fn error_status(error: &anyhow::Error) -> Option<&Status> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<Status>())
+    error.chain().find_map(|cause| cause.downcast_ref::<Status>())
 }
 
 pub(super) fn build_omk_error_reply(error: &anyhow::Error) -> anyhow::Result<OutboundReply> {
@@ -208,12 +206,10 @@ fn build_direct_omk_security_level_reply(
                 ServiceMethod::GetSecurityLevel,
                 caller,
             )?;
-            Ok(Some(
-                parcel::build_get_security_level_reply_with_carrier_bytes(
-                    &carrier.bytes,
-                    carrier.is_object,
-                )?,
-            ))
+            Ok(Some(parcel::build_get_security_level_reply_with_carrier_bytes(
+                &carrier.bytes,
+                carrier.is_object,
+            )?))
         }
         Err(error) => omk_error_reply_for_method("getSecurityLevel", caller, &error),
     }
@@ -290,10 +286,7 @@ pub(super) unsafe fn build_service_reply_rewrite(
         return observe_system_service_reply(tr, pending);
     }
 
-    if matches!(
-        &pending.request,
-        ParsedServiceRequest::GetSecurityLevel { .. }
-    ) {
+    if matches!(&pending.request, ParsedServiceRequest::GetSecurityLevel { .. }) {
         if let Err(error) = observe_system_service_reply(tr, pending).map(|_| ()) {
             warn!(
                 "event=route failed to retain original System security-level target before OMK reply rewrite: {:#}",
@@ -324,11 +317,7 @@ pub(super) fn build_omk_service_reply(
             };
             Ok(Some(build_no_carrier_omk_key_entry_reply(entry, caller)?))
         }
-        ParsedServiceRequest::UpdateSubcomponent {
-            key,
-            public_cert,
-            certificate_chain,
-        } => {
+        ParsedServiceRequest::UpdateSubcomponent { key, public_cert, certificate_chain } => {
             match ipc::with_omk_once(|omk| {
                 Ok(omk.r#updateSubcomponent(
                     Some(caller),
@@ -347,11 +336,7 @@ pub(super) fn build_omk_service_reply(
                 Err(error) => omk_error_reply_for_method("listEntries", caller, &error),
             }
         }
-        ParsedServiceRequest::Grant {
-            key,
-            grantee_uid,
-            access_vector,
-        } => {
+        ParsedServiceRequest::Grant { key, grantee_uid, access_vector } => {
             let omk_grant = match ipc::with_omk_once(|omk| {
                 Ok(omk.r#grant(Some(caller), key, *grantee_uid, *access_vector)?)
             }) {
@@ -374,11 +359,7 @@ pub(super) fn build_omk_service_reply(
                 Err(error) => omk_error_reply_for_method("getNumberOfEntries", caller, &error),
             }
         }
-        ParsedServiceRequest::ListEntriesBatched {
-            domain,
-            nspace,
-            starting_past_alias,
-        } => {
+        ParsedServiceRequest::ListEntriesBatched { domain, nspace, starting_past_alias } => {
             match ipc::with_omk_once(|omk| {
                 Ok(omk.r#listEntriesBatched(
                     Some(caller),
@@ -413,10 +394,8 @@ pub(super) unsafe fn observe_system_security_level_reply(
     pending: &PendingSecurityLevelCall,
 ) -> anyhow::Result<Option<OutboundReply>> {
     let (data, data_size, offsets, offsets_size) = transaction_parts(tr);
-    if let ParsedSecurityLevelRequest::CreateOperation {
-        operation_parameters,
-        ..
-    } = &pending.request
+    if let ParsedSecurityLevelRequest::CreateOperation { operation_parameters, .. } =
+        &pending.request
     {
         if let Err(error) = register_operation_target_from_reply(
             tr,
@@ -464,11 +443,7 @@ pub(super) fn build_omk_security_level_reply(
         };
 
     match &pending.request {
-        ParsedSecurityLevelRequest::CreateOperation {
-            key,
-            operation_parameters,
-            forced,
-        } => {
+        ParsedSecurityLevelRequest::CreateOperation { key, operation_parameters, forced } => {
             let omk_response =
                 match omk_level.r#createOperation(Some(caller), key, operation_parameters, *forced)
                 {
@@ -507,13 +482,7 @@ pub(super) fn build_omk_security_level_reply(
                 Err(error) => omk_status_reply_for_method("generateKey", &pending.caller, &error),
             }
         }
-        ParsedSecurityLevelRequest::ImportKey {
-            key,
-            attestation_key,
-            params,
-            flags,
-            key_data,
-        } => {
+        ParsedSecurityLevelRequest::ImportKey { key, attestation_key, params, flags, key_data } => {
             match omk_level.r#importKey(
                 Some(caller),
                 key,

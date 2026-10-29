@@ -77,42 +77,18 @@ impl ParsedAuthorizationRequest {
 
 #[derive(Debug, Clone)]
 pub enum ParsedMaintenanceRequest {
-    OnUserAdded {
-        user_id: i32,
-    },
-    InitUserSuperKeys {
-        user_id: i32,
-        password: Vec<u8>,
-        allow_existing: bool,
-    },
-    OnUserRemoved {
-        user_id: i32,
-    },
-    OnUserLskfRemoved {
-        user_id: i32,
-    },
-    OnUserPasswordChanged {
-        user_id: i32,
-        password: Option<Vec<u8>>,
-    },
-    ClearNamespace {
-        domain: Domain,
-        nspace: i64,
-    },
-    GetState {
-        user_id: i32,
-    },
+    OnUserAdded { user_id: i32 },
+    InitUserSuperKeys { user_id: i32, password: Vec<u8>, allow_existing: bool },
+    OnUserRemoved { user_id: i32 },
+    OnUserLskfRemoved { user_id: i32 },
+    OnUserPasswordChanged { user_id: i32, password: Option<Vec<u8>> },
+    ClearNamespace { domain: Domain, nspace: i64 },
+    GetState { user_id: i32 },
     EarlyBootEnded,
     OnDeviceOffBody,
-    MigrateKeyNamespace {
-        source: KeyDescriptor,
-        destination: KeyDescriptor,
-    },
+    MigrateKeyNamespace { source: KeyDescriptor, destination: KeyDescriptor },
     DeleteAllKeys,
-    GetAppUidsAffectedBySid {
-        user_id: i32,
-        sid: i64,
-    },
+    GetAppUidsAffectedBySid { user_id: i32, sid: i64 },
 }
 
 impl ParsedMaintenanceRequest {
@@ -249,16 +225,9 @@ impl ParsedSecurityLevelRequest {
 
 #[derive(Debug)]
 pub enum ParsedOperationRequest {
-    UpdateAad {
-        aad_input: Vec<u8>,
-    },
-    Update {
-        input: Vec<u8>,
-    },
-    Finish {
-        input: Option<Vec<u8>>,
-        signature: Option<Vec<u8>>,
-    },
+    UpdateAad { aad_input: Vec<u8> },
+    Update { input: Vec<u8> },
+    Finish { input: Option<Vec<u8>>, signature: Option<Vec<u8>> },
     Abort,
 }
 
@@ -303,22 +272,16 @@ unsafe fn parse_authorization_request_with_resolver(
     method_from_code: impl FnOnce(u32) -> Option<AuthorizationMethod>,
 ) -> Result<ParsedAuthorizationRequest> {
     let (mut parcel, method) = parse_typed_request(
-        RequestEnvelope {
-            data,
-            data_size,
-            offsets,
-            offsets_size,
-            code,
-        },
+        RequestEnvelope { data, data_size, offsets, offsets_size, code },
         KEYSTORE_AUTHORIZATION_INTERFACE,
         "IKeystoreAuthorization",
         method_from_code,
     )?;
 
     Ok(match method {
-        AuthorizationMethod::AddAuthToken => ParsedAuthorizationRequest::AddAuthToken {
-            auth_token: parcel.read()?,
-        },
+        AuthorizationMethod::AddAuthToken => {
+            ParsedAuthorizationRequest::AddAuthToken { auth_token: parcel.read()? }
+        }
         AuthorizationMethod::LegacyOnLockScreenEvent => {
             let event: i32 = parcel.read()?;
             let user_id: i32 = parcel.read()?;
@@ -344,19 +307,13 @@ unsafe fn parse_authorization_request_with_resolver(
             weak_unlock_enabled: parcel.read()?,
         },
         AuthorizationMethod::OnUserStorageLocked => {
-            ParsedAuthorizationRequest::OnUserStorageLocked {
-                user_id: parcel.read()?,
-            }
+            ParsedAuthorizationRequest::OnUserStorageLocked { user_id: parcel.read()? }
         }
         AuthorizationMethod::OnWeakUnlockMethodsExpired => {
-            ParsedAuthorizationRequest::OnWeakUnlockMethodsExpired {
-                user_id: parcel.read()?,
-            }
+            ParsedAuthorizationRequest::OnWeakUnlockMethodsExpired { user_id: parcel.read()? }
         }
         AuthorizationMethod::OnNonLskfUnlockMethodsExpired => {
-            ParsedAuthorizationRequest::OnNonLskfUnlockMethodsExpired {
-                user_id: parcel.read()?,
-            }
+            ParsedAuthorizationRequest::OnNonLskfUnlockMethodsExpired { user_id: parcel.read()? }
         }
         AuthorizationMethod::GetAuthTokensForCredStore => {
             ParsedAuthorizationRequest::GetAuthTokensForCredStore {
@@ -402,33 +359,27 @@ unsafe fn parse_maintenance_request_with_resolver(
     method_from_code: impl FnOnce(u32) -> Option<MaintenanceMethod>,
 ) -> Result<ParsedMaintenanceRequest> {
     let (mut parcel, method) = parse_typed_request(
-        RequestEnvelope {
-            data,
-            data_size,
-            offsets,
-            offsets_size,
-            code,
-        },
+        RequestEnvelope { data, data_size, offsets, offsets_size, code },
         KEYSTORE_MAINTENANCE_INTERFACE,
         "IKeystoreMaintenance",
         method_from_code,
     )?;
 
     Ok(match method {
-        MaintenanceMethod::OnUserAdded => ParsedMaintenanceRequest::OnUserAdded {
-            user_id: parcel.read()?,
-        },
+        MaintenanceMethod::OnUserAdded => {
+            ParsedMaintenanceRequest::OnUserAdded { user_id: parcel.read()? }
+        }
         MaintenanceMethod::InitUserSuperKeys => ParsedMaintenanceRequest::InitUserSuperKeys {
             user_id: parcel.read()?,
             password: parcel.read()?,
             allow_existing: parcel.read()?,
         },
-        MaintenanceMethod::OnUserRemoved => ParsedMaintenanceRequest::OnUserRemoved {
-            user_id: parcel.read()?,
-        },
-        MaintenanceMethod::OnUserLskfRemoved => ParsedMaintenanceRequest::OnUserLskfRemoved {
-            user_id: parcel.read()?,
-        },
+        MaintenanceMethod::OnUserRemoved => {
+            ParsedMaintenanceRequest::OnUserRemoved { user_id: parcel.read()? }
+        }
+        MaintenanceMethod::OnUserLskfRemoved => {
+            ParsedMaintenanceRequest::OnUserLskfRemoved { user_id: parcel.read()? }
+        }
         MaintenanceMethod::OnUserPasswordChanged => {
             ParsedMaintenanceRequest::OnUserPasswordChanged {
                 user_id: parcel.read()?,
@@ -439,9 +390,9 @@ unsafe fn parse_maintenance_request_with_resolver(
             domain: parcel.read()?,
             nspace: parcel.read()?,
         },
-        MaintenanceMethod::GetState => ParsedMaintenanceRequest::GetState {
-            user_id: parcel.read()?,
-        },
+        MaintenanceMethod::GetState => {
+            ParsedMaintenanceRequest::GetState { user_id: parcel.read()? }
+        }
         MaintenanceMethod::EarlyBootEnded => ParsedMaintenanceRequest::EarlyBootEnded,
         MaintenanceMethod::OnDeviceOffBody => ParsedMaintenanceRequest::OnDeviceOffBody,
         MaintenanceMethod::MigrateKeyNamespace => ParsedMaintenanceRequest::MigrateKeyNamespace {
@@ -470,46 +421,34 @@ pub unsafe fn parse_service_request(
     code: u32,
 ) -> Result<ParsedServiceRequest> {
     let (mut parcel, method) = parse_typed_request(
-        RequestEnvelope {
-            data,
-            data_size,
-            offsets,
-            offsets_size,
-            code,
-        },
+        RequestEnvelope { data, data_size, offsets, offsets_size, code },
         KEYSTORE_SERVICE_INTERFACE,
         "IKeystoreService",
         service_method_from_code,
     )?;
 
     Ok(match method {
-        ServiceMethod::GetSecurityLevel => ParsedServiceRequest::GetSecurityLevel {
-            security_level: parcel.read()?,
-        },
-        ServiceMethod::GetKeyEntry => ParsedServiceRequest::GetKeyEntry {
-            key: parcel.read()?,
-        },
+        ServiceMethod::GetSecurityLevel => {
+            ParsedServiceRequest::GetSecurityLevel { security_level: parcel.read()? }
+        }
+        ServiceMethod::GetKeyEntry => ParsedServiceRequest::GetKeyEntry { key: parcel.read()? },
         ServiceMethod::UpdateSubcomponent => ParsedServiceRequest::UpdateSubcomponent {
             key: parcel.read()?,
             public_cert: parcel.read()?,
             certificate_chain: parcel.read()?,
         },
-        ServiceMethod::ListEntries => ParsedServiceRequest::ListEntries {
-            domain: parcel.read()?,
-            nspace: parcel.read()?,
-        },
-        ServiceMethod::DeleteKey => ParsedServiceRequest::DeleteKey {
-            key: parcel.read()?,
-        },
+        ServiceMethod::ListEntries => {
+            ParsedServiceRequest::ListEntries { domain: parcel.read()?, nspace: parcel.read()? }
+        }
+        ServiceMethod::DeleteKey => ParsedServiceRequest::DeleteKey { key: parcel.read()? },
         ServiceMethod::Grant => ParsedServiceRequest::Grant {
             key: parcel.read()?,
             grantee_uid: parcel.read()?,
             access_vector: parcel.read()?,
         },
-        ServiceMethod::Ungrant => ParsedServiceRequest::Ungrant {
-            key: parcel.read()?,
-            grantee_uid: parcel.read()?,
-        },
+        ServiceMethod::Ungrant => {
+            ParsedServiceRequest::Ungrant { key: parcel.read()?, grantee_uid: parcel.read()? }
+        }
         ServiceMethod::GetNumberOfEntries => ParsedServiceRequest::GetNumberOfEntries {
             domain: parcel.read()?,
             nspace: parcel.read()?,
@@ -520,9 +459,7 @@ pub unsafe fn parse_service_request(
             starting_past_alias: parcel.read()?,
         },
         ServiceMethod::GetSupplementaryAttestationInfo => {
-            ParsedServiceRequest::GetSupplementaryAttestationInfo {
-                tag: parcel.read()?,
-            }
+            ParsedServiceRequest::GetSupplementaryAttestationInfo { tag: parcel.read()? }
         }
     })
 }
@@ -539,13 +476,7 @@ pub unsafe fn parse_security_level_request(
     code: u32,
 ) -> Result<ParsedSecurityLevelRequest> {
     let (mut parcel, method) = parse_typed_request(
-        RequestEnvelope {
-            data,
-            data_size,
-            offsets,
-            offsets_size,
-            code,
-        },
+        RequestEnvelope { data, data_size, offsets, offsets_size, code },
         KEYSTORE_SECURITY_LEVEL_INTERFACE,
         "IKeystoreSecurityLevel",
         security_level_method_from_code,
@@ -579,13 +510,11 @@ pub unsafe fn parse_security_level_request(
             authenticators: parcel.read()?,
         },
         SecurityLevelMethod::ConvertStorageKeyToEphemeral => {
-            ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral {
-                storage_key: parcel.read()?,
-            }
+            ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral { storage_key: parcel.read()? }
         }
-        SecurityLevelMethod::DeleteKey => ParsedSecurityLevelRequest::DeleteKey {
-            key: parcel.read()?,
-        },
+        SecurityLevelMethod::DeleteKey => {
+            ParsedSecurityLevelRequest::DeleteKey { key: parcel.read()? }
+        }
     })
 }
 
@@ -601,29 +530,20 @@ pub unsafe fn parse_operation_request(
     code: u32,
 ) -> Result<ParsedOperationRequest> {
     let (mut parcel, method) = parse_typed_request(
-        RequestEnvelope {
-            data,
-            data_size,
-            offsets,
-            offsets_size,
-            code,
-        },
+        RequestEnvelope { data, data_size, offsets, offsets_size, code },
         KEYSTORE_OPERATION_INTERFACE,
         "IKeystoreOperation",
         operation_method_from_code,
     )?;
 
     Ok(match method {
-        OperationMethod::UpdateAad => ParsedOperationRequest::UpdateAad {
-            aad_input: parcel.read()?,
-        },
-        OperationMethod::Update => ParsedOperationRequest::Update {
-            input: parcel.read()?,
-        },
-        OperationMethod::Finish => ParsedOperationRequest::Finish {
-            input: parcel.read()?,
-            signature: parcel.read()?,
-        },
+        OperationMethod::UpdateAad => {
+            ParsedOperationRequest::UpdateAad { aad_input: parcel.read()? }
+        }
+        OperationMethod::Update => ParsedOperationRequest::Update { input: parcel.read()? },
+        OperationMethod::Finish => {
+            ParsedOperationRequest::Finish { input: parcel.read()?, signature: parcel.read()? }
+        }
         OperationMethod::Abort => ParsedOperationRequest::Abort,
     })
 }

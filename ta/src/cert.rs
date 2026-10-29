@@ -133,30 +133,22 @@ pub(crate) fn tbs_certificate<'a>(
     // - ML-DSA: RFC 9881 section 2 requires parameters be omitted.
     let (sig_alg_oid, parameters) = match info {
         Some(info) => match info.signing_key {
-            KeyMaterial::Rsa(_) => (
-                crypto::rsa::SHA256_PKCS1_SIGNATURE_OID,
-                Some(X509Any::null()),
-            ),
+            KeyMaterial::Rsa(_) => (crypto::rsa::SHA256_PKCS1_SIGNATURE_OID, Some(X509Any::null())),
             KeyMaterial::Ec(curve, _, _) => (crypto::ec::curve_to_signing_oid(curve), None),
             KeyMaterial::MlDsa(variant, _) => (crypto::mldsa::variant_to_oid(variant), None),
             _ => {
-                return Err(km_err!(
-                    UnsupportedAlgorithm,
-                    "unexpected cert signing key type"
-                ));
+                return Err(km_err!(UnsupportedAlgorithm, "unexpected cert signing key type"));
             }
         },
         None => {
             // No signing key, so signature will be empty, but we still need a value here.
             match tag::get_algorithm(params)? {
-                keymint::Algorithm::Rsa => (
-                    crypto::rsa::SHA256_PKCS1_SIGNATURE_OID,
-                    Some(X509Any::null()),
-                ),
-                keymint::Algorithm::Ec => (
-                    crypto::ec::curve_to_signing_oid(tag::get_ec_curve(chars)?),
-                    None,
-                ),
+                keymint::Algorithm::Rsa => {
+                    (crypto::rsa::SHA256_PKCS1_SIGNATURE_OID, Some(X509Any::null()))
+                }
+                keymint::Algorithm::Ec => {
+                    (crypto::ec::curve_to_signing_oid(tag::get_ec_curve(chars)?), None)
+                }
                 keymint::Algorithm::MlDsa => {
                     let variant = tag::get_mldsa_variant(chars)?;
                     (crypto::mldsa::variant_to_oid(variant), None)
@@ -212,15 +204,9 @@ pub(crate) fn tbs_certificate<'a>(
     Ok(TbsCertificate {
         version: Version::V3,
         serial_number: SerialNumber::new(cert_serial).map_err(|e| {
-            x509_der_error(
-                e,
-                format_args!("failed to build serial number for {cert_serial:?}"),
-            )
+            x509_der_error(e, format_args!("failed to build serial number for {cert_serial:?}"))
         })?,
-        signature: X509AlgorithmIdentifierOwned {
-            oid: sig_alg_oid,
-            parameters,
-        },
+        signature: X509AlgorithmIdentifierOwned { oid: sig_alg_oid, parameters },
         issuer: <Name as x509_der::Decode>::from_der(cert_issuer)
             .map_err(|e| x509_der_error(e, format_args!("failed to build issuer")))?,
         validity: Validity {
@@ -262,26 +248,19 @@ fn validity_time_from_datetime(when: DateTime) -> Result<Time, Error> {
 
         let duration = Duration::from_secs(u64::try_from(secs_since_epoch).map_err(dt_err)?);
         if duration >= MAX_UTC_TIME {
-            Ok(Time::GeneralTime(
-                X509GeneralizedTime::from_unix_duration(duration).map_err(|e| {
-                    x509_der_error(e, format_args!("failed to build GeneralTime for {when:?}"))
-                })?,
-            ))
+            Ok(Time::GeneralTime(X509GeneralizedTime::from_unix_duration(duration).map_err(
+                |e| x509_der_error(e, format_args!("failed to build GeneralTime for {when:?}")),
+            )?))
         } else {
-            Ok(Time::UtcTime(
-                X509UtcTime::from_unix_duration(duration).map_err(|e| {
-                    x509_der_error(e, format_args!("failed to build UtcTime for {when:?}"))
-                })?,
-            ))
+            Ok(Time::UtcTime(X509UtcTime::from_unix_duration(duration).map_err(|e| {
+                x509_der_error(e, format_args!("failed to build UtcTime for {when:?}"))
+            })?))
         }
     } else {
         // TODO: cope with negative offsets from Unix Epoch.
         Ok(Time::GeneralTime(
             X509GeneralizedTime::from_unix_duration(Duration::from_secs(0)).map_err(|e| {
-                x509_der_error(
-                    e,
-                    format_args!("failed to build GeneralizedTime(0) for {when:?}"),
-                )
+                x509_der_error(e, format_args!("failed to build GeneralizedTime(0) for {when:?}"))
             })?,
         ))
     }
@@ -330,10 +309,7 @@ pub(crate) fn key_usage_extension_bits(params: &[KeyParam]) -> KeyUsage {
 
 /// Build basic constraints extension value
 pub(crate) fn basic_constraints_ext_value(ca_required: bool) -> BasicConstraints {
-    BasicConstraints {
-        ca: ca_required,
-        path_len_constraint: None,
-    }
+    BasicConstraints { ca: ca_required, path_len_constraint: None }
 }
 
 /// Attestation extension contents
@@ -627,86 +603,34 @@ impl AttestationIds<'_> {
     }
 
     fn check_match(&self, wanted: &crate::AttestationIdInfo) -> Result<(), Error> {
-        if self
-            .brand
-            .as_ref()
-            .is_some_and(|brand| *brand != wanted.brand)
-        {
-            return Err(km_err!(
-                CannotAttestIds,
-                "attestation ID mismatch for brand"
-            ));
+        if self.brand.as_ref().is_some_and(|brand| *brand != wanted.brand) {
+            return Err(km_err!(CannotAttestIds, "attestation ID mismatch for brand"));
         }
-        if self
-            .device
-            .as_ref()
-            .is_some_and(|device| *device != wanted.device)
-        {
-            return Err(km_err!(
-                CannotAttestIds,
-                "attestation ID mismatch for device"
-            ));
+        if self.device.as_ref().is_some_and(|device| *device != wanted.device) {
+            return Err(km_err!(CannotAttestIds, "attestation ID mismatch for device"));
         }
-        if self
-            .product
-            .as_ref()
-            .is_some_and(|product| *product != wanted.product)
-        {
-            return Err(km_err!(
-                CannotAttestIds,
-                "attestation ID mismatch for product"
-            ));
+        if self.product.as_ref().is_some_and(|product| *product != wanted.product) {
+            return Err(km_err!(CannotAttestIds, "attestation ID mismatch for product"));
         }
-        if self
-            .serial
-            .as_ref()
-            .is_some_and(|serial| *serial != wanted.serial)
-        {
-            return Err(km_err!(
-                CannotAttestIds,
-                "attestation ID mismatch for serial"
-            ));
+        if self.serial.as_ref().is_some_and(|serial| *serial != wanted.serial) {
+            return Err(km_err!(CannotAttestIds, "attestation ID mismatch for serial"));
         }
         // The IMEI fields can match any valid IMEI value.
-        if self
-            .imei
-            .as_ref()
-            .is_some_and(|imei| *imei != wanted.imei && *imei != wanted.imei2)
-        {
+        if self.imei.as_ref().is_some_and(|imei| *imei != wanted.imei && *imei != wanted.imei2) {
             return Err(km_err!(CannotAttestIds, "attestation ID mismatch for imei"));
         }
-        if self
-            .imei2
-            .as_ref()
-            .is_some_and(|imei2| *imei2 != wanted.imei2 && *imei2 != wanted.imei)
+        if self.imei2.as_ref().is_some_and(|imei2| *imei2 != wanted.imei2 && *imei2 != wanted.imei)
         {
-            return Err(km_err!(
-                CannotAttestIds,
-                "attestation ID mismatch for imei2"
-            ));
+            return Err(km_err!(CannotAttestIds, "attestation ID mismatch for imei2"));
         }
         if self.meid.as_ref().is_some_and(|meid| *meid != wanted.meid) {
             return Err(km_err!(CannotAttestIds, "attestation ID mismatch for meid"));
         }
-        if self
-            .manufacturer
-            .as_ref()
-            .is_some_and(|mfr| *mfr != wanted.manufacturer)
-        {
-            return Err(km_err!(
-                CannotAttestIds,
-                "attestation ID mismatch for manufacturer"
-            ));
+        if self.manufacturer.as_ref().is_some_and(|mfr| *mfr != wanted.manufacturer) {
+            return Err(km_err!(CannotAttestIds, "attestation ID mismatch for manufacturer"));
         }
-        if self
-            .model
-            .as_ref()
-            .is_some_and(|model| *model != wanted.model)
-        {
-            return Err(km_err!(
-                CannotAttestIds,
-                "attestation ID mismatch for model"
-            ));
+        if self.model.as_ref().is_some_and(|model| *model != wanted.model) {
+            return Err(km_err!(CannotAttestIds, "attestation ID mismatch for model"));
         }
         Ok(())
     }
@@ -732,10 +656,7 @@ impl<'a> AuthorizationList<'a> {
             }
         }
         let encoded_rot = if let Some(rot) = rot_info {
-            Some(
-                rot.to_der()
-                    .map_err(|e| der_err!(e, "failed to encode RoT"))?,
-            )
+            Some(rot.to_der().map_err(|e| der_err!(e, "failed to encode RoT"))?)
         } else {
             None
         };
@@ -1028,9 +949,7 @@ fn decode_value_from_bytes(
         }
         Tag::RootOfTrust => {
             key_params
-                .try_push(KeyParam::RootOfTrust(
-                    try_to_vec(tlv_bytes).map_err(der_alloc_err)?,
-                ))
+                .try_push(KeyParam::RootOfTrust(try_to_vec(tlv_bytes).map_err(der_alloc_err)?))
                 .map_err(der_alloc_err)?;
         }
         Tag::OsVersion => {
@@ -1223,10 +1142,7 @@ fn asn1_octet_string(
     val: Option<&[u8]>,
 ) -> der::Result<Option<ExplicitTaggedValue<&OctetStringRef>>> {
     match val {
-        Some(val) => Ok(Some(ExplicitTaggedValue::new(
-            tag,
-            OctetStringRef::new(val)?,
-        ))),
+        Some(val) => Ok(Some(ExplicitTaggedValue::new(tag, OctetStringRef::new(val)?))),
         None => Ok(None),
     }
 }
@@ -1236,10 +1152,7 @@ fn asn1_root_of_trust(
     rot: Option<&[u8]>,
 ) -> der::Result<Option<ExplicitTaggedValue<RootOfTrust<'_>>>> {
     match rot {
-        Some(rot) => Ok(Some(ExplicitTaggedValue::new(
-            tag,
-            RootOfTrust::from_der(rot)?,
-        ))),
+        Some(rot) => Ok(Some(ExplicitTaggedValue::new(tag, RootOfTrust::from_der(rot)?))),
         None => Ok(None),
     }
 }
@@ -1280,10 +1193,7 @@ impl EncodeValue for AuthorizationList<'_> {
             + asn1_len(asn1_null!(self.auths, RollbackResistance))?
             + asn1_len(asn1_null!(self.auths, EarlyBootOnly))?
             + asn1_len(asn1_integer_datetime!(self.auths, ActiveDatetime))?
-            + asn1_len(asn1_integer_datetime!(
-                self.auths,
-                OriginationExpireDatetime
-            ))?
+            + asn1_len(asn1_integer_datetime!(self.auths, OriginationExpireDatetime))?
             + asn1_len(asn1_integer_datetime!(self.auths, UsageExpireDatetime))?
             + asn1_len(asn1_integer!(self.auths, UsageCountLimit))?
             + if self.encode_sid {
@@ -1300,59 +1210,26 @@ impl EncodeValue for AuthorizationList<'_> {
             + asn1_len(asn1_null!(self.auths, UnlockedDeviceRequired))?
             + asn1_len(asn1_integer_datetime!(self.auths, CreationDatetime))?
             + asn1_len(asn1_integer!(self.auths, Origin))?
-            + asn1_len(asn1_root_of_trust(
-                Tag::RootOfTrust,
-                self.rot_info.as_deref(),
-            )?)?
+            + asn1_len(asn1_root_of_trust(Tag::RootOfTrust, self.rot_info.as_deref())?)?
             + asn1_len(asn1_integer!(self.auths, OsVersion))?
             + asn1_len(asn1_integer!(self.auths, OsPatchlevel))?
-            + asn1_len(asn1_octet_string(
-                Tag::AttestationApplicationId,
-                self.app_id.as_deref(),
-            )?)?
-            + asn1_len(asn1_octet_string(
-                Tag::AttestationIdBrand,
-                self.ids.brand.as_deref(),
-            )?)?
-            + asn1_len(asn1_octet_string(
-                Tag::AttestationIdDevice,
-                self.ids.device.as_deref(),
-            )?)?
-            + asn1_len(asn1_octet_string(
-                Tag::AttestationIdProduct,
-                self.ids.product.as_deref(),
-            )?)?
-            + asn1_len(asn1_octet_string(
-                Tag::AttestationIdSerial,
-                self.ids.serial.as_deref(),
-            )?)?
-            + asn1_len(asn1_octet_string(
-                Tag::AttestationIdImei,
-                self.ids.imei.as_deref(),
-            )?)?
-            + asn1_len(asn1_octet_string(
-                Tag::AttestationIdMeid,
-                self.ids.meid.as_deref(),
-            )?)?
+            + asn1_len(asn1_octet_string(Tag::AttestationApplicationId, self.app_id.as_deref())?)?
+            + asn1_len(asn1_octet_string(Tag::AttestationIdBrand, self.ids.brand.as_deref())?)?
+            + asn1_len(asn1_octet_string(Tag::AttestationIdDevice, self.ids.device.as_deref())?)?
+            + asn1_len(asn1_octet_string(Tag::AttestationIdProduct, self.ids.product.as_deref())?)?
+            + asn1_len(asn1_octet_string(Tag::AttestationIdSerial, self.ids.serial.as_deref())?)?
+            + asn1_len(asn1_octet_string(Tag::AttestationIdImei, self.ids.imei.as_deref())?)?
+            + asn1_len(asn1_octet_string(Tag::AttestationIdMeid, self.ids.meid.as_deref())?)?
             + asn1_len(asn1_octet_string(
                 Tag::AttestationIdManufacturer,
                 self.ids.manufacturer.as_deref(),
             )?)?
-            + asn1_len(asn1_octet_string(
-                Tag::AttestationIdModel,
-                self.ids.model.as_deref(),
-            )?)?
+            + asn1_len(asn1_octet_string(Tag::AttestationIdModel, self.ids.model.as_deref())?)?
             + asn1_len(asn1_integer!(self.auths, VendorPatchlevel))?
             + asn1_len(asn1_integer!(self.auths, BootPatchlevel))?
             + asn1_len(asn1_null!(self.auths, DeviceUniqueAttestation))?
-            + asn1_len(asn1_octet_string(
-                Tag::AttestationIdSecondImei,
-                self.ids.imei2.as_deref(),
-            )?)?
-            + asn1_len(asn1_octet_string(
-                Tag::ModuleHash,
-                self.module_hash.as_deref(),
-            )?)?
+            + asn1_len(asn1_octet_string(Tag::AttestationIdSecondImei, self.ids.imei2.as_deref())?)?
+            + asn1_len(asn1_octet_string(Tag::ModuleHash, self.module_hash.as_deref())?)?
     }
 
     fn encode_value(&self, writer: &mut impl der::Writer) -> der::Result<()> {
@@ -1371,14 +1248,8 @@ impl EncodeValue for AuthorizationList<'_> {
         asn1_val(asn1_null!(self.auths, RollbackResistance), writer)?;
         asn1_val(asn1_null!(self.auths, EarlyBootOnly), writer)?;
         asn1_val(asn1_integer_datetime!(self.auths, ActiveDatetime), writer)?;
-        asn1_val(
-            asn1_integer_datetime!(self.auths, OriginationExpireDatetime),
-            writer,
-        )?;
-        asn1_val(
-            asn1_integer_datetime!(self.auths, UsageExpireDatetime),
-            writer,
-        )?;
+        asn1_val(asn1_integer_datetime!(self.auths, OriginationExpireDatetime), writer)?;
+        asn1_val(asn1_integer_datetime!(self.auths, UsageExpireDatetime), writer)?;
         asn1_val(asn1_integer!(self.auths, UsageCountLimit), writer)?;
         // Note that `UserSecureId` is only included in the extension for
         // importWrappedKey() cases.
@@ -1395,10 +1266,7 @@ impl EncodeValue for AuthorizationList<'_> {
         asn1_val(asn1_integer_datetime!(self.auths, CreationDatetime), writer)?;
         asn1_val(asn1_integer!(self.auths, Origin), writer)?;
         // Root of trust info is a special case (not in key characteristics).
-        asn1_val(
-            asn1_root_of_trust(Tag::RootOfTrust, self.rot_info.as_deref())?,
-            writer,
-        )?;
+        asn1_val(asn1_root_of_trust(Tag::RootOfTrust, self.rot_info.as_deref())?, writer)?;
         asn1_val(asn1_integer!(self.auths, OsVersion), writer)?;
         asn1_val(asn1_integer!(self.auths, OsPatchlevel), writer)?;
         // Attestation application ID is a special case (not in key characteristics).
@@ -1407,41 +1275,20 @@ impl EncodeValue for AuthorizationList<'_> {
             writer,
         )?;
         // Accuracy of attestation IDs has already been checked, so just copy across.
-        asn1_val(
-            asn1_octet_string(Tag::AttestationIdBrand, self.ids.brand.as_deref())?,
-            writer,
-        )?;
-        asn1_val(
-            asn1_octet_string(Tag::AttestationIdDevice, self.ids.device.as_deref())?,
-            writer,
-        )?;
+        asn1_val(asn1_octet_string(Tag::AttestationIdBrand, self.ids.brand.as_deref())?, writer)?;
+        asn1_val(asn1_octet_string(Tag::AttestationIdDevice, self.ids.device.as_deref())?, writer)?;
         asn1_val(
             asn1_octet_string(Tag::AttestationIdProduct, self.ids.product.as_deref())?,
             writer,
         )?;
+        asn1_val(asn1_octet_string(Tag::AttestationIdSerial, self.ids.serial.as_deref())?, writer)?;
+        asn1_val(asn1_octet_string(Tag::AttestationIdImei, self.ids.imei.as_deref())?, writer)?;
+        asn1_val(asn1_octet_string(Tag::AttestationIdMeid, self.ids.meid.as_deref())?, writer)?;
         asn1_val(
-            asn1_octet_string(Tag::AttestationIdSerial, self.ids.serial.as_deref())?,
+            asn1_octet_string(Tag::AttestationIdManufacturer, self.ids.manufacturer.as_deref())?,
             writer,
         )?;
-        asn1_val(
-            asn1_octet_string(Tag::AttestationIdImei, self.ids.imei.as_deref())?,
-            writer,
-        )?;
-        asn1_val(
-            asn1_octet_string(Tag::AttestationIdMeid, self.ids.meid.as_deref())?,
-            writer,
-        )?;
-        asn1_val(
-            asn1_octet_string(
-                Tag::AttestationIdManufacturer,
-                self.ids.manufacturer.as_deref(),
-            )?,
-            writer,
-        )?;
-        asn1_val(
-            asn1_octet_string(Tag::AttestationIdModel, self.ids.model.as_deref())?,
-            writer,
-        )?;
+        asn1_val(asn1_octet_string(Tag::AttestationIdModel, self.ids.model.as_deref())?, writer)?;
         asn1_val(asn1_integer!(self.auths, VendorPatchlevel), writer)?;
         asn1_val(asn1_integer!(self.auths, BootPatchlevel), writer)?;
         asn1_val(asn1_null!(self.auths, DeviceUniqueAttestation), writer)?;
@@ -1449,10 +1296,7 @@ impl EncodeValue for AuthorizationList<'_> {
             asn1_octet_string(Tag::AttestationIdSecondImei, self.ids.imei2.as_deref())?,
             writer,
         )?;
-        asn1_val(
-            asn1_octet_string(Tag::ModuleHash, self.module_hash.as_deref())?,
-            writer,
-        )?;
+        asn1_val(asn1_octet_string(Tag::ModuleHash, self.module_hash.as_deref())?, writer)?;
         Ok(())
     }
 }
@@ -1464,10 +1308,7 @@ struct ExplicitTaggedValue<T: Encode> {
 
 impl<T: Encode> ExplicitTaggedValue<T> {
     fn new(tag: Tag, val: T) -> ExplicitTaggedValue<T> {
-        ExplicitTaggedValue {
-            tag: raw_tag_value(tag),
-            val,
-        }
+        ExplicitTaggedValue { tag: raw_tag_value(tag), val }
     }
 
     fn explicit_tag_len(&self) -> der::Result<der::Length> {
@@ -1703,10 +1544,7 @@ mod tests {
 
     #[test]
     fn test_authorization_list_tags_ordered_by_raw_value() {
-        assert!(AUTHORIZATION_LIST_TAGS
-            .iter()
-            .map(|tag| raw_tag_value(*tag))
-            .is_sorted());
+        assert!(AUTHORIZATION_LIST_TAGS.iter().map(|tag| raw_tag_value(*tag)).is_sorted());
     }
 
     #[test]
@@ -1844,10 +1682,7 @@ mod tests {
         got.encode_sid = false;
 
         let want = AuthorizationList::new(
-            &[
-                KeyParam::Algorithm(keymint::Algorithm::Ec),
-                KeyParam::UserSecureId(2),
-            ],
+            &[KeyParam::Algorithm(keymint::Algorithm::Ec), KeyParam::UserSecureId(2)],
             &[],
             None,
             Some(RootOfTrust {
@@ -1866,19 +1701,13 @@ mod tests {
 
     #[test]
     fn test_authz_list_rejects_mismatched_attestation_id() {
-        let attestation_ids = AttestationIdInfo {
-            brand: b"good".to_vec(),
-            ..Default::default()
-        };
+        let attestation_ids = AttestationIdInfo { brand: b"good".to_vec(), ..Default::default() };
         let keygen_params = [KeyParam::AttestationIdBrand(b"bad".to_vec())];
         let error =
             AuthorizationList::new(&[], &keygen_params, Some(&attestation_ids), None, None, &[])
                 .unwrap_err();
 
-        assert!(matches!(
-            error.kind(),
-            CommonErrorKind::Hal(ErrorCode::CannotAttestIds, _)
-        ));
+        assert!(matches!(error.kind(), CommonErrorKind::Hal(ErrorCode::CannotAttestIds, _)));
     }
 
     #[test]
@@ -1911,10 +1740,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(authz_list.ids.imei2.as_deref(), Some([].as_slice()));
-        assert_eq!(
-            hex::encode(authz_list.to_der().unwrap()),
-            "3006bf8553020400"
-        );
+        assert_eq!(hex::encode(authz_list.to_der().unwrap()), "3006bf8553020400");
     }
 
     #[test]
@@ -1946,10 +1772,7 @@ mod tests {
     fn test_authorization_list_order_fail() {
         use kmr_wire::keymint::Digest;
         let authorization_list = AuthorizationList::new(
-            &[
-                KeyParam::Digest(Digest::Sha1),
-                KeyParam::Digest(Digest::None),
-            ],
+            &[KeyParam::Digest(Digest::Sha1), KeyParam::Digest(Digest::None)],
             &[],
             None,
             Some(RootOfTrust {

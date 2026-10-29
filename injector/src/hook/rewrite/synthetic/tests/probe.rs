@@ -8,10 +8,7 @@ fn operation_publication_probe_skips_a_deferred_front_entry() {
     let deferred_retirement = complete_test_publication(deferred, 20);
     let probe = take_ready_operation_publication_probe().unwrap();
     let requeued_at = Instant::now();
-    assert_eq!(
-        finish_operation_publication_probe(probe, Ok(true), requeued_at),
-        None
-    );
+    assert_eq!(finish_operation_publication_probe(probe, Ok(true), requeued_at), None);
 
     let ready = allocate_test_target();
     register_operation_publication(ready).unwrap();
@@ -41,10 +38,7 @@ fn publication_probe_requeue_is_lock_free_and_acquire_safe() {
     let stale = allocate_test_target();
     register_operation_publication(stale).unwrap();
     let stale_retirement = complete_test_publication(stale, 20);
-    assert_eq!(
-        mark_operation_publication_acquire_pending(stale, 20),
-        Some(stale_retirement)
-    );
+    assert_eq!(mark_operation_publication_acquire_pending(stale, 20), Some(stale_retirement));
     mark_operation_publication_acquire_committed(stale_retirement);
 
     let live = allocate_test_target();
@@ -54,10 +48,7 @@ fn publication_probe_requeue_is_lock_free_and_acquire_safe() {
     assert_eq!(first.target, live);
     assert!(OPERATION_PUBLICATIONS.try_lock().is_ok());
     let requeued_at = Instant::now();
-    assert_eq!(
-        finish_operation_publication_probe(first, Ok(true), requeued_at),
-        None
-    );
+    assert_eq!(finish_operation_publication_probe(first, Ok(true), requeued_at), None);
     assert!(take_operation_publication_probe(
         requeued_at + OPERATION_PUBLICATION_REPROBE_DELAY / 2
     )
@@ -65,14 +56,8 @@ fn publication_probe_requeue_is_lock_free_and_acquire_safe() {
 
     let probe = take_operation_publication_probe(requeued_at + OPERATION_PUBLICATION_REPROBE_DELAY)
         .unwrap();
-    assert_eq!(
-        mark_operation_publication_acquire_pending(live, 21),
-        Some(live_retirement)
-    );
-    assert_eq!(
-        finish_operation_publication_probe_for_test(probe, Ok(false)),
-        None
-    );
+    assert_eq!(mark_operation_publication_acquire_pending(live, 21), Some(live_retirement));
+    assert_eq!(finish_operation_publication_probe_for_test(probe, Ok(false)), None);
     mark_operation_publication_acquire_committed(live_retirement);
     assert!(!OPERATION_PUBLICATIONS
         .lock()
@@ -89,10 +74,7 @@ fn missing_operation_node_reclaims_publication_without_lock() {
     assert!(take_operation_publication_probe(Instant::now()).is_none());
     let probe = take_ready_operation_publication_probe().unwrap();
     assert!(OPERATION_PUBLICATIONS.try_lock().is_ok());
-    assert_eq!(
-        finish_operation_publication_probe_for_test(probe, Ok(false)),
-        Some(retirement)
-    );
+    assert_eq!(finish_operation_publication_probe_for_test(probe, Ok(false)), Some(retirement));
     assert!(!OPERATION_PUBLICATIONS
         .lock()
         .expect("operation publication map poisoned")
@@ -107,10 +89,7 @@ fn transient_node_query_error_requeues_publication() {
     let retirement = complete_test_publication(target, 25);
     let probe = take_ready_operation_publication_probe().unwrap();
     let requeued_at = Instant::now();
-    assert_eq!(
-        finish_operation_publication_probe(probe, Err(libc::EIO), requeued_at),
-        None
-    );
+    assert_eq!(finish_operation_publication_probe(probe, Err(libc::EIO), requeued_at), None);
     assert_eq!(
         OPERATION_PUBLICATION_PROBES
             .lock()
@@ -124,10 +103,7 @@ fn transient_node_query_error_requeues_publication() {
         take_operation_publication_probe(requeued_at + OPERATION_PUBLICATION_REPROBE_DELAY * 2)
             .unwrap();
     assert_eq!(probe.query_failures, 1);
-    assert_eq!(
-        finish_operation_publication_probe_for_test(probe, Ok(false)),
-        Some(retirement)
-    );
+    assert_eq!(finish_operation_publication_probe_for_test(probe, Ok(false)), Some(retirement));
 }
 
 #[test]
@@ -143,11 +119,7 @@ fn persistent_node_query_errors_back_off_without_retiring_backend() {
     let (_, retirement) = register_synthetic_operation_carrier(
         backend,
         false,
-        &CallerInfo {
-            uid: 10002,
-            sid: String::new(),
-            pid: 2000,
-        },
+        &CallerInfo { uid: 10002, sid: String::new(), pid: 2000 },
     )
     .expect("synthetic operation carrier should register");
     mark_operation_publication_completed(retirement, binder_token(26));
@@ -156,10 +128,7 @@ fn persistent_node_query_errors_back_off_without_retiring_backend() {
     for failure in 1..=OPERATION_PUBLICATION_MAX_QUERY_BACKOFF_SHIFT + 2 {
         let probe = take_operation_publication_probe(attempt_at).unwrap();
         assert_eq!(probe.target, retirement.target);
-        assert_eq!(
-            finish_operation_publication_probe(probe, Err(libc::EPERM), attempt_at),
-            None
-        );
+        assert_eq!(finish_operation_publication_probe(probe, Err(libc::EPERM), attempt_at), None);
         let queued = OPERATION_PUBLICATION_PROBES
             .lock()
             .expect("operation publication probe queue poisoned")
@@ -183,16 +152,10 @@ fn persistent_node_query_errors_back_off_without_retiring_backend() {
         .contains_key(&retirement.target));
     assert_eq!(aborts.load(Ordering::SeqCst), 0);
     assert!(lookup_native_operation_state(retirement.target).is_some());
-    assert_eq!(
-        lookup_synthetic_target(retirement.target),
-        Some(SyntheticTargetKind::Operation)
-    );
+    assert_eq!(lookup_synthetic_target(retirement.target), Some(SyntheticTargetKind::Operation));
     assert!(lookup_native_binder(retirement.target).is_some());
     let probe = take_operation_publication_probe(attempt_at).unwrap();
-    assert_eq!(
-        finish_operation_publication_probe_for_test(probe, Ok(false)),
-        Some(retirement)
-    );
+    assert_eq!(finish_operation_publication_probe_for_test(probe, Ok(false)), Some(retirement));
     drop_synthetic_operation_retirement(retirement);
     assert_eq!(aborts.load(Ordering::SeqCst), 1);
     assert!(lookup_native_operation_state(retirement.target).is_none());

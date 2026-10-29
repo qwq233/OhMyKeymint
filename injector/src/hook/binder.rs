@@ -117,27 +117,15 @@ pub(crate) struct binder_version {
     pub protocol_version: i32,
 }
 
-pub(crate) const BINDER_VERSION: u32 = ioc(
-    IOC_READ | IOC_WRITE,
-    b'b' as u32,
-    9,
-    size_of::<binder_version>(),
-);
-pub(crate) const BINDER_GET_NODE_DEBUG_INFO: u32 = ioc(
-    IOC_READ | IOC_WRITE,
-    b'b' as u32,
-    11,
-    size_of::<binder_node_debug_info>(),
-);
+pub(crate) const BINDER_VERSION: u32 =
+    ioc(IOC_READ | IOC_WRITE, b'b' as u32, 9, size_of::<binder_version>());
+pub(crate) const BINDER_GET_NODE_DEBUG_INFO: u32 =
+    ioc(IOC_READ | IOC_WRITE, b'b' as u32, 11, size_of::<binder_node_debug_info>());
 
 pub(crate) const BR_TRANSACTION_COMPLETE_CMD: u32 =
     ioc(IOC_NONE, b'r' as u32, BR_TRANSACTION_COMPLETE_NR, 0);
-pub(crate) const BC_ACQUIRE_DONE_CMD: u32 = ioc(
-    IOC_WRITE,
-    b'c' as u32,
-    BC_ACQUIRE_DONE_NR,
-    size_of::<binder_ptr_cookie>(),
-);
+pub(crate) const BC_ACQUIRE_DONE_CMD: u32 =
+    ioc(IOC_WRITE, b'c' as u32, BC_ACQUIRE_DONE_NR, size_of::<binder_ptr_cookie>());
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct LocalBinderTarget {
@@ -317,9 +305,7 @@ pub(crate) unsafe fn describe_transaction_objects(tr: &binder_transaction_data) 
 
         let stability_offset = offset + object_size;
         let stability = if data_size.saturating_sub(stability_offset) >= size_of::<i32>() {
-            Some(std::ptr::read_unaligned(
-                bytes.as_ptr().add(stability_offset) as *const i32,
-            ))
+            Some(std::ptr::read_unaligned(bytes.as_ptr().add(stability_offset) as *const i32))
         } else {
             None
         };
@@ -372,10 +358,7 @@ pub(crate) unsafe fn parse_local_binder_target_from_parcel_bytes(
     }
 
     let object = std::ptr::read_unaligned(bytes.as_ptr() as *const flat_binder_object);
-    if !matches!(
-        object.hdr.type_,
-        BINDER_TYPE_BINDER | BINDER_TYPE_WEAK_BINDER
-    ) {
+    if !matches!(object.hdr.type_, BINDER_TYPE_BINDER | BINDER_TYPE_WEAK_BINDER) {
         return None;
     }
 
@@ -384,8 +367,5 @@ pub(crate) unsafe fn parse_local_binder_target_from_parcel_bytes(
         return None;
     }
 
-    Some(LocalBinderTarget {
-        ptr,
-        cookie: object.cookie,
-    })
+    Some(LocalBinderTarget { ptr, cookie: object.cookie })
 }

@@ -43,9 +43,7 @@ macro_rules! bloberr {
 
 /// Get the `KeyParameterValue` associated with a tag from a collection of `KeyParameter`s.
 fn get_tag_value(params: &[KeyParameter], tag: Tag) -> Option<&KeyParameterValue> {
-    params
-        .iter()
-        .find_map(|kp| if kp.tag == tag { Some(&kp.value) } else { None })
+    params.iter().find_map(|kp| if kp.tag == tag { Some(&kp.value) } else { None })
 }
 
 /// Get the [`TagType`] for a [`Tag`].
@@ -59,11 +57,8 @@ pub fn export_key(
     params: &[KeyParameter],
 ) -> Result<(KeyFormat, Vec<u8>, Vec<KeyParameter>)> {
     let hidden = hidden_params(params, &[SOFTWARE_ROOT_OF_TRUST]);
-    let KeyBlob {
-        key_material,
-        hw_enforced,
-        sw_enforced,
-    } = KeyBlob::new_from_serialized(data, &hidden)?;
+    let KeyBlob { key_material, hw_enforced, sw_enforced } =
+        KeyBlob::new_from_serialized(data, &hidden)?;
 
     let mut combined = hw_enforced;
     combined.extend_from_slice(&sw_enforced);
@@ -184,10 +179,7 @@ fn pkcs8_wrap_nist_key(nist_key: &[u8], curve: EcCurve) -> Result<Vec<u8>> {
 
     let mut buf = Vec::new();
     buf.push(0x30); // SEQUENCE
-    add_der_len(
-        &mut buf,
-        DER_VERSION_0.len() + der_alg_id.len() + nist_key_octet_string.len(),
-    )?;
+    add_der_len(&mut buf, DER_VERSION_0.len() + der_alg_id.len() + nist_key_octet_string.len())?;
     buf.extend_from_slice(DER_VERSION_0);
     buf.extend_from_slice(der_alg_id);
     buf.extend_from_slice(&nist_key_octet_string);
@@ -264,11 +256,7 @@ impl KeyBlob {
         if !rest.is_empty() {
             return Err(bloberr!("extra data (len {})", rest.len()));
         }
-        Ok(KeyBlob {
-            key_material,
-            hw_enforced,
-            sw_enforced,
-        })
+        Ok(KeyBlob { key_material, hw_enforced, sw_enforced })
     }
 
     /// Compute the authentication HMAC for a KeyBlob. This is built as:
@@ -291,16 +279,10 @@ impl KeyBlob {
 fn hidden_params(params: &[KeyParameter], rots: &[&[u8]]) -> Vec<KeyParameter> {
     let mut results = Vec::new();
     if let Some(app_id) = get_tag_value(params, Tag::APPLICATION_ID) {
-        results.push(KeyParameter {
-            tag: Tag::APPLICATION_ID,
-            value: app_id.clone(),
-        });
+        results.push(KeyParameter { tag: Tag::APPLICATION_ID, value: app_id.clone() });
     }
     if let Some(app_data) = get_tag_value(params, Tag::APPLICATION_DATA) {
-        results.push(KeyParameter {
-            tag: Tag::APPLICATION_DATA,
-            value: app_data.clone(),
-        });
+        results.push(KeyParameter { tag: Tag::APPLICATION_DATA, value: app_data.clone() });
     }
     for rot in rots {
         results.push(KeyParameter {
@@ -393,11 +375,7 @@ fn consume_blob(
     let data_offset = consume_u32(data)? as usize;
     // Expect the blob data to come from the next offset in the initial blob chunk.
     if data_offset != *next_blob_offset {
-        return Err(bloberr!(
-            "got blob offset {} instead of {}",
-            data_offset,
-            next_blob_offset
-        ));
+        return Err(bloberr!("got blob offset {} instead of {}", data_offset, next_blob_offset));
     }
     if (data_offset + data_len) > blob_data.len() {
         return Err(bloberr!(
@@ -516,10 +494,7 @@ fn serialize_params(params: &[KeyParameter]) -> Result<Vec<u8>> {
         let tag_type = tag_type(&param.tag);
         if let KeyParameterValue::Blob(v) = &param.value {
             if tag_type != TagType::BIGNUM && tag_type != TagType::BYTES {
-                return Err(bloberr!(
-                    "unexpected tag type for tag {:?} with blob",
-                    param.tag
-                ));
+                return Err(bloberr!("unexpected tag type for tag {:?} with blob", param.tag));
             }
             result.extend_from_slice(v);
             blob_size += v.len() as u32;

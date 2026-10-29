@@ -18,18 +18,11 @@ pub(crate) fn remember_security_level_target(
     target: LocalBinderTarget,
     info: SecurityLevelTargetInfo,
 ) {
-    SECURITY_LEVEL_TARGETS
-        .lock()
-        .expect("security level target map poisoned")
-        .insert(target, info);
+    SECURITY_LEVEL_TARGETS.lock().expect("security level target map poisoned").insert(target, info);
 }
 
 pub(crate) fn lookup_security_level_target(
     target: LocalBinderTarget,
 ) -> Option<SecurityLevelTargetInfo> {
-    SECURITY_LEVEL_TARGETS
-        .lock()
-        .expect("security level target map poisoned")
-        .get(&target)
-        .copied()
+    SECURITY_LEVEL_TARGETS.lock().expect("security level target map poisoned").get(&target).copied()
 }

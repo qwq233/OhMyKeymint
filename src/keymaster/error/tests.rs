@@ -125,10 +125,7 @@ fn keystore_error_test() -> anyhow::Result<(), String> {
 
     // map_km_error creates a Error::Binder variant storing the given exception code.
     let binder_exception = map_km_error(binder_exception(ExceptionCode::TransactionFailed));
-    assert_eq!(
-        Err(Error::BinderTransaction(StatusCode::FailedTransaction)),
-        binder_exception
-    );
+    assert_eq!(Err(Error::BinderTransaction(StatusCode::FailedTransaction)), binder_exception);
     // into_binder then maps it on a service specific error of ResponseCode::SYSTEM_ERROR.
     assert_eq!(
         Result::<(), ResponseCode>::Err(ResponseCode::SYSTEM_ERROR),
@@ -174,9 +171,7 @@ pub fn check_result_contains_error_string<T>(
 ) {
     let error_str = format!(
         "{:#?}",
-        result
-            .err()
-            .unwrap_or_else(|| panic!("Expected the error: {expected_error_string}"))
+        result.err().unwrap_or_else(|| panic!("Expected the error: {expected_error_string}"))
     );
     assert!(
         error_str.contains(expected_error_string),

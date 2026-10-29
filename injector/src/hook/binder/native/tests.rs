@@ -3,10 +3,7 @@ use super::*;
 #[test]
 fn native_request_offsets_admit_base_transactions_only() {
     assert_eq!(native_request_offsets(1, 0), Some([].as_slice()));
-    assert_eq!(
-        native_request_offsets(rsbinder::SHELL_COMMAND_TRANSACTION, 3),
-        Some([].as_slice())
-    );
+    assert_eq!(native_request_offsets(rsbinder::SHELL_COMMAND_TRANSACTION, 3), Some([].as_slice()));
     assert_eq!(
         native_request_offsets(rsbinder::DUMP_TRANSACTION, 1),
         Some(DUMP_OBJECT_OFFSETS.as_slice())

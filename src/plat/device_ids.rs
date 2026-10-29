@@ -16,17 +16,11 @@ const IMEI_PROPERTIES: &[&str] = &[
     "persist.vendor.radio.imei1",
 ];
 
-const IMEI2_PROPERTIES: &[&str] = &[
-    "ro.ril.oem.imei2",
-    "persist.radio.imei2",
-    "persist.vendor.radio.imei2",
-];
+const IMEI2_PROPERTIES: &[&str] =
+    &["ro.ril.oem.imei2", "persist.radio.imei2", "persist.vendor.radio.imei2"];
 
-const MEID_PROPERTIES: &[&str] = &[
-    "ro.ril.oem.meid",
-    "persist.radio.meid",
-    "persist.vendor.radio.meid",
-];
+const MEID_PROPERTIES: &[&str] =
+    &["ro.ril.oem.meid", "persist.radio.meid", "persist.vendor.radio.meid"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdentifierKind {
@@ -69,11 +63,7 @@ fn bootstrap_device_ids(config_file: &mut ConfigFile) -> Option<bool> {
         Err(error) => {
             service_unavailable = is_binder_service_unavailable(&error);
             log::warn!("device ID feature probe failed; probing all ID APIs once: {error:#}");
-            TelephonyFeatures {
-                any: true,
-                gsm: true,
-                cdma: true,
-            }
+            TelephonyFeatures { any: true, gsm: true, cdma: true }
         }
     };
     let (candidates, probe_service_unavailable) = probe_device_id_candidates(features);
@@ -131,10 +121,7 @@ fn apply_telephony_candidates(
     for candidate in candidates {
         match candidate.kind {
             IdentifierKind::Imei => {
-                if used_imeis
-                    .iter()
-                    .any(|existing| existing == &candidate.value)
-                {
+                if used_imeis.iter().any(|existing| existing == &candidate.value) {
                     continue;
                 }
 
@@ -270,11 +257,7 @@ fn classify_identifier(raw: &str, source: String) -> Option<IdentifierCandidate>
             18 => IdentifierKind::Meid,
             _ => return None,
         };
-        return Some(IdentifierCandidate {
-            kind,
-            value: value.to_string(),
-            source,
-        });
+        return Some(IdentifierCandidate { kind, value: value.to_string(), source });
     }
 
     None
@@ -293,9 +276,7 @@ where
         .filter_map(|(property, raw)| classify_identifier(&raw, property.to_string()))
         .find(|candidate| {
             candidate.kind == expected_kind
-                && !excluded_values
-                    .iter()
-                    .any(|existing| existing == &candidate.value)
+                && !excluded_values.iter().any(|existing| existing == &candidate.value)
         })
 }
 
@@ -501,11 +482,9 @@ mod tests {
     #[test]
     fn slot_probe_keeps_valid_candidates_after_errors() {
         let mut candidates = Vec::new();
-        let mut imeis = vec![
-            Ok(Some("355231937352445".to_string())),
-            Err(anyhow::anyhow!("slot unavailable")),
-        ]
-        .into_iter();
+        let mut imeis =
+            vec![Ok(Some("355231937352445".to_string())), Err(anyhow::anyhow!("slot unavailable"))]
+                .into_iter();
         let service_unavailable = collect_slot_candidates(
             &mut candidates,
             "telephony API IMEI",

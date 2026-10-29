@@ -20,11 +20,7 @@ fn cmsg(level: i32, type_: i32, payload: &[u8]) -> Vec<u8> {
     let cmsg_space = unsafe { libc::CMSG_SPACE(payload.len() as u32) as usize };
     let cmsg_len = unsafe { libc::CMSG_LEN(payload.len() as u32) as usize };
     let mut data = vec![0u8; cmsg_space];
-    let header = libc::cmsghdr {
-        cmsg_len,
-        cmsg_level: level,
-        cmsg_type: type_,
-    };
+    let header = libc::cmsghdr { cmsg_len, cmsg_level: level, cmsg_type: type_ };
 
     unsafe {
         std::ptr::write_unaligned(data.as_mut_ptr() as *mut libc::cmsghdr, header);
@@ -57,11 +53,7 @@ fn scm_credentials_cmsg(cred: libc::ucred) -> Vec<u8> {
 }
 
 fn valid_test_cred() -> libc::ucred {
-    libc::ucred {
-        pid: 1234,
-        uid: AID_SYSTEM,
-        gid: AID_SYSTEM,
-    }
+    libc::ucred { pid: 1234, uid: AID_SYSTEM, gid: AID_SYSTEM }
 }
 
 fn valid_control_message(fd: i32) -> (Vec<u8>, libc::ucred) {
@@ -144,8 +136,5 @@ fn rejected_handoff_cleanup_finds_received_rights_fds() {
     data.extend_from_slice(&scm_credentials_cmsg(valid_test_cred()));
     let msg = remote_msg_with_control(0, data.len());
 
-    assert_eq!(
-        received_remote_fds_from_control_data(&msg, &data),
-        vec![42, 43]
-    );
+    assert_eq!(received_remote_fds_from_control_data(&msg, &data), vec![42, 43]);
 }

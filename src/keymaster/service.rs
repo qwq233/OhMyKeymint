@@ -96,9 +96,9 @@ impl KeystoreService {
             ..Default::default()
         };
 
-        let retired = result.retire_stale_keybox_bound_entries().context(err!(
-            "retiring stale keybox-bound entries during service startup"
-        ))?;
+        let retired = result
+            .retire_stale_keybox_bound_entries()
+            .context(err!("retiring stale keybox-bound entries during service startup"))?;
         if retired != 0 {
             log::info!("retired {retired} stale keybox-bound entries during service startup");
         }
@@ -136,8 +136,7 @@ impl KeystoreService {
         }
 
         DB.with(|db| {
-            db.borrow_mut()
-                .retire_stale_keybox_bound_entries(keybox::current_identity_digest())
+            db.borrow_mut().retire_stale_keybox_bound_entries(keybox::current_identity_digest())
         })
     }
 
@@ -145,10 +144,7 @@ impl KeystoreService {
         let tee_uuid = Uuid::from(SecurityLevel::TRUSTED_ENVIRONMENT);
         let refresh_tee = {
             let security_levels = self.security_levels.read().unwrap();
-            security_levels
-                .uuid_by_sec_level
-                .get(&SecurityLevel::TRUSTED_ENVIRONMENT)
-                .copied()
+            security_levels.uuid_by_sec_level.get(&SecurityLevel::TRUSTED_ENVIRONMENT).copied()
                 != Some(tee_uuid)
         };
 
@@ -161,10 +157,7 @@ impl KeystoreService {
             let strongbox_uuid = Uuid::from(SecurityLevel::STRONGBOX);
             let refresh_strongbox = {
                 let security_levels = self.security_levels.read().unwrap();
-                security_levels
-                    .uuid_by_sec_level
-                    .get(&SecurityLevel::STRONGBOX)
-                    .copied()
+                security_levels.uuid_by_sec_level.get(&SecurityLevel::STRONGBOX).copied()
                     != Some(strongbox_uuid)
             };
 
@@ -231,12 +224,8 @@ impl KeystoreService {
             }
         }
 
-        security_levels
-            .i_sec_level_by_uuid
-            .insert(uuid, i_sec_level);
-        security_levels
-            .i_osec_level_by_uuid
-            .insert(uuid, i_osec_level);
+        security_levels.i_sec_level_by_uuid.insert(uuid, i_sec_level);
+        security_levels.i_osec_level_by_uuid.insert(uuid, i_osec_level);
         security_levels.uuid_by_sec_level.insert(sec_level, uuid);
 
         Ok(())
@@ -427,15 +416,13 @@ impl KeystoreService {
             },
             (Domain::SELINUX, Some(_)) => key.clone(),
             _ => {
-                return Err(Error::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!(
-                    "Domain must be APP or SELINUX to insert a certificate."
-                ));
+                return Err(Error::Rc(ResponseCode::INVALID_ARGUMENT))
+                    .context(err!("Domain must be APP or SELINUX to insert a certificate."));
             }
         };
 
-        check_key_permission(KeyPerm::Rebind, &key, None, ctx).context(err!(
-            "Caller does not have permission to insert this certificate."
-        ))?;
+        check_key_permission(KeyPerm::Rebind, &key, None, ctx)
+            .context(err!("Caller does not have permission to insert this certificate."))?;
 
         DB.with::<_, Result<()>>(|db| {
             db.borrow_mut().store_new_certificate(
@@ -459,16 +446,8 @@ impl KeystoreService {
         let caller_uid = calling_uid(ctx);
 
         let mut k = match domain {
-            Domain::APP => KeyDescriptor {
-                domain,
-                nspace: caller_uid.0,
-                ..Default::default()
-            },
-            Domain::SELINUX => KeyDescriptor {
-                domain,
-                nspace: namespace,
-                ..Default::default()
-            },
+            Domain::APP => KeyDescriptor { domain, nspace: caller_uid.0, ..Default::default() },
+            Domain::SELINUX => KeyDescriptor { domain, nspace: namespace, ..Default::default() },
             _ => {
                 return Err(Error::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!(
                     "List entries is only supported for Domain::APP and Domain::SELINUX."
@@ -519,9 +498,8 @@ impl KeystoreService {
                 .map(|bundle| bundle.encoded_der.clone())
                 .ok_or(Error::Rc(ResponseCode::INFO_NOT_AVAILABLE))
                 .context(err!("MODULE_HASH supplementary info is unavailable")),
-            _ => Err(Error::Rc(ResponseCode::INVALID_ARGUMENT)).context(err!(
-                "Tag {tag:?} not supported for getSupplementaryAttestationInfo."
-            )),
+            _ => Err(Error::Rc(ResponseCode::INVALID_ARGUMENT))
+                .context(err!("Tag {tag:?} not supported for getSupplementaryAttestationInfo.")),
         }
     }
 
@@ -545,10 +523,9 @@ impl KeystoreService {
             .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
 
         DB.with(|db| {
-            db.borrow_mut()
-                .unbind_key(key, KeyType::Client, caller_uid, |k, av| {
-                    check_key_permission(KeyPerm::Delete, k, av.as_ref(), ctx)
-                })
+            db.borrow_mut().unbind_key(key, KeyType::Client, caller_uid, |k, av| {
+                check_key_permission(KeyPerm::Delete, k, av.as_ref(), ctx)
+            })
         })
         .context(err!("Trying to unbind the key."))?;
         Ok(())
@@ -589,10 +566,9 @@ impl KeystoreService {
         self.ensure_security_levels_current()?;
         let caller_uid = calling_uid(ctx);
         DB.with(|db| {
-            db.borrow_mut()
-                .ungrant(key, caller_uid, AppUid(grantee_uid as i64), |k| {
-                    check_key_permission(KeyPerm::Grant, k, None, ctx)
-                })
+            db.borrow_mut().ungrant(key, caller_uid, AppUid(grantee_uid as i64), |k| {
+                check_key_permission(KeyPerm::Grant, k, None, ctx)
+            })
         })
         .context(err!("KeystoreService::ungrant."))
     }
@@ -623,18 +599,14 @@ impl KeystoreService {
     fn enforce_keybox_admin(&self, ctx: &CallerInfo) -> Result<()> {
         match ctx.uid as u32 {
             AID_ROOT | AID_SYSTEM | AID_KEYSTORE => Ok(()),
-            uid => Err(Error::perm()).context(err!(
-                "keybox update requires root/system/keystore caller, got uid={uid}"
-            )),
+            uid => Err(Error::perm())
+                .context(err!("keybox update requires root/system/keystore caller, got uid={uid}")),
         }
     }
 }
 
 fn calling_uid(ctx: Option<&CallerInfo>) -> AppUid {
-    AppUid(
-        ctx.map(|ctx| ctx.uid)
-            .unwrap_or(CallingContext::default().uid.into()),
-    )
+    AppUid(ctx.map(|ctx| ctx.uid).unwrap_or(CallingContext::default().uid.into()))
 }
 
 impl rsbinder::Interface for KeystoreService {}
@@ -648,8 +620,7 @@ impl IKeystoreService for KeystoreService {
         security_level: SecurityLevel,
     ) -> Result<Strong<dyn IKeystoreSecurityLevel>, Status> {
         let _wp = wd::watch_millis_with("IKeystoreService::getSecurityLevel", 500, security_level);
-        self.get_security_level(security_level)
-            .map_err(into_logged_binder)
+        self.get_security_level(security_level).map_err(into_logged_binder)
     }
 
     fn getKeyEntry(&self, key: &KeyDescriptor) -> Result<KeyEntryResponse, Status> {
@@ -670,8 +641,7 @@ impl IKeystoreService for KeystoreService {
 
     fn listEntries(&self, domain: Domain, namespace: i64) -> Result<Vec<KeyDescriptor>, Status> {
         let _wp = wd::watch("IKeystoreService::listEntries");
-        self.list_entries(None, domain, namespace)
-            .map_err(into_logged_binder)
+        self.list_entries(None, domain, namespace).map_err(into_logged_binder)
     }
 
     fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
@@ -688,20 +658,17 @@ impl IKeystoreService for KeystoreService {
         access_vector: i32,
     ) -> Result<KeyDescriptor, Status> {
         let _wp = wd::watch("IKeystoreService::grant");
-        self.grant(None, key, grantee_uid, access_vector.into())
-            .map_err(into_logged_binder)
+        self.grant(None, key, grantee_uid, access_vector.into()).map_err(into_logged_binder)
     }
 
     fn ungrant(&self, key: &KeyDescriptor, grantee_uid: i32) -> Result<(), Status> {
         let _wp = wd::watch("IKeystoreService::ungrant");
-        self.ungrant(None, key, grantee_uid)
-            .map_err(into_logged_binder)
+        self.ungrant(None, key, grantee_uid).map_err(into_logged_binder)
     }
 
     fn getNumberOfEntries(&self, domain: Domain, namespace: i64) -> Result<i32, Status> {
         let _wp = wd::watch("IKeystoreService::getNumberOfEntries");
-        self.count_num_entries(None, domain, namespace)
-            .map_err(into_logged_binder)
+        self.count_num_entries(None, domain, namespace).map_err(into_logged_binder)
     }
 
     fn listEntriesBatched(
@@ -717,8 +684,7 @@ impl IKeystoreService for KeystoreService {
 
     fn getSupplementaryAttestationInfo(&self, tag: Tag) -> Result<Vec<u8>, Status> {
         let _wp = wd::watch("IKeystoreService::getSupplementaryAttestationInfo");
-        self.get_supplementary_attestation_info(tag)
-            .map_err(into_logged_binder)
+        self.get_supplementary_attestation_info(tag).map_err(into_logged_binder)
     }
 }
 
@@ -729,8 +695,7 @@ impl IOhMyKsService for KeystoreService {
         security_level: SecurityLevel,
     ) -> Result<Strong<dyn IKeystoreSecurityLevel>, Status> {
         let _wp = wd::watch_millis_with("IOhMyKsService::getSecurityLevel", 500, security_level);
-        self.get_security_level(security_level)
-            .map_err(into_logged_binder)
+        self.get_security_level(security_level).map_err(into_logged_binder)
     }
 
     fn getOhMySecurityLevel(
@@ -738,8 +703,7 @@ impl IOhMyKsService for KeystoreService {
         security_level: SecurityLevel,
     ) -> Result<Strong<dyn IOhMySecurityLevel>, Status> {
         let _wp = wd::watch_millis_with("IOhMyKsService::getSecurityLevel", 500, security_level);
-        self.get_iohmy_security_level(security_level)
-            .map_err(into_logged_binder)
+        self.get_iohmy_security_level(security_level).map_err(into_logged_binder)
     }
 
     fn getKeyEntry(
@@ -773,8 +737,7 @@ impl IOhMyKsService for KeystoreService {
     ) -> Result<Vec<KeyDescriptor>, Status> {
         let _wp = wd::watch("IOhMyKsService::listEntries");
         let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::listEntries")?);
-        self.list_entries(ctx, domain, namespace)
-            .map_err(into_logged_binder)
+        self.list_entries(ctx, domain, namespace).map_err(into_logged_binder)
     }
 
     fn deleteKey(&self, ctx: Option<&CallerInfo>, key: &KeyDescriptor) -> Result<(), Status> {
@@ -794,8 +757,7 @@ impl IOhMyKsService for KeystoreService {
     ) -> Result<KeyDescriptor, Status> {
         let _wp = wd::watch("IOhMyKsService::grant");
         let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::grant")?);
-        self.grant(ctx, key, grantee_uid, access_vector.into())
-            .map_err(into_logged_binder)
+        self.grant(ctx, key, grantee_uid, access_vector.into()).map_err(into_logged_binder)
     }
 
     fn ungrant(
@@ -806,8 +768,7 @@ impl IOhMyKsService for KeystoreService {
     ) -> Result<(), Status> {
         let _wp = wd::watch("IOhMyKsService::ungrant");
         let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::ungrant")?);
-        self.ungrant(ctx, key, grantee_uid)
-            .map_err(into_logged_binder)
+        self.ungrant(ctx, key, grantee_uid).map_err(into_logged_binder)
     }
 
     fn getNumberOfEntries(
@@ -818,8 +779,7 @@ impl IOhMyKsService for KeystoreService {
     ) -> Result<i32, Status> {
         let _wp = wd::watch("IOhMyKsService::getNumberOfEntries");
         let ctx = Some(require_omk_ctx(ctx, "IOhMyKsService::getNumberOfEntries")?);
-        self.count_num_entries(ctx, domain, namespace)
-            .map_err(into_logged_binder)
+        self.count_num_entries(ctx, domain, namespace).map_err(into_logged_binder)
     }
 
     fn listEntriesBatched(
@@ -837,8 +797,7 @@ impl IOhMyKsService for KeystoreService {
 
     fn getSupplementaryAttestationInfo(&self, tag: Tag) -> Result<Vec<u8>, Status> {
         let _wp = wd::watch("IOhMyKsService::getSupplementaryAttestationInfo");
-        self.get_supplementary_attestation_info(tag)
-            .map_err(into_logged_binder)
+        self.get_supplementary_attestation_info(tag).map_err(into_logged_binder)
     }
 
     fn updateEcKeybox(
@@ -857,8 +816,7 @@ impl IOhMyKsService for KeystoreService {
             .collect();
 
         keybox::update_ec_keybox(key.to_vec(), chain).map_err(into_logged_binder)?;
-        self.ensure_security_levels_current()
-            .map_err(into_logged_binder)?;
+        self.ensure_security_levels_current().map_err(into_logged_binder)?;
         Ok(())
     }
 
@@ -878,8 +836,7 @@ impl IOhMyKsService for KeystoreService {
             .collect();
 
         keybox::update_rsa_keybox(key.to_vec(), chain).map_err(into_logged_binder)?;
-        self.ensure_security_levels_current()
-            .map_err(into_logged_binder)?;
+        self.ensure_security_levels_current().map_err(into_logged_binder)?;
         Ok(())
     }
 

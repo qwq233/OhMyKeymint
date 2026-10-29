@@ -32,11 +32,8 @@ thread_local! {
 
 static PROCESS_STATE_INIT: Once = Once::new();
 
-static RPC_CACHE: Mutex<RpcCache> = Mutex::new(RpcCache {
-    service: None,
-    auth_token: None,
-    lifecycle: None,
-});
+static RPC_CACHE: Mutex<RpcCache> =
+    Mutex::new(RpcCache { service: None, auth_token: None, lifecycle: None });
 static SERVICE_CONNECT: Mutex<()> = Mutex::new(());
 static AUTH_TOKEN_CONNECT: Mutex<()> = Mutex::new(());
 static LIFECYCLE_CONNECT: Mutex<()> = Mutex::new(());
@@ -107,19 +104,13 @@ fn with_rpc_client<T: 'static, R>(
     let invoke = |client: &Arc<RpcClient<T>>| {
         let result = f(&client.service);
         if client.session.is_ended()
-            || result
-                .as_ref()
-                .err()
-                .is_some_and(is_rpc_cache_invalidating_error)
+            || result.as_ref().err().is_some_and(is_rpc_cache_invalidating_error)
         {
             client.active.store(false, Ordering::Release);
             let retired = {
                 let mut cache = cache.lock().expect("RPC cache poisoned");
                 let slot = slot(&mut cache);
-                if slot
-                    .as_ref()
-                    .is_some_and(|cached| Arc::ptr_eq(cached, client))
-                {
+                if slot.as_ref().is_some_and(|cached| Arc::ptr_eq(cached, client)) {
                     slot.take()
                 } else {
                     None
@@ -144,11 +135,8 @@ fn with_rpc_client<T: 'static, R>(
                     None => {
                         let session = connect()?;
                         let service = resolve(&session)?;
-                        let client = Arc::new(RpcClient {
-                            session,
-                            service,
-                            active: AtomicBool::new(true),
-                        });
+                        let client =
+                            Arc::new(RpcClient { session, service, active: AtomicBool::new(true) });
                         {
                             let mut cache = cache.lock().expect("RPC cache poisoned");
                             *slot(&mut cache) = Some(Arc::clone(&client));
@@ -159,10 +147,8 @@ fn with_rpc_client<T: 'static, R>(
             }
         };
         // A reentrant call may borrow the old TLS entry; its slow path must not replace it.
-        let retired = local
-            .try_borrow_mut()
-            .ok()
-            .and_then(|mut cached| cached.replace(Arc::clone(&client)));
+        let retired =
+            local.try_borrow_mut().ok().and_then(|mut cached| cached.replace(Arc::clone(&client)));
         drop(retired);
         invoke(&client)
     })
@@ -183,11 +169,7 @@ pub fn with_omk_once<T>(f: impl FnOnce(&Strong<dyn IOhMyKsService>) -> Result<T>
         &SERVICE_CONNECT,
         &LOCAL_SERVICE,
         |cache| &mut cache.service,
-        |session| {
-            session
-                .get_interface(rpc::SERVICE)
-                .context("failed to connect to omk service")
-        },
+        |session| session.get_interface(rpc::SERVICE).context("failed to connect to omk service"),
         f,
     )
 }
@@ -343,9 +325,7 @@ where
 
 pub(crate) fn is_dead_object_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause
-            .downcast_ref::<Status>()
-            .is_some_and(is_dead_object_status)
+        cause.downcast_ref::<Status>().is_some_and(is_dead_object_status)
             || cause
                 .downcast_ref::<StatusCode>()
                 .is_some_and(|status| *status == StatusCode::DeadObject)
@@ -353,10 +333,7 @@ pub(crate) fn is_dead_object_error(error: &anyhow::Error) -> bool {
 }
 
 pub(crate) fn is_stale_rpc_status_code(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::DeadObject | StatusCode::RpcError | StatusCode::NotEnoughData
-    )
+    matches!(status, StatusCode::DeadObject | StatusCode::RpcError | StatusCode::NotEnoughData)
 }
 
 pub(crate) fn is_rpc_cache_invalidating_status_code(status: StatusCode) -> bool {

@@ -11,26 +11,15 @@ unsafe extern "C" fn efault_ioctl(_fd: c_int, _request: c_int, _arg: *mut c_void
 
 #[test]
 fn invalid_binder_write_read_input_returns_efault_without_crashing() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     EFAULT_IOCTL_CALLS.store(0, Ordering::SeqCst);
     let previous = OLD_IOCTL.swap(efault_ioctl as *mut c_void, Ordering::SeqCst);
 
     assert_eq!(
-        unsafe {
-            new_ioctl(
-                91,
-                BINDER_WRITE_READ as c_int,
-                std::ptr::dangling_mut::<c_void>(),
-            )
-        },
+        unsafe { new_ioctl(91, BINDER_WRITE_READ as c_int, std::ptr::dangling_mut::<c_void>(),) },
         -1
     );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EFAULT)
-    );
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EFAULT));
 
     let mut bwr = binder_write_read {
         write_size: size_of::<u32>(),
@@ -42,18 +31,11 @@ fn invalid_binder_write_read_input_returns_efault_without_crashing() {
     };
     assert_eq!(
         unsafe {
-            new_ioctl(
-                91,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(91, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         -1
     );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EFAULT)
-    );
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EFAULT));
     assert_eq!(EFAULT_IOCTL_CALLS.load(Ordering::SeqCst), 1);
 
     bwr.write_size = 0;
@@ -62,11 +44,7 @@ fn invalid_binder_write_read_input_returns_efault_without_crashing() {
     bwr.read_buffer = 1;
     assert_eq!(
         unsafe {
-            new_ioctl(
-                91,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(91, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         -1
     );
@@ -79,9 +57,7 @@ fn invalid_binder_write_read_input_returns_efault_without_crashing() {
 
 #[test]
 fn unsafe_reply_parcels_and_partial_commands_are_not_claimed() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 93;
     let connection = binder_state_key(fd);
     let previous = OLD_IOCTL.swap(efault_ioctl as *mut c_void, Ordering::SeqCst);
@@ -103,11 +79,7 @@ fn unsafe_reply_parcels_and_partial_commands_are_not_claimed() {
     reset_pending_reply_frames_for_test(connection, 1);
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         -1
     );
@@ -123,11 +95,7 @@ fn unsafe_reply_parcels_and_partial_commands_are_not_claimed() {
     bwr.write_buffer = write.as_mut_ptr() as libc::c_ulong;
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         -1
     );

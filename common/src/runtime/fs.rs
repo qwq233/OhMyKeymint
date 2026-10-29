@@ -42,10 +42,7 @@ pub fn atomic_replace_preserving_metadata(
         }
         Err(error) => return Err(error),
     };
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("config");
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("config");
     let temp_path = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
 
     let result = (|| {

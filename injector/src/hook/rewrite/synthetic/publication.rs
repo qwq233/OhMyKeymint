@@ -18,9 +18,8 @@ pub(in crate::hook) fn next_operation_publication_probe_deadline() -> Option<Ins
 }
 
 pub(super) fn register_operation_publication(target: LocalBinderTarget) -> anyhow::Result<u64> {
-    let mut publications = OPERATION_PUBLICATIONS
-        .lock()
-        .expect("operation publication map poisoned");
+    let mut publications =
+        OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned");
     if publications.len() >= MAX_PENDING_OPERATION_PUBLICATIONS {
         anyhow::bail!(
             "pending native operation publication limit reached ({MAX_PENDING_OPERATION_PUBLICATIONS})"
@@ -61,9 +60,8 @@ pub(in crate::hook) fn mark_operation_publication_acquire_pending(
     target: LocalBinderTarget,
     connection: BinderStateKey,
 ) -> Option<NativeBinderRetirement> {
-    let mut publications = OPERATION_PUBLICATIONS
-        .lock()
-        .expect("operation publication map poisoned");
+    let mut publications =
+        OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned");
     let publication = publications.get_mut(&target)?;
     if publication.connection != Some(connection)
         || publication.acquire_pending
@@ -72,19 +70,15 @@ pub(in crate::hook) fn mark_operation_publication_acquire_pending(
         return None;
     }
     publication.acquire_pending = true;
-    Some(NativeBinderRetirement {
-        target,
-        generation: publication.generation,
-    })
+    Some(NativeBinderRetirement { target, generation: publication.generation })
 }
 
 pub(in crate::hook) fn mark_operation_publication_acquire_committed(
     retirement: NativeBinderRetirement,
 ) {
     let finished = {
-        let mut publications = OPERATION_PUBLICATIONS
-            .lock()
-            .expect("operation publication map poisoned");
+        let mut publications =
+            OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned");
         let Some(publication) = publications.get_mut(&retirement.target) else {
             return;
         };
@@ -131,16 +125,10 @@ pub(in crate::hook) fn operation_publication_pending_acquire(
     target: LocalBinderTarget,
     connection: BinderStateKey,
 ) -> Option<NativeBinderRetirement> {
-    let publications = OPERATION_PUBLICATIONS
-        .lock()
-        .expect("operation publication map poisoned");
+    let publications = OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned");
     let publication = publications.get(&target)?;
-    (publication.connection == Some(connection) && publication.acquire_pending).then_some(
-        NativeBinderRetirement {
-            target,
-            generation: publication.generation,
-        },
-    )
+    (publication.connection == Some(connection) && publication.acquire_pending)
+        .then_some(NativeBinderRetirement { target, generation: publication.generation })
 }
 
 pub(in crate::hook) fn mark_operation_publication_completed(
@@ -148,16 +136,13 @@ pub(in crate::hook) fn mark_operation_publication_completed(
     binder: BinderFdToken,
 ) {
     let (finished, probe) = {
-        let mut publications = OPERATION_PUBLICATIONS
-            .lock()
-            .expect("operation publication map poisoned");
+        let mut publications =
+            OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned");
         let Some(publication) = publications.get_mut(&retirement.target) else {
             return;
         };
         if publication.generation != retirement.generation
-            || publication
-                .connection
-                .is_some_and(|connection| connection != binder.connection)
+            || publication.connection.is_some_and(|connection| connection != binder.connection)
         {
             return;
         }
@@ -165,15 +150,13 @@ pub(in crate::hook) fn mark_operation_publication_completed(
         publication.binder = Some(binder);
         let finished = finish_operation_publication(&mut publications, retirement);
         let probe =
-            publications
-                .get(&retirement.target)
-                .map(|publication| OperationPublicationProbe {
-                    target: retirement.target,
-                    binder,
-                    generation: publication.generation,
-                    not_before: Instant::now() + OPERATION_PUBLICATION_PROBE_GRACE,
-                    query_failures: 0,
-                });
+            publications.get(&retirement.target).map(|publication| OperationPublicationProbe {
+                target: retirement.target,
+                binder,
+                generation: publication.generation,
+                not_before: Instant::now() + OPERATION_PUBLICATION_PROBE_GRACE,
+                query_failures: 0,
+            });
         (finished, probe)
     };
     if finished {
@@ -194,9 +177,7 @@ pub(in crate::hook) fn bind_operation_publication_connection(
         .get_mut(&retirement.target)
         .filter(|publication| {
             publication.generation == retirement.generation
-                && publication
-                    .connection
-                    .is_none_or(|bound| bound == connection)
+                && publication.connection.is_none_or(|bound| bound == connection)
         })
     {
         publication.connection = Some(connection);
@@ -205,9 +186,8 @@ pub(in crate::hook) fn bind_operation_publication_connection(
 
 pub(in crate::hook) fn retire_binder_connection_publications(connection: BinderStateKey) {
     let (targets, retired_targets) = {
-        let mut publications = OPERATION_PUBLICATIONS
-            .lock()
-            .expect("operation publication map poisoned");
+        let mut publications =
+            OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned");
         let targets = publications
             .iter()
             .filter_map(|(target, publication)| {
@@ -249,9 +229,8 @@ pub(in crate::hook) fn retire_binder_connection_publications(connection: BinderS
 
 pub(in crate::hook) fn finish_local_operation_publication(retirement: NativeBinderRetirement) {
     let removed = {
-        let mut publications = OPERATION_PUBLICATIONS
-            .lock()
-            .expect("operation publication map poisoned");
+        let mut publications =
+            OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned");
         publications
             .get(&retirement.target)
             .is_some_and(|publication| publication.generation == retirement.generation)
@@ -276,9 +255,8 @@ pub(in crate::hook) fn take_operation_publication_probe(
             probes.remove(ready)?
         };
         let eligible = {
-            let publications = OPERATION_PUBLICATIONS
-                .lock()
-                .expect("operation publication map poisoned");
+            let publications =
+                OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned");
             publications.get(&probe.target).is_some_and(|publication| {
                 publication.generation == probe.generation
                     && publication.binder == Some(probe.binder)
@@ -297,9 +275,8 @@ pub(in crate::hook) fn finish_operation_publication_probe(
     now: Instant,
 ) -> Option<NativeBinderRetirement> {
     {
-        let mut publications = OPERATION_PUBLICATIONS
-            .lock()
-            .expect("operation publication map poisoned");
+        let mut publications =
+            OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned");
         let publication = publications.get(&probe.target)?;
         if publication.generation != probe.generation
             || publication.binder != Some(probe.binder)

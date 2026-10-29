@@ -3,17 +3,10 @@ use crate::hook::rewrite::tests::raw_parts;
 
 #[test]
 fn system_failure_and_read_only_calls_skip_mirror() {
-    let caller = CallerInfo {
-        uid: 1000,
-        sid: String::new(),
-        pid: 2000,
-    };
+    let caller = CallerInfo { uid: 1000, sid: String::new(), pid: 2000 };
     let cfg = config::InjectorConfig::default();
     for (status, requires_mirror) in [
-        (
-            Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None),
-            true,
-        ),
+        (Status::new_service_specific_error(ResponseCode::SYSTEM_ERROR.0, None), true),
         (Status::from(StatusCode::Ok), false),
     ] {
         let mut reply = parcel::build_status_reply(&status).unwrap();
@@ -37,11 +30,7 @@ fn system_failure_and_read_only_calls_skip_mirror() {
 
 #[test]
 fn mirror_is_synchronous_single_pass_and_failure_does_not_block_next_call() {
-    let caller = CallerInfo {
-        uid: 1000,
-        sid: String::new(),
-        pid: 2000,
-    };
+    let caller = CallerInfo { uid: 1000, sid: String::new(), pid: 2000 };
     let mut system_reply = parcel::build_void_reply().unwrap();
     let (data, data_size, offsets, offsets_size) = raw_parts(&mut system_reply);
     // SAFETY: All fields and union members contain integer types that permit zero.
@@ -97,10 +86,7 @@ fn mirror_is_synchronous_single_pass_and_failure_does_not_block_next_call() {
             }
             .unwrap()
             .is_none());
-            assert_eq!(
-                calls, 2,
-                "a later request must not replay the failed update"
-            );
+            assert_eq!(calls, 2, "a later request must not replay the failed update");
         }
     }
 }

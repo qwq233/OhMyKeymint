@@ -23,12 +23,8 @@ fn android_package_is_rejected_when_blocking_is_enabled() {
     let config = base_config();
     let scope = vec!["android".to_string()];
 
-    let decision = evaluate(
-        &scope,
-        &config,
-        10_000,
-        PackageResolution::Known(vec!["android".to_string()]),
-    );
+    let decision =
+        evaluate(&scope, &config, 10_000, PackageResolution::Known(vec!["android".to_string()]));
     assert!(!decision.allowed);
     assert_eq!(decision.reason, FilterReason::RejectedAndroidPackage);
 }
@@ -101,12 +97,7 @@ fn root_follows_android_package_policy() {
 fn android_prefixed_package_in_scope_is_allowed() {
     let config = base_config();
     let scope = vec!["com.android.vending".to_string()];
-    let decision = evaluate(
-        &scope,
-        &config,
-        10_000,
-        PackageResolution::Known(scope.clone()),
-    );
+    let decision = evaluate(&scope, &config, 10_000, PackageResolution::Known(scope.clone()));
     assert!(decision.allowed);
     assert_eq!(decision.reason, FilterReason::Allowed);
 }
@@ -115,32 +106,20 @@ fn android_prefixed_package_in_scope_is_allowed() {
 fn empty_scope_keeps_android_and_denylist_precedence() {
     let mut config = base_config();
     config.block_android_package = false;
-    let decision = evaluate(
-        &[],
-        &config,
-        10_000,
-        PackageResolution::Known(vec!["com.anything".to_string()]),
-    );
+    let decision =
+        evaluate(&[], &config, 10_000, PackageResolution::Known(vec!["com.anything".to_string()]));
     assert!(!decision.allowed);
     assert_eq!(decision.reason, FilterReason::RejectedNotInScope);
 
     let config = base_config();
-    let decision = evaluate(
-        &[],
-        &config,
-        10_000,
-        PackageResolution::Known(vec!["android".to_string()]),
-    );
+    let decision =
+        evaluate(&[], &config, 10_000, PackageResolution::Known(vec!["android".to_string()]));
     assert_eq!(decision.reason, FilterReason::RejectedAndroidPackage);
 
     let mut config = base_config();
     config.block_android_package = false;
     config.deny_packages = vec!["com.blocked".to_string()];
-    let decision = evaluate(
-        &[],
-        &config,
-        10_000,
-        PackageResolution::Known(vec!["com.blocked".to_string()]),
-    );
+    let decision =
+        evaluate(&[], &config, 10_000, PackageResolution::Known(vec!["com.blocked".to_string()]));
     assert_eq!(decision.reason, FilterReason::RejectedByDenylist);
 }

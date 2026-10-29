@@ -77,22 +77,12 @@ pub fn parse_tlv(input: &[u8]) -> Result<(Tlv<'_>, &[u8])> {
 
     let (length, length_bytes) = parse_der_length(&input[offset..])?;
     offset += length_bytes;
-    let end = offset
-        .checked_add(length)
-        .ok_or_else(|| anyhow!("DER length overflow"))?;
+    let end = offset.checked_add(length).ok_or_else(|| anyhow!("DER length overflow"))?;
     if end > input.len() {
         bail!("DER field exceeds remaining input");
     }
 
-    Ok((
-        Tlv {
-            class,
-            constructed,
-            tag_number,
-            value: &input[offset..end],
-        },
-        &input[end..],
-    ))
+    Ok((Tlv { class, constructed, tag_number, value: &input[offset..end] }, &input[end..]))
 }
 
 pub fn parse_der_length(input: &[u8]) -> Result<(usize, usize)> {
@@ -188,9 +178,7 @@ fn extract_verified_boot_hash_from_authorization_list(mut bytes: &[u8]) -> Resul
         }
     }
 
-    Err(anyhow!(
-        "RootOfTrust tag 704 missing from authorization list"
-    ))
+    Err(anyhow!("RootOfTrust tag 704 missing from authorization list"))
 }
 
 fn extract_verified_boot_hash_from_root_of_trust(bytes: &[u8]) -> Result<[u8; 32]> {
@@ -213,10 +201,7 @@ fn extract_verified_boot_hash_from_root_of_trust(bytes: &[u8]) -> Result<[u8; 32
         bail!("unexpected trailing data after verifiedBootHash");
     }
     if verified_boot_hash.value.len() != 32 {
-        bail!(
-            "verifiedBootHash must be 32 bytes, got {}",
-            verified_boot_hash.value.len()
-        );
+        bail!("verifiedBootHash must be 32 bytes, got {}", verified_boot_hash.value.len());
     }
 
     let mut bytes = [0u8; 32];
@@ -264,28 +249,22 @@ mod tests {
             .concat(),
         );
         let error = extract_verified_boot_hash_from_attestation_extension(&extension).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("RootOfTrust tag 704 missing from authorization list"));
+        assert!(error.to_string().contains("RootOfTrust tag 704 missing from authorization list"));
     }
 
     #[test]
     fn malformed_leaf_certificate_is_rejected() {
         let error = extract_attestation_challenge_from_leaf_certificate(b"not-der").unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("failed to parse attestation leaf"));
+        assert!(error.to_string().contains("failed to parse attestation leaf"));
     }
 
     fn build_leaf_with_attestation_extension(challenge: &[u8], hash: [u8; 32]) -> Vec<u8> {
         let extension = build_test_attestation_extension(challenge, hash);
         let mut params = CertificateParams::new(Vec::new()).unwrap();
-        params
-            .custom_extensions
-            .push(CustomExtension::from_oid_content(
-                &[1, 3, 6, 1, 4, 1, 11129, 2, 1, 17],
-                extension,
-            ));
+        params.custom_extensions.push(CustomExtension::from_oid_content(
+            &[1, 3, 6, 1, 4, 1, 11129, 2, 1, 17],
+            extension,
+        ));
         let key_pair = KeyPair::generate().unwrap();
         let cert = params.self_signed(&key_pair).unwrap();
         cert.der().to_vec()
@@ -309,12 +288,7 @@ mod tests {
             TlvClass::Universal,
             true,
             16,
-            &encode_tlv(
-                TlvClass::ContextSpecific,
-                true,
-                ROOT_OF_TRUST_TAG,
-                &root_of_trust,
-            ),
+            &encode_tlv(TlvClass::ContextSpecific, true, ROOT_OF_TRUST_TAG, &root_of_trust),
         );
 
         encode_tlv(
@@ -372,10 +346,7 @@ mod tests {
         }
 
         let bytes = length.to_be_bytes();
-        let first_non_zero = bytes
-            .iter()
-            .position(|byte| *byte != 0)
-            .unwrap_or(bytes.len() - 1);
+        let first_non_zero = bytes.iter().position(|byte| *byte != 0).unwrap_or(bytes.len() - 1);
         let encoded = &bytes[first_non_zero..];
         out.push(0x80 | encoded.len() as u8);
         out.extend_from_slice(encoded);

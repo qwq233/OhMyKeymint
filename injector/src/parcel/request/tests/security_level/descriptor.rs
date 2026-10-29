@@ -9,10 +9,7 @@ fn security_level_blob_descriptor_preserves_null_and_empty() {
     let ParsedSecurityLevelRequest::DeleteKey { key } = parsed else {
         panic!("deleteKey request should parse as DeleteKey");
     };
-    assert_eq!(
-        key.domain,
-        crate::android::system::keystore2::Domain::Domain::BLOB
-    );
+    assert_eq!(key.domain, crate::android::system::keystore2::Domain::Domain::BLOB);
     assert_eq!(key.blob, Some(Vec::new()));
 
     let parsed = parse_security_level_key_request(
@@ -22,10 +19,7 @@ fn security_level_blob_descriptor_preserves_null_and_empty() {
     let ParsedSecurityLevelRequest::ConvertStorageKeyToEphemeral { storage_key } = parsed else {
         panic!("convertStorageKeyToEphemeral request should parse");
     };
-    assert_eq!(
-        storage_key.domain,
-        crate::android::system::keystore2::Domain::Domain::BLOB
-    );
+    assert_eq!(storage_key.domain, crate::android::system::keystore2::Domain::Domain::BLOB);
     assert_eq!(storage_key.blob, Some(Vec::new()));
 
     let parsed = parse_security_level_key_request(

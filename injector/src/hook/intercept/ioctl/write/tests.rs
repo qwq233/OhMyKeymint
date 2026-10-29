@@ -9,9 +9,7 @@ use crate::hook::rewrite::tests::reset_pending_reply_frames_for_test;
 
 #[test]
 fn write_parser_tracks_transaction_and_reply_completions() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let _route_guard = crate::tracker::tests::state_test_guard();
     reset_pending_reply_frames_for_test(0, 0);
     let tr: binder_transaction_data = unsafe { std::mem::zeroed() };
@@ -22,10 +20,7 @@ fn write_parser_tracks_transaction_and_reply_completions() {
     push_unaligned(&mut write, &BC_REPLY_CMD);
     push_unaligned(&mut write, &tr);
     push_unaligned(&mut write, &BC_ACQUIRE_DONE_CMD);
-    let acquire_target = LocalBinderTarget {
-        ptr: 0x1234,
-        cookie: 0x5678,
-    };
+    let acquire_target = LocalBinderTarget { ptr: 0x1234, cookie: 0x5678 };
     let acquire_retirement = register_operation_publication_for_test(acquire_target);
     let connection = binder_state_key(20);
     bind_operation_publication_connection(acquire_retirement, connection);
@@ -35,10 +30,7 @@ fn write_parser_tracks_transaction_and_reply_completions() {
     );
     push_unaligned(
         &mut write,
-        &binder_ptr_cookie {
-            ptr: acquire_target.ptr,
-            cookie: acquire_target.cookie,
-        },
+        &binder_ptr_cookie { ptr: acquire_target.ptr, cookie: acquire_target.cookie },
     );
 
     let completions = unsafe { parse_write_buffer(20, &mut write) };
@@ -57,9 +49,7 @@ fn write_parser_tracks_transaction_and_reply_completions() {
 
 #[test]
 fn inbound_shadow_free_is_translated_and_released_only_after_consumption() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let connection = binder_state_key(20);
     clear_inbound_transaction_shadows(connection);
     let original = [1u8, 2, 3, 4];
@@ -92,17 +82,12 @@ fn inbound_shadow_free_is_translated_and_released_only_after_consumption() {
     );
     mark_inbound_free_buffers_consumed(connection, &rewritten, command_end);
     complete_inbound_free_buffers(connection, &rewritten, command_end);
-    assert_eq!(
-        inbound_transaction_original_buffer(connection, shadow_buffer),
-        None
-    );
+    assert_eq!(inbound_transaction_original_buffer(connection, shadow_buffer), None);
 }
 
 #[test]
 fn preflight_snapshots_all_replies_before_claiming_frames() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .expect("synthetic reply test lock poisoned");
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().expect("synthetic reply test lock poisoned");
     let _route_guard = crate::tracker::tests::state_test_guard();
     let fd = 23;
     let connection = binder_state_key(fd);
@@ -130,9 +115,7 @@ fn preflight_snapshots_all_replies_before_claiming_frames() {
 
 #[test]
 fn parser_consumes_preflight_payloads_without_reading_them_again() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .expect("synthetic reply test lock poisoned");
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().expect("synthetic reply test lock poisoned");
     let _route_guard = crate::tracker::tests::state_test_guard();
     let fd = 24;
     let connection = binder_state_key(fd);
@@ -161,10 +144,7 @@ fn parser_consumes_preflight_payloads_without_reading_them_again() {
         // required.
         unsafe {
             std::ptr::write_unaligned(
-                write
-                    .as_mut_ptr()
-                    .add(offset)
-                    .cast::<binder_transaction_data>(),
+                write.as_mut_ptr().add(offset).cast::<binder_transaction_data>(),
                 changed,
             )
         };

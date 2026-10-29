@@ -168,20 +168,12 @@ fn resolve_aidl_hal_version_with(
 
 impl<'a> ManifestMerger<'a> {
     fn new(expected_kind: ManifestKind, target_hal: &'a str) -> Self {
-        Self {
-            expected_kind,
-            target_hal,
-            source_meta_version: None,
-            instances: BTreeMap::new(),
-        }
+        Self { expected_kind, target_hal, source_meta_version: None, instances: BTreeMap::new() }
     }
 
     fn version_for(&self, interface: &str, instance: &str) -> Option<i32> {
         self.instances
-            .get(&InstanceKey {
-                interface: interface.to_string(),
-                instance: instance.to_string(),
-            })
+            .get(&InstanceKey { interface: interface.to_string(), instance: instance.to_string() })
             .and_then(|versions| versions.last().copied())
     }
 
@@ -226,10 +218,8 @@ impl<'a> ManifestMerger<'a> {
                 // override removes every prior declaration for this package before adding itself.
                 self.instances.clear();
             } else if source_meta_version >= META_VERSION_NO_HAL_INTERFACE_INSTANCE {
-                if let Some(conflict) = hal
-                    .instances
-                    .iter()
-                    .find(|candidate| self.instances.contains_key(*candidate))
+                if let Some(conflict) =
+                    hal.instances.iter().find(|candidate| self.instances.contains_key(*candidate))
                 {
                     bail!(
                         "conflicting AIDL FqInstance {}/{} for HAL {} while merging {}",
@@ -242,10 +232,7 @@ impl<'a> ManifestMerger<'a> {
             }
 
             for instance in hal.instances {
-                self.instances
-                    .entry(instance)
-                    .or_default()
-                    .extend(hal.versions.iter().copied());
+                self.instances.entry(instance).or_default().extend(hal.versions.iter().copied());
             }
         }
 
@@ -266,10 +253,7 @@ fn parse_aidl_hal(hal: HalXml, meta_version: MetaVersion, source: &Path) -> Resu
             .parse::<i32>()
             .with_context(|| format!("invalid AIDL version {value:?} in {}", source.display()))?;
         if version < 0 {
-            bail!(
-                "invalid negative AIDL version {version} in {}",
-                source.display()
-            );
+            bail!("invalid negative AIDL version {version} in {}", source.display());
         }
         BTreeSet::from([version])
     };
@@ -289,36 +273,23 @@ fn parse_aidl_hal(hal: HalXml, meta_version: MetaVersion, source: &Path) -> Resu
 
     let mut interface_names = BTreeSet::new();
     for interface in hal.interfaces {
-        let name = interface
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("AIDL interface is missing its name in {}", source.display())
-            })?;
+        let name =
+            interface.name.as_deref().map(str::trim).filter(|name| !name.is_empty()).ok_or_else(
+                || anyhow::anyhow!("AIDL interface is missing its name in {}", source.display()),
+            )?;
         if !interface_names.insert(name.to_string()) {
-            bail!(
-                "duplicated AIDL interface entry {name:?} in {}",
-                source.display()
-            );
+            bail!("duplicated AIDL interface entry {name:?} in {}", source.display());
         }
         if meta_version >= META_VERSION_NO_HAL_INTERFACE_INSTANCE && interface.instances.is_empty()
         {
-            bail!(
-                "AIDL interface {name:?} has no instance in {}",
-                source.display()
-            );
+            bail!("AIDL interface {name:?} has no instance in {}", source.display());
         }
 
         let mut interface_instances = BTreeSet::new();
         for instance in interface.instances {
             let instance = instance.trim();
             if instance.is_empty() {
-                bail!(
-                    "AIDL interface {name:?} has an empty instance in {}",
-                    source.display()
-                );
+                bail!("AIDL interface {name:?} has an empty instance in {}", source.display());
             }
             if !interface_instances.insert(instance.to_string()) {
                 bail!(
@@ -326,10 +297,7 @@ fn parse_aidl_hal(hal: HalXml, meta_version: MetaVersion, source: &Path) -> Resu
                     source.display()
                 );
             }
-            let key = InstanceKey {
-                interface: name.to_string(),
-                instance: instance.to_string(),
-            };
+            let key = InstanceKey { interface: name.to_string(), instance: instance.to_string() };
             let inserted = instances.insert(key.clone());
             if meta_version >= META_VERSION_NO_HAL_INTERFACE_INSTANCE && !inserted {
                 bail!(
@@ -346,17 +314,10 @@ fn parse_aidl_hal(hal: HalXml, meta_version: MetaVersion, source: &Path) -> Resu
         && instances.is_empty()
         && !hal.is_override
     {
-        bail!(
-            "AIDL HAL has no instance and is not disabled in {}",
-            source.display()
-        );
+        bail!("AIDL HAL has no instance and is not disabled in {}", source.display());
     }
 
-    Ok(ParsedAidlHal {
-        is_override: hal.is_override,
-        versions,
-        instances,
-    })
+    Ok(ParsedAidlHal { is_override: hal.is_override, versions, instances })
 }
 
 fn parse_aidl_fqname(value: &str, source: &Path) -> Result<InstanceKey> {
@@ -373,10 +334,7 @@ fn parse_aidl_fqname(value: &str, source: &Path) -> Result<InstanceKey> {
     if interface.is_empty() || instance.is_empty() || parts.next().is_some() {
         bail!("invalid AIDL fqname {value:?} in {}", source.display());
     }
-    Ok(InstanceKey {
-        interface: interface.to_string(),
-        instance: instance.to_string(),
-    })
+    Ok(InstanceKey { interface: interface.to_string(), instance: instance.to_string() })
 }
 
 fn parse_meta_version(value: &str) -> Result<MetaVersion> {
@@ -533,16 +491,12 @@ fn apex_vintf_directories(
     read_property: &dyn Fn(&str) -> Option<String>,
     group: ApexPartitionGroup,
 ) -> Result<Vec<PathBuf>> {
-    let ready = property_value(read_property, "apex.all.ready")
-        .as_deref()
-        .is_some_and(parse_bool_property);
+    let ready =
+        property_value(read_property, "apex.all.ready").as_deref().is_some_and(parse_bool_property);
     let (info_path, apex_root) = if ready {
         (crate::apex::APEX_INFO_LIST_PATH, "/apex")
     } else {
-        (
-            crate::apex::BOOTSTRAP_APEX_INFO_LIST_PATH,
-            "/bootstrap-apex",
-        )
+        (crate::apex::BOOTSTRAP_APEX_INFO_LIST_PATH, "/bootstrap-apex")
     };
     let Some(info_xml) = read_optional_path(&rooted_path(root, info_path))? else {
         return Ok(Vec::new());
@@ -559,11 +513,7 @@ fn apex_vintf_directories(
         if module_name.is_empty() {
             bail!("active APEX entry in {info_path} is missing moduleName");
         }
-        directories.push(
-            rooted_path(root, apex_root)
-                .join(module_name)
-                .join("etc/vintf"),
-        );
+        directories.push(rooted_path(root, apex_root).join(module_name).join("etc/vintf"));
     }
     Ok(directories)
 }
@@ -637,22 +587,15 @@ fn rooted_path(root: &Path, absolute: &str) -> PathBuf {
 }
 
 fn property_value(read_property: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
-    read_property(name)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    read_property(name).map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
 }
 
 fn parse_bool_property(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "y" | "yes" | "on"
-    )
+    matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "y" | "yes" | "on")
 }
 
 fn read_string_property(name: &str) -> Option<String> {
-    rsproperties::get::<String>(name)
-        .ok()
-        .map(|value| value.trim().to_string())
+    rsproperties::get::<String>(name).ok().map(|value| value.trim().to_string())
 }
 
 #[cfg(test)]
@@ -696,23 +639,13 @@ mod tests {
 "#;
 
         assert_eq!(
-            resolve_xmls(
-                ManifestKind::Device,
-                KEYMINT_DEVICE_INTERFACE,
-                "default",
-                &[xml]
-            )
-            .unwrap(),
+            resolve_xmls(ManifestKind::Device, KEYMINT_DEVICE_INTERFACE, "default", &[xml])
+                .unwrap(),
             Some(1)
         );
         assert_eq!(
-            resolve_xmls(
-                ManifestKind::Device,
-                "IRemotelyProvisionedComponent",
-                "default",
-                &[xml]
-            )
-            .unwrap(),
+            resolve_xmls(ManifestKind::Device, "IRemotelyProvisionedComponent", "default", &[xml])
+                .unwrap(),
             Some(1)
         );
     }
@@ -761,13 +694,8 @@ mod tests {
 </manifest>
 "#;
 
-        assert!(resolve_xmls(
-            ManifestKind::Device,
-            KEYMINT_DEVICE_INTERFACE,
-            "default",
-            &[xml]
-        )
-        .is_err());
+        assert!(resolve_xmls(ManifestKind::Device, KEYMINT_DEVICE_INTERFACE, "default", &[xml])
+            .is_err());
     }
 
     #[test]
@@ -818,13 +746,8 @@ mod tests {
 "#;
 
         assert_eq!(
-            resolve_xmls(
-                ManifestKind::Device,
-                KEYMINT_DEVICE_INTERFACE,
-                "default",
-                &[xml]
-            )
-            .unwrap(),
+            resolve_xmls(ManifestKind::Device, KEYMINT_DEVICE_INTERFACE, "default", &[xml])
+                .unwrap(),
             Some(0)
         );
     }
@@ -1023,14 +946,9 @@ mod tests {
 </apex-info-list>"#,
         );
 
-        let properties = HashMap::from([
-            ("ro.boot.product.vendor.sku", "sku"),
-            ("apex.all.ready", "true"),
-        ]);
-        assert_eq!(
-            resolve_at(&root, ManifestKind::Device, &properties).unwrap(),
-            Some(4)
-        );
+        let properties =
+            HashMap::from([("ro.boot.product.vendor.sku", "sku"), ("apex.all.ready", "true")]);
+        assert_eq!(resolve_at(&root, ManifestKind::Device, &properties).unwrap(), Some(4));
     }
 
     #[test]
@@ -1045,10 +963,7 @@ mod tests {
             r#"<manifest version="1.0" type="device"><hal format="aidl" override="true"><name>android.hardware.security.keymint</name><version>5</version><fqname>IKeyMintDevice/default</fqname></hal></manifest>"#,
         );
 
-        assert_eq!(
-            resolve_at(&root, ManifestKind::Device, &HashMap::new()).unwrap(),
-            Some(2)
-        );
+        assert_eq!(resolve_at(&root, ManifestKind::Device, &HashMap::new()).unwrap(), Some(2));
     }
 
     #[test]
@@ -1082,10 +997,7 @@ mod tests {
             r#"<manifest version="1.0" type="framework"><hal format="aidl" override="true"><name>android.hardware.security.keymint</name><version>5</version><fqname>IKeyMintDevice/default</fqname></hal></manifest>"#,
         );
 
-        assert_eq!(
-            resolve_at(&root, ManifestKind::Framework, &HashMap::new()).unwrap(),
-            Some(4)
-        );
+        assert_eq!(resolve_at(&root, ManifestKind::Framework, &HashMap::new()).unwrap(), Some(4));
     }
 
     #[test]
@@ -1105,9 +1017,6 @@ mod tests {
             r#"<manifest version="1.0" type="framework"><hal format="aidl" override="true"><name>android.hardware.security.keymint</name><version>4</version><fqname>IKeyMintDevice/default</fqname></hal></manifest>"#,
         );
 
-        assert_eq!(
-            resolve_at(&root, ManifestKind::Framework, &HashMap::new()).unwrap(),
-            Some(4)
-        );
+        assert_eq!(resolve_at(&root, ManifestKind::Framework, &HashMap::new()).unwrap(), Some(4));
     }
 }

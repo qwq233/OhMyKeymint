@@ -106,11 +106,7 @@ impl KeyBox {
         let ec_info = Self::build_ec_info(ec_entry)?;
         let identity_digest = Self::compute_identity_digest(rsa_info.as_ref(), &ec_info)?;
 
-        Ok(Self {
-            rsa_info,
-            ec_info,
-            identity_digest,
-        })
+        Ok(Self { rsa_info, ec_info, identity_digest })
     }
 
     fn build_rsa_info(entry: ParsedKeyEntry) -> Result<CertSignAlgoInfo> {
@@ -123,16 +119,10 @@ impl KeyBox {
         let chain: Vec<keymint::Certificate> = entry
             .chain
             .into_iter()
-            .map(|encoded_certificate| keymint::Certificate {
-                encoded_certificate,
-            })
+            .map(|encoded_certificate| keymint::Certificate { encoded_certificate })
             .collect();
         validate_chain_matches_key(&key, &chain, KeyAlgorithm::Rsa)?;
-        Ok(CertSignAlgoInfo {
-            key,
-            key_der: entry.key_der,
-            chain,
-        })
+        Ok(CertSignAlgoInfo { key, key_der: entry.key_der, chain })
     }
 
     fn build_ec_info(entry: ParsedKeyEntry) -> Result<CertSignAlgoInfo> {
@@ -144,16 +134,10 @@ impl KeyBox {
         let chain: Vec<keymint::Certificate> = entry
             .chain
             .into_iter()
-            .map(|encoded_certificate| keymint::Certificate {
-                encoded_certificate,
-            })
+            .map(|encoded_certificate| keymint::Certificate { encoded_certificate })
             .collect();
         validate_chain_matches_key(&key, &chain, KeyAlgorithm::Ec)?;
-        Ok(CertSignAlgoInfo {
-            key,
-            key_der: entry.key_der,
-            chain,
-        })
+        Ok(CertSignAlgoInfo { key, key_der: entry.key_der, chain })
     }
 
     fn compute_identity_digest(
@@ -225,10 +209,7 @@ impl KeyBox {
     ) -> Result<()> {
         let entry = ParsedKeyEntry {
             key_der,
-            chain: chain
-                .into_iter()
-                .map(|certificate| certificate.encoded_certificate)
-                .collect(),
+            chain: chain.into_iter().map(|certificate| certificate.encoded_certificate).collect(),
         };
         match algorithm {
             KeyAlgorithm::Ec => self.ec_info = Self::build_ec_info(entry)?,
@@ -365,9 +346,7 @@ fn validate_chain_matches_key(
     chain: &[keymint::Certificate],
     algorithm: KeyAlgorithm,
 ) -> Result<()> {
-    let first_cert = chain
-        .first()
-        .context("certificate chain must contain a leaf certificate")?;
+    let first_cert = chain.first().context("certificate chain must contain a leaf certificate")?;
     let certificate = <Certificate as x509_der::Decode>::from_der(&first_cert.encoded_certificate)
         .with_context(|| {
             format!(
@@ -426,9 +405,7 @@ fn decode_pem(pem: &str) -> Result<Vec<u8>> {
         bail!("empty PEM payload");
     }
 
-    STANDARD
-        .decode(base64_body.as_bytes())
-        .context("failed to decode PEM payload")
+    STANDARD.decode(base64_body.as_bytes()).context("failed to decode PEM payload")
 }
 
 fn encode_pem_block(label: &str, der: &[u8]) -> String {
@@ -445,10 +422,7 @@ fn encode_pem_block(label: &str, der: &[u8]) -> String {
 
 fn temp_keybox_path(path: &str) -> PathBuf {
     let target = Path::new(path);
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("keybox.xml");
+    let file_name = target.file_name().and_then(|name| name.to_str()).unwrap_or("keybox.xml");
     let temp_name = format!(".{file_name}.tmp-{}", std::process::id());
     target
         .parent()
@@ -469,22 +443,13 @@ fn write_keybox_xml(path: &str, xml: &str) -> Result<()> {
             .truncate(true)
             .open(&temp_path)
             .with_context(|| {
-                format!(
-                    "failed to open temporary keybox.xml {}",
-                    temp_path.display()
-                )
+                format!("failed to open temporary keybox.xml {}", temp_path.display())
             })?;
         file.write_all(xml.as_bytes()).with_context(|| {
-            format!(
-                "failed to write temporary keybox.xml {}",
-                temp_path.display()
-            )
+            format!("failed to write temporary keybox.xml {}", temp_path.display())
         })?;
         file.sync_all().with_context(|| {
-            format!(
-                "failed to sync temporary keybox.xml {}",
-                temp_path.display()
-            )
+            format!("failed to sync temporary keybox.xml {}", temp_path.display())
         })?;
     }
 
@@ -520,10 +485,9 @@ fn retire_stale_keybox_bound_entries(current_identity: [u8; 32]) {
         return;
     }
 
-    match crate::global::DB.with(|db| {
-        db.borrow_mut()
-            .retire_stale_keybox_bound_entries(current_identity)
-    }) {
+    match crate::global::DB
+        .with(|db| db.borrow_mut().retire_stale_keybox_bound_entries(current_identity))
+    {
         Ok(0) => debug!("no stale keybox-bound key entries needed retirement"),
         Ok(retired) => info!("retired {retired} stale keybox-bound key entries"),
         Err(error) => error!("failed to retire stale keybox-bound key entries: {error:#}"),
@@ -568,10 +532,8 @@ pub fn db_retirement_allowed() -> bool {
 }
 
 fn is_fallback_continuation(keybox: &KeyBox, contents: &str) -> bool {
-    let current_identity = KEYBOX
-        .read()
-        .map(|current| current.identity_digest())
-        .unwrap_or([0u8; 32]);
+    let current_identity =
+        KEYBOX.read().map(|current| current.identity_digest()).unwrap_or([0u8; 32]);
     is_fallback_continuation_with_state(
         keybox,
         contents,
@@ -602,10 +564,7 @@ fn load_keybox_with_fallback(path: &str) -> Result<(KeyBox, bool)> {
                 Ok((keybox, fallback_origin))
             }
             Err(error) => {
-                warn!(
-                    "invalid keybox.xml at {}: {:#}; rewriting bundled template",
-                    path, error
-                );
+                warn!("invalid keybox.xml at {}: {:#}; rewriting bundled template", path, error);
                 write_bundled_keybox(path)?;
                 Ok((KeyBox::new(), true))
             }
@@ -628,15 +587,9 @@ fn reload_from_disk_inner(retire_db_entries: bool) -> Result<bool> {
     let (keybox, used_fallback) = load_keybox_with_fallback(KEYBOX_PATH)?;
     let changed = install_keybox(keybox, retire_db_entries, !used_fallback);
     if changed {
-        info!(
-            "active keybox identity updated from {} (fallback={})",
-            KEYBOX_PATH, used_fallback
-        );
+        info!("active keybox identity updated from {} (fallback={})", KEYBOX_PATH, used_fallback);
     } else {
-        debug!(
-            "keybox reload completed without identity change (fallback={})",
-            used_fallback
-        );
+        debug!("keybox reload completed without identity change (fallback={})", used_fallback);
     }
     Ok(changed)
 }
@@ -825,10 +778,7 @@ mod tests {
                 algo_hint: SigningAlgorithm::Rsa,
             })
             .unwrap();
-        assert_ne!(
-            bundled_rsa_snapshot.identity_digest,
-            rsa_snapshot.identity_digest
-        );
+        assert_ne!(bundled_rsa_snapshot.identity_digest, rsa_snapshot.identity_digest);
         // Dropping the RSA entry changes the keybox identity; keys bound to the previous
         // identity are not carried over.
         assert_ne!(keybox.identity_digest(), KeyBox::new().identity_digest());

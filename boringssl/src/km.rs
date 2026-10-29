@@ -120,12 +120,9 @@ pub fn aes_gcm_decrypt(data: &[u8], iv: &[u8], tag: &[u8], key: &[u8]) -> Result
     crypter.set_tag(tag).map_err(|_| Error::DecryptionFailed)?;
 
     let mut result = ZVec::new(data.len() + cipher.block_size())?;
-    let count = crypter
-        .update(data, &mut result)
-        .map_err(|_| Error::DecryptionFailed)?;
-    let final_count = crypter
-        .finalize(&mut result[count..])
-        .map_err(|_| Error::DecryptionFailed)?;
+    let count = crypter.update(data, &mut result).map_err(|_| Error::DecryptionFailed)?;
+    let final_count =
+        crypter.finalize(&mut result[count..]).map_err(|_| Error::DecryptionFailed)?;
     let total_count = count + final_count;
     if total_count != data.len() {
         return Err(Error::DecryptionFailed);
@@ -501,11 +498,7 @@ pub fn ec_point_point_to_oct(point: &EcPointRef) -> Result<Vec<u8>, Error> {
 
     let mut ctx = openssl::bn::BigNumContext::new().map_err(|_| Error::ECPoint2OctFailed)?;
     let bytes = point
-        .to_bytes(
-            &group,
-            openssl::ec::PointConversionForm::UNCOMPRESSED,
-            &mut ctx,
-        )
+        .to_bytes(&group, openssl::ec::PointConversionForm::UNCOMPRESSED, &mut ctx)
         .map_err(|_| Error::ECPoint2OctFailed)?;
     if buf.len() < bytes.len() {
         return Err(Error::ECPoint2OctFailed);

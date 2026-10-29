@@ -12,11 +12,7 @@ fn create_operation_accepts_empty_params() {
         },
     )
     .expect("empty createOperation params should parse");
-    let ParsedSecurityLevelRequest::CreateOperation {
-        operation_parameters,
-        ..
-    } = parsed
-    else {
+    let ParsedSecurityLevelRequest::CreateOperation { operation_parameters, .. } = parsed else {
         panic!("createOperation request should parse");
     };
     assert!(operation_parameters.is_empty());
@@ -26,26 +22,14 @@ fn create_operation_accepts_empty_params() {
 fn create_operation_preserves_begin_metadata_params() {
     let key = blob_key_descriptor(None);
     let params = vec![
-        KeyParameter {
-            tag: Tag::ASSOCIATED_DATA,
-            value: KeyParameterValue::Blob(vec![1]),
-        },
-        KeyParameter {
-            tag: Tag::CONFIRMATION_TOKEN,
-            value: KeyParameterValue::Blob(vec![2]),
-        },
-        KeyParameter {
-            tag: Tag::MIN_SECONDS_BETWEEN_OPS,
-            value: KeyParameterValue::Integer(30),
-        },
+        KeyParameter { tag: Tag::ASSOCIATED_DATA, value: KeyParameterValue::Blob(vec![1]) },
+        KeyParameter { tag: Tag::CONFIRMATION_TOKEN, value: KeyParameterValue::Blob(vec![2]) },
+        KeyParameter { tag: Tag::MIN_SECONDS_BETWEEN_OPS, value: KeyParameterValue::Integer(30) },
         KeyParameter {
             tag: Tag::HARDWARE_TYPE,
             value: KeyParameterValue::SecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT),
         },
-        KeyParameter {
-            tag: Tag::UNIQUE_ID,
-            value: KeyParameterValue::Blob(vec![3]),
-        },
+        KeyParameter { tag: Tag::UNIQUE_ID, value: KeyParameterValue::Blob(vec![3]) },
         KeyParameter {
             tag: Tag::IDENTITY_CREDENTIAL_KEY,
             value: KeyParameterValue::BoolValue(true),
@@ -60,11 +44,7 @@ fn create_operation_preserves_begin_metadata_params() {
         },
     )
     .expect("begin metadata createOperation params should parse");
-    let ParsedSecurityLevelRequest::CreateOperation {
-        operation_parameters,
-        ..
-    } = parsed
-    else {
+    let ParsedSecurityLevelRequest::CreateOperation { operation_parameters, .. } = parsed else {
         panic!("createOperation request should parse");
     };
     assert_eq!(operation_parameters, params);
@@ -85,12 +65,8 @@ fn generate_key_preserves_empty_params_entropy_and_flags() {
         },
     )
     .expect("empty generateKey params should parse");
-    let ParsedSecurityLevelRequest::GenerateKey {
-        params,
-        flags: parsed_flags,
-        entropy,
-        ..
-    } = parsed
+    let ParsedSecurityLevelRequest::GenerateKey { params, flags: parsed_flags, entropy, .. } =
+        parsed
     else {
         panic!("generateKey request should parse");
     };
@@ -114,16 +90,10 @@ fn generate_key_preserves_empty_attestation_blob() {
         },
     )
     .expect("empty optional attestation-key blob should parse");
-    let ParsedSecurityLevelRequest::GenerateKey {
-        attestation_key, ..
-    } = parsed
-    else {
+    let ParsedSecurityLevelRequest::GenerateKey { attestation_key, .. } = parsed else {
         panic!("generateKey request should parse");
     };
-    assert_eq!(
-        attestation_key.and_then(|descriptor| descriptor.blob),
-        Some(Vec::new())
-    );
+    assert_eq!(attestation_key.and_then(|descriptor| descriptor.blob), Some(Vec::new()));
 }
 
 #[test]
@@ -141,12 +111,8 @@ fn import_key_preserves_empty_params_data_and_flags() {
         },
     )
     .expect("empty importKey params should parse");
-    let ParsedSecurityLevelRequest::ImportKey {
-        params,
-        flags: parsed_flags,
-        key_data,
-        ..
-    } = parsed
+    let ParsedSecurityLevelRequest::ImportKey { params, flags: parsed_flags, key_data, .. } =
+        parsed
     else {
         panic!("importKey request should parse");
     };
@@ -176,10 +142,7 @@ fn import_wrapped_key_preserves_empty_arrays_and_blobs() {
     )
     .expect("absent importWrappedKey masking key should parse");
     let ParsedSecurityLevelRequest::ImportWrappedKey {
-        masking_key,
-        params,
-        authenticators,
-        ..
+        masking_key, params, authenticators, ..
     } = parsed
     else {
         panic!("importWrappedKey request should parse");

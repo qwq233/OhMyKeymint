@@ -26,10 +26,8 @@ pub fn with_rows_extract_one<'a, T, F>(rows: &mut Rows<'a>, row_extractor: F) ->
 where
     F: FnOnce(Option<&Row<'a>>) -> Result<T>,
 {
-    let result = row_extractor(
-        rows.next()
-            .context("with_rows_extract_one: Failed to unpack row.")?,
-    );
+    let result =
+        row_extractor(rows.next().context("with_rows_extract_one: Failed to unpack row.")?);
 
     rows.next()
         .context("In with_rows_extract_one: Failed to unpack unexpected row.")?
@@ -44,10 +42,7 @@ where
     F: FnMut(&Row<'a>) -> Result<()>,
 {
     loop {
-        match rows
-            .next()
-            .context("In with_rows_extract_all: Failed to unpack row")?
-        {
+        match rows.next().context("In with_rows_extract_all: Failed to unpack row")? {
             Some(row) => {
                 row_extractor(row).context("In with_rows_extract_all.")?;
             }

@@ -21,22 +21,14 @@ unsafe extern "C" fn blocking_ioctl(_fd: c_int, _request: c_int, _arg: *mut c_vo
 
 #[test]
 fn publication_deadline_wait_does_not_need_an_ioctl_wakeup() {
-    let _ioctl_guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ioctl_guard =
+        SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let _route_guard = route_state_test_guard();
-    let target = LocalBinderTarget {
-        ptr: 0x6d00,
-        cookie: 0x7d00,
-    };
+    let target = LocalBinderTarget { ptr: 0x6d00, cookie: 0x7d00 };
     let retirement = register_operation_publication_for_test(target);
     mark_operation_publication_completed(
         retirement,
-        BinderFdToken {
-            fd: 91,
-            generation: 0,
-            connection: 91,
-        },
+        BinderFdToken { fd: 91, generation: 0, connection: 91 },
     );
 
     std::thread::spawn(wait_for_operation_publication_deadline)
@@ -60,11 +52,7 @@ fn existing_binder_fd_lifecycle(fd: c_int) -> Option<Arc<BinderFdLifecycle>> {
 pub(in crate::hook::intercept) fn binder_fd_token_is_current(token: BinderFdToken) -> bool {
     existing_binder_fd_lifecycle(token.fd).is_some_and(|lifecycle| {
         lifecycle.connection == token.connection
-            && lifecycle
-                .state
-                .lock()
-                .expect("binder fd lifecycle poisoned")
-                .generation
+            && lifecycle.state.lock().expect("binder fd lifecycle poisoned").generation
                 == token.generation
     })
 }

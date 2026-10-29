@@ -84,11 +84,8 @@ pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
         OsVersionSpec::Fixed(value) => value,
     };
 
-    let vb_key = resolve_vb_key(
-        &config_file.trust.vb_key,
-        config_file.trust.device_locked,
-        &slot_suffix,
-    );
+    let vb_key =
+        resolve_vb_key(&config_file.trust.vb_key, config_file.trust.device_locked, &slot_suffix);
     let vb_hash = resolve_vb_hash(&config_file.trust.vb_hash);
 
     let pinned = pin_random_fallback_values(config_file, &vb_key, &vb_hash);
@@ -144,24 +141,17 @@ pub(crate) fn write_runtime_security_patch(desired: &str, previous: Option<&str>
 
 fn resolve_vb_key(spec: &TrustValueSpec, device_locked: bool, slot_suffix: &str) -> ResolvedField {
     match spec {
-        TrustValueSpec::Hex(value) => ResolvedField {
-            value: *value,
-            source: TrustValueSource::ExplicitHex,
-        },
+        TrustValueSpec::Hex(value) => {
+            ResolvedField { value: *value, source: TrustValueSource::ExplicitHex }
+        }
         TrustValueSpec::Random => random_field(TrustValueSource::RandomExplicit),
         TrustValueSpec::Auto => {
             if let Some(value) = read_hex_property(VBMETA_KEY_PROP) {
-                return ResolvedField {
-                    value,
-                    source: TrustValueSource::Property,
-                };
+                return ResolvedField { value, source: TrustValueSource::Property };
             }
 
             match compute_vbmeta_public_key_digest(slot_suffix, device_locked) {
-                Ok(value) => ResolvedField {
-                    value,
-                    source: TrustValueSource::Computed,
-                },
+                Ok(value) => ResolvedField { value, source: TrustValueSource::Computed },
                 Err(error) => {
                     log::warn!("computed vbmeta public key digest unavailable: {error:#}");
                     random_field(TrustValueSource::RandomFallback)
@@ -173,24 +163,17 @@ fn resolve_vb_key(spec: &TrustValueSpec, device_locked: bool, slot_suffix: &str)
 
 fn resolve_vb_hash(spec: &TrustValueSpec) -> ResolvedField {
     match spec {
-        TrustValueSpec::Hex(value) => ResolvedField {
-            value: *value,
-            source: TrustValueSource::ExplicitHex,
-        },
+        TrustValueSpec::Hex(value) => {
+            ResolvedField { value: *value, source: TrustValueSource::ExplicitHex }
+        }
         TrustValueSpec::Random => random_field(TrustValueSource::RandomExplicit),
         TrustValueSpec::Auto => {
             if let Some(value) = read_hex_property(VBMETA_HASH_PROP) {
-                return ResolvedField {
-                    value,
-                    source: TrustValueSource::Property,
-                };
+                return ResolvedField { value, source: TrustValueSource::Property };
             }
 
             match probe_original_verified_boot_hash_with_timeout(ORIGINAL_HASH_TIMEOUT) {
-                Ok(value) => ResolvedField {
-                    value,
-                    source: TrustValueSource::Original,
-                },
+                Ok(value) => ResolvedField { value, source: TrustValueSource::Original },
                 Err(error) => {
                     log::warn!("original verified boot hash unavailable: {error:#}");
                     random_field(TrustValueSource::RandomFallback)
@@ -226,9 +209,8 @@ fn random_field(source: TrustValueSource) -> ResolvedField {
 
 pub(crate) fn resolve_patch_levels(trust: &RawTrustConfig) -> Result<ResolvedPatchLevels> {
     let observed_security_patch = resetprop::read_string_property(SECURITY_PATCH_PROP);
-    let security_patch = observed_security_patch
-        .clone()
-        .or_else(|| read_build_prop_value(SECURITY_PATCH_PROP));
+    let security_patch =
+        observed_security_patch.clone().or_else(|| read_build_prop_value(SECURITY_PATCH_PROP));
     if security_patch.is_none() {
         log::warn!(
             "failed to read {SECURITY_PATCH_PROP} from properties or build.prop; using {SECURITY_PATCH_FALLBACK}"
@@ -282,12 +264,8 @@ fn resolve_patch_levels_from(
     let security_auto = security_property.unwrap_or(SECURITY_PATCH_FALLBACK);
     let security_patch =
         resolve_security_patch_value(&trust.security_patch, security_auto, latest)?;
-    let os_patchlevel = resolve_patchlevel_mode(
-        "os_patchlevel",
-        &trust.os_patchlevel,
-        &security_patch,
-        latest,
-    )?;
+    let os_patchlevel =
+        resolve_patchlevel_mode("os_patchlevel", &trust.os_patchlevel, &security_patch, latest)?;
     let vendor_auto = vendor_property.unwrap_or(&os_patchlevel);
     let vendor_patchlevel = resolve_patchlevel_mode(
         "vendor_patchlevel",
@@ -437,9 +415,7 @@ fn current_year_month() -> Result<(i32, u32)> {
 
     #[cfg(not(unix))]
     {
-        Err(anyhow!(
-            "current_year_month is unsupported on this platform"
-        ))
+        Err(anyhow!("current_year_month is unsupported on this platform"))
     }
 }
 
@@ -723,9 +699,7 @@ fn find_avb_partition_path(slot_suffix: &str, partition_name: &str) -> Result<Pa
             return Ok(candidate);
         }
     }
-    Err(anyhow!(
-        "no {partition_name} partition found for slot suffix '{slot_suffix}'"
-    ))
+    Err(anyhow!("no {partition_name} partition found for slot suffix '{slot_suffix}'"))
 }
 
 fn load_vbmeta_blob(path: &Path) -> Result<Vec<u8>> {
@@ -752,11 +726,9 @@ fn load_embedded_vbmeta_blob(path: &Path) -> Result<Vec<u8>> {
     let footer_offset = partition_size
         .checked_sub(AVB_FOOTER_SIZE as u64)
         .ok_or_else(|| anyhow!("partition is smaller than an AVB footer"))?;
-    file.seek(SeekFrom::Start(footer_offset))
-        .context("failed to seek to AVB footer")?;
+    file.seek(SeekFrom::Start(footer_offset)).context("failed to seek to AVB footer")?;
     let mut footer = [0u8; AVB_FOOTER_SIZE];
-    file.read_exact(&mut footer)
-        .context("failed to read AVB footer")?;
+    file.read_exact(&mut footer).context("failed to read AVB footer")?;
     if &footer[..4] != b"AVBf" {
         bail!("partition has neither AVB0 header nor AVBf footer");
     }
@@ -789,11 +761,9 @@ fn load_vbmeta_blob_at(
     offset: u64,
     maximum_size: Option<usize>,
 ) -> Result<Vec<u8>> {
-    file.seek(SeekFrom::Start(offset))
-        .context("failed to seek to vbmeta header")?;
+    file.seek(SeekFrom::Start(offset)).context("failed to seek to vbmeta header")?;
     let mut header = [0u8; AVB_HEADER_SIZE];
-    file.read_exact(&mut header)
-        .context("failed to read vbmeta header")?;
+    file.read_exact(&mut header).context("failed to read vbmeta header")?;
 
     let total_size = validated_vbmeta_size(&header)?;
     if let Some(maximum_size) = maximum_size {
@@ -804,13 +774,9 @@ fn load_vbmeta_blob_at(
 
     let mut blob = vec![0u8; total_size];
     blob[..AVB_HEADER_SIZE].copy_from_slice(&header);
-    file.read_exact(&mut blob[AVB_HEADER_SIZE..])
-        .with_context(|| {
-            format!(
-                "failed to read {} bytes of vbmeta data",
-                total_size - AVB_HEADER_SIZE
-            )
-        })?;
+    file.read_exact(&mut blob[AVB_HEADER_SIZE..]).with_context(|| {
+        format!("failed to read {} bytes of vbmeta data", total_size - AVB_HEADER_SIZE)
+    })?;
     Ok(blob)
 }
 
@@ -851,23 +817,20 @@ fn compute_vbmeta_public_key_digest_from_bytes(vbmeta_bytes: &[u8]) -> Result<[u
 }
 
 fn be_u64(bytes: &[u8]) -> Result<usize> {
-    let array: [u8; 8] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("expected 8 bytes, got {}", bytes.len()))?;
+    let array: [u8; 8] =
+        bytes.try_into().map_err(|_| anyhow!("expected 8 bytes, got {}", bytes.len()))?;
     usize::try_from(u64::from_be_bytes(array)).context("value does not fit in usize")
 }
 
 fn be_u32(bytes: &[u8]) -> Result<u32> {
-    let array: [u8; 4] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("expected 4 bytes, got {}", bytes.len()))?;
+    let array: [u8; 4] =
+        bytes.try_into().map_err(|_| anyhow!("expected 4 bytes, got {}", bytes.len()))?;
     Ok(u32::from_be_bytes(array))
 }
 
 fn le_u32(bytes: &[u8]) -> Result<u32> {
-    let array: [u8; 4] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("expected 4 bytes, got {}", bytes.len()))?;
+    let array: [u8; 4] =
+        bytes.try_into().map_err(|_| anyhow!("expected 4 bytes, got {}", bytes.len()))?;
     Ok(u32::from_le_bytes(array))
 }
 
@@ -902,10 +865,7 @@ fn probe_original_verified_boot_hash_inner() -> Result<[u8; 32]> {
     let alias = format!(
         "omk-vbhash-probe-{}-{}",
         std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
     );
     let descriptor = app_descriptor(&alias);
     let result = tee.generateKey(&descriptor, None, &attested_ec_params(), 0, &[]);
@@ -920,24 +880,14 @@ fn probe_original_verified_boot_hash_inner() -> Result<[u8; 32]> {
 fn generate_blob_attested_key(
     security_level: &Strong<dyn IKeystoreSecurityLevel>,
 ) -> Result<KeyMetadata> {
-    let descriptor = KeyDescriptor {
-        domain: Domain::BLOB,
-        nspace: 0,
-        alias: None,
-        blob: None,
-    };
+    let descriptor = KeyDescriptor { domain: Domain::BLOB, nspace: 0, alias: None, blob: None };
     security_level
         .generateKey(&descriptor, None, &attested_ec_params(), 0, &[])
         .context("BLOB attestation key generation failed")
 }
 
 fn app_descriptor(alias: &str) -> KeyDescriptor {
-    KeyDescriptor {
-        domain: Domain::APP,
-        nspace: 0,
-        alias: Some(alias.to_string()),
-        blob: None,
-    }
+    KeyDescriptor { domain: Domain::APP, nspace: 0, alias: Some(alias.to_string()), blob: None }
 }
 
 fn attested_ec_params() -> Vec<KeyParameter> {
@@ -946,14 +896,8 @@ fn attested_ec_params() -> Vec<KeyParameter> {
         kp(Tag::EC_CURVE, KeyParameterValue::EcCurve(EcCurve::P_256)),
         kp(Tag::KEY_SIZE, KeyParameterValue::Integer(256)),
         kp(Tag::DIGEST, KeyParameterValue::Digest(Digest::SHA_2_256)),
-        kp(
-            Tag::PURPOSE,
-            KeyParameterValue::KeyPurpose(KeyPurpose::SIGN),
-        ),
-        kp(
-            Tag::ATTESTATION_CHALLENGE,
-            KeyParameterValue::Blob(b"omk-vbmeta-probe".to_vec()),
-        ),
+        kp(Tag::PURPOSE, KeyParameterValue::KeyPurpose(KeyPurpose::SIGN)),
+        kp(Tag::ATTESTATION_CHALLENGE, KeyParameterValue::Blob(b"omk-vbmeta-probe".to_vec())),
     ]
 }
 
@@ -991,10 +935,7 @@ mod tests {
         assert_eq!(vbmeta_boot_patchlevel(&direct).unwrap(), Some(20260201));
 
         let mut duplicate = build_test_property_descriptor(BOOT_AVB_PROPERTY, b"2026-13-01");
-        duplicate.extend(build_test_property_descriptor(
-            BOOT_AVB_PROPERTY,
-            b"2026-02-01",
-        ));
+        duplicate.extend(build_test_property_descriptor(BOOT_AVB_PROPERTY, b"2026-02-01"));
         let first_invalid = build_test_vbmeta_with_descriptors(0, &duplicate);
         assert!(vbmeta_boot_patchlevel(&first_invalid).is_err());
 
@@ -1036,11 +977,8 @@ mod tests {
         );
 
         let embedded_without_property = build_test_vbmeta_with_descriptors(0, &[]);
-        std::fs::write(
-            &boot_path,
-            build_test_boot_image(Some(&embedded_without_property)),
-        )
-        .unwrap();
+        std::fs::write(&boot_path, build_test_boot_image(Some(&embedded_without_property)))
+            .unwrap();
         assert_eq!(
             read_abl_boot_patchlevel_from_paths(Ok(top_level_path.clone()), &boot_path).unwrap(),
             20250900
@@ -1071,10 +1009,9 @@ mod tests {
 
     #[test]
     fn boot_header_patchlevel_decodes_legacy_and_modern_headers() {
-        for (header_version, offset) in [
-            (0u32, BOOT_HEADER_LEGACY_OS_VERSION_OFFSET),
-            (4u32, BOOT_HEADER_V3_OS_VERSION_OFFSET),
-        ] {
+        for (header_version, offset) in
+            [(0u32, BOOT_HEADER_LEGACY_OS_VERSION_OFFSET), (4u32, BOOT_HEADER_V3_OS_VERSION_OFFSET)]
+        {
             let mut header = [0u8; BOOT_HEADER_PREFIX_SIZE];
             header[..8].copy_from_slice(b"ANDROID!");
             header[BOOT_HEADER_VERSION_OFFSET..BOOT_HEADER_VERSION_OFFSET + 4]
@@ -1170,19 +1107,14 @@ mod tests {
         assert_eq!(resolved.os_patchlevel, "2026-03-05");
         assert_eq!(resolved.vendor_patchlevel, "2026-03-05");
         assert_eq!(resolved.boot_patchlevel, "2026-07-05");
-        assert_eq!(
-            resolved.observed_security_patch.as_deref(),
-            Some("2025-12-01")
-        );
+        assert_eq!(resolved.observed_security_patch.as_deref(), Some("2025-12-01"));
         assert!(resolved.write_security_patch);
     }
 
     #[test]
     fn build_prop_security_value_is_not_treated_as_a_runtime_property() {
-        let trust = RawTrustConfig {
-            security_patch: "2026-04-05".to_string(),
-            ..Default::default()
-        };
+        let trust =
+            RawTrustConfig { security_patch: "2026-04-05".to_string(), ..Default::default() };
         let resolved =
             resolve_patch_levels_from(&trust, Some("2025-12-01"), None, None, None, None).unwrap();
         assert_eq!(resolved.security_patch, "2026-04-05");
@@ -1246,20 +1178,10 @@ ro.vendor.boot_security_patch.extra = ignored
     #[test]
     fn random_fallback_values_are_pinned_in_config() {
         let mut config_file = ConfigFile::default();
-        let vb_key = ResolvedField {
-            value: [0x11; 32],
-            source: TrustValueSource::RandomFallback,
-        };
-        let vb_hash = ResolvedField {
-            value: [0x22; 32],
-            source: TrustValueSource::RandomFallback,
-        };
+        let vb_key = ResolvedField { value: [0x11; 32], source: TrustValueSource::RandomFallback };
+        let vb_hash = ResolvedField { value: [0x22; 32], source: TrustValueSource::RandomFallback };
 
-        assert!(pin_random_fallback_values(
-            &mut config_file,
-            &vb_key,
-            &vb_hash
-        ));
+        assert!(pin_random_fallback_values(&mut config_file, &vb_key, &vb_hash));
         assert_eq!(config_file.trust.vb_key, TrustValueSpec::Hex([0x11; 32]));
         assert_eq!(config_file.trust.vb_hash, TrustValueSpec::Hex([0x22; 32]));
     }

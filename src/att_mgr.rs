@@ -12,8 +12,7 @@ static ATTESTATION_IDS: Mutex<Option<AttestationIdInfo>> = Mutex::new(None);
 
 impl RetrieveAttestationIds for AttestationIdMgr {
     fn get(&self) -> Result<AttestationIdInfo, kmr_common::Error> {
-        self.get_ids()?
-            .ok_or_else(|| km_err!(CannotAttestIds, "attestation ID info not available"))
+        self.get_ids()?.ok_or_else(|| km_err!(CannotAttestIds, "attestation ID info not available"))
     }
 
     fn get_ids(&self) -> Result<Option<AttestationIdInfo>, kmr_common::Error> {
@@ -30,9 +29,7 @@ impl RetrieveAttestationIds for AttestationIdMgr {
                     || device.imei2.trim().is_empty()
                     || device.meid.trim().is_empty())
         };
-        let guard = config()
-            .read()
-            .map_err(|_| km_err!(UnknownError, "config lock poisoned"))?;
+        let guard = config().read().map_err(|_| km_err!(UnknownError, "config lock poisoned"))?;
         let device = if needs_resolution(&guard.device) {
             drop(guard);
             match crate::plat::device_ids::resolve_runtime_device_ids() {

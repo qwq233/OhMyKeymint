@@ -267,9 +267,7 @@ where
 {
     let primitive: Primitive = serde::de::Deserialize::deserialize(deserializer)?;
     Ok(T::from_primitive(
-        primitive
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("Type Mismatch"))?,
+        primitive.try_into().map_err(|_| serde::de::Error::custom("Type Mismatch"))?,
     ))
 }
 
@@ -1069,10 +1067,7 @@ pub struct KeyParameter {
 impl KeyParameter {
     /// Create an instance of KeyParameter, given the value and the security level.
     pub fn new(value: KeyParameterValue, security_level: SecurityLevel) -> Self {
-        KeyParameter {
-            value,
-            security_level,
-        }
+        KeyParameter { value, security_level }
     }
 
     /// Construct a KeyParameter from the data from a rusqlite row.
@@ -1116,9 +1111,6 @@ impl KeyParameter {
     /// to convey the key characteristics to keystore clients. This function consumes
     /// an internal KeyParameter representation to produce the Authorization wire type.
     pub fn into_authorization(self) -> Authorization {
-        Authorization {
-            securityLevel: self.security_level,
-            keyParameter: self.value.into(),
-        }
+        Authorization { securityLevel: self.security_level, keyParameter: self.value.into() }
     }
 }

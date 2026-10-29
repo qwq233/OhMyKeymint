@@ -31,26 +31,14 @@ const SECURE_DELETION_DATA_FILE: &str = "/data/misc/keystore/omk/data/keymint.da
 
 fn read_sdd_file() -> Result<storage::SecureDeletionData, Error> {
     let f = fs::File::open(SECURE_DELETION_DATA_FILE).map_err(|e| {
-        km_err!(
-            SecureHwCommunicationFailed,
-            "failed to open secure deletion data file: {:?}",
-            e
-        )
+        km_err!(SecureHwCommunicationFailed, "failed to open secure deletion data file: {:?}", e)
     })?;
     let mut buf = std::io::BufReader::new(f);
     let mut buf = buf.fill_buf().map_err(|e| {
-        km_err!(
-            SecureHwCommunicationFailed,
-            "failed to read secure deletion data file: {:?}",
-            e
-        )
+        km_err!(SecureHwCommunicationFailed, "failed to read secure deletion data file: {:?}", e)
     })?;
     storage::SecureDeletionData::decode(&mut buf).map_err(|e| {
-        km_err!(
-            SecureHwCommunicationFailed,
-            "failed to parse secure deletion data: {:?}",
-            e
-        )
+        km_err!(SecureHwCommunicationFailed, "failed to parse secure deletion data: {:?}", e)
     })
 }
 
@@ -65,11 +53,7 @@ fn write_sdd_file(data: &storage::SecureDeletionData) -> Result<(), Error> {
         },
     )?;
     let mut f = fs::File::create(SECURE_DELETION_DATA_FILE).map_err(|e| {
-        km_err!(
-            SecureHwCommunicationFailed,
-            "failed to create secure deletion data file: {:?}",
-            e
-        )
+        km_err!(SecureHwCommunicationFailed, "failed to create secure deletion data file: {:?}", e)
     })?;
     let mut buf = Vec::with_capacity(data.encoded_len());
     data.encode(&mut buf).map_err(|e| {
@@ -160,9 +144,7 @@ impl HostSddManager {
     }
 
     pub fn new(rng: &mut dyn crypto::Rng) -> Result<Self, Error> {
-        let mut sdd_mgr = Self {
-            data: storage::SecureDeletionData::default(),
-        };
+        let mut sdd_mgr = Self { data: storage::SecureDeletionData::default() };
         sdd_mgr.init(rng).map(|_| sdd_mgr)
     }
 }
@@ -194,10 +176,11 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
         _purpose: keyblob::SlotPurpose,
     ) -> Result<(keyblob::SecureDeletionSlot, keyblob::SecureDeletionData), Error> {
         // Allocate new slot ID.
-        let slot_id = self.data.last_free_slot.checked_add(1).ok_or(km_err!(
-            RollbackResistanceUnavailable,
-            "ran out of slot IDs"
-        ))?;
+        let slot_id = self
+            .data
+            .last_free_slot
+            .checked_add(1)
+            .ok_or(km_err!(RollbackResistanceUnavailable, "ran out of slot IDs"))?;
 
         info!("generating secure deletion secret slot_id={:?}", slot_id);
 
@@ -212,9 +195,7 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
         rng.fill_bytes(&mut sdd.secure_deletion_secret[..]);
 
         // Cache the secure deletion secret locally.
-        self.data
-            .secure_deletion_secrets
-            .insert(slot_id, sdd.secure_deletion_secret.to_vec());
+        self.data.secure_deletion_secrets.insert(slot_id, sdd.secure_deletion_secret.to_vec());
         self.data.last_free_slot = slot_id;
 
         // Save the secure deletion secret on disk.
@@ -236,11 +217,11 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
         let slot_id = slot.0;
         info!("fetching secure deletion secret slot_id={:?}", slot_id);
 
-        let secret = self
-            .data
-            .secure_deletion_secrets
-            .get(&slot_id)
-            .ok_or(km_err!(InvalidKeyBlob, "slot ID: {:?} not found.", slot_id))?;
+        let secret = self.data.secure_deletion_secrets.get(&slot_id).ok_or(km_err!(
+            InvalidKeyBlob,
+            "slot ID: {:?} not found.",
+            slot_id
+        ))?;
         Ok(keyblob::SecureDeletionData {
             factory_reset_secret: self.data.factory_secret.clone().try_into().unwrap(),
             secure_deletion_secret: secret.clone().try_into().unwrap(),
@@ -260,10 +241,7 @@ impl keyblob::SecureDeletionSecretManager for HostSddManager {
         // Save the secure deletion secret on disk.
         if let Err(e) = write_sdd_file(&self.data) {
             // Restore cached state.
-            self.data
-                .secure_deletion_secrets
-                .insert(slot_id, secret)
-                .unwrap();
+            self.data.secure_deletion_secrets.insert(slot_id, secret).unwrap();
             return Err(e);
         }
         Ok(())

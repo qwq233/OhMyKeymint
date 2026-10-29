@@ -64,9 +64,7 @@ unsafe extern "C" fn write_error_resets_accumulated_read_ioctl(
 
 #[test]
 fn read_buffer_copyback_efault_does_not_replay_ioctl() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 97;
     reset_binder_fd_for_test(fd);
     let connection = binder_state_key(fd);
@@ -104,18 +102,11 @@ fn read_buffer_copyback_efault_does_not_replay_ioctl() {
 
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         -1
     );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EFAULT)
-    );
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EFAULT));
     assert_eq!(bwr.read_consumed, 0);
     assert_eq!(pending_completions(), 1);
     assert_eq!(
@@ -124,11 +115,7 @@ fn read_buffer_copyback_efault_does_not_replay_ioctl() {
     );
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         0
     );
@@ -148,9 +135,7 @@ fn read_buffer_copyback_efault_does_not_replay_ioctl() {
 
 #[test]
 fn binder_write_read_copyback_efault_does_not_replay_ioctl() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 97;
     reset_binder_fd_for_test(fd);
     COPYBACK_IOCTL_CALLS.store(0, Ordering::SeqCst);
@@ -184,23 +169,14 @@ fn binder_write_read_copyback_efault_does_not_replay_ioctl() {
     POST_IOCTL_PROTECT_LENGTH.store(page_size, Ordering::SeqCst);
     let previous = OLD_IOCTL.swap(protect_copyback_ioctl as *mut c_void, Ordering::SeqCst);
 
-    assert_eq!(
-        unsafe { new_ioctl(fd, BINDER_WRITE_READ as c_int, bwr_ptr.cast()) },
-        -1
-    );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EFAULT)
-    );
+    assert_eq!(unsafe { new_ioctl(fd, BINDER_WRITE_READ as c_int, bwr_ptr.cast()) }, -1);
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EFAULT));
     assert_eq!(COPYBACK_IOCTL_CALLS.load(Ordering::SeqCst), 1);
     assert_eq!(
         unsafe { libc::mprotect(bwr_page, page_size, libc::PROT_READ | libc::PROT_WRITE) },
         0
     );
-    assert_eq!(
-        unsafe { new_ioctl(fd, BINDER_WRITE_READ as c_int, bwr_ptr.cast()) },
-        0
-    );
+    assert_eq!(unsafe { new_ioctl(fd, BINDER_WRITE_READ as c_int, bwr_ptr.cast()) }, 0);
     assert_eq!(COPYBACK_IOCTL_CALLS.load(Ordering::SeqCst), 1);
 
     OLD_IOCTL.store(previous, Ordering::SeqCst);
@@ -211,9 +187,7 @@ fn binder_write_read_copyback_efault_does_not_replay_ioctl() {
 
 #[test]
 fn invalid_driver_consumption_poison_connection_without_replaying_ioctl() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let previous = OLD_IOCTL.swap(invalid_consumption_ioctl as *mut c_void, Ordering::SeqCst);
     let mut write = BR_NOOP_CMD.to_ne_bytes();
     let mut read = [0u8; 2 * size_of::<u32>()];
@@ -233,10 +207,7 @@ fn invalid_driver_consumption_poison_connection_without_replaying_ioctl() {
                 },
                 -1
             );
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::EPROTO)
-            );
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPROTO));
         }
         assert_eq!(BOUNDARY_IOCTL_CALLS.load(Ordering::SeqCst), 1);
         assert!(PENDING_IOCTL_COPYBACKS
@@ -287,9 +258,7 @@ fn invalid_driver_consumption_poison_connection_without_replaying_ioctl() {
 
 #[test]
 fn write_error_preserves_kernel_read_consumed_reset() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 26;
     let mut write = [0u8; size_of::<u32>()];
     let mut read = [0x5au8; 2 * size_of::<u32>()];
@@ -301,25 +270,16 @@ fn write_error_preserves_kernel_read_consumed_reset() {
         read_consumed: size_of::<u32>(),
         read_buffer: read.as_mut_ptr() as libc::c_ulong,
     };
-    let previous = OLD_IOCTL.swap(
-        write_error_resets_accumulated_read_ioctl as *mut c_void,
-        Ordering::SeqCst,
-    );
+    let previous =
+        OLD_IOCTL.swap(write_error_resets_accumulated_read_ioctl as *mut c_void, Ordering::SeqCst);
 
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         -1
     );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EINTR)
-    );
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EINTR));
     assert_eq!(bwr.read_consumed, 0);
     assert_eq!(read, [0x5a; 2 * size_of::<u32>()]);
 

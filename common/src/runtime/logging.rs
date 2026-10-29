@@ -53,12 +53,7 @@ impl LockedRotatingFileAppender {
     ) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let _ = fs::remove_file(suffixed_path(&path, ".lock"));
-        Ok(Self {
-            path,
-            file: Mutex::new(None),
-            encoder,
-            max_size_bytes,
-        })
+        Ok(Self { path, file: Mutex::new(None), encoder, max_size_bytes })
     }
 
     fn open_log_file(path: &Path) -> io::Result<File> {
@@ -121,10 +116,8 @@ impl Append for LockedRotatingFileAppender {
             .with_context(|| format!("failed to encode {}", self.path.display()))?;
         let data = encoded.0;
 
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|error| anyhow!("failed to lock log writer: {}", error))?;
+        let mut file =
+            self.file.lock().map_err(|error| anyhow!("failed to lock log writer: {}", error))?;
         let _file_guard = FileLockGuard::lock_path(&self.path)
             .with_context(|| format!("failed to lock {}", self.path.display()))?;
         let metadata = self
@@ -219,9 +212,8 @@ pub fn build_console_file_config<P: AsRef<Path>>(
         .map(|target| target != Path::new("/dev/null"))
         .unwrap_or(true)
     {
-        let stdout = ConsoleAppender::builder()
-            .encoder(Box::new(PatternEncoder::new(pattern)))
-            .build();
+        let stdout =
+            ConsoleAppender::builder().encoder(Box::new(PatternEncoder::new(pattern))).build();
         builder = builder.appender(Appender::builder().build("stdout", Box::new(stdout)));
         root = root.appender("stdout");
     }
@@ -265,31 +257,18 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_log_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir()
-            .join(format!("omk-log-test-{}-{nanos}", std::process::id()))
-            .join(name)
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("omk-log-test-{}-{nanos}", std::process::id())).join(name)
     }
 
     fn append_message(appender: &LockedRotatingFileAppender, message: &'static str) {
         let args = format_args!("{message}");
-        let record = Record::builder()
-            .args(args)
-            .level(Level::Info)
-            .target("logging-test")
-            .build();
+        let record = Record::builder().args(args).level(Level::Info).target("logging-test").build();
         log4rs::append::Append::append(appender, &record).unwrap();
     }
 
     fn log_lines(path: &Path) -> Vec<String> {
-        fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect()
+        fs::read_to_string(path).unwrap().lines().map(str::to_owned).collect()
     }
 
     #[test]

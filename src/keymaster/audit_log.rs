@@ -67,9 +67,6 @@ fn log_key_event(tag: u32, key: &KeyDescriptor, calling_app: uid_t, success: boo
     let owner = key_owner(key.domain, key.nspace, calling_app as i32);
     let alias = String::from(key.alias.as_ref().map_or("none", String::as_str));
     ASYNC_TASK.queue_lo(move |_| {
-        info!(
-            "audit tag={tag} success={} alias={alias} owner={owner}",
-            i32::from(success)
-        );
+        info!("audit tag={tag} success={} alias={alias} owner={owner}", i32::from(success));
     });
 }

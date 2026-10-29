@@ -81,56 +81,29 @@ fn install_hooks() -> Result<()> {
         bail!("Could not find binder libraries in process maps");
     }
 
-    let ioctl_backups = register_hooks(
-        &libraries,
-        &["ioctl", "__ioctl"],
-        new_ioctl as *mut c_void,
-        "ioctl",
-    )?;
-    let close_backups = register_hooks(
-        &libraries,
-        &["close", "__close"],
-        new_close as *mut c_void,
-        "close",
-    )?;
-    let dup_backups = register_hooks(
-        &libraries,
-        &["dup"],
-        new_dup as *mut c_void,
-        "fd duplication",
-    )?;
+    let ioctl_backups =
+        register_hooks(&libraries, &["ioctl", "__ioctl"], new_ioctl as *mut c_void, "ioctl")?;
+    let close_backups =
+        register_hooks(&libraries, &["close", "__close"], new_close as *mut c_void, "close")?;
+    let dup_backups =
+        register_hooks(&libraries, &["dup"], new_dup as *mut c_void, "fd duplication")?;
     let fdsan_backups = register_hooks(
         &libraries,
         &["android_fdsan_close_with_tag"],
         new_fdsan_close as *mut c_void,
         "close",
     )?;
-    let dup2_backups = register_hooks(
-        &libraries,
-        &["dup2"],
-        new_dup2 as *mut c_void,
-        "fd replacement",
-    )?;
-    let dup3_backups = register_hooks(
-        &libraries,
-        &["dup3"],
-        new_dup3 as *mut c_void,
-        "fd replacement",
-    )?;
-    let fcntl_backups = register_hooks(
-        &libraries,
-        &["fcntl"],
-        new_fcntl as *mut c_void,
-        "fd duplication",
-    )?;
+    let dup2_backups =
+        register_hooks(&libraries, &["dup2"], new_dup2 as *mut c_void, "fd replacement")?;
+    let dup3_backups =
+        register_hooks(&libraries, &["dup3"], new_dup3 as *mut c_void, "fd replacement")?;
+    let fcntl_backups =
+        register_hooks(&libraries, &["fcntl"], new_fcntl as *mut c_void, "fd duplication")?;
 
     lsplt_rs::commit_hook().map_err(|e| anyhow!("Failed to commit lsplt hook: {:?}", e))?;
     let ioctl_committed = ioctl_backups.iter().filter(|ptr| !ptr.is_null()).count();
-    let close_committed = close_backups
-        .iter()
-        .chain(fdsan_backups.iter())
-        .filter(|ptr| !ptr.is_null())
-        .count();
+    let close_committed =
+        close_backups.iter().chain(fdsan_backups.iter()).filter(|ptr| !ptr.is_null()).count();
     store_original(&ioctl_backups, &OLD_IOCTL);
     store_original(&close_backups, &OLD_CLOSE);
     store_original(&fdsan_backups, &OLD_FDSAN_CLOSE);

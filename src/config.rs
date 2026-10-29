@@ -50,9 +50,7 @@ fn random_32(rng: &mut impl Rng) -> [u8; 32] {
 }
 
 pub fn config() -> &'static RwLock<Config> {
-    CONFIG
-        .get()
-        .expect("CONFIG must be bootstrapped before use")
+    CONFIG.get().expect("CONFIG must be bootstrapped before use")
 }
 
 pub fn config_path() -> &'static str {
@@ -92,9 +90,7 @@ pub fn bootstrap_config_file() -> Result<ConfigFile> {
 }
 
 pub fn load_config_file() -> Result<ConfigFile> {
-    load_config_file_once()
-        .map(|loaded| loaded.config_file)
-        .map_err(|error| anyhow!("{error}"))
+    load_config_file_once().map(|loaded| loaded.config_file).map_err(|error| anyhow!("{error}"))
 }
 
 pub fn persist_config_file(config_file: &ConfigFile) -> Result<()> {
@@ -102,9 +98,8 @@ pub fn persist_config_file(config_file: &ConfigFile) -> Result<()> {
 }
 
 fn bootstrap_config_file_to_path(path: &Path) -> Result<ConfigFile> {
-    let _write_guard = CONFIG_FILE_WRITE_LOCK
-        .lock()
-        .map_err(|_| anyhow!("config file write lock poisoned"))?;
+    let _write_guard =
+        CONFIG_FILE_WRITE_LOCK.lock().map_err(|_| anyhow!("config file write lock poisoned"))?;
     let (contents, parsed) = match fs::read_to_string(path) {
         Ok(contents) => {
             let parsed = parse_config_file(&contents, true)?;
@@ -114,14 +109,7 @@ fn bootstrap_config_file_to_path(path: &Path) -> Result<ConfigFile> {
             log::warn!("config file missing during startup: {error}; seeding defaults");
             let config_file = ConfigFile::default();
             let table = toml::from_str(&toml::to_string_pretty(&config_file)?)?;
-            (
-                None,
-                ParsedConfigFile {
-                    config_file,
-                    table,
-                    migrated: false,
-                },
-            )
+            (None, ParsedConfigFile { config_file, table, migrated: false })
         }
         Err(error) => {
             return Err(error)
@@ -154,16 +142,12 @@ fn bootstrap_config_file_to_path(path: &Path) -> Result<ConfigFile> {
 }
 
 fn persist_config_file_to_path(path: &Path, config_file: &ConfigFile) -> Result<()> {
-    let _write_guard = CONFIG_FILE_WRITE_LOCK
-        .lock()
-        .map_err(|_| anyhow!("config file write lock poisoned"))?;
+    let _write_guard =
+        CONFIG_FILE_WRITE_LOCK.lock().map_err(|_| anyhow!("config file write lock poisoned"))?;
     let typed = toml::to_string_pretty(config_file).context("failed to serialize config.toml")?;
     let mut updated: toml::Table =
         toml::from_str(&typed).context("failed to deserialize serialized config.toml")?;
-    updated.insert(
-        "version".to_string(),
-        toml::Value::Integer(i64::from(CURRENT_CONFIG_VERSION)),
-    );
+    updated.insert("version".to_string(), toml::Value::Integer(i64::from(CURRENT_CONFIG_VERSION)));
     let mut merged = match fs::read_to_string(path) {
         Ok(existing) => {
             parse_config_file(&existing, false)
@@ -238,10 +222,7 @@ fn load_config_file_once() -> Result<LoadedConfigFile, ConfigLoadError> {
         Ok(contents) => {
             let parsed = parse_config_file(&contents, false)
                 .map_err(|error| ConfigLoadError::Parse(format!("{error:#}")))?;
-            Ok(LoadedConfigFile {
-                config_file: parsed.config_file,
-                retries: 0,
-            })
+            Ok(LoadedConfigFile { config_file: parsed.config_file, retries: 0 })
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             Err(ConfigLoadError::Missing(error))
@@ -307,9 +288,7 @@ fn parse_config_file(contents: &str, allow_migration: bool) -> Result<ParsedConf
             true
         }
         0 | CONFIG_VERSION_V1 | CONFIG_VERSION_V2 => {
-            return Err(anyhow!(
-                "config version {version} requires a keymint restart to migrate"
-            ))
+            return Err(anyhow!("config version {version} requires a keymint restart to migrate"))
         }
         CURRENT_CONFIG_VERSION => false,
         version => {
@@ -323,11 +302,7 @@ fn parse_config_file(contents: &str, allow_migration: bool) -> Result<ParsedConf
     let config_file: ConfigFile =
         toml::from_str(&serialized).context("failed to validate migrated config.toml")?;
     validate_trust_config(&config_file.trust)?;
-    Ok(ParsedConfigFile {
-        config_file,
-        table,
-        migrated,
-    })
+    Ok(ParsedConfigFile { config_file, table, migrated })
 }
 
 fn config_version(table: &toml::Table) -> Result<u32> {
@@ -344,10 +319,7 @@ fn config_version(table: &toml::Table) -> Result<u32> {
 
 fn upgrade_v0_to_v1(table: &mut toml::Table) -> Result<()> {
     table.remove("trust_record");
-    table.insert(
-        "version".to_string(),
-        toml::Value::Integer(i64::from(CONFIG_VERSION_V1)),
-    );
+    table.insert("version".to_string(), toml::Value::Integer(i64::from(CONFIG_VERSION_V1)));
     let trust = table
         .get_mut("trust")
         .and_then(toml::Value::as_table_mut)
@@ -357,9 +329,7 @@ fn upgrade_v0_to_v1(table: &mut toml::Table) -> Result<()> {
         .cloned()
         .unwrap_or_else(|| toml::Value::String("auto".to_string()));
     for field in ["os_patchlevel", "vendor_patchlevel", "boot_patchlevel"] {
-        trust
-            .entry(field.to_string())
-            .or_insert_with(|| inherited_patchlevel.clone());
+        trust.entry(field.to_string()).or_insert_with(|| inherited_patchlevel.clone());
     }
     Ok(())
 }
@@ -369,14 +339,8 @@ fn upgrade_v1_to_v2(table: &mut toml::Table) -> Result<()> {
         .get_mut("trust")
         .and_then(toml::Value::as_table_mut)
         .ok_or_else(|| anyhow!("config is missing a valid [trust] table"))?;
-    trust.insert(
-        "os_version".to_string(),
-        toml::Value::String("auto".to_string()),
-    );
-    table.insert(
-        "version".to_string(),
-        toml::Value::Integer(i64::from(CONFIG_VERSION_V2)),
-    );
+    trust.insert("os_version".to_string(), toml::Value::String("auto".to_string()));
+    table.insert("version".to_string(), toml::Value::Integer(i64::from(CONFIG_VERSION_V2)));
     Ok(())
 }
 
@@ -385,14 +349,8 @@ fn upgrade_v2_to_v3(table: &mut toml::Table) -> Result<()> {
         .get_mut("main")
         .and_then(toml::Value::as_table_mut)
         .ok_or_else(|| anyhow!("config is missing a valid [main] table"))?;
-    main.insert(
-        "retire_stale_keybox_bound_keys".to_string(),
-        toml::Value::Boolean(true),
-    );
-    table.insert(
-        "version".to_string(),
-        toml::Value::Integer(i64::from(CURRENT_CONFIG_VERSION)),
-    );
+    main.insert("retire_stale_keybox_bound_keys".to_string(), toml::Value::Boolean(true));
+    table.insert("version".to_string(), toml::Value::Integer(i64::from(CURRENT_CONFIG_VERSION)));
     Ok(())
 }
 
@@ -473,10 +431,8 @@ fn reload_runtime_config(trigger: WatchTrigger) {
                         &patches.boot_patchlevel,
                     );
                 if patches.write_security_patch {
-                    security_patch_update = Some((
-                        patches.security_patch.clone(),
-                        patches.observed_security_patch,
-                    ));
+                    security_patch_update =
+                        Some((patches.security_patch.clone(), patches.observed_security_patch));
                 }
                 applied_trust.security_patch = patches.security_patch;
                 applied_trust.os_patchlevel = patches.os_patchlevel;
@@ -634,9 +590,7 @@ impl<'de> Deserialize<'de> for Backend {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        value
-            .parse()
-            .map_err(|()| serde::de::Error::custom(format!("unknown backend {value:?}")))
+        value.parse().map_err(|()| serde::de::Error::custom(format!("unknown backend {value:?}")))
     }
 }
 
@@ -708,10 +662,7 @@ impl Serialize for CryptoConfig {
         state.serialize_field("root_kek_seed", &hex::encode(self.root_kek_seed))?;
         state.serialize_field("kak_seed", &hex::encode(self.kak_seed))?;
         state.serialize_field("shared_secret_seed", &hex::encode(self.shared_secret_seed))?;
-        state.serialize_field(
-            "shared_secret_nonce",
-            &hex::encode(self.shared_secret_nonce),
-        )?;
+        state.serialize_field("shared_secret_nonce", &hex::encode(self.shared_secret_nonce))?;
         if let Some(key) = self.auth_token_hmac_key {
             state.serialize_field("auth_token_hmac_key", &hex::encode(key))?;
         }
@@ -851,12 +802,10 @@ impl<'de> Deserialize<'de> for OsVersionSpec {
     {
         match toml::Value::deserialize(deserializer)? {
             toml::Value::String(value) if value == "auto" => Ok(Self::Auto),
-            toml::Value::Integer(value) => i32::try_from(value)
-                .map(Self::Fixed)
-                .map_err(serde::de::Error::custom),
-            _ => Err(serde::de::Error::custom(
-                "os_version must be \"auto\" or an integer",
-            )),
+            toml::Value::Integer(value) => {
+                i32::try_from(value).map(Self::Fixed).map_err(serde::de::Error::custom)
+            }
+            _ => Err(serde::de::Error::custom("os_version must be \"auto\" or an integer")),
         }
     }
 }
@@ -997,10 +946,7 @@ mod tests {
             value: TrustValueSpec,
         }
 
-        let serialized = toml::to_string(&Wrapper {
-            value: TrustValueSpec::Random,
-        })
-        .unwrap();
+        let serialized = toml::to_string(&Wrapper { value: TrustValueSpec::Random }).unwrap();
         assert!(serialized.contains("value = \"random\""));
     }
 
@@ -1032,10 +978,7 @@ mod tests {
         config_file.trust.os_version = OsVersionSpec::Fixed(17);
         let parsed = parse_config_file(&toml::to_string(&config_file).unwrap(), false).unwrap();
         assert!(!parsed.migrated);
-        assert_eq!(
-            parsed.config_file.trust.os_version,
-            OsVersionSpec::Fixed(17)
-        );
+        assert_eq!(parsed.config_file.trust.os_version, OsVersionSpec::Fixed(17));
 
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("config.toml");
@@ -1056,9 +999,7 @@ mod tests {
         let trust = RawTrustConfig::default();
         assert_eq!(ConfigFile::default().version, CURRENT_CONFIG_VERSION);
         assert_eq!(trust.os_version, OsVersionSpec::Auto);
-        assert!(toml::to_string(&trust)
-            .unwrap()
-            .contains("os_version = \"auto\""));
+        assert!(toml::to_string(&trust).unwrap().contains("os_version = \"auto\""));
         assert_eq!(trust.security_patch, "auto");
         assert_eq!(trust.os_patchlevel, "auto");
         assert_eq!(trust.vendor_patchlevel, "auto");
@@ -1166,39 +1107,22 @@ imei2 = ""
         let mut table: toml::Table =
             toml::from_str(&toml::to_string_pretty(&ConfigFile::default()).unwrap()).unwrap();
         table.insert("version".to_string(), toml::Value::Integer(0));
-        table.insert(
-            "trust_record".to_string(),
-            toml::Value::Table(toml::Table::new()),
-        );
-        table.insert(
-            "future_key".to_string(),
-            toml::Value::String("preserve-me".to_string()),
-        );
-        let trust = table
-            .get_mut("trust")
-            .and_then(toml::Value::as_table_mut)
-            .unwrap();
+        table.insert("trust_record".to_string(), toml::Value::Table(toml::Table::new()));
+        table.insert("future_key".to_string(), toml::Value::String("preserve-me".to_string()));
+        let trust = table.get_mut("trust").and_then(toml::Value::as_table_mut).unwrap();
         trust.insert(
             "future_trust_key".to_string(),
             toml::Value::String("preserve-me-too".to_string()),
         );
         trust.insert("os_version".to_string(), toml::Value::Integer(17));
         trust.remove("os_patchlevel");
-        trust.insert(
-            "vendor_patchlevel".to_string(),
-            toml::Value::String("2026-03-05".to_string()),
-        );
+        trust
+            .insert("vendor_patchlevel".to_string(), toml::Value::String("2026-03-05".to_string()));
         trust.remove("boot_patchlevel");
-        let crypto = table
-            .get_mut("crypto")
-            .and_then(toml::Value::as_table_mut)
-            .unwrap();
+        let crypto = table.get_mut("crypto").and_then(toml::Value::as_table_mut).unwrap();
         crypto.remove("shared_secret_seed");
         crypto.remove("shared_secret_nonce");
-        crypto.insert(
-            "auth_token_hmac_key".to_string(),
-            toml::Value::String("44".repeat(32)),
-        );
+        crypto.insert("auth_token_hmac_key".to_string(), toml::Value::String("44".repeat(32)));
 
         let original = toml::to_string_pretty(&table).unwrap();
         let parsed = parse_config_file(&original, true).unwrap();
@@ -1234,30 +1158,18 @@ imei2 = ""
             Some("auto")
         );
         assert!(!migrated.contains_key("trust_record"));
+        assert_eq!(migrated.get("future_key").and_then(toml::Value::as_str), Some("preserve-me"));
+        let migrated_crypto = migrated.get("crypto").and_then(toml::Value::as_table).unwrap();
         assert_eq!(
-            migrated.get("future_key").and_then(toml::Value::as_str),
-            Some("preserve-me")
-        );
-        let migrated_crypto = migrated
-            .get("crypto")
-            .and_then(toml::Value::as_table)
-            .unwrap();
-        assert_eq!(
-            migrated_crypto
-                .get("shared_secret_seed")
-                .and_then(toml::Value::as_str),
+            migrated_crypto.get("shared_secret_seed").and_then(toml::Value::as_str),
             Some(expected_shared_secret_seed.as_str())
         );
         assert_eq!(
-            migrated_crypto
-                .get("shared_secret_nonce")
-                .and_then(toml::Value::as_str),
+            migrated_crypto.get("shared_secret_nonce").and_then(toml::Value::as_str),
             Some(expected_shared_secret_nonce.as_str())
         );
         assert_eq!(
-            migrated_crypto
-                .get("auth_token_hmac_key")
-                .and_then(toml::Value::as_str),
+            migrated_crypto.get("auth_token_hmac_key").and_then(toml::Value::as_str),
             Some("4444444444444444444444444444444444444444444444444444444444444444")
         );
 
@@ -1270,10 +1182,7 @@ imei2 = ""
             persisted.get("version").and_then(toml::Value::as_integer),
             Some(i64::from(CURRENT_CONFIG_VERSION))
         );
-        assert_eq!(
-            persisted.get("future_key").and_then(toml::Value::as_str),
-            Some("preserve-me")
-        );
+        assert_eq!(persisted.get("future_key").and_then(toml::Value::as_str), Some("preserve-me"));
         assert_eq!(
             persisted
                 .get("trust")
@@ -1297,20 +1206,13 @@ imei2 = ""
             .unwrap()
             .get("auth_token_hmac_key")
             .is_none());
-        let persisted_crypto = persisted
-            .get("crypto")
-            .and_then(toml::Value::as_table)
-            .unwrap();
+        let persisted_crypto = persisted.get("crypto").and_then(toml::Value::as_table).unwrap();
         assert_eq!(
-            persisted_crypto
-                .get("shared_secret_seed")
-                .and_then(toml::Value::as_str),
+            persisted_crypto.get("shared_secret_seed").and_then(toml::Value::as_str),
             Some(expected_shared_secret_seed.as_str())
         );
         assert_eq!(
-            persisted_crypto
-                .get("shared_secret_nonce")
-                .and_then(toml::Value::as_str),
+            persisted_crypto.get("shared_secret_nonce").and_then(toml::Value::as_str),
             Some(expected_shared_secret_nonce.as_str())
         );
     }
@@ -1319,10 +1221,7 @@ imei2 = ""
     fn config_v1_migration_forces_os_version_auto() {
         let mut table: toml::Table =
             toml::from_str(&toml::to_string_pretty(&ConfigFile::default()).unwrap()).unwrap();
-        table.insert(
-            "version".to_string(),
-            toml::Value::Integer(i64::from(CONFIG_VERSION_V1)),
-        );
+        table.insert("version".to_string(), toml::Value::Integer(i64::from(CONFIG_VERSION_V1)));
         table
             .get_mut("trust")
             .and_then(toml::Value::as_table_mut)
@@ -1332,10 +1231,7 @@ imei2 = ""
             .get_mut("main")
             .and_then(toml::Value::as_table_mut)
             .unwrap()
-            .insert(
-                "log_level".to_string(),
-                toml::Value::String("trace".to_string()),
-            );
+            .insert("log_level".to_string(), toml::Value::String("trace".to_string()));
 
         let parsed = parse_config_file(&toml::to_string_pretty(&table).unwrap(), true).unwrap();
         assert!(parsed.migrated);
@@ -1348,18 +1244,12 @@ imei2 = ""
     fn config_v2_migration_enables_keybox_bound_retirement() {
         let mut table: toml::Table =
             toml::from_str(&toml::to_string_pretty(&ConfigFile::default()).unwrap()).unwrap();
-        table.insert(
-            "version".to_string(),
-            toml::Value::Integer(i64::from(CONFIG_VERSION_V2)),
-        );
+        table.insert("version".to_string(), toml::Value::Integer(i64::from(CONFIG_VERSION_V2)));
         table
             .get_mut("main")
             .and_then(toml::Value::as_table_mut)
             .unwrap()
-            .insert(
-                "retire_stale_keybox_bound_keys".to_string(),
-                toml::Value::Boolean(false),
-            );
+            .insert("retire_stale_keybox_bound_keys".to_string(), toml::Value::Boolean(false));
 
         let parsed = parse_config_file(&toml::to_string_pretty(&table).unwrap(), true).unwrap();
         assert!(parsed.migrated);
@@ -1374,10 +1264,7 @@ imei2 = ""
 
         let legacy = ConfigFile {
             version: CONFIG_VERSION_V1,
-            trust: RawTrustConfig {
-                os_version: OsVersionSpec::Fixed(16),
-                ..Default::default()
-            },
+            trust: RawTrustConfig { os_version: OsVersionSpec::Fixed(16), ..Default::default() },
             ..Default::default()
         };
         let stale = parse_config_file(&toml::to_string_pretty(&legacy).unwrap(), true).unwrap();
@@ -1385,14 +1272,8 @@ imei2 = ""
         assert_eq!(stale.config_file.trust.os_version, OsVersionSpec::Auto);
 
         let current = ConfigFile {
-            main: MainConfig {
-                log_level: "trace".to_string(),
-                ..Default::default()
-            },
-            trust: RawTrustConfig {
-                os_version: OsVersionSpec::Fixed(17),
-                ..Default::default()
-            },
+            main: MainConfig { log_level: "trace".to_string(), ..Default::default() },
+            trust: RawTrustConfig { os_version: OsVersionSpec::Fixed(17), ..Default::default() },
             ..Default::default()
         };
         let current_contents = toml::to_string_pretty(&current).unwrap();
@@ -1408,10 +1289,7 @@ imei2 = ""
     fn config_version_validation_handles_v0_and_rejects_unsupported_values() {
         assert_eq!(config_version(&toml::Table::new()).unwrap(), 0);
 
-        for value in [
-            toml::Value::Integer(-1),
-            toml::Value::String("1".to_string()),
-        ] {
+        for value in [toml::Value::Integer(-1), toml::Value::String("1".to_string())] {
             let mut table = toml::Table::new();
             table.insert("version".to_string(), value);
             assert!(config_version(&table).is_err());
@@ -1420,10 +1298,7 @@ imei2 = ""
         for version in [0, CONFIG_VERSION_V1, CONFIG_VERSION_V2] {
             let mut table: toml::Table =
                 toml::from_str(&toml::to_string_pretty(&ConfigFile::default()).unwrap()).unwrap();
-            table.insert(
-                "version".to_string(),
-                toml::Value::Integer(i64::from(version)),
-            );
+            table.insert("version".to_string(), toml::Value::Integer(i64::from(version)));
             assert!(parse_config_file(&toml::to_string_pretty(&table).unwrap(), false).is_err());
         }
 

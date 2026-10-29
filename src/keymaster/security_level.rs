@@ -136,15 +136,10 @@ impl KeystoreSecurityLevel {
     pub fn new_binders(
         security_level: SecurityLevel,
         id_rotation_state: IdRotationState,
-    ) -> Result<(
-        Strong<dyn IKeystoreSecurityLevel>,
-        Strong<dyn IOhMySecurityLevel>,
-    )> {
+    ) -> Result<(Strong<dyn IKeystoreSecurityLevel>, Strong<dyn IOhMySecurityLevel>)> {
         let inner = Arc::new(Self::new(security_level, id_rotation_state)?);
         let aosp = BnKeystoreSecurityLevel::new_binder_with_features(
-            AospSecurityLevelWrapper {
-                inner: inner.clone(),
-            },
+            AospSecurityLevelWrapper { inner: inner.clone() },
             crate::consts::sid_features(),
         );
         let omk = BnOhMySecurityLevel::new_binder_with_features(
@@ -222,10 +217,8 @@ impl KeystoreSecurityLevel {
 
         let mut key_parameters = key_characteristics_to_internal(key_characteristics);
 
-        key_parameters.push(KsKeyParam::new(
-            KsKeyParamValue::UserID(user.0),
-            SecurityLevel::SOFTWARE,
-        ));
+        key_parameters
+            .push(KsKeyParam::new(KsKeyParamValue::UserID(user.0), SecurityLevel::SOFTWARE));
 
         let creation_date = DateTime::now().context(ks_err!("Trying to make creation time."))?;
 
@@ -354,13 +347,11 @@ impl KeystoreSecurityLevel {
 
                 is_attested = key_entry.is_attested();
 
-                let (blob, blob_metadata) = key_entry
-                    .take_key_blob_info()
-                    .ok_or_else(Error::sys)
-                    .context(ks_err!(
-                    "Successfully loaded key entry, \
+                let (blob, blob_metadata) =
+                    key_entry.take_key_blob_info().ok_or_else(Error::sys).context(ks_err!(
+                        "Successfully loaded key entry, \
                         but KM blob was missing."
-                ))?;
+                    ))?;
                 scoping_blob = blob;
 
                 (
@@ -372,26 +363,20 @@ impl KeystoreSecurityLevel {
             }
         };
 
-        let purpose = operation_parameters
-            .iter()
-            .find(|p| p.tag == Tag::PURPOSE)
-            .map_or(
-                Err(Error::Km(ErrorCode::INVALID_ARGUMENT))
-                    .context(ks_err!("No operation purpose specified.")),
-                |kp| match kp.value {
-                    KeyParameterValue::KeyPurpose(p) => Ok(p),
-                    _ => Err(Error::Km(ErrorCode::INVALID_ARGUMENT))
-                        .context(ks_err!("Malformed KeyParameter.")),
-                },
-            )?;
+        let purpose = operation_parameters.iter().find(|p| p.tag == Tag::PURPOSE).map_or(
+            Err(Error::Km(ErrorCode::INVALID_ARGUMENT))
+                .context(ks_err!("No operation purpose specified.")),
+            |kp| match kp.value {
+                KeyParameterValue::KeyPurpose(p) => Ok(p),
+                _ => Err(Error::Km(ErrorCode::INVALID_ARGUMENT))
+                    .context(ks_err!("Malformed KeyParameter.")),
+            },
+        )?;
 
         // Remove Tag::PURPOSE from the operation_parameters, since some keymaster devices return
         // an error on begin() if Tag::PURPOSE is in the operation_parameters.
-        let op_params: Vec<KeyParameter> = operation_parameters
-            .iter()
-            .filter(|p| p.tag != Tag::PURPOSE)
-            .cloned()
-            .collect();
+        let op_params: Vec<KeyParameter> =
+            operation_parameters.iter().filter(|p| p.tag != Tag::PURPOSE).cloned().collect();
         let operation_parameters = op_params.as_slice();
 
         let (immediate_hat, mut auth_info) = ENFORCEMENTS
@@ -455,10 +440,8 @@ impl KeystoreSecurityLevel {
         let op_params: Vec<KeyParameter> = operation_parameters.to_vec();
 
         let (algorithm, _, _) = if let Some((_, ref props)) = key_properties {
-            let km_props: Vec<KmKeyParameter> = props
-                .iter()
-                .map(|kp| kp.clone().into_key_parameter())
-                .collect();
+            let km_props: Vec<KmKeyParameter> =
+                props.iter().map(|kp| kp.clone().into_key_parameter()).collect();
             parse_key_parameters(&km_props)
         } else {
             parse_key_parameters(operation_parameters)
@@ -498,18 +481,12 @@ impl KeystoreSecurityLevel {
             operationChallenge: operation_challenge,
             parameters: match begin_result.params.len() {
                 0 => None,
-                _ => Some(KeyParameters {
-                    keyParameter: begin_result.params,
-                }),
+                _ => Some(KeyParameters { keyParameter: begin_result.params }),
             },
             // An upgraded blob should only be returned if the caller has permission
             // to use Domain::BLOB keys. If we got to this point, we already checked
             // that the caller had that permission.
-            upgradedBlob: if key.domain == Domain::BLOB {
-                upgraded_blob
-            } else {
-                None
-            },
+            upgradedBlob: if key.domain == Domain::BLOB { upgraded_blob } else { None },
         })
     }
 
@@ -578,9 +555,7 @@ impl KeystoreSecurityLevel {
             if self
                 .id_rotation_state
                 .had_factory_reset_since_id_rotation(&creation_datetime)
-                .context(ks_err!(
-                    "Call to had_factory_reset_since_id_rotation failed."
-                ))?
+                .context(ks_err!("Call to had_factory_reset_since_id_rotation failed."))?
             {
                 result.push(KeyParameter {
                     tag: Tag::RESET_SINCE_ID_ROTATION,
@@ -600,22 +575,13 @@ impl KeystoreSecurityLevel {
         // If we are generating/importing an asymmetric key, we need to make sure
         // that NOT_BEFORE and NOT_AFTER are present.
         match params.iter().find(|kp| kp.tag == Tag::ALGORITHM) {
-            Some(KeyParameter {
-                tag: _,
-                value: KeyParameterValue::Algorithm(Algorithm::RSA),
-            })
-            | Some(KeyParameter {
-                tag: _,
-                value: KeyParameterValue::Algorithm(Algorithm::EC),
-            })
+            Some(KeyParameter { tag: _, value: KeyParameterValue::Algorithm(Algorithm::RSA) })
+            | Some(KeyParameter { tag: _, value: KeyParameterValue::Algorithm(Algorithm::EC) })
             | Some(KeyParameter {
                 tag: _,
                 value: KeyParameterValue::Algorithm(Algorithm::ML_DSA),
             }) => {
-                if !params
-                    .iter()
-                    .any(|kp| kp.tag == Tag::CERTIFICATE_NOT_BEFORE)
-                {
+                if !params.iter().any(|kp| kp.tag == Tag::CERTIFICATE_NOT_BEFORE) {
                     result.push(KeyParameter {
                         tag: Tag::CERTIFICATE_NOT_BEFORE,
                         value: KeyParameterValue::DateTime(0),
@@ -832,25 +798,17 @@ impl KeystoreSecurityLevel {
                     log_security_safe_params(&params)
                 ))
                 .map(|(result, _)| result),
-            None => self
-                .generate_key_and_retry_on_att_id_mismatch(&params, None)
-                .context(ks_err!(
-                    "While generating without a provided \
+            None => self.generate_key_and_retry_on_att_id_mismatch(&params, None).context(ks_err!(
+                "While generating without a provided \
                  attestation key and params: {:?}.",
-                    log_security_safe_params(&params)
-                )),
+                log_security_safe_params(&params)
+            )),
         }
         .context(ks_err!())?;
 
         let user = caller_uid.owning_user();
-        self.store_new_key(
-            key,
-            creation_result,
-            user,
-            Some(flags),
-            keybox_attestation_allowed,
-        )
-        .context(ks_err!())
+        self.store_new_key(key, creation_result, user, Some(flags), keybox_attestation_allowed)
+            .context(ks_err!())
     }
 
     fn import_key(
@@ -913,8 +871,7 @@ impl KeystoreSecurityLevel {
         .context(ks_err!("Trying to call importKey"))?;
 
         let user = caller_uid.owning_user();
-        self.store_new_key(key, creation_result, user, Some(flags), true)
-            .context(ks_err!())
+        self.store_new_key(key, creation_result, user, Some(flags), true).context(ks_err!())
     }
 
     fn import_wrapped_key(
@@ -927,17 +884,9 @@ impl KeystoreSecurityLevel {
         authenticators: &[AuthenticatorSpec],
     ) -> Result<KeyMetadata> {
         let wrapped_data: &[u8] = match key {
-            KeyDescriptor {
-                domain: Domain::APP,
-                blob: Some(ref blob),
-                alias: Some(_),
-                ..
-            }
+            KeyDescriptor { domain: Domain::APP, blob: Some(ref blob), alias: Some(_), .. }
             | KeyDescriptor {
-                domain: Domain::SELINUX,
-                blob: Some(ref blob),
-                alias: Some(_),
-                ..
+                domain: Domain::SELINUX, blob: Some(ref blob), alias: Some(_), ..
             } => blob,
             _ => {
                 return Err(error::Error::Km(ErrorCode::INVALID_ARGUMENT)).context(ks_err!(
@@ -948,9 +897,8 @@ impl KeystoreSecurityLevel {
         };
 
         if wrapping_key.domain == Domain::BLOB {
-            return Err(error::Error::Km(ErrorCode::INVALID_ARGUMENT)).context(ks_err!(
-                "Import wrapped key not supported for self managed blobs."
-            ));
+            return Err(error::Error::Km(ErrorCode::INVALID_ARGUMENT))
+                .context(ks_err!("Import wrapped key not supported for self managed blobs."));
         }
 
         let caller_uid = caller_uid(ctx);
@@ -989,12 +937,10 @@ impl KeystoreSecurityLevel {
             })
             .context(ks_err!("Failed to load wrapping key."))?;
 
-        let (wrapping_key_blob, wrapping_blob_metadata) = wrapping_key_entry
-            .take_key_blob_info()
-            .ok_or_else(error::Error::sys)
-            .context(ks_err!(
-                "No km_blob after successfully loading key. This should never happen."
-            ))?;
+        let (wrapping_key_blob, wrapping_blob_metadata) =
+            wrapping_key_entry.take_key_blob_info().ok_or_else(error::Error::sys).context(
+                ks_err!("No km_blob after successfully loading key. This should never happen."),
+            )?;
 
         let wrapping_key_blob = SUPER_KEY
             .read()
@@ -1003,9 +949,7 @@ impl KeystoreSecurityLevel {
                 &wrapping_blob_metadata,
                 &wrapping_key_blob,
             )
-            .context(ks_err!(
-                "Failed to handle super encryption for wrapping key."
-            ))?;
+            .context(ks_err!("Failed to handle super encryption for wrapping key."))?;
 
         // km_dev.importWrappedKey does not return a certificate chain.
         // TODO Do we assume that all wrapped keys are symmetric?
@@ -1111,10 +1055,7 @@ impl KeystoreSecurityLevel {
                 }
             },
         )
-        .context(ks_err!(
-            "upgrade_keyblob_if_required_with(key_id={:?})",
-            key_id_guard
-        ))?;
+        .context(ks_err!("upgrade_keyblob_if_required_with(key_id={:?})", key_id_guard))?;
 
         // If no upgrade was needed, use the opportunity to reencrypt the blob if required
         // and if the a key_id_guard is held. Note: key_id_guard can only be Some if no
@@ -1144,13 +1085,8 @@ impl KeystoreSecurityLevel {
             .context(ks_err!("No key blob specified"))?;
 
         // convert_storage_key_to_ephemeral requires the associated permission
-        check_key_permission(
-            KeyPerm::ConvertStorageKeyToEphemeral,
-            storage_key,
-            None,
-            ctx,
-        )
-        .context(ks_err!("Check permission"))?;
+        check_key_permission(KeyPerm::ConvertStorageKeyToEphemeral, storage_key, None, ctx)
+            .context(ks_err!("Check permission"))?;
 
         let km_dev = &self.keymint;
         let res = {
@@ -1161,10 +1097,9 @@ impl KeystoreSecurityLevel {
             map_km_error(km_dev.convertStorageKeyToEphemeral(key_blob))
         };
         match res {
-            Ok(result) => Ok(EphemeralStorageKeyResponse {
-                ephemeralKey: result,
-                upgradedBlob: None,
-            }),
+            Ok(result) => {
+                Ok(EphemeralStorageKeyResponse { ephemeralKey: result, upgradedBlob: None })
+            }
             Err(error::Error::Km(ErrorCode::KEY_REQUIRES_UPGRADE)) => {
                 let upgraded_blob = {
                     let _wp = self.watch("IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: calling IKeyMintDevice::upgradeKey");
@@ -1213,10 +1148,7 @@ impl KeystoreSecurityLevel {
 }
 
 fn caller_uid(ctx: Option<&CallerInfo>) -> AppUid {
-    AppUid(
-        ctx.map(|ctx| ctx.uid)
-            .unwrap_or_else(|| CallingContext::default().uid.into()),
-    )
+    AppUid(ctx.map(|ctx| ctx.uid).unwrap_or_else(|| CallingContext::default().uid.into()))
 }
 
 impl binder::Interface for AospSecurityLevelWrapper {}
@@ -1355,8 +1287,7 @@ impl IKeystoreSecurityLevel for AospSecurityLevelWrapper {
     ) -> Result<EphemeralStorageKeyResponse, Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::convertStorageKeyToEphemeral");
         security_level_manager::notify_operation_performed(self.security_level);
-        self.convert_storage_key_to_ephemeral(None, storage_key)
-            .map_err(into_logged_binder)
+        self.convert_storage_key_to_ephemeral(None, storage_key).map_err(into_logged_binder)
     }
     fn deleteKey(&self, key: &KeyDescriptor) -> Result<(), Status> {
         let _wp = self.watch("IKeystoreSecurityLevel::deleteKey");
@@ -1469,10 +1400,7 @@ impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
         params: &[KeyParameter],
         authenticators: &[AuthenticatorSpec],
     ) -> Result<KeyMetadata, Status> {
-        let ctx = Some(require_omk_ctx(
-            ctx,
-            "IOhMySecurityLevel::importWrappedKey",
-        )?);
+        let ctx = Some(require_omk_ctx(ctx, "IOhMySecurityLevel::importWrappedKey")?);
         let _wp = self.watch("IOhMySecurityLevel::importWrappedKey");
         security_level_manager::notify_operation_performed(self.security_level);
         let (latency, result) = crate::timed_call!(self.import_wrapped_key(
@@ -1506,14 +1434,10 @@ impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
         ctx: Option<&CallerInfo>,
         storage_key: &KeyDescriptor,
     ) -> Result<EphemeralStorageKeyResponse, Status> {
-        let ctx = Some(require_omk_ctx(
-            ctx,
-            "IOhMySecurityLevel::convertStorageKeyToEphemeral",
-        )?);
+        let ctx = Some(require_omk_ctx(ctx, "IOhMySecurityLevel::convertStorageKeyToEphemeral")?);
         let _wp = self.watch("IOhMySecurityLevel::convertStorageKeyToEphemeral");
         security_level_manager::notify_operation_performed(self.security_level);
-        self.convert_storage_key_to_ephemeral(ctx, storage_key)
-            .map_err(into_logged_binder)
+        self.convert_storage_key_to_ephemeral(ctx, storage_key).map_err(into_logged_binder)
     }
 
     fn deleteKey(&self, ctx: Option<&CallerInfo>, key: &KeyDescriptor) -> Result<(), Status> {
@@ -1548,20 +1472,11 @@ mod tests {
     }
 
     fn blob_descriptor(blob: Option<Vec<u8>>) -> KeyDescriptor {
-        KeyDescriptor {
-            domain: Domain::BLOB,
-            nspace: 0,
-            alias: None,
-            blob,
-        }
+        KeyDescriptor { domain: Domain::BLOB, nspace: 0, alias: None, blob }
     }
 
     fn untrusted_app() -> CallerInfo {
-        CallerInfo {
-            uid: 10123,
-            sid: "u:r:untrusted_app:s0".to_string(),
-            pid: 1234,
-        }
+        CallerInfo { uid: 10123, sid: "u:r:untrusted_app:s0".to_string(), pid: 1234 }
     }
 
     fn service_specific<T>(result: anyhow::Result<T>) -> i32 {

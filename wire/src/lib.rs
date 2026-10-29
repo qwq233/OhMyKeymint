@@ -482,9 +482,9 @@ impl AsCborValue for String {
 impl AsCborValue for u64 {
     fn from_cbor_value(value: cbor::value::Value) -> Result<Self, CborError> {
         match value {
-            cbor::value::Value::Integer(i) => i
-                .try_into()
-                .map_err(|_| crate::CborError::OutOfRangeIntegerValue),
+            cbor::value::Value::Integer(i) => {
+                i.try_into().map_err(|_| crate::CborError::OutOfRangeIntegerValue)
+            }
             v => crate::cbor_type_error(&v, "u64"),
         }
     }
@@ -501,9 +501,9 @@ impl AsCborValue for u64 {
 impl AsCborValue for i64 {
     fn from_cbor_value(value: cbor::value::Value) -> Result<Self, CborError> {
         match value {
-            cbor::value::Value::Integer(i) => i
-                .try_into()
-                .map_err(|_| crate::CborError::OutOfRangeIntegerValue),
+            cbor::value::Value::Integer(i) => {
+                i.try_into().map_err(|_| crate::CborError::OutOfRangeIntegerValue)
+            }
             v => crate::cbor_type_error(&v, "i64"),
         }
     }
@@ -520,9 +520,9 @@ impl AsCborValue for i64 {
 impl AsCborValue for u32 {
     fn from_cbor_value(value: cbor::value::Value) -> Result<Self, CborError> {
         match value {
-            cbor::value::Value::Integer(i) => i
-                .try_into()
-                .map_err(|_| crate::CborError::OutOfRangeIntegerValue),
+            cbor::value::Value::Integer(i) => {
+                i.try_into().map_err(|_| crate::CborError::OutOfRangeIntegerValue)
+            }
             v => crate::cbor_type_error(&v, "u32"),
         }
     }
@@ -571,9 +571,9 @@ impl AsCborValue for () {
 impl AsCborValue for i32 {
     fn from_cbor_value(value: cbor::value::Value) -> Result<Self, CborError> {
         match value {
-            cbor::value::Value::Integer(i) => i
-                .try_into()
-                .map_err(|_| crate::CborError::OutOfRangeIntegerValue),
+            cbor::value::Value::Integer(i) => {
+                i.try_into().map_err(|_| crate::CborError::OutOfRangeIntegerValue)
+            }
             v => crate::cbor_type_error(&v, "i64"),
         }
     }

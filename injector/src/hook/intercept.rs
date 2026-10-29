@@ -134,9 +134,7 @@ fn zeroed_buffer(size: usize) -> Result<Vec<u8>, c_int> {
 
 fn copy_process_buffer(address: usize, size: usize) -> Result<Vec<u8>, c_int> {
     let mut buffer = zeroed_buffer(size)?;
-    copy_from_process(address, &mut buffer)
-        .then_some(buffer)
-        .ok_or(libc::EFAULT)
+    copy_from_process(address, &mut buffer).then_some(buffer).ok_or(libc::EFAULT)
 }
 
 fn copy_process_c_string(address: usize) -> Option<String> {
@@ -214,22 +212,14 @@ fn retry_pending_ioctl_copyback(
             PendingReadCopyback::None => (PendingReadCopyback::None, true, None),
             PendingReadCopyback::Processed { address, data } => {
                 let copied = copy_to_process(address, &data);
-                (
-                    PendingReadCopyback::Processed { address, data },
-                    copied,
-                    None,
-                )
+                (PendingReadCopyback::Processed { address, data }, copied, None)
             }
             PendingReadCopyback::Unread { address, len } => match copy_process_buffer(address, len)
             {
                 Ok(mut data) => {
                     let effects = unsafe { ioctl::parse_read_buffer(fd, &mut data) };
                     let copied = copy_to_process(address, &data);
-                    (
-                        PendingReadCopyback::Processed { address, data },
-                        copied,
-                        Some(effects),
-                    )
+                    (PendingReadCopyback::Processed { address, data }, copied, Some(effects))
                 }
                 Err(_) => (PendingReadCopyback::Unread { address, len }, false, None),
             },
@@ -277,12 +267,7 @@ impl TransactionPayloadShadow {
         if !copy_from_process(original_offsets as usize, offset_bytes) {
             return None;
         }
-        Some(Self {
-            data,
-            offsets,
-            original_buffer,
-            original_offsets,
-        })
+        Some(Self { data, offsets, original_buffer, original_offsets })
     }
 
     unsafe fn install(&mut self, tr: &mut binder_transaction_data) {
@@ -330,9 +315,8 @@ fn retain_inbound_transaction_shadow(
 }
 
 fn publish_inbound_transaction_shadows(connection: BinderStateKey, shadows: &[usize]) {
-    let mut entries = INBOUND_TRANSACTION_SHADOWS
-        .lock()
-        .expect("inbound transaction shadow map poisoned");
+    let mut entries =
+        INBOUND_TRANSACTION_SHADOWS.lock().expect("inbound transaction shadow map poisoned");
     for shadow_buffer in shadows {
         if let Some(shadow) = entries.get_mut(&(connection, *shadow_buffer)) {
             if shadow.state == InboundTransactionShadowState::Staged {
@@ -356,11 +340,7 @@ fn inbound_transaction_original_buffer(
 
 impl PendingReadEffects {
     fn new(connection: BinderStateKey) -> Self {
-        Self {
-            connection,
-            staged_inbound_shadows: Vec::new(),
-            operation_acquires: Vec::new(),
-        }
+        Self { connection, staged_inbound_shadows: Vec::new(), operation_acquires: Vec::new() }
     }
 
     fn commit(&mut self) {
@@ -429,10 +409,7 @@ fn reset_current_thread_binder_state(connection: BinderStateKey) {
     let completions = PENDING_TRANSACTION_COMPLETIONS
         .with(|pending| pending.borrow_mut().remove(&connection))
         .unwrap_or_default();
-    for target in completions
-        .into_iter()
-        .filter_map(|completion| completion.operation_target)
-    {
+    for target in completions.into_iter().filter_map(|completion| completion.operation_target) {
         retire_synthetic_operation_retirement(target);
     }
     debug!("event=binder cleared stale thread state for connection={connection}");
@@ -468,15 +445,12 @@ fn cleanup_retired_current_thread_connections() {
         connections.extend(state.borrow().values().map(|token| token.connection));
     });
 
-    for connection in connections
-        .into_iter()
-        .filter(|connection| binder_connection_cleanup_ready(*connection))
+    for connection in
+        connections.into_iter().filter(|connection| binder_connection_cleanup_ready(*connection))
     {
         reset_current_thread_binder_state(connection);
         OBSERVED_BINDER_FD_TOKENS.with(|observed| {
-            observed
-                .borrow_mut()
-                .retain(|_, token| token.connection != connection);
+            observed.borrow_mut().retain(|_, token| token.connection != connection);
         });
     }
 }

@@ -3,11 +3,7 @@ use super::*;
 fn operation_info() -> SyntheticTargetInfo {
     SyntheticTargetInfo {
         kind: SyntheticTargetKind::Operation,
-        caller: Some(CallerInfo {
-            uid: 10002,
-            sid: String::new(),
-            pid: 2000,
-        }),
+        caller: Some(CallerInfo { uid: 10002, sid: String::new(), pid: 2000 }),
         native_generation: None,
         operation: None,
     }
@@ -27,16 +23,9 @@ fn metadata_reply(
 
 #[test]
 fn synthetic_metadata_version_matches_keystore2_contract() {
-    let target = LocalBinderTarget {
-        ptr: 0x6234,
-        cookie: 0xa678,
-    };
+    let target = LocalBinderTarget { ptr: 0x6234, cookie: 0xa678 };
     let request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
-    let reply = metadata_reply(
-        target,
-        identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION,
-        request,
-    );
+    let reply = metadata_reply(target, identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION, request);
     let SyntheticReply::Parcel(mut reply) = reply else {
         panic!("metadata version should return a parcel reply");
     };
@@ -44,24 +33,15 @@ fn synthetic_metadata_version_matches_keystore2_contract() {
         parcel::parse_owned_success_reply(&mut reply).expect("metadata version should parse");
     assert_eq!(
         version,
-        keystore2_aidl_metadata()
-            .expect("keystore2 metadata should resolve")
-            .version
+        keystore2_aidl_metadata().expect("keystore2 metadata should resolve").version
     );
 }
 
 #[test]
 fn synthetic_metadata_rejects_wrong_interface() {
-    let target = LocalBinderTarget {
-        ptr: 0x7234,
-        cookie: 0xb678,
-    };
+    let target = LocalBinderTarget { ptr: 0x7234, cookie: 0xb678 };
     let request = request_parcel(identify::KEYSTORE_SERVICE_INTERFACE);
-    let reply = metadata_reply(
-        target,
-        identify::AIDL_GET_INTERFACE_HASH_TRANSACTION,
-        request,
-    );
+    let reply = metadata_reply(target, identify::AIDL_GET_INTERFACE_HASH_TRANSACTION, request);
     assert_synthetic_status(reply, StatusCode::BadType);
 }
 
@@ -74,10 +54,8 @@ fn synthetic_metadata_rejects_bad_interface_marker() {
     .into_iter()
     .enumerate()
     {
-        let target = LocalBinderTarget {
-            ptr: 0x7254 + index as u64,
-            cookie: 0xb698 + index as u64,
-        };
+        let target =
+            LocalBinderTarget { ptr: 0x7254 + index as u64, cookie: 0xb698 + index as u64 };
         let request = request_parcel_with_marker(identify::KEYSTORE_OPERATION_INTERFACE, 0);
         assert_synthetic_status(metadata_reply(target, code, request), StatusCode::BadType);
     }
@@ -88,21 +66,10 @@ fn synthetic_metadata_accepts_trailing_payload_for_version_and_hash() {
     let expected = keystore2_aidl_metadata().expect("keystore2 metadata should resolve");
 
     for (index, label, code) in [
-        (
-            0,
-            "operation version",
-            identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION,
-        ),
-        (
-            1,
-            "operation hash",
-            identify::AIDL_GET_INTERFACE_HASH_TRANSACTION,
-        ),
+        (0, "operation version", identify::AIDL_GET_INTERFACE_VERSION_TRANSACTION),
+        (1, "operation hash", identify::AIDL_GET_INTERFACE_HASH_TRANSACTION),
     ] {
-        let target = LocalBinderTarget {
-            ptr: 0x7334 + index,
-            cookie: 0xb778 + index,
-        };
+        let target = LocalBinderTarget { ptr: 0x7334 + index, cookie: 0xb778 + index };
         let mut request = request_parcel(identify::KEYSTORE_OPERATION_INTERFACE);
         request.write(&0x4f4d4bi32).unwrap();
         let reply = metadata_reply(target, code, request);

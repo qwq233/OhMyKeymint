@@ -166,18 +166,16 @@ fn execute_maintenance_mirror(
                 Ok(maintenance.r#onUserAdded(Some(caller), *user_id)?)
             })
         }
-        ParsedMaintenanceRequest::InitUserSuperKeys {
-            user_id,
-            password,
-            allow_existing,
-        } => ipc::with_omk_maintenance_once(|maintenance| {
-            Ok(maintenance.r#initUserSuperKeys(
-                Some(caller),
-                *user_id,
-                password,
-                *allow_existing,
-            )?)
-        }),
+        ParsedMaintenanceRequest::InitUserSuperKeys { user_id, password, allow_existing } => {
+            ipc::with_omk_maintenance_once(|maintenance| {
+                Ok(maintenance.r#initUserSuperKeys(
+                    Some(caller),
+                    *user_id,
+                    password,
+                    *allow_existing,
+                )?)
+            })
+        }
         ParsedMaintenanceRequest::OnUserRemoved { user_id } => {
             ipc::with_omk_maintenance_once(|maintenance| {
                 Ok(maintenance.r#onUserRemoved(Some(caller), *user_id)?)

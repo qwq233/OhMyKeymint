@@ -109,11 +109,7 @@ fn take_ready_operation_publication_probe() -> Option<OperationPublicationProbe>
 }
 
 fn binder_token(fd: i32) -> BinderFdToken {
-    BinderFdToken {
-        fd,
-        generation: 0,
-        connection: fd as BinderStateKey,
-    }
+    BinderFdToken { fd, generation: 0, connection: fd as BinderStateKey }
 }
 
 fn publication_retirement(target: LocalBinderTarget) -> NativeBinderRetirement {
@@ -141,14 +137,8 @@ fn finish_operation_publication_probe_for_test(
 }
 
 pub(in crate::hook::rewrite) fn reset_state_for_tests() {
-    OPERATION_TARGETS
-        .lock()
-        .expect("operation target map poisoned")
-        .clear();
-    OPERATION_PUBLICATIONS
-        .lock()
-        .expect("operation publication map poisoned")
-        .clear();
+    OPERATION_TARGETS.lock().expect("operation target map poisoned").clear();
+    OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned").clear();
     OPERATION_PUBLICATION_PROBES
         .lock()
         .expect("operation publication probe queue poisoned")
@@ -157,10 +147,7 @@ pub(in crate::hook::rewrite) fn reset_state_for_tests() {
         .lock()
         .expect("synthetic security-level target map poisoned")
         .clear();
-    SYNTHETIC_TARGETS
-        .lock()
-        .expect("synthetic target map poisoned")
-        .clear();
+    SYNTHETIC_TARGETS.lock().expect("synthetic target map poisoned").clear();
     let natives = NATIVE_BINDERS
         .lock()
         .expect("native binder map poisoned")
@@ -175,11 +162,7 @@ pub(in crate::hook::rewrite) fn reset_state_for_tests() {
 pub(in crate::hook::rewrite) fn lookup_synthetic_target_info(
     target: LocalBinderTarget,
 ) -> Option<SyntheticTargetInfo> {
-    SYNTHETIC_TARGETS
-        .lock()
-        .expect("synthetic target map poisoned")
-        .get(&target)
-        .cloned()
+    SYNTHETIC_TARGETS.lock().expect("synthetic target map poisoned").get(&target).cloned()
 }
 
 pub(in crate::hook::rewrite) fn lookup_native_operation_state(
@@ -203,14 +186,8 @@ fn drop_synthetic_operation_target(target: LocalBinderTarget) {
         drop_synthetic_operation_retirement(retirement);
         return;
     }
-    OPERATION_PUBLICATIONS
-        .lock()
-        .expect("operation publication map poisoned")
-        .remove(&target);
-    let native = NATIVE_BINDERS
-        .lock()
-        .expect("native binder map poisoned")
-        .remove(&target);
+    OPERATION_PUBLICATIONS.lock().expect("operation publication map poisoned").remove(&target);
+    let native = NATIVE_BINDERS.lock().expect("native binder map poisoned").remove(&target);
     if let Some(native) = native.as_ref() {
         native.disarm_retirement();
     }
@@ -220,10 +197,7 @@ fn drop_synthetic_operation_target(target: LocalBinderTarget) {
 }
 
 fn retire_synthetic_operation_target(target: LocalBinderTarget) {
-    let info = OPERATION_TARGETS
-        .lock()
-        .expect("operation target map poisoned")
-        .remove(&target);
+    let info = OPERATION_TARGETS.lock().expect("operation target map poisoned").remove(&target);
     let state = SYNTHETIC_TARGETS
         .lock()
         .expect("synthetic target map poisoned")

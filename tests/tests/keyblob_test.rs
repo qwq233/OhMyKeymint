@@ -84,11 +84,7 @@ fn test_serialize_authenticated_legacy_keyblob() {
             ),
             "0000000000000000", // hmac
         ),
-        KeyBlob {
-            key_material: vec![0xbb, 0xbb],
-            hw_enforced: vec![],
-            sw_enforced: vec![],
-        },
+        KeyBlob { key_material: vec![0xbb, 0xbb], hw_enforced: vec![], sw_enforced: vec![] },
     )];
     for (hex_data, want) in tests {
         let mut data = hex::decode(hex_data).unwrap();

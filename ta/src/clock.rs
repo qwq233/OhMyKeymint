@@ -23,11 +23,8 @@ impl crate::KeyMintTa {
     /// Generates an authenticated timestamp.
     pub fn generate_timestamp(&self, challenge: i64) -> Result<TimeStampToken, Error> {
         if let Some(clock) = &self.imp.clock {
-            let mut ret = TimeStampToken {
-                challenge,
-                timestamp: clock.now().into(),
-                mac: Vec::new(),
-            };
+            let mut ret =
+                TimeStampToken { challenge, timestamp: clock.now().into(), mac: Vec::new() };
             let mac_input = self.dev.keys.timestamp_token_mac_input(&ret)?;
             ret.mac = self.device_hmac(&mac_input)?;
             Ok(ret)

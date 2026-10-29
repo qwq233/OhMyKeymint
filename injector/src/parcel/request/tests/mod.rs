@@ -168,9 +168,7 @@ fn assert_status_code<T>(result: Result<T>, expected: StatusCode) {
         Ok(_) => panic!("request should fail"),
         Err(error) => error,
     };
-    let status = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<StatusCode>().copied());
+    let status = error.chain().find_map(|cause| cause.downcast_ref::<StatusCode>().copied());
     assert_eq!(status, Some(expected));
 }
 

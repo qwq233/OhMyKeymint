@@ -165,10 +165,9 @@ impl DeviceLockState {
             LockState::DeviceUnlocked { password } => {
                 Self::on_device_unlocked(op.user, password.map(Password::Owned))
             }
-            LockState::DeviceLocked {
-                unlocking_sids,
-                weak_unlock_enabled,
-            } => Self::on_device_locked(op.user, &unlocking_sids, weak_unlock_enabled),
+            LockState::DeviceLocked { unlocking_sids, weak_unlock_enabled } => {
+                Self::on_device_locked(op.user, &unlocking_sids, weak_unlock_enabled)
+            }
             LockState::UserStorageLocked => Self::on_user_storage_locked(op.user),
             LockState::WeakUnlockMethodsExpired => Self::on_weak_unlock_methods_expired(op.user),
             LockState::NonLskfUnlockMethodsExpired => {
@@ -178,10 +177,7 @@ impl DeviceLockState {
     }
 
     fn on_device_unlocked(user: AndroidUserId, password: Option<Password>) {
-        info!(
-            "on_device_unlocked({user:?}, password.is_some()={})",
-            password.is_some()
-        );
+        info!("on_device_unlocked({user:?}, password.is_some()={})", password.is_some());
         let _wp = wd::watch("DeviceLockState::on_device_unlocked");
         ENFORCEMENTS.set_device_locked(user, false);
 
@@ -264,18 +260,12 @@ impl AuthorizationManager {
     /// Create a new instance of Keystore Authorization service.
     pub fn new_native_binder() -> Result<Strong<dyn IKeystoreAuthorization>> {
         let mgr = Self::new_manager();
-        Ok(BnKeystoreAuthorization::new_binder_with_features(
-            mgr,
-            crate::consts::sid_features(),
-        ))
+        Ok(BnKeystoreAuthorization::new_binder_with_features(mgr, crate::consts::sid_features()))
     }
 
     pub fn new_omk_binder() -> Result<Strong<dyn IOhMyAuthorizationService>> {
         let mgr = Self::new_manager();
-        Ok(BnOhMyAuthorizationService::new_binder_with_features(
-            mgr,
-            crate::consts::sid_features(),
-        ))
+        Ok(BnOhMyAuthorizationService::new_binder_with_features(mgr, crate::consts::sid_features()))
     }
 
     /// Act on a lock state notification.
@@ -357,10 +347,7 @@ impl AuthorizationManager {
         // Obtain the auth token and the timestamp token from the enforcement module.
         let (auth_token, ts_token) =
             ENFORCEMENTS.get_auth_tokens(challenge, sid, auth_token_max_age_millis)?;
-        Ok(AuthorizationTokens {
-            authToken: auth_token,
-            timestampToken: ts_token,
-        })
+        Ok(AuthorizationTokens { authToken: auth_token, timestampToken: ts_token })
     }
 
     fn get_last_auth_time(
@@ -487,10 +474,7 @@ struct SystemKeymintDeath {
 impl DeathRecipient for SystemKeymintDeath {
     fn binder_died(&self, _who: &WIBinder) {
         clear_system_keymint(self.service);
-        log::warn!(
-            "system KeyMint verifier service {} died; cache cleared",
-            self.service
-        );
+        log::warn!("system KeyMint verifier service {} died; cache cleared", self.service);
     }
 }
 
@@ -523,9 +507,7 @@ fn verify_system_auth_token(auth_token: &HardwareAuthToken) -> Result<()> {
         &[KeyParam::MacLength(VERIFIER_MAC_LENGTH_BITS as u32)],
         KeyMintDevice::KEY_MINT_V5,
     )
-    .context(ks_err!(
-        "failed to build system verifier operation parameters"
-    ))?;
+    .context(ks_err!("failed to build system verifier operation parameters"))?;
     let mut saw_rejection = false;
     let mut failures = Vec::new();
 
@@ -550,9 +532,7 @@ fn verify_system_auth_token(auth_token: &HardwareAuthToken) -> Result<()> {
                 if is_dead_object_status(&status) {
                     clear_system_keymint(service);
                 }
-                failures.push(format!(
-                    "{service}: verifier key generation failed: {status}"
-                ));
+                failures.push(format!("{service}: verifier key generation failed: {status}"));
                 continue;
             }
         };
@@ -579,9 +559,7 @@ fn verify_system_auth_token(auth_token: &HardwareAuthToken) -> Result<()> {
                     clear_system_keymint(service);
                 }
                 saw_rejection = true;
-                failures.push(format!(
-                    "{service}: verifier begin rejected token: {status}"
-                ));
+                failures.push(format!("{service}: verifier begin rejected token: {status}"));
             }
         }
     }
@@ -619,10 +597,8 @@ fn verifier_key_params(auth_token: &HardwareAuthToken) -> Result<Vec<KeyParamete
 
 fn get_system_keymint(service: &'static str) -> Result<Strong<dyn IKeyMintDevice>> {
     SYSTEM_KEYMINT_CACHE.with(|cache| {
-        if let Some(keymint) = cache
-            .borrow()
-            .as_ref()
-            .and_then(|services| services.get(service).cloned())
+        if let Some(keymint) =
+            cache.borrow().as_ref().and_then(|services| services.get(service).cloned())
         {
             return Ok(keymint);
         }
@@ -635,15 +611,9 @@ fn get_system_keymint(service: &'static str) -> Result<Strong<dyn IKeyMintDevice
             .link_to_death(Arc::downgrade(&recipient))
             .with_context(|| format!("watch {service} death"))?;
         SYSTEM_KEYMINT_DEATH.with(|death| {
-            death
-                .borrow_mut()
-                .get_or_insert_with(HashMap::new)
-                .insert(service, recipient);
+            death.borrow_mut().get_or_insert_with(HashMap::new).insert(service, recipient);
         });
-        cache
-            .borrow_mut()
-            .get_or_insert_with(HashMap::new)
-            .insert(service, keymint.clone());
+        cache.borrow_mut().get_or_insert_with(HashMap::new).insert(service, keymint.clone());
         Ok(keymint)
     })
 }
@@ -686,10 +656,7 @@ fn get_system_verifier_key(
         key_id.auth_type,
         sid_shape(key_id),
     );
-    Ok(CachedVerifierKey {
-        blob,
-        reused: false,
-    })
+    Ok(CachedVerifierKey { blob, reused: false })
 }
 
 fn begin_system_verifier(
@@ -754,8 +721,7 @@ impl IKeystoreAuthorization for AuthorizationManager {
             .context(ks_err!("caller missing AddAuth permissions"))
             .map_err(into_logged_binder)?;
 
-        self.add_auth_token(None, auth_token)
-            .map_err(into_logged_binder)
+        self.add_auth_token(None, auth_token).map_err(into_logged_binder)
     }
 
     fn onDeviceUnlocked(&self, user_id: i32, password: Option<&[u8]>) -> BinderResult<()> {
@@ -773,10 +739,7 @@ impl IKeystoreAuthorization for AuthorizationManager {
                     .map_err(into_logged_binder)?,
             ),
         };
-        let op = LockStateNotification {
-            user,
-            state: LockState::DeviceUnlocked { password },
-        };
+        let op = LockStateNotification { user, state: LockState::DeviceUnlocked { password } };
         self.update_lock_state(op);
         Ok(())
     }
@@ -801,10 +764,7 @@ impl IKeystoreAuthorization for AuthorizationManager {
         }).collect();
         let op = LockStateNotification {
             user,
-            state: LockState::DeviceLocked {
-                unlocking_sids,
-                weak_unlock_enabled,
-            },
+            state: LockState::DeviceLocked { unlocking_sids, weak_unlock_enabled },
         };
         self.update_lock_state(op);
         Ok(())
@@ -817,10 +777,7 @@ impl IKeystoreAuthorization for AuthorizationManager {
             .map_err(into_logged_binder)?;
 
         let user = AndroidUserId(user_id);
-        let op = LockStateNotification {
-            user,
-            state: LockState::UserStorageLocked,
-        };
+        let op = LockStateNotification { user, state: LockState::UserStorageLocked };
         self.update_lock_state(op);
         Ok(())
     }
@@ -832,10 +789,7 @@ impl IKeystoreAuthorization for AuthorizationManager {
             .map_err(into_logged_binder)?;
 
         let user = AndroidUserId(user_id);
-        let op = LockStateNotification {
-            user,
-            state: LockState::WeakUnlockMethodsExpired,
-        };
+        let op = LockStateNotification { user, state: LockState::WeakUnlockMethodsExpired };
         self.update_lock_state(op);
         Ok(())
     }
@@ -847,10 +801,7 @@ impl IKeystoreAuthorization for AuthorizationManager {
             .map_err(into_logged_binder)?;
 
         let user = AndroidUserId(user_id);
-        let op = LockStateNotification {
-            user,
-            state: LockState::NonLskfUnlockMethodsExpired,
-        };
+        let op = LockStateNotification { user, state: LockState::NonLskfUnlockMethodsExpired };
         self.update_lock_state(op);
         Ok(())
     }
@@ -883,8 +834,7 @@ impl IKeystoreAuthorization for AuthorizationManager {
             .map_err(into_logged_binder)?;
 
         let sid = SecureUserId(secure_user_id);
-        self.get_last_auth_time(sid, auth_types)
-            .map_err(into_logged_binder)
+        self.get_last_auth_time(sid, auth_types).map_err(into_logged_binder)
     }
 }
 
@@ -903,8 +853,7 @@ impl IOhMyAuthorizationService for AuthorizationManager {
             "caller missing AddAuth permissions",
         )?;
 
-        self.add_auth_token(Some(ctx), auth_token)
-            .map_err(into_logged_binder)
+        self.add_auth_token(Some(ctx), auth_token).map_err(into_logged_binder)
     }
 
     fn onDeviceUnlocked(
@@ -930,10 +879,7 @@ impl IOhMyAuthorizationService for AuthorizationManager {
                     .map_err(into_logged_binder)?,
             ),
         };
-        let op = LockStateNotification {
-            user,
-            state: LockState::DeviceUnlocked { password },
-        };
+        let op = LockStateNotification { user, state: LockState::DeviceUnlocked { password } };
         self.update_lock_state(op);
         Ok(())
     }
@@ -958,10 +904,7 @@ impl IOhMyAuthorizationService for AuthorizationManager {
         }).collect();
         let op = LockStateNotification {
             user,
-            state: LockState::DeviceLocked {
-                unlocking_sids,
-                weak_unlock_enabled,
-            },
+            state: LockState::DeviceLocked { unlocking_sids, weak_unlock_enabled },
         };
         self.update_lock_state(op);
         Ok(())
@@ -973,10 +916,7 @@ impl IOhMyAuthorizationService for AuthorizationManager {
         check_omk_keystore_permission(ctx, KeystorePerm::Lock, "caller missing Lock permission")?;
 
         let user = AndroidUserId(user_id);
-        let op = LockStateNotification {
-            user,
-            state: LockState::UserStorageLocked,
-        };
+        let op = LockStateNotification { user, state: LockState::UserStorageLocked };
         self.update_lock_state(op);
         Ok(())
     }
@@ -991,10 +931,7 @@ impl IOhMyAuthorizationService for AuthorizationManager {
         check_omk_keystore_permission(ctx, KeystorePerm::Lock, "caller missing Lock permission")?;
 
         let user = AndroidUserId(user_id);
-        let op = LockStateNotification {
-            user,
-            state: LockState::WeakUnlockMethodsExpired,
-        };
+        let op = LockStateNotification { user, state: LockState::WeakUnlockMethodsExpired };
         self.update_lock_state(op);
         Ok(())
     }
@@ -1005,17 +942,11 @@ impl IOhMyAuthorizationService for AuthorizationManager {
         user_id: i32,
     ) -> BinderResult<()> {
         let _wp = wd::watch("IOhMyAuthorizationService::onNonLskfUnlockMethodsExpired");
-        let ctx = require_omk_ctx(
-            ctx,
-            "IOhMyAuthorizationService::onNonLskfUnlockMethodsExpired",
-        )?;
+        let ctx = require_omk_ctx(ctx, "IOhMyAuthorizationService::onNonLskfUnlockMethodsExpired")?;
         check_omk_keystore_permission(ctx, KeystorePerm::Lock, "caller missing Lock permission")?;
 
         let user = AndroidUserId(user_id);
-        let op = LockStateNotification {
-            user,
-            state: LockState::NonLskfUnlockMethodsExpired,
-        };
+        let op = LockStateNotification { user, state: LockState::NonLskfUnlockMethodsExpired };
         self.update_lock_state(op);
         Ok(())
     }
@@ -1056,8 +987,7 @@ impl IOhMyAuthorizationService for AuthorizationManager {
         )?;
 
         let sid = SecureUserId(secure_user_id);
-        self.get_last_auth_time(sid, auth_types)
-            .map_err(into_logged_binder)
+        self.get_last_auth_time(sid, auth_types).map_err(into_logged_binder)
     }
 }
 
@@ -1066,11 +996,7 @@ mod tests {
     use super::*;
 
     fn mirrored_caller() -> CallerInfo {
-        CallerInfo {
-            uid: 1000,
-            sid: "u:r:system_server:s0".to_string(),
-            pid: 2000,
-        }
+        CallerInfo { uid: 1000, sid: "u:r:system_server:s0".to_string(), pid: 2000 }
     }
 
     fn valid_auth_token() -> HardwareAuthToken {
@@ -1101,10 +1027,7 @@ mod tests {
 
         variants.push((
             "all-zero authorization fields",
-            HardwareAuthToken {
-                mac: vec![0; AUTH_TOKEN_MAC_LEN],
-                ..Default::default()
-            },
+            HardwareAuthToken { mac: vec![0; AUTH_TOKEN_MAC_LEN], ..Default::default() },
         ));
 
         let mut token = valid_auth_token();
@@ -1187,14 +1110,12 @@ mod tests {
         let mut token = valid_auth_token();
         token.authenticatorType = HardwareAuthenticatorType(4);
 
-        assert!(
-            localize_auth_token_for_source(Some(&caller), &token, |token| {
-                token.to_km()?;
-                Ok(token.clone())
-            })
-            .expect("unknown mirror auth type should preserve System success")
-            .is_none()
-        );
+        assert!(localize_auth_token_for_source(Some(&caller), &token, |token| {
+            token.to_km()?;
+            Ok(token.clone())
+        })
+        .expect("unknown mirror auth type should preserve System success")
+        .is_none());
 
         let token = valid_auth_token();
         assert!(localize_auth_token_for_source(Some(&caller), &token, |_| {
@@ -1206,12 +1127,10 @@ mod tests {
 
     #[test]
     fn direct_localization_failures_are_propagated() {
-        assert!(
-            localize_auth_token_for_source(None, &valid_auth_token(), |_| {
-                Err(anyhow::anyhow!("auth-token HMAC key is not initialized"))
-            })
-            .is_err()
-        );
+        assert!(localize_auth_token_for_source(None, &valid_auth_token(), |_| {
+            Err(anyhow::anyhow!("auth-token HMAC key is not initialized"))
+        })
+        .is_err());
     }
 
     #[test]

@@ -128,18 +128,13 @@ pub unsafe fn parse_key_entry_reply(
     data_size: usize,
     offsets: *mut usize,
     offsets_size: usize,
-) -> Result<(
-    ReplyBinderCarrier,
-    crate::android::system::keystore2::KeyMetadata::KeyMetadata,
-)> {
+) -> Result<(ReplyBinderCarrier, crate::android::system::keystore2::KeyMetadata::KeyMetadata)> {
     let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
     read_ok_status(&mut parcel)?;
     read_non_null_parcelable_flag(&mut parcel, "key-entry")?;
     read_sized_reply_payload(&mut parcel, "key-entry payload", |sub_parcel| {
         let carrier = read_reply_binder_carrier(sub_parcel, data)?;
-        let metadata = sub_parcel
-            .read()
-            .context("failed to decode key-entry metadata payload")?;
+        let metadata = sub_parcel.read().context("failed to decode key-entry metadata payload")?;
         Ok((carrier, metadata))
     })
 }
@@ -157,11 +152,9 @@ pub unsafe fn extract_create_operation_reply_carrier(
     let mut parcel = parcel_from_ipc_parts(data, data_size, offsets, offsets_size);
     read_ok_status(&mut parcel)?;
     read_non_null_parcelable_flag(&mut parcel, "create-operation")?;
-    read_sized_reply_payload(
-        &mut parcel,
-        "create-operation binder carrier",
-        |sub_parcel| read_reply_binder_carrier(sub_parcel, data),
-    )
+    read_sized_reply_payload(&mut parcel, "create-operation binder carrier", |sub_parcel| {
+        read_reply_binder_carrier(sub_parcel, data)
+    })
 }
 
 pub fn build_get_security_level_reply_with_carrier_bytes(
@@ -185,22 +178,14 @@ pub fn build_get_security_level_reply_with_carrier_bytes(
 
     let mut data = parcel_bytes(&mut parcel)?;
     data[start..end].copy_from_slice(carrier_bytes);
-    Ok(owned_reply_from_bytes(
-        parcel,
-        data,
-        carrier_is_object.then_some(start),
-    ))
+    Ok(owned_reply_from_bytes(parcel, data, carrier_is_object.then_some(start)))
 }
 
 pub fn build_interface_descriptor_reply(descriptor: &str) -> Result<OwnedReply> {
     let mut parcel = Parcel::new();
     parcel.write(&descriptor.to_string())?;
     let data = parcel_bytes(&mut parcel)?;
-    Ok(owned_reply_from_bytes(
-        parcel,
-        data,
-        std::iter::empty::<usize>(),
-    ))
+    Ok(owned_reply_from_bytes(parcel, data, std::iter::empty::<usize>()))
 }
 
 pub fn build_empty_reply() -> OwnedReply {
@@ -211,11 +196,7 @@ pub fn build_raw_i32_reply(value: i32) -> Result<OwnedReply> {
     let mut parcel = Parcel::new();
     parcel.write(&value)?;
     let data = parcel_bytes(&mut parcel)?;
-    Ok(owned_reply_from_bytes(
-        parcel,
-        data,
-        std::iter::empty::<usize>(),
-    ))
+    Ok(owned_reply_from_bytes(parcel, data, std::iter::empty::<usize>()))
 }
 
 pub fn build_null_binder_reply() -> Result<OwnedReply> {
@@ -223,11 +204,7 @@ pub fn build_null_binder_reply() -> Result<OwnedReply> {
     let binder: Option<rsbinder::SIBinder> = None;
     parcel.write(&binder)?;
     let data = parcel_bytes(&mut parcel)?;
-    Ok(owned_reply_from_bytes(
-        parcel,
-        data,
-        std::iter::empty::<usize>(),
-    ))
+    Ok(owned_reply_from_bytes(parcel, data, std::iter::empty::<usize>()))
 }
 
 pub fn build_local_binder_carrier_bytes(
@@ -237,9 +214,7 @@ pub fn build_local_binder_carrier_bytes(
     stability: i32,
 ) -> Vec<u8> {
     let object = flat_binder_object {
-        hdr: binder_object_header {
-            type_: BINDER_TYPE_BINDER,
-        },
+        hdr: binder_object_header { type_: BINDER_TYPE_BINDER },
         flags,
         handle_or_ptr: flat_binder_object_handle_or_ptr { binder: ptr },
         cookie,
@@ -268,10 +243,7 @@ fn build_sized_parcelable_reply(
 }
 
 pub fn build_key_entry_reply(reply: KeyEntryResponse) -> Result<OwnedReply> {
-    let KeyEntryResponse {
-        r#iSecurityLevel,
-        r#metadata,
-    } = reply;
+    let KeyEntryResponse { r#iSecurityLevel, r#metadata } = reply;
     build_sized_parcelable_reply(|sub_parcel, binder_offset| {
         match r#iSecurityLevel.as_ref() {
             Some(binder) => {
@@ -353,11 +325,7 @@ pub fn build_plain_reply<T: Serialize>(value: &T) -> Result<OwnedReply> {
         }
     }
     let data = rsbinder::to_bytes(&PlainReply(value))?;
-    Ok(owned_reply_from_bytes(
-        Parcel::with_capacity(0),
-        data,
-        std::iter::empty::<usize>(),
-    ))
+    Ok(owned_reply_from_bytes(Parcel::with_capacity(0), data, std::iter::empty::<usize>()))
 }
 
 pub fn build_void_reply() -> Result<OwnedReply> {
@@ -366,11 +334,7 @@ pub fn build_void_reply() -> Result<OwnedReply> {
 
 pub fn build_status_reply(status: &Status) -> Result<OwnedReply> {
     let data = rsbinder::to_bytes(status)?;
-    Ok(owned_reply_from_bytes(
-        Parcel::with_capacity(0),
-        data,
-        std::iter::empty::<usize>(),
-    ))
+    Ok(owned_reply_from_bytes(Parcel::with_capacity(0), data, std::iter::empty::<usize>()))
 }
 
 fn owned_reply_from_bytes(
@@ -417,9 +381,8 @@ fn read_ok_status(parcel: &mut Parcel) -> Result<()> {
 }
 
 fn read_non_null_parcelable_flag(parcel: &mut Parcel, label: &str) -> Result<()> {
-    let flag: i32 = parcel
-        .read()
-        .with_context(|| format!("failed to decode {label} parcelable flag"))?;
+    let flag: i32 =
+        parcel.read().with_context(|| format!("failed to decode {label} parcelable flag"))?;
     if flag != NON_NULL_PARCELABLE_FLAG {
         bail!("unexpected {label} parcelable flag: {flag}");
     }
@@ -450,25 +413,17 @@ fn read_sized_reply_payload<T>(
 fn read_reply_binder_carrier(parcel: &mut Parcel, base: *mut u8) -> Result<ReplyBinderCarrier> {
     let start = parcel.data_position();
     let binder_len = size_of::<flat_binder_object>() + size_of::<i32>();
-    let end = start
-        .checked_add(binder_len)
-        .ok_or_else(|| anyhow!("binder carrier length overflow"))?;
+    let end =
+        start.checked_add(binder_len).ok_or_else(|| anyhow!("binder carrier length overflow"))?;
     if end > parcel.data_size() {
-        bail!(
-            "binder carrier truncated: end {} exceeds parcel size {}",
-            end,
-            parcel.data_size()
-        );
+        bail!("binder carrier truncated: end {} exceeds parcel size {}", end, parcel.data_size());
     }
 
     let flat = unsafe { std::ptr::read_unaligned(base.add(start) as *const flat_binder_object) };
     parcel.set_data_position(end);
 
     let bytes = unsafe { std::slice::from_raw_parts(base.add(start), end - start) }.to_vec();
-    Ok(ReplyBinderCarrier {
-        bytes,
-        is_object: binder_carrier_is_object(&flat),
-    })
+    Ok(ReplyBinderCarrier { bytes, is_object: binder_carrier_is_object(&flat) })
 }
 
 fn binder_carrier_is_object(flat: &flat_binder_object) -> bool {
@@ -509,11 +464,7 @@ fn build_parcelable_reply_with_carrier_bytes(
 
     let mut data = parcel_bytes(&mut parcel)?;
     data[start..end].copy_from_slice(carrier_bytes);
-    Ok(owned_reply_from_bytes(
-        parcel,
-        data,
-        carrier_is_object.then_some(start),
-    ))
+    Ok(owned_reply_from_bytes(parcel, data, carrier_is_object.then_some(start)))
 }
 
 fn write_none_binder_placeholder<T>(parcel: &mut Parcel) -> rsbinder::Result<(usize, usize)>

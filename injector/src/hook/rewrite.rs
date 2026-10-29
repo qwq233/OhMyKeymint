@@ -82,10 +82,7 @@ fn evaluate_caller(
 ) -> crate::filter::FilterDecision {
     let uid = caller.uid as u32;
     let preflight = filter::evaluate(&cfg.scoop, &cfg.filter, uid, PackageResolution::Unknown);
-    if matches!(
-        preflight.reason,
-        FilterReason::RejectedAndroidPackage | FilterReason::Disabled
-    ) {
+    if matches!(preflight.reason, FilterReason::RejectedAndroidPackage | FilterReason::Disabled) {
         return preflight;
     }
 
@@ -102,21 +99,19 @@ fn precompute_omk_service_mutator_reply(
 ) -> PrecomputedServiceReply {
     let _guard = BypassGuard::enter();
     match request {
-        ParsedServiceRequest::UpdateSubcomponent {
-            key,
-            public_cert,
-            certificate_chain,
-        } => match ipc::with_omk_once(|omk| {
-            Ok(omk.r#updateSubcomponent(
-                Some(caller),
-                key,
-                public_cert.as_deref(),
-                certificate_chain.as_deref(),
-            )?)
-        }) {
-            Ok(()) => PrecomputedServiceReply::UpdateSubcomponentSuccess,
-            Err(error) => PrecomputedServiceReply::Error(precomputed_omk_error_reply(&error)),
-        },
+        ParsedServiceRequest::UpdateSubcomponent { key, public_cert, certificate_chain } => {
+            match ipc::with_omk_once(|omk| {
+                Ok(omk.r#updateSubcomponent(
+                    Some(caller),
+                    key,
+                    public_cert.as_deref(),
+                    certificate_chain.as_deref(),
+                )?)
+            }) {
+                Ok(()) => PrecomputedServiceReply::UpdateSubcomponentSuccess,
+                Err(error) => PrecomputedServiceReply::Error(precomputed_omk_error_reply(&error)),
+            }
+        }
         ParsedServiceRequest::DeleteKey { key } => {
             match ipc::with_omk_once(|omk| Ok(omk.r#deleteKey(Some(caller), key)?)) {
                 Ok(()) => PrecomputedServiceReply::DeleteKeySuccess,
@@ -150,14 +145,12 @@ fn precompute_omk_grant_service_reply_with(
     mut ungrant: impl FnMut(&CallerInfo, &KeyDescriptor, i32) -> anyhow::Result<()>,
 ) -> PrecomputedServiceReply {
     match request {
-        ParsedServiceRequest::Grant {
-            key,
-            grantee_uid,
-            access_vector,
-        } => match grant(caller, key, *grantee_uid, *access_vector) {
-            Ok(omk_grant) => PrecomputedServiceReply::GrantSuccess(omk_grant),
-            Err(error) => PrecomputedServiceReply::Error(precomputed_omk_error_reply(&error)),
-        },
+        ParsedServiceRequest::Grant { key, grantee_uid, access_vector } => {
+            match grant(caller, key, *grantee_uid, *access_vector) {
+                Ok(omk_grant) => PrecomputedServiceReply::GrantSuccess(omk_grant),
+                Err(error) => PrecomputedServiceReply::Error(precomputed_omk_error_reply(&error)),
+            }
+        }
         ParsedServiceRequest::Ungrant { key, grantee_uid } => {
             match ungrant(caller, key, *grantee_uid) {
                 Ok(()) => PrecomputedServiceReply::UngrantSuccess,
@@ -183,15 +176,9 @@ fn synthetic_fallback_reply() -> parcel::OwnedReply {
 }
 
 fn precompute_omk_migrate_reply(call: &PendingMaintenanceCall) -> PrecomputedMaintenanceReply {
-    let ParsedMaintenanceRequest::MigrateKeyNamespace {
-        source,
-        destination,
-    } = &call.request
+    let ParsedMaintenanceRequest::MigrateKeyNamespace { source, destination } = &call.request
     else {
-        unreachable!(
-            "OMK migrate precompute called for {:?}",
-            call.request.method()
-        );
+        unreachable!("OMK migrate precompute called for {:?}", call.request.method());
     };
     debug_assert_eq!(call.route, RouteTarget::Omk);
     let _guard = BypassGuard::enter();

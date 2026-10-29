@@ -48,11 +48,7 @@ use std::{
 };
 
 type ConfirmationTokenReceiver = Arc<Mutex<Option<Receiver<Vec<u8>>>>>;
-type FinishAuthTokens = (
-    Option<HardwareAuthToken>,
-    Option<TimeStampToken>,
-    Option<Vec<u8>>,
-);
+type FinishAuthTokens = (Option<HardwareAuthToken>, Option<TimeStampToken>, Option<Vec<u8>>);
 
 #[derive(Debug)]
 enum AuthRequestState {
@@ -71,10 +67,7 @@ struct AuthRequest {
 
 impl AuthRequest {
     fn op_auth() -> Arc<Self> {
-        Arc::new(Self {
-            state: AuthRequestState::OpAuth,
-            hat: Mutex::new(None),
-        })
+        Arc::new(Self { state: AuthRequestState::OpAuth, hat: Mutex::new(None) })
     }
 
     fn timestamp(
@@ -167,9 +160,7 @@ struct TokenReceiverMap {
 
 impl Default for TokenReceiverMap {
     fn default() -> Self {
-        Self {
-            map_and_cleanup_counter: Mutex::new((HashMap::new(), Self::CLEANUP_PERIOD + 1)),
-        }
+        Self { map_and_cleanup_counter: Mutex::new((HashMap::new(), Self::CLEANUP_PERIOD + 1)) }
     }
 }
 
@@ -230,15 +221,8 @@ impl TokenReceiver {
                     self.auth_type
                 );
             }
-            if !self
-                .sids
-                .iter()
-                .any(|&sid| hat.userId == sid.0 || hat.authenticatorId == sid.0)
-            {
-                error!(
-                    "Per-op {hat:?} doesn't have a SID required for key: {:?}",
-                    self.sids
-                );
+            if !self.sids.iter().any(|&sid| hat.userId == sid.0 || hat.authenticatorId == sid.0) {
+                error!("Per-op {hat:?} doesn't have a SID required for key: {:?}", self.sids);
             }
 
             state_arc.add_auth_token(hat);
@@ -279,9 +263,7 @@ impl AuthInfo {
                 ENFORCEMENTS.register_op_auth_receiver(challenge, token_receiver);
 
                 self.state = DeferredAuthState::Waiting(auth_request);
-                Some(OperationChallenge {
-                    challenge: challenge.0,
-                })
+                Some(OperationChallenge { challenge: challenge.0 })
             }
             DeferredAuthState::TimeStampRequired(hat) => {
                 let hat = (*hat).clone();
@@ -323,8 +305,7 @@ impl AuthInfo {
                 }
             }
         }
-        self.get_auth_tokens()
-            .map(|(hat, tst)| (hat, tst, confirmation_token))
+        self.get_auth_tokens().map(|(hat, tst)| (hat, tst, confirmation_token))
     }
 
     /// This function is the authorization hook called after finish succeeded.
@@ -352,11 +333,7 @@ impl AuthInfo {
     /// [`DeferredAuthState::Token`] state for future use.
     fn get_auth_tokens(&mut self) -> Result<(Option<HardwareAuthToken>, Option<TimeStampToken>)> {
         let deferred_tokens = if let DeferredAuthState::Waiting(ref auth_request) = self.state {
-            Some(
-                auth_request
-                    .get_auth_tokens()
-                    .context("In AuthInfo::get_auth_tokens.")?,
-            )
+            Some(auth_request.get_auth_tokens().context("In AuthInfo::get_auth_tokens.")?)
         } else {
             None
         };
@@ -481,9 +458,8 @@ impl Enforcements {
                 }
             }
             _ => {
-                return Err(Error::Km(Ec::UNSUPPORTED_PURPOSE)).context(ks_err!(
-                    "authorize_create: specified purpose is not supported."
-                ));
+                return Err(Error::Km(Ec::UNSUPPORTED_PURPOSE))
+                    .context(ks_err!("authorize_create: specified purpose is not supported."));
             }
         }
         // The following variables are to record information from key parameters to be used in
@@ -582,9 +558,8 @@ impl Enforcements {
 
         // if both NO_AUTH_REQUIRED and USER_SECURE_ID tags are present, return error
         if !user_sids.is_empty() && no_auth_required {
-            return Err(Error::Km(Ec::INVALID_KEY_BLOB)).context(ks_err!(
-                "key has both NO_AUTH_REQUIRED and USER_SECURE_ID tags."
-            ));
+            return Err(Error::Km(Ec::INVALID_KEY_BLOB))
+                .context(ks_err!("key has both NO_AUTH_REQUIRED and USER_SECURE_ID tags."));
         }
 
         // if either of auth_type or secure_id is present and the other is not present, return error
@@ -601,9 +576,8 @@ impl Enforcements {
             && !caller_nonce_allowed
             && op_params.iter().any(|kp| kp.tag == Tag::NONCE)
         {
-            return Err(Error::Km(Ec::CALLER_NONCE_PROHIBITED)).context(ks_err!(
-                "NONCE is present, although CALLER_NONCE is not present"
-            ));
+            return Err(Error::Km(Ec::CALLER_NONCE_PROHIBITED))
+                .context(ks_err!("NONCE is present, although CALLER_NONCE is not present"));
         }
 
         if unlocked_device_required {
@@ -633,10 +607,8 @@ impl Enforcements {
                 "No suitable auth token for {user_sids:?} type {user_auth_type:?} received in last {key_time_out}s found",
             ))?;
             let now = BootTime::now();
-            let token_age = now
-                .checked_sub(&hat.time_received())
-                .ok_or_else(Error::sys)
-                .context(ks_err!(
+            let token_age =
+                now.checked_sub(&hat.time_received()).ok_or_else(Error::sys).context(ks_err!(
                     "Overflow while computing Auth token validity. Validity cannot be established."
                 ))?;
 
@@ -674,14 +646,7 @@ impl Enforcements {
                 ),
             )
         };
-        Ok((
-            hat,
-            AuthInfo {
-                state,
-                key_usage_limited,
-                confirmation_token_receiver,
-            },
-        ))
+        Ok((hat, AuthInfo { state, key_usage_limited, confirmation_token_receiver }))
     }
 
     fn find_auth_token<F>(p: F) -> Option<AuthTokenEntry>
@@ -786,28 +751,20 @@ impl Enforcements {
             priority: u32,
             enc_type: SuperEncryptionType,
         }
-        let mut result = Candidate {
-            priority: 0,
-            enc_type: SuperEncryptionType::None,
-        };
+        let mut result = Candidate { priority: 0, enc_type: SuperEncryptionType::None };
         for kp in key_parameters {
             let t = match kp.key_parameter_value() {
                 KeyParameterValue::MaxBootLevel(level) => Candidate {
                     priority: 3,
                     enc_type: SuperEncryptionType::BootLevel(BootLevel(*level as usize)),
                 },
-                KeyParameterValue::UnlockedDeviceRequired if *domain == Domain::APP => Candidate {
-                    priority: 2,
-                    enc_type: SuperEncryptionType::UnlockedDeviceRequired,
-                },
-                KeyParameterValue::UserSecureID(_) if *domain == Domain::APP => Candidate {
-                    priority: 1,
-                    enc_type: SuperEncryptionType::CredentialEncrypted,
-                },
-                _ => Candidate {
-                    priority: 0,
-                    enc_type: SuperEncryptionType::None,
-                },
+                KeyParameterValue::UnlockedDeviceRequired if *domain == Domain::APP => {
+                    Candidate { priority: 2, enc_type: SuperEncryptionType::UnlockedDeviceRequired }
+                }
+                KeyParameterValue::UserSecureID(_) if *domain == Domain::APP => {
+                    Candidate { priority: 1, enc_type: SuperEncryptionType::CredentialEncrypted }
+                }
+                _ => Candidate { priority: 0, enc_type: SuperEncryptionType::None },
             };
             if t.priority > result.priority {
                 result = t;

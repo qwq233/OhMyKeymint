@@ -119,54 +119,21 @@ fn test_key_new_from_serialized() {
                 key_material: hex::decode("d43c2f04f948521b81bdbf001310f592").unwrap(),
                 hw_enforced: vec![],
                 sw_enforced: vec![
-                    KeyParameter {
-                        tag: Tag::ALGORITHM,
-                        value: KPV::Algorithm(Algorithm::AES),
-                    },
-                    KeyParameter {
-                        tag: Tag::KEY_SIZE,
-                        value: KPV::Integer(128),
-                    },
-                    KeyParameter {
-                        tag: Tag::PURPOSE,
-                        value: KPV::KeyPurpose(KeyPurpose::ENCRYPT),
-                    },
-                    KeyParameter {
-                        tag: Tag::PURPOSE,
-                        value: KPV::KeyPurpose(KeyPurpose::DECRYPT),
-                    },
-                    KeyParameter {
-                        tag: Tag::BLOCK_MODE,
-                        value: KPV::BlockMode(BlockMode::CBC),
-                    },
-                    KeyParameter {
-                        tag: Tag::PADDING,
-                        value: KPV::PaddingMode(PaddingMode::NONE),
-                    },
-                    KeyParameter {
-                        tag: Tag::ORIGIN,
-                        value: KPV::Origin(KeyOrigin::GENERATED),
-                    },
-                    KeyParameter {
-                        tag: Tag::OS_VERSION,
-                        value: KPV::Integer(110000),
-                    },
-                    KeyParameter {
-                        tag: Tag::OS_PATCHLEVEL,
-                        value: KPV::Integer(202107),
-                    },
+                    KeyParameter { tag: Tag::ALGORITHM, value: KPV::Algorithm(Algorithm::AES) },
+                    KeyParameter { tag: Tag::KEY_SIZE, value: KPV::Integer(128) },
+                    KeyParameter { tag: Tag::PURPOSE, value: KPV::KeyPurpose(KeyPurpose::ENCRYPT) },
+                    KeyParameter { tag: Tag::PURPOSE, value: KPV::KeyPurpose(KeyPurpose::DECRYPT) },
+                    KeyParameter { tag: Tag::BLOCK_MODE, value: KPV::BlockMode(BlockMode::CBC) },
+                    KeyParameter { tag: Tag::PADDING, value: KPV::PaddingMode(PaddingMode::NONE) },
+                    KeyParameter { tag: Tag::ORIGIN, value: KPV::Origin(KeyOrigin::GENERATED) },
+                    KeyParameter { tag: Tag::OS_VERSION, value: KPV::Integer(110000) },
+                    KeyParameter { tag: Tag::OS_PATCHLEVEL, value: KPV::Integer(202107) },
                     KeyParameter {
                         tag: Tag::CREATION_DATETIME,
                         value: KPV::DateTime(1628871769000),
                     },
-                    KeyParameter {
-                        tag: Tag::VENDOR_PATCHLEVEL,
-                        value: KPV::Integer(20210705),
-                    },
-                    KeyParameter {
-                        tag: Tag::BOOT_PATCHLEVEL,
-                        value: KPV::Integer(0),
-                    },
+                    KeyParameter { tag: Tag::VENDOR_PATCHLEVEL, value: KPV::Integer(20210705) },
+                    KeyParameter { tag: Tag::BOOT_PATCHLEVEL, value: KPV::Integer(0) },
                 ],
             },
             Some(KeyFormat::RAW),
@@ -199,54 +166,21 @@ fn test_key_new_from_serialized() {
                 .unwrap(),
                 hw_enforced: vec![],
                 sw_enforced: vec![
-                    KeyParameter {
-                        tag: Tag::ALGORITHM,
-                        value: KPV::Algorithm(Algorithm::EC),
-                    },
-                    KeyParameter {
-                        tag: Tag::EC_CURVE,
-                        value: KPV::EcCurve(EcCurve::P_521),
-                    },
-                    KeyParameter {
-                        tag: Tag::PURPOSE,
-                        value: KPV::KeyPurpose(KeyPurpose::SIGN),
-                    },
-                    KeyParameter {
-                        tag: Tag::PURPOSE,
-                        value: KPV::KeyPurpose(KeyPurpose::VERIFY),
-                    },
-                    KeyParameter {
-                        tag: Tag::DIGEST,
-                        value: KPV::Digest(Digest::NONE),
-                    },
-                    KeyParameter {
-                        tag: Tag::KEY_SIZE,
-                        value: KPV::Integer(521),
-                    },
-                    KeyParameter {
-                        tag: Tag::ORIGIN,
-                        value: KPV::Origin(KeyOrigin::GENERATED),
-                    },
-                    KeyParameter {
-                        tag: Tag::OS_VERSION,
-                        value: KPV::Integer(110000),
-                    },
-                    KeyParameter {
-                        tag: Tag::OS_PATCHLEVEL,
-                        value: KPV::Integer(202107),
-                    },
+                    KeyParameter { tag: Tag::ALGORITHM, value: KPV::Algorithm(Algorithm::EC) },
+                    KeyParameter { tag: Tag::EC_CURVE, value: KPV::EcCurve(EcCurve::P_521) },
+                    KeyParameter { tag: Tag::PURPOSE, value: KPV::KeyPurpose(KeyPurpose::SIGN) },
+                    KeyParameter { tag: Tag::PURPOSE, value: KPV::KeyPurpose(KeyPurpose::VERIFY) },
+                    KeyParameter { tag: Tag::DIGEST, value: KPV::Digest(Digest::NONE) },
+                    KeyParameter { tag: Tag::KEY_SIZE, value: KPV::Integer(521) },
+                    KeyParameter { tag: Tag::ORIGIN, value: KPV::Origin(KeyOrigin::GENERATED) },
+                    KeyParameter { tag: Tag::OS_VERSION, value: KPV::Integer(110000) },
+                    KeyParameter { tag: Tag::OS_PATCHLEVEL, value: KPV::Integer(202107) },
                     KeyParameter {
                         tag: Tag::CREATION_DATETIME,
                         value: KPV::DateTime(1628871775000),
                     },
-                    KeyParameter {
-                        tag: Tag::VENDOR_PATCHLEVEL,
-                        value: KPV::Integer(20210705),
-                    },
-                    KeyParameter {
-                        tag: Tag::BOOT_PATCHLEVEL,
-                        value: KPV::Integer(0),
-                    },
+                    KeyParameter { tag: Tag::VENDOR_PATCHLEVEL, value: KPV::Integer(20210705) },
+                    KeyParameter { tag: Tag::BOOT_PATCHLEVEL, value: KPV::Integer(0) },
                 ],
             },
             Some(KeyFormat::PKCS8),
@@ -268,54 +202,21 @@ fn test_key_new_from_serialized() {
                 .unwrap(),
                 hw_enforced: vec![],
                 sw_enforced: vec![
-                    KeyParameter {
-                        tag: Tag::ALGORITHM,
-                        value: KPV::Algorithm(Algorithm::HMAC),
-                    },
-                    KeyParameter {
-                        tag: Tag::KEY_SIZE,
-                        value: KPV::Integer(440),
-                    },
-                    KeyParameter {
-                        tag: Tag::PURPOSE,
-                        value: KPV::KeyPurpose(KeyPurpose::SIGN),
-                    },
-                    KeyParameter {
-                        tag: Tag::PURPOSE,
-                        value: KPV::KeyPurpose(KeyPurpose::VERIFY),
-                    },
-                    KeyParameter {
-                        tag: Tag::DIGEST,
-                        value: KPV::Digest(Digest::SHA_2_256),
-                    },
-                    KeyParameter {
-                        tag: Tag::MIN_MAC_LENGTH,
-                        value: KPV::Integer(256),
-                    },
-                    KeyParameter {
-                        tag: Tag::ORIGIN,
-                        value: KPV::Origin(KeyOrigin::GENERATED),
-                    },
-                    KeyParameter {
-                        tag: Tag::OS_VERSION,
-                        value: KPV::Integer(110000),
-                    },
-                    KeyParameter {
-                        tag: Tag::OS_PATCHLEVEL,
-                        value: KPV::Integer(202107),
-                    },
+                    KeyParameter { tag: Tag::ALGORITHM, value: KPV::Algorithm(Algorithm::HMAC) },
+                    KeyParameter { tag: Tag::KEY_SIZE, value: KPV::Integer(440) },
+                    KeyParameter { tag: Tag::PURPOSE, value: KPV::KeyPurpose(KeyPurpose::SIGN) },
+                    KeyParameter { tag: Tag::PURPOSE, value: KPV::KeyPurpose(KeyPurpose::VERIFY) },
+                    KeyParameter { tag: Tag::DIGEST, value: KPV::Digest(Digest::SHA_2_256) },
+                    KeyParameter { tag: Tag::MIN_MAC_LENGTH, value: KPV::Integer(256) },
+                    KeyParameter { tag: Tag::ORIGIN, value: KPV::Origin(KeyOrigin::GENERATED) },
+                    KeyParameter { tag: Tag::OS_VERSION, value: KPV::Integer(110000) },
+                    KeyParameter { tag: Tag::OS_PATCHLEVEL, value: KPV::Integer(202107) },
                     KeyParameter {
                         tag: Tag::CREATION_DATETIME,
                         value: KPV::DateTime(1628871776000),
                     },
-                    KeyParameter {
-                        tag: Tag::VENDOR_PATCHLEVEL,
-                        value: KPV::Integer(20210705),
-                    },
-                    KeyParameter {
-                        tag: Tag::BOOT_PATCHLEVEL,
-                        value: KPV::Integer(0),
-                    },
+                    KeyParameter { tag: Tag::VENDOR_PATCHLEVEL, value: KPV::Integer(20210705) },
+                    KeyParameter { tag: Tag::BOOT_PATCHLEVEL, value: KPV::Integer(0) },
                 ],
             },
             Some(KeyFormat::RAW),
@@ -409,58 +310,22 @@ fn test_key_new_from_serialized() {
                 .unwrap(),
                 hw_enforced: vec![],
                 sw_enforced: vec![
-                    KeyParameter {
-                        tag: Tag::ALGORITHM,
-                        value: KPV::Algorithm(Algorithm::RSA),
-                    },
-                    KeyParameter {
-                        tag: Tag::KEY_SIZE,
-                        value: KPV::Integer(2048),
-                    },
-                    KeyParameter {
-                        tag: Tag::RSA_PUBLIC_EXPONENT,
-                        value: KPV::LongInteger(65537),
-                    },
-                    KeyParameter {
-                        tag: Tag::PURPOSE,
-                        value: KPV::KeyPurpose(KeyPurpose::SIGN),
-                    },
-                    KeyParameter {
-                        tag: Tag::PURPOSE,
-                        value: KPV::KeyPurpose(KeyPurpose::VERIFY),
-                    },
-                    KeyParameter {
-                        tag: Tag::DIGEST,
-                        value: KPV::Digest(Digest::NONE),
-                    },
-                    KeyParameter {
-                        tag: Tag::PADDING,
-                        value: KPV::PaddingMode(PaddingMode::NONE),
-                    },
-                    KeyParameter {
-                        tag: Tag::ORIGIN,
-                        value: KPV::Origin(KeyOrigin::GENERATED),
-                    },
-                    KeyParameter {
-                        tag: Tag::OS_VERSION,
-                        value: KPV::Integer(110000),
-                    },
-                    KeyParameter {
-                        tag: Tag::OS_PATCHLEVEL,
-                        value: KPV::Integer(202107),
-                    },
+                    KeyParameter { tag: Tag::ALGORITHM, value: KPV::Algorithm(Algorithm::RSA) },
+                    KeyParameter { tag: Tag::KEY_SIZE, value: KPV::Integer(2048) },
+                    KeyParameter { tag: Tag::RSA_PUBLIC_EXPONENT, value: KPV::LongInteger(65537) },
+                    KeyParameter { tag: Tag::PURPOSE, value: KPV::KeyPurpose(KeyPurpose::SIGN) },
+                    KeyParameter { tag: Tag::PURPOSE, value: KPV::KeyPurpose(KeyPurpose::VERIFY) },
+                    KeyParameter { tag: Tag::DIGEST, value: KPV::Digest(Digest::NONE) },
+                    KeyParameter { tag: Tag::PADDING, value: KPV::PaddingMode(PaddingMode::NONE) },
+                    KeyParameter { tag: Tag::ORIGIN, value: KPV::Origin(KeyOrigin::GENERATED) },
+                    KeyParameter { tag: Tag::OS_VERSION, value: KPV::Integer(110000) },
+                    KeyParameter { tag: Tag::OS_PATCHLEVEL, value: KPV::Integer(202107) },
                     KeyParameter {
                         tag: Tag::CREATION_DATETIME,
                         value: KPV::DateTime(1628871769000),
                     },
-                    KeyParameter {
-                        tag: Tag::VENDOR_PATCHLEVEL,
-                        value: KPV::Integer(20210705),
-                    },
-                    KeyParameter {
-                        tag: Tag::BOOT_PATCHLEVEL,
-                        value: KPV::Integer(0),
-                    },
+                    KeyParameter { tag: Tag::VENDOR_PATCHLEVEL, value: KPV::Integer(20210705) },
+                    KeyParameter { tag: Tag::BOOT_PATCHLEVEL, value: KPV::Integer(0) },
                 ],
             },
             // No support for RSA keys in export_key().
@@ -537,12 +402,7 @@ fn test_pkcs8_wrap_key_p256() {
     ))
     .unwrap();
     let got = pkcs8_wrap_nist_key(&input, EcCurve::P_256).unwrap();
-    assert_eq!(
-        hex::encode(got),
-        hex::encode(want),
-        " for input {}",
-        hex::encode(input)
-    );
+    assert_eq!(hex::encode(got), hex::encode(want), " for input {}", hex::encode(input));
 }
 
 #[test]
@@ -585,10 +445,5 @@ fn test_pkcs8_wrap_key_p521() {
     ))
     .unwrap();
     let got = pkcs8_wrap_nist_key(&input, EcCurve::P_521).unwrap();
-    assert_eq!(
-        hex::encode(got),
-        hex::encode(want),
-        " for input {}",
-        hex::encode(input)
-    );
+    assert_eq!(hex::encode(got), hex::encode(want), " for input {}", hex::encode(input));
 }

@@ -17,21 +17,16 @@ impl Drop for TempConfigPath {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
         if let (Some(parent), Some(file_name)) = (self.0.parent(), self.0.file_name()) {
-            let temp = parent.join(format!(
-                ".{}.tmp-{}",
-                file_name.to_string_lossy(),
-                std::process::id()
-            ));
+            let temp =
+                parent.join(format!(".{}.tmp-{}", file_name.to_string_lossy(), std::process::id()));
             let _ = fs::remove_file(temp);
         }
     }
 }
 
 fn temp_config_path(name: &str) -> TempConfigPath {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time should move forward")
-        .as_nanos();
+    let unique =
+        SystemTime::now().duration_since(UNIX_EPOCH).expect("time should move forward").as_nanos();
     TempConfigPath(std::env::temp_dir().join(format!("omk-injector-{name}-{unique}.toml")))
 }
 
@@ -95,10 +90,7 @@ get_supplementary_attestation_info = true
     )
     .expect("config should parse");
 
-    assert_eq!(
-        parsed.scoop,
-        vec!["com.example.app".to_string(), "com.other.app".to_string()]
-    );
+    assert_eq!(parsed.scoop, vec!["com.example.app".to_string(), "com.other.app".to_string()]);
     assert_eq!(parsed.main.log_level_filter(), LevelFilter::Trace);
     assert!(!parsed.main.enabled);
     assert_eq!(
@@ -146,15 +138,11 @@ allow_packages = ["com.legacy.app"]
 
 #[test]
 fn rendered_config_uses_new_scoop_format() {
-    let mut config = InjectorConfig {
-        scoop: vec!["com.example.app".to_string()],
-        ..Default::default()
-    };
+    let mut config =
+        InjectorConfig { scoop: vec!["com.example.app".to_string()], ..Default::default() };
     let mut table = toml::Table::new();
     table.insert("enabled".to_string(), toml::Value::Boolean(true));
-    config
-        .scoop_details
-        .insert("com.example.app".to_string(), table);
+    config.scoop_details.insert("com.example.app".to_string(), table);
 
     let rendered = render_config(&config).expect("config should render");
     assert!(rendered.contains("scoop = ["));
@@ -181,10 +169,7 @@ fn missing_config_is_seeded_but_invalid_startup_config_is_untouched() {
     fs::write(&*path, invalid).expect("invalid config should be written");
 
     let loaded = load_or_seed(&path, LoadContext::Startup).unwrap();
-    assert!(
-        !loaded.main.enabled,
-        "invalid startup config must disable injection"
-    );
+    assert!(!loaded.main.enabled, "invalid startup config must disable injection");
     assert_eq!(fs::read_to_string(&*path).unwrap(), invalid);
     assert!(!PathBuf::from(format!("{}.bak", path.display())).exists());
 }
@@ -209,10 +194,7 @@ fn v0_config_migrates_through_public_scoop_syntax_and_preserves_mode() {
     );
 
     let migrated = fs::read_to_string(&*path).unwrap();
-    assert_eq!(
-        migrated,
-        v0.replacen('\u{feff}', "\u{feff}version = 1\r\n", 1)
-    );
+    assert_eq!(migrated, v0.replacen('\u{feff}', "\u{feff}version = 1\r\n", 1));
     assert_eq!(fs::metadata(&*path).unwrap().mode() & 0o777, 0o640);
 }
 
@@ -270,9 +252,7 @@ fn replace_save_retry_only_retries_read_failures() {
             attempts += 1;
             match attempts {
                 1 => Err(LoadError::Io(io::Error::from(io::ErrorKind::NotFound))),
-                2 => Err(LoadError::Io(io::Error::from(
-                    io::ErrorKind::PermissionDenied,
-                ))),
+                2 => Err(LoadError::Io(io::Error::from(io::ErrorKind::PermissionDenied))),
                 _ => Ok(InjectorConfig::default()),
             }
         },
@@ -283,9 +263,7 @@ fn replace_save_retry_only_retries_read_failures() {
     assert_eq!(loaded.retries, 2);
     assert_eq!(attempts, 3);
     assert_eq!(sleeps.len(), 2);
-    assert!(sleeps
-        .iter()
-        .all(|duration| *duration == REPLACE_SAVE_RETRY_INTERVAL));
+    assert!(sleeps.iter().all(|duration| *duration == REPLACE_SAVE_RETRY_INTERVAL));
 
     let path = temp_config_path("replace-save-parse");
     let mut sleeps = Vec::new();

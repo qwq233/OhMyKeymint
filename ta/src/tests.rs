@@ -99,22 +99,12 @@ fn test_secure_key_wrapper() {
     let encoded_bytes = hex::decode(encoded_str).unwrap();
     let secure_key_wrapper = SecureKeyWrapper::from_der(&encoded_bytes).unwrap();
     assert_eq!(secure_key_wrapper.version, 0);
-    let key_format: KeyFormat = secure_key_wrapper
-        .key_description
-        .key_format
-        .try_into()
-        .unwrap();
+    let key_format: KeyFormat = secure_key_wrapper.key_description.key_format.try_into().unwrap();
     assert_eq!(KeyFormat::Raw, key_format);
     let authz = secure_key_wrapper.key_description.key_params.auths;
     let purpose_values: Vec<KeyPurpose> = authz
         .iter()
-        .filter_map(|param| {
-            if let KeyParam::Purpose(v) = param {
-                Some(*v)
-            } else {
-                None
-            }
-        })
+        .filter_map(|param| if let KeyParam::Purpose(v) = param { Some(*v) } else { None })
         .collect();
     assert_eq!(purpose_values.len(), 2);
     assert!(purpose_values.contains(&KeyPurpose::Encrypt));
@@ -220,10 +210,7 @@ fn test_key_description_encode_decode() {
     let secure_key_wrapper = SecureKeyWrapper::from_der(&encoded_bytes).unwrap();
     let key_description = secure_key_wrapper.key_description;
     let encoded_key_description_got = key_description.to_der().unwrap();
-    assert_eq!(
-        hex::encode(encoded_key_description_got),
-        encoded_key_description_want
-    );
+    assert_eq!(hex::encode(encoded_key_description_got), encoded_key_description_want);
 }
 
 #[test]
@@ -232,17 +219,11 @@ fn test_split_rsp_invalid_input() {
     let rsp = vec![];
     let result = split_rsp(&rsp, 5);
     assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err().kind(),
-        ErrorKind::Hal(ErrorCode::InvalidArgument, _)
-    ));
+    assert!(matches!(result.unwrap_err().kind(), ErrorKind::Hal(ErrorCode::InvalidArgument, _)));
 
     let rsp = vec![0x82, 0x21, 0x80];
     let result = split_rsp(&rsp, 1);
-    assert!(matches!(
-        result.unwrap_err().kind(),
-        ErrorKind::Hal(ErrorCode::InvalidArgument, _)
-    ));
+    assert!(matches!(result.unwrap_err().kind(), ErrorKind::Hal(ErrorCode::InvalidArgument, _)));
 }
 
 #[test]
@@ -251,10 +232,7 @@ fn test_split_rsp_smaller_input() {
     let rsp = vec![0x82, 0x13, 0x82, 0x80, 0x80];
     let result = split_rsp(&rsp, 20).expect("result should not be error");
     assert_eq!(result.len(), 1);
-    let inner_msg = result
-        .first()
-        .expect("single message is expected")
-        .as_slice();
+    let inner_msg = result.first().expect("single message is expected").as_slice();
     assert_eq!(inner_msg.len(), 6);
     let marker = inner_msg[0];
     assert_eq!(marker, NEXT_MESSAGE_SIGNAL_FALSE);
@@ -268,10 +246,7 @@ fn test_split_rsp_allowed_size_input() {
     let rsp = vec![0x82, 0x13, 0x82, 0x80, 0x80];
     let result = split_rsp(&rsp, 6).expect("result should not be error");
     assert_eq!(result.len(), 1);
-    let inner_msg = result
-        .first()
-        .expect("single message is expected")
-        .as_slice();
+    let inner_msg = result.first().expect("single message is expected").as_slice();
     assert_eq!(inner_msg.len(), 6);
     let marker = inner_msg[0];
     assert_eq!(marker, NEXT_MESSAGE_SIGNAL_FALSE);
@@ -286,19 +261,13 @@ fn test_split_rsp_max_size_input() {
     let result = split_rsp(&rsp, 6).expect("result should not be error");
     assert_eq!(result.len(), 2);
 
-    let inner_msg1 = result
-        .first()
-        .expect("a message is expected at index 0")
-        .as_slice();
+    let inner_msg1 = result.first().expect("a message is expected at index 0").as_slice();
     assert_eq!(inner_msg1.len(), 6);
     let marker1 = inner_msg1[0];
     assert_eq!(marker1, NEXT_MESSAGE_SIGNAL_TRUE);
     assert_eq!(&inner_msg1[1..], &rsp[..5]);
 
-    let inner_msg2 = result
-        .get(1)
-        .expect("a message is expected at index 1")
-        .as_slice();
+    let inner_msg2 = result.get(1).expect("a message is expected at index 1").as_slice();
     assert_eq!(inner_msg2.len(), 2);
     let marker2 = inner_msg2[0];
     assert_eq!(marker2, NEXT_MESSAGE_SIGNAL_FALSE);
@@ -318,30 +287,21 @@ fn test_split_rsp_larger_input_perfect_split() {
     let result = split_rsp(&rsp, 6).expect("result should not be error");
     assert_eq!(result.len(), 3);
 
-    let inner_msg1 = result
-        .first()
-        .expect("a message is expected at index 0")
-        .as_slice();
+    let inner_msg1 = result.first().expect("a message is expected at index 0").as_slice();
     assert_eq!(inner_msg1.len(), 6);
     let marker1 = inner_msg1[0];
     assert_eq!(marker1, NEXT_MESSAGE_SIGNAL_TRUE);
     let msg1 = &inner_msg1[1..];
     assert_eq!(msg1, rsp1);
 
-    let inner_msg2 = result
-        .get(1)
-        .expect("a message is expected at index 1")
-        .as_slice();
+    let inner_msg2 = result.get(1).expect("a message is expected at index 1").as_slice();
     assert_eq!(inner_msg2.len(), 6);
     let marker2 = inner_msg2[0];
     assert_eq!(marker2, NEXT_MESSAGE_SIGNAL_TRUE);
     let msg2 = &inner_msg2[1..];
     assert_eq!(msg2, rsp2);
 
-    let inner_msg3 = result
-        .get(2)
-        .expect("a message is expected at index 2")
-        .as_slice();
+    let inner_msg3 = result.get(2).expect("a message is expected at index 2").as_slice();
     assert_eq!(inner_msg3.len(), 6);
     let marker3 = inner_msg3[0];
     assert_eq!(marker3, NEXT_MESSAGE_SIGNAL_FALSE);
@@ -362,30 +322,21 @@ fn test_split_rsp_larger_input_imperfect_split() {
     let result = split_rsp(&rsp, 6).expect("result should not be error");
     assert_eq!(result.len(), 3);
 
-    let inner_msg1 = result
-        .first()
-        .expect("a message is expected at index 0")
-        .as_slice();
+    let inner_msg1 = result.first().expect("a message is expected at index 0").as_slice();
     assert_eq!(inner_msg1.len(), 6);
     let marker1 = inner_msg1[0];
     assert_eq!(marker1, NEXT_MESSAGE_SIGNAL_TRUE);
     let msg1 = &inner_msg1[1..];
     assert_eq!(msg1, rsp1);
 
-    let inner_msg2 = result
-        .get(1)
-        .expect("a message is expected at index 1")
-        .as_slice();
+    let inner_msg2 = result.get(1).expect("a message is expected at index 1").as_slice();
     assert_eq!(inner_msg2.len(), 6);
     let marker2 = inner_msg2[0];
     assert_eq!(marker2, NEXT_MESSAGE_SIGNAL_TRUE);
     let msg2 = &inner_msg2[1..];
     assert_eq!(msg2, rsp2);
 
-    let inner_msg3 = result
-        .get(2)
-        .expect("a message is expected at index 2")
-        .as_slice();
+    let inner_msg3 = result.get(2).expect("a message is expected at index 2").as_slice();
     assert_eq!(inner_msg3.len(), 2);
     let marker3 = inner_msg3[0];
     assert_eq!(marker3, NEXT_MESSAGE_SIGNAL_FALSE);

@@ -36,10 +36,7 @@ fn private_key_from_der_for_group(
     der: &[u8],
     group: &openssl::ec::EcGroupRef,
 ) -> Result<openssl::ec::EcKey<openssl::pkey::Private>, openssl::error::ErrorStack> {
-    let mut cbs = ffi::CBS {
-        data: der.as_ptr(),
-        len: der.len(),
-    };
+    let mut cbs = ffi::CBS { data: der.as_ptr(), len: der.len() };
     // Safety: cbs references `der` for this call, `group` is valid, and a successful result is
     // transferred into the returned EcKey.
     let key = unsafe { ffi::EC_KEY_parse_private_key(&mut cbs, group.as_ptr()) };
@@ -64,9 +61,7 @@ pub struct BoringEc {
 impl core::default::Default for BoringEc {
     fn default() -> Self {
         ffi::init();
-        Self {
-            _priv: core::marker::PhantomData,
-        }
+        Self { _priv: core::marker::PhantomData }
     }
 }
 
@@ -87,11 +82,7 @@ impl crypto::Ec for BoringEc {
             ec::NistCurve::P384 => Key::P384(nist_key),
             ec::NistCurve::P521 => Key::P521(nist_key),
         };
-        Ok(crypto::KeyMaterial::Ec(
-            curve.into(),
-            CurveType::Nist,
-            key.into(),
-        ))
+        Ok(crypto::KeyMaterial::Ec(curve.into(), CurveType::Nist, key.into()))
     }
 
     fn generate_ed25519_key(
@@ -102,18 +93,10 @@ impl crypto::Ec for BoringEc {
         let pkey = ossl!(openssl::pkey::PKey::generate_ed25519())?;
         let key = ossl!(pkey.raw_private_key())?;
         let key: [u8; ec::CURVE25519_PRIV_KEY_LEN] = key.try_into().map_err(|e| {
-            km_err!(
-                UnsupportedKeySize,
-                "generated Ed25519 key of unexpected size: {:?}",
-                e
-            )
+            km_err!(UnsupportedKeySize, "generated Ed25519 key of unexpected size: {:?}", e)
         })?;
         let key = Key::Ed25519(ec::Ed25519Key(key));
-        Ok(crypto::KeyMaterial::Ec(
-            EcCurve::Curve25519,
-            CurveType::EdDsa,
-            key.into(),
-        ))
+        Ok(crypto::KeyMaterial::Ec(EcCurve::Curve25519, CurveType::EdDsa, key.into()))
     }
 
     fn generate_x25519_key(
@@ -124,18 +107,10 @@ impl crypto::Ec for BoringEc {
         let pkey = ossl!(openssl::pkey::PKey::generate_x25519())?;
         let key = ossl!(pkey.raw_private_key())?;
         let key: [u8; ec::CURVE25519_PRIV_KEY_LEN] = key.try_into().map_err(|e| {
-            km_err!(
-                UnsupportedKeySize,
-                "generated X25519 key of unexpected size: {:?}",
-                e
-            )
+            km_err!(UnsupportedKeySize, "generated X25519 key of unexpected size: {:?}", e)
         })?;
         let key = Key::X25519(ec::X25519Key(key));
-        Ok(crypto::KeyMaterial::Ec(
-            EcCurve::Curve25519,
-            CurveType::Xdh,
-            key.into(),
-        ))
+        Ok(crypto::KeyMaterial::Ec(EcCurve::Curve25519, CurveType::Xdh, key.into()))
     }
 
     fn nist_public_key(&self, key: &ec::NistKey, curve: ec::NistCurve) -> Result<Vec<u8>, Error> {
@@ -184,11 +159,7 @@ impl crypto::Ec for BoringEc {
         //
         // Round up a bit just in case.
         let max_size = 164;
-        Ok(Box::new(BoringEcAgreeOperation {
-            key,
-            pending_input: Vec::new(),
-            max_size,
-        }))
+        Ok(Box::new(BoringEcAgreeOperation { key, pending_input: Vec::new(), max_size }))
     }
 
     fn begin_sign(
@@ -202,18 +173,15 @@ impl crypto::Ec for BoringEc {
             Key::P224(key) | Key::P256(key) | Key::P384(key) | Key::P521(key) => {
                 let curve = ec::NistCurve::try_from(curve)?;
                 if let Some(digest) = digest_into_openssl(digest) {
-                    Ok(Box::new(BoringEcDigestSignOperation::new(
-                        key, curve, digest,
-                    )?))
+                    Ok(Box::new(BoringEcDigestSignOperation::new(key, curve, digest)?))
                 } else {
                     Ok(Box::new(BoringEcUndigestSignOperation::new(key, curve)?))
                 }
             }
             Key::Ed25519(key) => Ok(Box::new(BoringEd25519SignOperation::new(key)?)),
-            Key::X25519(_) => Err(km_err!(
-                IncompatibleAlgorithm,
-                "X25519 key not valid for signing"
-            )),
+            Key::X25519(_) => {
+                Err(km_err!(IncompatibleAlgorithm, "X25519 key not valid for signing"))
+            }
         }
     }
 }
@@ -237,9 +205,7 @@ impl crypto::AccumulatingOperation for BoringEcAgreeOperation {
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Error> {
-        let peer_key = ossl!(openssl::pkey::PKey::public_key_from_der(
-            &self.pending_input
-        ))?;
+        let peer_key = ossl!(openssl::pkey::PKey::public_key_from_der(&self.pending_input))?;
         match &self.key {
             Key::P224(key) | Key::P256(key) | Key::P384(key) | Key::P521(key) => {
                 let group = nist_key_to_group(&self.key)?;
@@ -255,9 +221,8 @@ impl crypto::AccumulatingOperation for BoringEcAgreeOperation {
                 // The BoringSSL `EVP_PKEY` interface does not support X25519, so need to invoke the
                 // `ffi:X25519()` method directly. First need to extract the raw peer key from the
                 // `SubjectPublicKeyInfo` it arrives in.
-                let peer_key = ossl!(openssl::pkey::PKey::public_key_from_der(
-                    &self.pending_input
-                ))?;
+                let peer_key =
+                    ossl!(openssl::pkey::PKey::public_key_from_der(&self.pending_input))?;
                 let peer_key_type = peer_key.id();
                 if peer_key_type != openssl::pkey::Id::X25519 {
                     return Err(km_err!(
@@ -279,11 +244,7 @@ impl crypto::AccumulatingOperation for BoringEcAgreeOperation {
                 // Safety: all pointer arguments need to point to 32-byte memory areas, enforced
                 // above and in the definition of [`ec::X25519Key`].
                 let result = unsafe {
-                    ffi::X25519(
-                        sig.as_mut_ptr(),
-                        &key.0 as *const u8,
-                        peer_key_data.as_ptr(),
-                    )
+                    ffi::X25519(sig.as_mut_ptr(), &key.0 as *const u8, peer_key_data.as_ptr())
                 };
                 if result == 1 {
                     Ok(sig)
@@ -291,10 +252,9 @@ impl crypto::AccumulatingOperation for BoringEcAgreeOperation {
                     Err(super::openssl_last_err())
                 }
             }
-            Key::Ed25519(_) => Err(km_err!(
-                IncompatibleAlgorithm,
-                "Ed25519 key not valid for agreement"
-            )),
+            Key::Ed25519(_) => {
+                Err(km_err!(IncompatibleAlgorithm, "Ed25519 key not valid for agreement"))
+            }
         }
     }
 }
@@ -360,11 +320,7 @@ impl crypto::AccumulatingOperation for BoringEcDigestSignOperation {
     fn update(&mut self, data: &[u8]) -> Result<(), Error> {
         // Safety: `data` is a valid slice, and `self.md_ctx` is non-`nullptr` and valid.
         unsafe {
-            cvt(ffi::EVP_DigestUpdate(
-                self.md_ctx.0,
-                data.as_ptr() as *const _,
-                data.len(),
-            ))?;
+            cvt(ffi::EVP_DigestUpdate(self.md_ctx.0, data.as_ptr() as *const _, data.len()))?;
         }
         Ok(())
     }
@@ -373,11 +329,7 @@ impl crypto::AccumulatingOperation for BoringEcDigestSignOperation {
         let mut max_siglen = 0;
         // Safety: `self.md_ctx` is non-`nullptr` and valid.
         unsafe {
-            cvt(ffi::EVP_DigestSignFinal(
-                self.md_ctx.0,
-                ptr::null_mut(),
-                &mut max_siglen,
-            ))?;
+            cvt(ffi::EVP_DigestSignFinal(self.md_ctx.0, ptr::null_mut(), &mut max_siglen))?;
         }
         let mut buf = vec_try![0; max_siglen]?;
         let mut actual_siglen = max_siglen;
@@ -407,11 +359,7 @@ impl BoringEcUndigestSignOperation {
         let group = nist_curve_to_group(curve)?;
         let ec_key = ossl!(private_key_from_der_for_group(&key.0, group.as_ref()))?;
         // Input to an undigested EC signing operation must be smaller than key size.
-        Ok(Self {
-            ec_key,
-            pending_input: Vec::new(),
-            max_size: curve.coord_len(),
-        })
+        Ok(Self { ec_key, pending_input: Vec::new(), max_size: curve.coord_len() })
     }
 }
 
@@ -430,10 +378,7 @@ impl crypto::AccumulatingOperation for BoringEcUndigestSignOperation {
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Error> {
         // BoringSSL doesn't support `EVP_PKEY` use without digest, so use low-level ECDSA
         // functionality.
-        let sig = ossl!(openssl::ecdsa::EcdsaSig::sign(
-            &self.pending_input,
-            &self.ec_key
-        ))?;
+        let sig = ossl!(openssl::ecdsa::EcdsaSig::sign(&self.pending_input, &self.ec_key))?;
         let sig = ossl!(sig.to_der())?;
         Ok(sig)
     }
@@ -451,10 +396,7 @@ impl BoringEd25519SignOperation {
             &key.0,
             openssl::pkey::Id::ED25519
         ))?;
-        Ok(Self {
-            pkey,
-            pending_input: Vec::new(),
-        })
+        Ok(Self { pkey, pending_input: Vec::new() })
     }
 }
 
@@ -498,10 +440,7 @@ fn nist_key_to_group(key: &ec::Key) -> Result<openssl::ec::EcGroup, Error> {
         ec::Key::P384(_) => Nid::SECP384R1,
         ec::Key::P521(_) => Nid::SECP521R1,
         ec::Key::Ed25519(_) | ec::Key::X25519(_) => {
-            return Err(km_err!(
-                UnsupportedEcCurve,
-                "no NIST group for curve25519 key"
-            ))
+            return Err(km_err!(UnsupportedEcCurve, "no NIST group for curve25519 key"))
         }
     })
     .map_err(openssl_err!("failed to determine EcGroup"))

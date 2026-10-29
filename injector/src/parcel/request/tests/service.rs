@@ -12,11 +12,7 @@ fn update_subcomponent_preserves_empty_optional_blobs() {
         },
     )
     .expect("empty updateSubcomponent blobs should parse");
-    let ParsedServiceRequest::UpdateSubcomponent {
-        public_cert,
-        certificate_chain,
-        ..
-    } = parsed
+    let ParsedServiceRequest::UpdateSubcomponent { public_cert, certificate_chain, .. } = parsed
     else {
         panic!("updateSubcomponent request should parse");
     };

@@ -53,9 +53,7 @@ fn authorization_accepts_empty_authenticator_types() {
     let parsed =
         parse_authorization_request_as_method(AuthorizationMethod::GetLastAuthTime, |parcel| {
             parcel.write(&0i64).unwrap();
-            parcel
-                .write(&Vec::<HardwareAuthenticatorType>::new())
-                .unwrap();
+            parcel.write(&Vec::<HardwareAuthenticatorType>::new()).unwrap();
         })
         .expect("empty getLastAuthTime authTypes should parse");
     let ParsedAuthorizationRequest::GetLastAuthTime { auth_types, .. } = parsed else {
@@ -69,9 +67,7 @@ fn authorization_request_accepts_trailing_payload() {
     let parsed =
         parse_authorization_request_as_method(AuthorizationMethod::GetLastAuthTime, |parcel| {
             parcel.write(&0i64).unwrap();
-            parcel
-                .write(&Vec::<HardwareAuthenticatorType>::new())
-                .unwrap();
+            parcel.write(&Vec::<HardwareAuthenticatorType>::new()).unwrap();
             parcel.write(&0x4f4d4bi32).unwrap();
         })
         .expect("authorization mirror request with trailing payload should parse");

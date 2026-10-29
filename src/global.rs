@@ -67,10 +67,7 @@ pub fn create_thread_local_db() -> KeymasterDb {
     let mut db = match result {
         Ok(db) => db,
         Err(e) => {
-            log::error!(
-                "Failed to open Keystore database at {:?}: {e:?}",
-                db_root_path()
-            );
+            log::error!("Failed to open Keystore database at {:?}: {e:?}", db_root_path());
             log::error!("Has /data been mounted correctly?");
             panic!("Failed to open database for Keystore, cannot continue: {e:?}")
         }
@@ -79,9 +76,8 @@ pub fn create_thread_local_db() -> KeymasterDb {
     DB_INIT.call_once(|| {
         log::info!("Touching Keystore 2.0 database for this first time since boot.");
         log::info!("Calling cleanup_leftovers({DB_ORPHAN_LIMIT}).");
-        let n = db
-            .cleanup_leftovers(DB_ORPHAN_LIMIT)
-            .expect("Failed to cleanup database on startup");
+        let n =
+            db.cleanup_leftovers(DB_ORPHAN_LIMIT).expect("Failed to cleanup database on startup");
         if n != 0 {
             log::info!(
                 "Cleaned up {n} failed entries, indicating keystore crash on key generation"
@@ -126,15 +122,11 @@ fn watch_for_boot_completed() -> Result<()> {
     let watcher =
         PropertyWatcher::new("sys.boot_completed").context(err!("PropertyWatcher::new failed"))?;
     loop {
-        let value = watcher
-            .read()
-            .context(err!("Failed to read sys.boot_completed"))?;
+        let value = watcher.read().context(err!("Failed to read sys.boot_completed"))?;
         if value == "1" {
             return Ok(());
         }
-        watcher
-            .wait(Some(&value))
-            .context(err!("Failed to wait for sys.boot_completed"))?;
+        watcher.wait(Some(&value)).context(err!("Failed to wait for sys.boot_completed"))?;
     }
 }
 

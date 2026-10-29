@@ -55,10 +55,7 @@ fn parse_pkcs8_seed() {
     let key = import_pkcs8_key(&key_data).expect("PKCS8 parse failed");
     assert_eq!(
         key,
-        KeyMaterial::MlDsa(
-            MlDsaVariant::MlDsa65,
-            OpaqueOr::Explicit(Key::MlDsa65(SEED))
-        )
+        KeyMaterial::MlDsa(MlDsaVariant::MlDsa65, OpaqueOr::Explicit(Key::MlDsa65(SEED)))
     );
 }
 
@@ -73,22 +70,10 @@ fn parse_pkcs8_both_fail() {
 fn parse_pkcs8_failures() {
     let tests = [
         // Invalid seed format
-        concat!(
-            "801f",
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e"
-        ), // too short
-        concat!(
-            "8020",
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e"
-        ), // len mismatch
-        concat!(
-            "8021",
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-        ), // len mismatch
-        concat!(
-            "8021",
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
-        ), // too long
+        concat!("801f", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e"), // too short
+        concat!("8020", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e"), // len mismatch
+        concat!("8021", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), // len mismatch
+        concat!("8021", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"), // too long
         "8000", // empty
         // Invalid both format
         concat!(
@@ -104,10 +89,7 @@ fn parse_pkcs8_failures() {
             "0401aa"
         ),
         // Unexpected OCTET STRING (e.g. an expanded key)
-        concat!(
-            "0420",
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-        ),
+        concat!("0420", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
     ];
     for hex_data in tests {
         let data = hex::decode(hex_data).unwrap();

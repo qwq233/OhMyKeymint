@@ -20,14 +20,8 @@ use std::vec;
 #[test]
 fn test_characteristics_invalid() {
     let tests = vec![
-        (
-            vec![KeyParam::UsageCountLimit(42), KeyParam::UsageCountLimit(43)],
-            "duplicate value",
-        ),
-        (
-            vec![KeyParam::Nonce(vec![1, 2])],
-            "not a valid key characteristic",
-        ),
+        (vec![KeyParam::UsageCountLimit(42), KeyParam::UsageCountLimit(43)], "duplicate value"),
+        (vec![KeyParam::Nonce(vec![1, 2])], "not a valid key characteristic"),
     ];
     for (characteristics, msg) in tests {
         let result = crate::tag::characteristics_valid(&characteristics);
@@ -73,10 +67,7 @@ fn test_legacy_serialization() {
 fn test_copyable_tags() {
     for tag in UNPOLICED_COPYABLE_TAGS {
         let info = info(*tag).unwrap();
-        assert!(
-            info.user_can_specify.0,
-            "tag {tag:?} not listed as user-specifiable"
-        );
+        assert!(info.user_can_specify.0, "tag {tag:?} not listed as user-specifiable");
         assert!(
             info.characteristic == info::Characteristic::KeyMintEnforced
                 || info.characteristic == info::Characteristic::KeystoreEnforced
@@ -90,12 +81,7 @@ fn test_copyable_tags() {
 
 #[test]
 fn test_luhn_checksum() {
-    let tests = vec![
-        (0, 0),
-        (7992739871, 3),
-        (735423462345, 6),
-        (721367498765427, 4),
-    ];
+    let tests = vec![(0, 0), (7992739871, 3), (735423462345, 6), (721367498765427, 4)];
     for (input, want) in tests {
         let got = luhn_checksum(input);
         assert_eq!(got, want, "mismatch for input {input}");
@@ -113,10 +99,7 @@ fn test_increment_imei() {
         ("c328", ""),                 // Invalid UTF-8
         ("18446844073709551613", ""), // 20-digit and bigger than u64::MAX == 18_446_744_073_709_551_615
         // 721367498765404 => 721367498765412
-        (
-            "373231333637343938373635343034",
-            "373231333637343938373635343132",
-        ),
+        ("373231333637343938373635343034", "373231333637343938373635343132"),
         ("39393930", "3130303039"), // String gets longer
     ];
     for (input, want) in tests {

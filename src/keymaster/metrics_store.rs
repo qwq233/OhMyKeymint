@@ -178,10 +178,7 @@ impl MetricsStore {
                     },
                 )
             }
-            _ => Err(anyhow!(
-                "MetricsStore::get_atoms: Unrecognized AtomID {:?}",
-                atom_id
-            )),
+            _ => Err(anyhow!("MetricsStore::get_atoms: Unrecognized AtomID {:?}", atom_id)),
         }
     }
 
@@ -194,16 +191,13 @@ impl MetricsStore {
             *atom_count += 1;
         } else {
             // Insert an overflow atom
-            let overflow_atom_count_map = metrics_store_guard
-                .entry(AtomID::KEYSTORE2_ATOM_WITH_OVERFLOW)
-                .or_default();
+            let overflow_atom_count_map =
+                metrics_store_guard.entry(AtomID::KEYSTORE2_ATOM_WITH_OVERFLOW).or_default();
 
             if overflow_atom_count_map.len() < MetricsStore::SINGLE_ATOM_STORE_MAX_SIZE {
                 let overflow_atom = Keystore2AtomWithOverflow { atom_id };
                 let atom_count = overflow_atom_count_map
-                    .entry(KeystoreAtomPayload::Keystore2AtomWithOverflow(
-                        overflow_atom,
-                    ))
+                    .entry(KeystoreAtomPayload::Keystore2AtomWithOverflow(overflow_atom))
                     .or_insert(0);
                 *atom_count += 1;
             } else {
@@ -229,14 +223,9 @@ pub fn log_key_creation_event_stats<U>(
         key_creation_per_uid,
     ) = process_key_creation_event_stats(uid, sec_level, key_params, origin, result);
 
-    METRICS_STORE.insert_atom(
-        AtomID::KEY_CREATION_WITH_GENERAL_INFO,
-        key_creation_with_general_info,
-    );
-    METRICS_STORE.insert_atom(
-        AtomID::KEY_CREATION_WITH_AUTH_INFO,
-        key_creation_with_auth_info,
-    );
+    METRICS_STORE
+        .insert_atom(AtomID::KEY_CREATION_WITH_GENERAL_INFO, key_creation_with_general_info);
+    METRICS_STORE.insert_atom(AtomID::KEY_CREATION_WITH_AUTH_INFO, key_creation_with_auth_info);
     METRICS_STORE.insert_atom(
         AtomID::KEY_CREATION_WITH_PURPOSE_AND_MODES_INFO,
         key_creation_with_purpose_and_modes_info,
@@ -255,12 +244,7 @@ fn process_key_creation_event_stats<U>(
     key_params: &[KeyParameter],
     origin: KeyOrigin,
     result: &Result<U>,
-) -> (
-    KeystoreAtomPayload,
-    KeystoreAtomPayload,
-    KeystoreAtomPayload,
-    KeystoreAtomPayload,
-) {
+) -> (KeystoreAtomPayload, KeystoreAtomPayload, KeystoreAtomPayload, KeystoreAtomPayload) {
     // In the default atom objects, fields represented by bitmaps and i32 fields
     // will take 0, except error_code which defaults to 1 indicating NO_ERROR and key_size,
     // and auth_time_out which defaults to -1.
@@ -408,10 +392,8 @@ pub fn log_key_operation_event_stats(
         key_upgraded,
         is_attested,
     );
-    METRICS_STORE.insert_atom(
-        AtomID::KEY_OPERATION_WITH_GENERAL_INFO,
-        key_operation_with_general_info,
-    );
+    METRICS_STORE
+        .insert_atom(AtomID::KEY_OPERATION_WITH_GENERAL_INFO, key_operation_with_general_info);
     METRICS_STORE.insert_atom(
         AtomID::KEY_OPERATION_WITH_PURPOSE_AND_MODES_INFO,
         key_operation_with_purpose_and_modes_info,
@@ -432,16 +414,9 @@ fn process_key_operation_event_stats(
     op_outcome: &Outcome,
     key_upgraded: bool,
     is_attested: bool,
-) -> (
-    KeystoreAtomPayload,
-    KeystoreAtomPayload,
-    KeystoreAtomPayload,
-) {
+) -> (KeystoreAtomPayload, KeystoreAtomPayload, KeystoreAtomPayload) {
     let security_level = process_security_level(sec_level);
-    let key_operation_per_uid = KeyOperationPerUid {
-        uid,
-        security_level,
-    };
+    let key_operation_per_uid = KeyOperationPerUid { uid, security_level };
 
     let mut key_operation_with_general_info = KeyOperationWithGeneralInfo {
         outcome: MetricsOutcome::OUTCOME_UNSPECIFIED,
@@ -660,11 +635,10 @@ pub(crate) fn pull_storage_stats() -> Result<Vec<KeystoreAtom>> {
 fn pull_keys_per_uid() -> Result<Vec<KeystoreAtom>> {
     let counts = DB.with(|db| {
         let mut db = db.borrow_mut();
-        db.per_uid_counts(KEYS_PER_UID_MAX_UIDS, KEYS_PER_UID_MIN_KEY_COUNT)
-            .unwrap_or_else(|e| {
-                error!("pull_keys_per_uid: failed to retrieve top per-UID key counts: {e:?}");
-                Vec::new()
-            })
+        db.per_uid_counts(KEYS_PER_UID_MAX_UIDS, KEYS_PER_UID_MIN_KEY_COUNT).unwrap_or_else(|e| {
+            error!("pull_keys_per_uid: failed to retrieve top per-UID key counts: {e:?}");
+            Vec::new()
+        })
     });
     Ok(counts
         .into_iter()
@@ -674,10 +648,7 @@ fn pull_keys_per_uid() -> Result<Vec<KeystoreAtom>> {
                 i32::MAX
             });
             let s = KeysPerUid { uid, key_count };
-            KeystoreAtom {
-                payload: KeystoreAtomPayload::KeysPerUid(s),
-                ..Default::default()
-            }
+            KeystoreAtom { payload: KeystoreAtomPayload::KeysPerUid(s), ..Default::default() }
         })
         .collect())
 }
@@ -862,10 +833,7 @@ pub fn update_keystore_crash_count() {
         }
     };
 
-    if let Err(e) = std::fs::write(
-        KEYSTORE_CRASH_COUNT_PATH,
-        format!("{boot_id}\n{new_count}\n"),
-    ) {
+    if let Err(e) = std::fs::write(KEYSTORE_CRASH_COUNT_PATH, format!("{boot_id}\n{new_count}\n")) {
         error!("failed to write keystore crash count file: {e:?}");
     }
 }
@@ -903,9 +871,7 @@ fn parse_crash_count_record(record: &str, current_boot_id: &str) -> Result<Optio
         return Ok(None);
     }
 
-    let count = count
-        .parse::<i32>()
-        .context(ks_err!("Failed to parse crash count."))?;
+    let count = count.parse::<i32>().context(ks_err!("Failed to parse crash count."))?;
     if count < 0 {
         return Err(anyhow!("crash count is negative"));
     }
@@ -1220,12 +1186,7 @@ impl Summary for KeystoreAtomPayload {
     fn show(&self) -> String {
         match self {
             KeystoreAtomPayload::StorageStats(v) => {
-                format!(
-                    "{} sz={} unused={}",
-                    v.storage_type.show(),
-                    v.size,
-                    v.unused_size
-                )
+                format!("{} sz={} unused={}", v.storage_type.show(), v.size, v.unused_size)
             }
             KeystoreAtomPayload::KeyCreationWithGeneralInfo(v) => {
                 format!(

@@ -118,10 +118,7 @@ impl crypto::Aes for BoringAes {
 
         Ok(match dir {
             crypto::SymmetricOperation::Encrypt => Box::new({
-                BoringAesGcmEncryptOperation {
-                    mode,
-                    inner: BoringAesOperation { crypter },
-                }
+                BoringAesGcmEncryptOperation { mode, inner: BoringAesOperation { crypter } }
             }),
             crypto::SymmetricOperation::Decrypt => Box::new(BoringAesGcmDecryptOperation {
                 crypter,
@@ -143,10 +140,7 @@ impl crypto::EmittingOperation for BoringAesOperation {
         let out_len = self
             .crypter
             .update(data, &mut output)
-            .map_err(openssl_err!(
-                "update {} bytes from input failed",
-                data.len()
-            ))?;
+            .map_err(openssl_err!("update {} bytes from input failed", data.len()))?;
         output.truncate(out_len);
         Ok(output)
     }
@@ -187,10 +181,7 @@ impl crypto::EmittingOperation for BoringAesGcmEncryptOperation {
         self.inner
             .crypter
             .get_tag(&mut output[offset..offset + self.mode.tag_len()])
-            .map_err(openssl_err!(
-                "failed to get tag of len {}",
-                self.mode.tag_len()
-            ))?;
+            .map_err(openssl_err!("failed to get tag of len {}", self.mode.tag_len()))?;
         output.truncate(offset + self.mode.tag_len());
         Ok(output)
     }
@@ -238,10 +229,7 @@ impl crypto::EmittingOperation for BoringAesGcmDecryptOperation {
         if cipherable_from_pending > 0 {
             offset = self
                 .crypter
-                .update(
-                    &self.pending_input_tail[..cipherable_from_pending],
-                    &mut output,
-                )
+                .update(&self.pending_input_tail[..cipherable_from_pending], &mut output)
                 .map_err(openssl_err!(
                     "update {} bytes from pending failed",
                     cipherable_from_pending
@@ -251,10 +239,7 @@ impl crypto::EmittingOperation for BoringAesGcmDecryptOperation {
             let out_len = self
                 .crypter
                 .update(&data[..cipherable_from_data], &mut output[offset..])
-                .map_err(openssl_err!(
-                    "update {} bytes from input failed",
-                    cipherable_from_data
-                ))?;
+                .map_err(openssl_err!("update {} bytes from input failed", cipherable_from_data))?;
             offset += out_len;
         }
         output.truncate(offset);
@@ -262,8 +247,7 @@ impl crypto::EmittingOperation for BoringAesGcmDecryptOperation {
         // Reset `self.pending_input_tail` to the unused data.
         let leftover_pending = self.pending_input_tail.len() - cipherable_from_pending;
         self.pending_input_tail.resize(self.decrypt_tag_len, 0);
-        self.pending_input_tail
-            .copy_within(cipherable_from_pending.., 0);
+        self.pending_input_tail.copy_within(cipherable_from_pending.., 0);
         self.pending_input_tail[leftover_pending..].copy_from_slice(&data[cipherable_from_data..]);
 
         Ok(output)
@@ -279,12 +263,10 @@ impl crypto::EmittingOperation for BoringAesGcmDecryptOperation {
                 self.decrypt_tag_len
             ));
         }
-        self.crypter
-            .set_tag(&self.pending_input_tail)
-            .map_err(openssl_err!(
-                "failed to set {} bytes of tag",
-                self.pending_input_tail.len()
-            ))?;
+        self.crypter.set_tag(&self.pending_input_tail).map_err(openssl_err!(
+            "failed to set {} bytes of tag",
+            self.pending_input_tail.len()
+        ))?;
 
         // Feeding in just the tag should not result in any output data.
         let mut output = Vec::new();

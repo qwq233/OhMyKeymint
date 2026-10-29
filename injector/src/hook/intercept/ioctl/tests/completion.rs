@@ -73,10 +73,7 @@ unsafe extern "C" fn interleaved_host_reply_ioctl(
         }
         1 => {
             bwr.write_consumed = bwr.write_size;
-            assert_eq!(
-                bwr.read_consumed,
-                size_of::<u32>() + size_of::<binder_transaction_data>()
-            );
+            assert_eq!(bwr.read_consumed, size_of::<u32>() + size_of::<binder_transaction_data>());
         }
         call => panic!("unexpected interleaved reply ioctl call {call}"),
     }
@@ -85,16 +82,12 @@ unsafe extern "C" fn interleaved_host_reply_ioctl(
 
 #[test]
 fn fatal_zero_progress_host_reply_aborts_its_prepared_frame() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 24;
     let connection = binder_state_key(fd);
     drain_transaction_completions(fd);
     reset_pending_reply_frames_for_test(connection, 2);
-    *CAPTURED_REPLY_DATA
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    *CAPTURED_REPLY_DATA.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 
     let mut tr: binder_transaction_data = unsafe { std::mem::zeroed() };
     tr.data.ptr.buffer = 0x1111;
@@ -121,10 +114,7 @@ fn fatal_zero_progress_host_reply_aborts_its_prepared_frame() {
         },
         -1
     );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EIO)
-    );
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EIO));
     assert_eq!(pending_reply_frame_claims_for_test(connection), vec![false]);
     PREPARED_BC_REPLIES.with(|prepared| assert!(!prepared.borrow().contains_key(&connection)));
 
@@ -152,18 +142,13 @@ fn fatal_zero_progress_host_reply_aborts_its_prepared_frame() {
     OLD_IOCTL.store(previous, Ordering::SeqCst);
     reset_pending_reply_frames_for_test(connection, 0);
     drain_transaction_completions(fd);
-    CAPTURED_REPLY_DATA
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
+    CAPTURED_REPLY_DATA.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
     unsafe { *libc::__errno() = 0 };
 }
 
 #[test]
 fn fatal_partial_host_reply_commits_prefix_and_aborts_suffix() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 6;
     let connection = binder_state_key(fd);
     drain_transaction_completions(fd);
@@ -238,9 +223,7 @@ fn fatal_partial_host_reply_commits_prefix_and_aborts_suffix() {
 
 #[test]
 fn zero_progress_host_reply_keeps_its_frame_across_nested_transaction() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 21;
     let connection = binder_state_key(fd);
     drain_transaction_completions(fd);
@@ -260,10 +243,7 @@ fn zero_progress_host_reply_keeps_its_frame_across_nested_transaction() {
         read_consumed: 0,
         read_buffer: read.as_mut_ptr() as libc::c_ulong,
     };
-    let previous = OLD_IOCTL.swap(
-        interleaved_host_reply_ioctl as *mut c_void,
-        Ordering::SeqCst,
-    );
+    let previous = OLD_IOCTL.swap(interleaved_host_reply_ioctl as *mut c_void, Ordering::SeqCst);
 
     assert_eq!(
         unsafe {
@@ -276,10 +256,7 @@ fn zero_progress_host_reply_keeps_its_frame_across_nested_transaction() {
         0
     );
     assert_eq!(bwr.write_consumed, 0);
-    assert_eq!(
-        pending_reply_frame_claims_for_test(connection),
-        vec![true, false]
-    );
+    assert_eq!(pending_reply_frame_claims_for_test(connection), vec![true, false]);
 
     assert_eq!(
         unsafe {
@@ -301,39 +278,24 @@ fn zero_progress_host_reply_keeps_its_frame_across_nested_transaction() {
 
 #[test]
 fn undelivered_operation_acquire_is_canceled_but_delivered_acquire_is_retained() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let _route_guard = crate::tracker::tests::state_test_guard();
     let fd = 98;
     let connection = binder_state_key(fd);
-    let target = LocalBinderTarget {
-        ptr: 0x1234,
-        cookie: 0x5678,
-    };
+    let target = LocalBinderTarget { ptr: 0x1234, cookie: 0x5678 };
     let retirement = register_operation_publication_for_test(target);
     bind_operation_publication_connection(retirement, connection);
 
     let mut effects = PendingReadEffects::new(connection);
-    effects
-        .operation_acquires
-        .push(observe_operation_acquire(fd, target).unwrap());
+    effects.operation_acquires.push(observe_operation_acquire(fd, target).unwrap());
     drop(effects);
-    assert_eq!(
-        mark_operation_publication_acquire_pending(target, connection),
-        Some(retirement)
-    );
+    assert_eq!(mark_operation_publication_acquire_pending(target, connection), Some(retirement));
     cancel_operation_publication_acquire_pending(retirement);
 
     let mut effects = PendingReadEffects::new(connection);
-    effects
-        .operation_acquires
-        .push(observe_operation_acquire(fd, target).unwrap());
+    effects.operation_acquires.push(observe_operation_acquire(fd, target).unwrap());
     effects.commit();
-    assert_eq!(
-        mark_operation_publication_acquire_pending(target, connection),
-        None
-    );
+    assert_eq!(mark_operation_publication_acquire_pending(target, connection), None);
 
     cancel_operation_publication_acquire_pending(retirement);
     finish_local_operation_publication(retirement);
@@ -342,22 +304,14 @@ fn undelivered_operation_acquire_is_canceled_but_delivered_acquire_is_retained()
 
 #[test]
 fn fatal_partial_write_retains_unconsumed_operation_acquire() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let _route_guard = crate::tracker::tests::state_test_guard();
     let fd = 32;
-    let target = LocalBinderTarget {
-        ptr: 0x1234,
-        cookie: 0x5678,
-    };
+    let target = LocalBinderTarget { ptr: 0x1234, cookie: 0x5678 };
     let retirement = register_operation_publication_for_test(target);
     let connection = binder_state_key(fd);
     bind_operation_publication_connection(retirement, connection);
-    assert_eq!(
-        mark_operation_publication_acquire_pending(target, connection),
-        Some(retirement)
-    );
+    assert_eq!(mark_operation_publication_acquire_pending(target, connection), Some(retirement));
 
     let mut transaction: binder_transaction_data = unsafe { std::mem::zeroed() };
     transaction.flags = TF_ONE_WAY;
@@ -366,13 +320,7 @@ fn fatal_partial_write_retains_unconsumed_operation_acquire() {
     push_unaligned(&mut write, &transaction_command);
     push_unaligned(&mut write, &transaction);
     push_unaligned(&mut write, &BC_ACQUIRE_DONE_CMD);
-    push_unaligned(
-        &mut write,
-        &binder_ptr_cookie {
-            ptr: target.ptr,
-            cookie: target.cookie,
-        },
-    );
+    push_unaligned(&mut write, &binder_ptr_cookie { ptr: target.ptr, cookie: target.cookie });
     let mut bwr = binder_write_read {
         write_size: write.len(),
         write_consumed: 0,
@@ -386,22 +334,12 @@ fn fatal_partial_write_retains_unconsumed_operation_acquire() {
 
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         -1
     );
-    assert_eq!(
-        bwr.write_consumed,
-        size_of::<u32>() + size_of::<binder_transaction_data>()
-    );
-    assert_eq!(
-        mark_operation_publication_acquire_pending(target, connection),
-        None
-    );
+    assert_eq!(bwr.write_consumed, size_of::<u32>() + size_of::<binder_transaction_data>());
+    assert_eq!(mark_operation_publication_acquire_pending(target, connection), None);
 
     cancel_operation_publication_acquire_pending(retirement);
     finish_local_operation_publication(retirement);
@@ -413,9 +351,7 @@ fn fatal_partial_write_retains_unconsumed_operation_acquire() {
 
 #[test]
 fn partial_eintr_retry_registers_each_host_transaction_once() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 25;
     drain_transaction_completions(fd);
     HOST_IOCTL_CALLS.store(0, Ordering::SeqCst);
@@ -436,32 +372,18 @@ fn partial_eintr_retry_registers_each_host_transaction_once() {
         read_consumed: 0,
         read_buffer: 0,
     };
-    let previous = OLD_IOCTL.swap(
-        partial_eintr_host_write_ioctl as *mut c_void,
-        Ordering::SeqCst,
-    );
+    let previous = OLD_IOCTL.swap(partial_eintr_host_write_ioctl as *mut c_void, Ordering::SeqCst);
 
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         -1
     );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EINTR)
-    );
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EINTR));
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         0
     );

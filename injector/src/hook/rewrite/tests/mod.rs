@@ -28,12 +28,7 @@ pub(super) fn ensure_binder_process_state() {
 }
 
 pub(super) fn sample_key_descriptor() -> KeyDescriptor {
-    KeyDescriptor {
-        domain: Domain::APP,
-        nspace: 7,
-        alias: Some("alias".to_string()),
-        blob: None,
-    }
+    KeyDescriptor { domain: Domain::APP, nspace: 7, alias: Some("alias".to_string()), blob: None }
 }
 
 pub(super) fn sample_service_requests() -> Vec<ParsedServiceRequest> {
@@ -41,42 +36,27 @@ pub(super) fn sample_service_requests() -> Vec<ParsedServiceRequest> {
         ParsedServiceRequest::GetSecurityLevel {
             security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
         },
-        ParsedServiceRequest::GetKeyEntry {
-            key: sample_key_descriptor(),
-        },
+        ParsedServiceRequest::GetKeyEntry { key: sample_key_descriptor() },
         ParsedServiceRequest::UpdateSubcomponent {
             key: sample_key_descriptor(),
             public_cert: None,
             certificate_chain: None,
         },
-        ParsedServiceRequest::ListEntries {
-            domain: Domain::APP,
-            nspace: 0,
-        },
-        ParsedServiceRequest::DeleteKey {
-            key: sample_key_descriptor(),
-        },
+        ParsedServiceRequest::ListEntries { domain: Domain::APP, nspace: 0 },
+        ParsedServiceRequest::DeleteKey { key: sample_key_descriptor() },
         ParsedServiceRequest::Grant {
             key: sample_key_descriptor(),
             grantee_uid: 12345,
             access_vector: 7,
         },
-        ParsedServiceRequest::Ungrant {
-            key: sample_key_descriptor(),
-            grantee_uid: 12345,
-        },
-        ParsedServiceRequest::GetNumberOfEntries {
-            domain: Domain::APP,
-            nspace: 0,
-        },
+        ParsedServiceRequest::Ungrant { key: sample_key_descriptor(), grantee_uid: 12345 },
+        ParsedServiceRequest::GetNumberOfEntries { domain: Domain::APP, nspace: 0 },
         ParsedServiceRequest::ListEntriesBatched {
             domain: Domain::APP,
             nspace: 0,
             starting_past_alias: Some("alias".to_string()),
         },
-        ParsedServiceRequest::GetSupplementaryAttestationInfo {
-            tag: Tag::MODULE_HASH,
-        },
+        ParsedServiceRequest::GetSupplementaryAttestationInfo { tag: Tag::MODULE_HASH },
     ]
 }
 
@@ -133,11 +113,7 @@ pub(super) fn raw_parts(reply: &mut parcel::OwnedReply) -> (*mut u8, usize, *mut
     (
         reply.data_mut_ptr(),
         reply.data_size(),
-        if reply.offsets.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            reply.offsets.as_mut_ptr()
-        },
+        if reply.offsets.is_empty() { std::ptr::null_mut() } else { reply.offsets.as_mut_ptr() },
         reply.offsets_size(),
     )
 }
@@ -198,14 +174,10 @@ pub(super) fn transaction_for_parcel(
 
 static ROUTE_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub(in crate::hook) fn route_state_test_guard() -> (
-    std::sync::MutexGuard<'static, ()>,
-    std::sync::MutexGuard<'static, ()>,
-) {
+pub(in crate::hook) fn route_state_test_guard(
+) -> (std::sync::MutexGuard<'static, ()>, std::sync::MutexGuard<'static, ()>) {
     let tracker_guard = tracker::tests::state_test_guard();
-    let route_guard = ROUTE_STATE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let route_guard = ROUTE_STATE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     reset_route_state_for_tests();
     (tracker_guard, route_guard)
 }

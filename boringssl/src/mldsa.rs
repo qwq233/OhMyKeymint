@@ -247,14 +247,8 @@ impl MlDsa for BoringMlDsa {
 
 /// ML-DSA signing operation based on BoringSSL.
 enum BoringMlDsaSignOperation {
-    MlDsa65(
-        Box<bssl_sys::MLDSA65_private_key>,
-        bssl_sys::MLDSA65_prehash,
-    ),
-    MlDsa87(
-        Box<bssl_sys::MLDSA87_private_key>,
-        bssl_sys::MLDSA87_prehash,
-    ),
+    MlDsa65(Box<bssl_sys::MLDSA65_private_key>, bssl_sys::MLDSA65_prehash),
+    MlDsa87(Box<bssl_sys::MLDSA87_private_key>, bssl_sys::MLDSA87_prehash),
 }
 
 impl crypto::AccumulatingOperation for BoringMlDsaSignOperation {

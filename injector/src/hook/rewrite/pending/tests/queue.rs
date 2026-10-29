@@ -18,10 +18,7 @@ fn owned_outbound_reply_clears_tf_status_code() {
     assert_eq!(tr.data_size, data_size);
     assert_eq!(tr.offsets_size, offsets_size);
     assert_eq!(unsafe { tr.data.ptr.buffer }, data);
-    assert_eq!(
-        unsafe { tr.data.ptr.offsets },
-        if offsets_size == 0 { 0 } else { offsets }
-    );
+    assert_eq!(unsafe { tr.data.ptr.offsets }, if offsets_size == 0 { 0 } else { offsets });
     clear_outbound_reply_buffers(fd);
 }
 
@@ -41,14 +38,8 @@ fn outbound_reply_cleanup_is_isolated_by_binder_fd() {
         )
     };
 
-    let target = LocalBinderTarget {
-        ptr: 0x1234,
-        cookie: 0x5678,
-    };
-    let retirement = NativeBinderRetirement {
-        target,
-        generation: 1,
-    };
+    let target = LocalBinderTarget { ptr: 0x1234, cookie: 0x5678 };
+    let retirement = NativeBinderRetirement { target, generation: 1 };
     let mut second_reply = parcel::build_void_reply().expect("second reply should build");
     second_reply.native_operation = Some(retirement);
     let mut second_tr: binder_transaction_data = unsafe { std::mem::zeroed() };
@@ -56,10 +47,7 @@ fn outbound_reply_cleanup_is_isolated_by_binder_fd() {
     let second_data = unsafe { second_tr.data.ptr.buffer as usize };
 
     clear_outbound_reply_buffers(first_fd);
-    assert_eq!(
-        commit_bc_reply(second_fd, None, second_data),
-        Some(retirement)
-    );
+    assert_eq!(commit_bc_reply(second_fd, None, second_data), Some(retirement));
     clear_outbound_reply_buffers(second_fd);
 }
 
@@ -80,11 +68,7 @@ fn pending_reply_queue_consumes_nested_requests_from_the_top() {
             request: ParsedServiceRequest::GetSecurityLevel {
                 security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
             },
-            caller: CallerInfo {
-                uid: 1000,
-                sid: String::new(),
-                pid: 2000,
-            },
+            caller: CallerInfo { uid: 1000, sid: String::new(), pid: 2000 },
             packages: vec!["com.example".to_string()],
             route: RouteTarget::Omk,
         }),
@@ -94,14 +78,8 @@ fn pending_reply_queue_consumes_nested_requests_from_the_top() {
     replace_top_pending(
         fd,
         PendingCall::Service(PendingServiceCall {
-            request: ParsedServiceRequest::GetKeyEntry {
-                key: sample_key_descriptor(),
-            },
-            caller: CallerInfo {
-                uid: 1000,
-                sid: String::new(),
-                pid: 2000,
-            },
+            request: ParsedServiceRequest::GetKeyEntry { key: sample_key_descriptor() },
+            caller: CallerInfo { uid: 1000, sid: String::new(), pid: 2000 },
             packages: vec!["com.example".to_string()],
             route: RouteTarget::Omk,
         }),
@@ -119,16 +97,9 @@ fn pending_reply_queue_consumes_nested_requests_from_the_top() {
     assert!(take_top_pending(fd).is_none());
 
     let legacy = PendingCall::Authorization(PendingAuthorizationCall {
-        request: ParsedAuthorizationRequest::OnDeviceUnlocked {
-            user_id: 10,
-            password: None,
-        },
+        request: ParsedAuthorizationRequest::OnDeviceUnlocked { user_id: 10, password: None },
         method: AuthorizationMethod::LegacyOnLockScreenEvent,
-        caller: CallerInfo {
-            uid: 1000,
-            sid: String::new(),
-            pid: 2000,
-        },
+        caller: CallerInfo { uid: 1000, sid: String::new(), pid: 2000 },
         config: Arc::new(config::InjectorConfig::default()),
     });
     assert_eq!(legacy.reply_log_context().1, "LegacyOnLockScreenEvent");
@@ -205,10 +176,7 @@ fn precomputed_service_reply_is_moved_only_once() {
         parcel::build_plain_reply(&7i64).unwrap(),
     )));
     let mut serialized = build_precomputed_service_reply(&mut reply).unwrap();
-    assert_eq!(
-        parcel::parse_owned_success_reply::<i64>(&mut serialized).unwrap(),
-        7
-    );
+    assert_eq!(parcel::parse_owned_success_reply::<i64>(&mut serialized).unwrap(), 7);
     assert!(build_precomputed_service_reply(&mut reply).is_err());
 }
 
@@ -216,10 +184,7 @@ fn precomputed_service_reply_is_moved_only_once() {
 fn native_reply_trust_requires_matching_callback_output() {
     let _guard = route_state_test_guard();
     let connection = 43;
-    let target = LocalBinderTarget {
-        ptr: 0x1234,
-        cookie: 0x5678,
-    };
+    let target = LocalBinderTarget { ptr: 0x1234, cookie: 0x5678 };
     push_native_pending_frame(connection, target);
     let data = [0u8; 4];
     // SAFETY: All fields and union members contain integer types that permit zero.

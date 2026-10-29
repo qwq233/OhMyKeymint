@@ -45,10 +45,7 @@ fn init_logger_inner(configured_level: LevelFilter) -> Result<()> {
         );
     }
 
-    log::info!(
-        "initialized fallback logging with fixed level {:?}",
-        configured_level
-    );
+    log::info!("initialized fallback logging with fixed level {:?}", configured_level);
 
     Ok(())
 }

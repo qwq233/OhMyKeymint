@@ -48,10 +48,7 @@ impl crate::KeyMintTa {
 
         // Parse and decrypt the keyblob, which requires extra hidden params.
         let (keyblob, sdd_slot) = self.keyblob_parse_decrypt(key_blob, &params)?;
-        let keyblob::PlaintextKeyBlob {
-            characteristics,
-            key_material,
-        } = keyblob;
+        let keyblob::PlaintextKeyBlob { characteristics, key_material } = keyblob;
 
         // Validate parameters.
         let key_chars = characteristics_at(&characteristics, self.hw_info.security_level)?;
@@ -316,11 +313,7 @@ impl crate::KeyMintTa {
             info!("this operation requires proof-of-presence");
             self.presence_required_op = Some(op_handle);
         }
-        Ok(InternalBeginResult {
-            challenge,
-            params: ret_params,
-            op_handle: op_handle.0,
-        })
+        Ok(InternalBeginResult { challenge, params: ret_params, op_handle: op_handle.0 })
     }
 
     /// Check TA-specific key authorizations on `begin()`.
@@ -332,10 +325,7 @@ impl crate::KeyMintTa {
             ));
         }
         if !self.in_early_boot && get_bool_tag_value!(key_chars, EarlyBootOnly)? {
-            return Err(km_err!(
-                EarlyBootEnded,
-                "attempt to use EARLY_BOOT key after early boot"
-            ));
+            return Err(km_err!(EarlyBootEnded, "attempt to use EARLY_BOOT key after early boot"));
         }
 
         if let Some(max_uses) = get_opt_tag_value!(key_chars, MaxUsesPerBoot)? {
@@ -433,10 +423,7 @@ fn check_begin_params(
     if get_bool_tag_value!(chars, CallerNonce)? {
         // Caller-provided nonces are allowed.
     } else if nonce.is_some() && purpose == KeyPurpose::Encrypt {
-        return Err(km_err!(
-            CallerNonceProhibited,
-            "caller nonce not allowed for encryption"
-        ));
+        return Err(km_err!(CallerNonceProhibited, "caller nonce not allowed for encryption"));
     }
 
     // Further algorithm-specific checks.
@@ -491,9 +478,8 @@ fn check_begin_params(
         let mut mgf_digest_to_find =
             get_opt_tag_value!(params, RsaOaepMgfDigest, UnsupportedMgfDigest)?;
 
-        let chars_have_mgf_digest = chars
-            .iter()
-            .any(|param| matches!(param, KeyParam::RsaOaepMgfDigest(_)));
+        let chars_have_mgf_digest =
+            chars.iter().any(|param| matches!(param, KeyParam::RsaOaepMgfDigest(_)));
         if chars_have_mgf_digest && mgf_digest_to_find.is_none() {
             // The key characteristics include an explicit set of MGF digests, but the begin()
             // operation is using the default SHA1.  Check that this default is in the
@@ -582,10 +568,7 @@ fn check_begin_rsa_params(
         }
         PaddingMode::RsaPkcs115Sign if for_signing(purpose) => {
             if digest.is_none() {
-                return Err(km_err!(
-                    IncompatibleDigest,
-                    "digest required for RSA-PKCS_1_5_SIGN"
-                ));
+                return Err(km_err!(IncompatibleDigest, "digest required for RSA-PKCS_1_5_SIGN"));
             }
         }
         _ => {
@@ -598,12 +581,7 @@ fn check_begin_rsa_params(
         }
     }
 
-    Ok(BeginParamsToCheck {
-        block_mode: false,
-        padding: true,
-        digest: true,
-        mgf_digest: true,
-    })
+    Ok(BeginParamsToCheck { block_mode: false, padding: true, digest: true, mgf_digest: true })
 }
 
 /// Determine the [`rsa::DecryptionMode`] from parameters.
@@ -614,10 +592,7 @@ fn rsa_decryption_mode(params: &[KeyParam]) -> Result<rsa::DecryptionMode, Error
         PaddingMode::RsaOaep => {
             let msg_digest = get_digest(params)?;
             let mgf_digest = get_mgf_digest(params)?;
-            Ok(rsa::DecryptionMode::OaepPadding {
-                msg_digest,
-                mgf_digest,
-            })
+            Ok(rsa::DecryptionMode::OaepPadding { msg_digest, mgf_digest })
         }
         PaddingMode::RsaPkcs115Encrypt => Ok(rsa::DecryptionMode::Pkcs1_1_5Padding),
         _ => Err(km_err!(
@@ -660,10 +635,7 @@ fn check_begin_ec_params(
     if purpose == KeyPurpose::Sign {
         let digest = get_digest(params)?;
         if digest == Digest::Md5 {
-            return Err(km_err!(
-                UnsupportedDigest,
-                "Digest::MD5 unsupported for EC signing"
-            ));
+            return Err(km_err!(UnsupportedDigest, "Digest::MD5 unsupported for EC signing"));
         }
         if curve == EcCurve::Curve25519 && digest != Digest::None {
             return Err(km_err!(
@@ -673,12 +645,7 @@ fn check_begin_ec_params(
             ));
         }
     }
-    Ok(BeginParamsToCheck {
-        block_mode: false,
-        padding: false,
-        digest: true,
-        mgf_digest: false,
-    })
+    Ok(BeginParamsToCheck { block_mode: false, padding: false, digest: true, mgf_digest: false })
 }
 
 /// Check that an ML-DSA operation with the given `purpose` and `params` can validly be started.
@@ -689,18 +656,10 @@ fn check_begin_mldsa_params(
     if purpose == KeyPurpose::Sign {
         let digest = get_digest(params)?;
         if digest != Digest::None {
-            return Err(km_err!(
-                UnsupportedDigest,
-                "{digest:?} unsupported for ML-DSA signing"
-            ));
+            return Err(km_err!(UnsupportedDigest, "{digest:?} unsupported for ML-DSA signing"));
         }
     }
-    Ok(BeginParamsToCheck {
-        block_mode: false,
-        padding: false,
-        digest: true,
-        mgf_digest: false,
-    })
+    Ok(BeginParamsToCheck { block_mode: false, padding: false, digest: true, mgf_digest: false })
 }
 
 /// Check that an AES operation with the given `purpose` and `params` can validly be started
@@ -768,12 +727,7 @@ fn check_begin_aes_params(
             }
         }
     }
-    Ok(BeginParamsToCheck {
-        block_mode: true,
-        padding: true,
-        digest: false,
-        mgf_digest: false,
-    })
+    Ok(BeginParamsToCheck { block_mode: true, padding: true, digest: false, mgf_digest: false })
 }
 
 /// Determine the [`aes::Mode`], rejecting invalid parameters. Use `caller_nonce` if provided,
@@ -788,49 +742,38 @@ fn aes_mode(
     match mode {
         BlockMode::Ecb => {
             if caller_nonce.is_some() {
-                return Err(km_err!(
-                    InvalidNonce,
-                    "nonce unexpectedly provided for AES-ECB"
-                ));
+                return Err(km_err!(InvalidNonce, "nonce unexpectedly provided for AES-ECB"));
             }
             match padding {
                 PaddingMode::None => Ok(aes::Mode::Cipher(aes::CipherMode::EcbNoPadding)),
                 PaddingMode::Pkcs7 => Ok(aes::Mode::Cipher(aes::CipherMode::EcbPkcs7Padding)),
-                _ => Err(km_err!(
-                    IncompatiblePaddingMode,
-                    "expected NONE/PKCS7 padding for AES-ECB"
-                )),
+                _ => {
+                    Err(km_err!(IncompatiblePaddingMode, "expected NONE/PKCS7 padding for AES-ECB"))
+                }
             }
         }
         BlockMode::Cbc => {
             let nonce: [u8; aes::BLOCK_SIZE] = nonce(caller_nonce, rng)?;
             match padding {
                 PaddingMode::None => Ok(aes::Mode::Cipher(aes::CipherMode::CbcNoPadding { nonce })),
-                PaddingMode::Pkcs7 => Ok(aes::Mode::Cipher(aes::CipherMode::CbcPkcs7Padding {
-                    nonce,
-                })),
-                _ => Err(km_err!(
-                    IncompatiblePaddingMode,
-                    "expected NONE/PKCS7 padding for AES-CBC"
-                )),
+                PaddingMode::Pkcs7 => {
+                    Ok(aes::Mode::Cipher(aes::CipherMode::CbcPkcs7Padding { nonce }))
+                }
+                _ => {
+                    Err(km_err!(IncompatiblePaddingMode, "expected NONE/PKCS7 padding for AES-CBC"))
+                }
             }
         }
         BlockMode::Ctr => {
             if padding != PaddingMode::None {
-                return Err(km_err!(
-                    IncompatiblePaddingMode,
-                    "expected NONE padding for AES-CTR"
-                ));
+                return Err(km_err!(IncompatiblePaddingMode, "expected NONE padding for AES-CTR"));
             }
             let nonce: [u8; aes::BLOCK_SIZE] = nonce(caller_nonce, rng)?;
             Ok(aes::Mode::Cipher(aes::CipherMode::Ctr { nonce }))
         }
         BlockMode::Gcm => {
             if padding != PaddingMode::None {
-                return Err(km_err!(
-                    IncompatiblePaddingMode,
-                    "expected NONE padding for AES-GCM"
-                ));
+                return Err(km_err!(IncompatiblePaddingMode, "expected NONE padding for AES-GCM"));
             }
             let nonce: [u8; aes::GCM_NONCE_SIZE] = nonce(caller_nonce, rng)?;
             let tag_len = get_tag_value!(params, MacLength, ErrorCode::InvalidMacLength)?;
@@ -871,11 +814,7 @@ fn check_begin_3des_params(
     match bmode {
         BlockMode::Cbc | BlockMode::Ecb => {}
         _ => {
-            return Err(km_err!(
-                UnsupportedBlockMode,
-                "block mode {:?} not valid for 3-DES",
-                bmode
-            ))
+            return Err(km_err!(UnsupportedBlockMode, "block mode {:?} not valid for 3-DES", bmode))
         }
     }
 
@@ -892,12 +831,7 @@ fn check_begin_3des_params(
             }
         }
     }
-    Ok(BeginParamsToCheck {
-        block_mode: true,
-        padding: true,
-        digest: false,
-        mgf_digest: false,
-    })
+    Ok(BeginParamsToCheck { block_mode: true, padding: true, digest: false, mgf_digest: false })
 }
 
 /// Determine the [`des::Mode`], rejecting invalid parameters. Use `caller_nonce` if provided,
@@ -917,10 +851,9 @@ fn des_mode(
             match padding {
                 PaddingMode::None => Ok(des::Mode::EcbNoPadding),
                 PaddingMode::Pkcs7 => Ok(des::Mode::EcbPkcs7Padding),
-                _ => Err(km_err!(
-                    IncompatiblePaddingMode,
-                    "expected NONE/PKCS7 padding for DES-ECB"
-                )),
+                _ => {
+                    Err(km_err!(IncompatiblePaddingMode, "expected NONE/PKCS7 padding for DES-ECB"))
+                }
             }
         }
         BlockMode::Cbc => {
@@ -928,10 +861,9 @@ fn des_mode(
             match padding {
                 PaddingMode::None => Ok(des::Mode::CbcNoPadding { nonce }),
                 PaddingMode::Pkcs7 => Ok(des::Mode::CbcPkcs7Padding { nonce }),
-                _ => Err(km_err!(
-                    IncompatiblePaddingMode,
-                    "expected NONE/PKCS7 padding for DES-CBC"
-                )),
+                _ => {
+                    Err(km_err!(IncompatiblePaddingMode, "expected NONE/PKCS7 padding for DES-CBC"))
+                }
             }
         }
         _ => Err(km_err!(UnsupportedBlockMode, "want ECB/CBC")),
@@ -964,20 +896,13 @@ fn check_begin_hmac_params(
         }
     }
 
-    Ok(BeginParamsToCheck {
-        block_mode: false,
-        padding: false,
-        digest: true,
-        mgf_digest: false,
-    })
+    Ok(BeginParamsToCheck { block_mode: false, padding: false, digest: true, mgf_digest: false })
 }
 
 /// Extract or generate a nonce of the given size.
 fn nonce<const N: usize>(caller_nonce: Option<&[u8]>, rng: &mut dyn Rng) -> Result<[u8; N], Error> {
     Ok(match caller_nonce {
-        Some(n) => n
-            .try_into()
-            .map_err(|_| km_err!(InvalidNonce, "want {N} byte nonce"))?,
+        Some(n) => n.try_into().map_err(|_| km_err!(InvalidNonce, "want {N} byte nonce"))?,
         None => {
             let mut arr = [0u8; N];
             rng.fill_bytes(&mut arr);
@@ -1011,11 +936,7 @@ mod tests {
                 vec![KeyParam::Digest(Digest::Sha256), KeyParam::MacLength(160)],
                 "invalid purpose Encrypt",
             ),
-            (
-                KeyPurpose::Sign,
-                vec![KeyParam::Digest(Digest::Sha256)],
-                "MissingMacLength",
-            ),
+            (KeyPurpose::Sign, vec![KeyParam::Digest(Digest::Sha256)], "MissingMacLength"),
             (
                 KeyPurpose::Sign,
                 vec![KeyParam::Digest(Digest::Sha512), KeyParam::MacLength(160)],

@@ -69,14 +69,8 @@ fn plain_omk_error_becomes_system_error_reply() {
     let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
         .expect("status reply should parse");
 
-    assert_eq!(
-        parsed.exception_code(),
-        rsbinder::ExceptionCode::ServiceSpecific
-    );
-    assert_eq!(
-        parsed.service_specific_error(),
-        ResponseCode::SYSTEM_ERROR.0
-    );
+    assert_eq!(parsed.exception_code(), rsbinder::ExceptionCode::ServiceSpecific);
+    assert_eq!(parsed.service_specific_error(), ResponseCode::SYSTEM_ERROR.0);
 }
 
 #[test]
@@ -89,23 +83,13 @@ fn contextual_omk_status_error_keeps_service_specific_code() {
     let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
         .expect("status reply should parse");
 
-    assert_eq!(
-        parsed.exception_code(),
-        rsbinder::ExceptionCode::ServiceSpecific
-    );
-    assert_eq!(
-        parsed.service_specific_error(),
-        ResponseCode::PERMISSION_DENIED.0
-    );
+    assert_eq!(parsed.exception_code(), rsbinder::ExceptionCode::ServiceSpecific);
+    assert_eq!(parsed.service_specific_error(), ResponseCode::PERMISSION_DENIED.0);
 }
 
 #[test]
 fn unavailable_omk_errors_return_system_error_without_fallback() {
-    let caller = CallerInfo {
-        uid: 1000,
-        sid: String::new(),
-        pid: 2000,
-    };
+    let caller = CallerInfo { uid: 1000, sid: String::new(), pid: 2000 };
     for code in [
         StatusCode::DeadObject,
         StatusCode::RpcError,
@@ -127,10 +111,7 @@ fn unavailable_omk_errors_return_system_error_without_fallback() {
             let actual =
                 unsafe { parcel::parse_reply_status(data, size, offsets, offsets_size) }.unwrap();
             assert_eq!(actual.exception_code(), ExceptionCode::ServiceSpecific);
-            assert_eq!(
-                actual.service_specific_error(),
-                ResponseCode::SYSTEM_ERROR.0
-            );
+            assert_eq!(actual.service_specific_error(), ResponseCode::SYSTEM_ERROR.0);
         }
     }
 }
@@ -140,25 +121,17 @@ fn reachable_non_stale_omk_status_code_errors_become_system_error_reply() {
     // AOSP keystore2 maps a bare transport StatusCode through
     // map_binder_status_code -> Error::BinderTransaction -> SYSTEM_ERROR,
     // surfaced as a service-specific parcel, never a raw transport status.
-    for status in [
-        StatusCode::TimedOut,
-        StatusCode::PermissionDenied,
-        StatusCode::UnknownTransaction,
-    ] {
+    for status in
+        [StatusCode::TimedOut, StatusCode::PermissionDenied, StatusCode::UnknownTransaction]
+    {
         let error = anyhow::Error::new(status);
         let mut reply = build_omk_error_reply(&error)
             .expect("reachable OMK errors must produce a status reply");
         let (data, data_size, offsets, offsets_size) = raw_parts(&mut reply);
         let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
             .expect("status reply should parse");
-        assert_eq!(
-            parsed.exception_code(),
-            rsbinder::ExceptionCode::ServiceSpecific
-        );
-        assert_eq!(
-            parsed.service_specific_error(),
-            ResponseCode::SYSTEM_ERROR.0
-        );
+        assert_eq!(parsed.exception_code(), rsbinder::ExceptionCode::ServiceSpecific);
+        assert_eq!(parsed.service_specific_error(), ResponseCode::SYSTEM_ERROR.0);
     }
 }
 
@@ -171,12 +144,6 @@ fn reachable_omk_status_error_becomes_authoritative_reply() {
     let parsed = unsafe { parcel::parse_reply_status(data, data_size, offsets, offsets_size) }
         .expect("status reply should parse");
 
-    assert_eq!(
-        parsed.exception_code(),
-        rsbinder::ExceptionCode::ServiceSpecific
-    );
-    assert_eq!(
-        parsed.service_specific_error(),
-        ResponseCode::PERMISSION_DENIED.0
-    );
+    assert_eq!(parsed.exception_code(), rsbinder::ExceptionCode::ServiceSpecific);
+    assert_eq!(parsed.service_specific_error(), ResponseCode::PERMISSION_DENIED.0);
 }

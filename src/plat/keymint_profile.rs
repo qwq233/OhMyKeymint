@@ -81,16 +81,14 @@ fn resolve_property_profile_with(
     version_number: i32,
     read_property: impl Fn(&str) -> Option<String>,
 ) -> Option<KeyMintHardwareProfile> {
-    ["ro.product.vendor.", "ro.product."]
-        .into_iter()
-        .find_map(|prefix| {
-            resolve_property_profile_from_namespace(
-                prefix,
-                security_level,
-                version_number,
-                &read_property,
-            )
-        })
+    ["ro.product.vendor.", "ro.product."].into_iter().find_map(|prefix| {
+        resolve_property_profile_from_namespace(
+            prefix,
+            security_level,
+            version_number,
+            &read_property,
+        )
+    })
 }
 
 fn resolve_property_profile_from_namespace(
@@ -106,20 +104,11 @@ fn resolve_property_profile_from_namespace(
     let name = product_property(prefix, "name", read_property);
 
     let author_name = manufacturer.as_deref().or(brand.as_deref())?.to_string();
-    let identity = device
-        .as_deref()
-        .or(name.as_deref())
-        .or(model.as_deref())
-        .or(brand.as_deref());
+    let identity = device.as_deref().or(name.as_deref()).or(model.as_deref()).or(brand.as_deref());
     let impl_name = build_impl_name(&author_name, identity, security_level);
     let unique_id = derive_unique_id(&author_name, &impl_name, security_level, version_number)?;
 
-    Some(KeyMintHardwareProfile {
-        version_number,
-        impl_name,
-        author_name,
-        unique_id,
-    })
+    Some(KeyMintHardwareProfile { version_number, impl_name, author_name, unique_id })
 }
 
 fn product_property(
@@ -194,12 +183,7 @@ fn profile_from_system_hardware_info(
     let unique_id = derive_unique_id(&author_name, &impl_name, security_level, version_number)
         .ok_or_else(|| anyhow!("failed to derive KeyMint unique id"))?;
 
-    Ok(KeyMintHardwareProfile {
-        version_number,
-        impl_name,
-        author_name,
-        unique_id,
-    })
+    Ok(KeyMintHardwareProfile { version_number, impl_name, author_name, unique_id })
 }
 
 fn ensure_system_hardware_security_level(

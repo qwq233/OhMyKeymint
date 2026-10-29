@@ -49,10 +49,7 @@ impl AccumulatedSchema {
         #[cfg(feature = "cddl-cat")]
         for (name, data) in &self.samples {
             if let Err(e) = cddl_cat::validate_cbor_bytes(&name, &self.schema, &data) {
-                eprintln!(
-                    "Failed to validate sample data for {} against CDDL: {:?}",
-                    name, e
-                );
+                eprintln!("Failed to validate sample data for {} against CDDL: {:?}", name, e);
             }
         }
     }
@@ -74,9 +71,7 @@ fn main() {
         kek_context: vec![],
         encrypted_key_material: coset::CoseEncrypt0Builder::new()
             .protected(
-                coset::HeaderBuilder::new()
-                    .algorithm(coset::iana::Algorithm::A256GCM)
-                    .build(),
+                coset::HeaderBuilder::new().algorithm(coset::iana::Algorithm::A256GCM).build(),
             )
             .ciphertext(vec![1, 2, 3])
             .build(),
@@ -89,9 +84,7 @@ fn main() {
         kek_context: vec![],
         encrypted_key_material: coset::CoseEncrypt0Builder::new()
             .protected(
-                coset::HeaderBuilder::new()
-                    .algorithm(coset::iana::Algorithm::A256GCM)
-                    .build(),
+                coset::HeaderBuilder::new().algorithm(coset::iana::Algorithm::A256GCM).build(),
             )
             .ciphertext(vec![1, 2, 3])
             .build(),
@@ -107,9 +100,7 @@ fn main() {
         "[ protected: bstr, unprotected: { * (int / tstr) => any }, ciphertext: bstr / nil ]",
     );
 
-    schema.add(crypto::KeyMaterial::Aes(
-        crypto::aes::Key::Aes128([0u8; 16]).into(),
-    ));
+    schema.add(crypto::KeyMaterial::Aes(crypto::aes::Key::Aes128([0u8; 16]).into()));
     schema.add(keyblob::SecureDeletionSlot(1));
     schema.add(keyblob::SecureDeletionData {
         factory_reset_secret: [0; 32],
@@ -139,9 +130,7 @@ fn main() {
     schema.add(keymint::MlDsaVariant::MlDsa65);
     schema.add(keymint::PaddingMode::None);
 
-    schema.add(keymint::DateTime {
-        ms_since_epoch: 22_593_600_000,
-    });
+    schema.add(keymint::DateTime { ms_since_epoch: 22_593_600_000 });
     schema.add(kmr_wire::KeySizeInBits(256));
     schema.add(kmr_wire::RsaExponent(65537));
 

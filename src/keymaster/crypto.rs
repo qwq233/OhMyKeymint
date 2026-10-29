@@ -14,34 +14,24 @@ pub type EncryptedMessage = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 
 pub(crate) fn is_decryption_failure(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<CryptoError>(),
-            Some(CryptoError::DecryptionFailed)
-        )
+        matches!(cause.downcast_ref::<CryptoError>(), Some(CryptoError::DecryptionFailed))
     })
 }
 
 pub fn parse_subject_from_certificate(cert_buf: &[u8]) -> Result<Vec<u8>> {
     let cert = Certificate::from_der(cert_buf).context(err!("parsing certificate failed"))?;
-    cert.tbs_certificate()
-        .subject()
-        .to_der()
-        .context(err!("encoding certificate subject failed"))
+    cert.tbs_certificate().subject().to_der().context(err!("encoding certificate subject failed"))
 }
 
 impl ECDHPrivateKey {
     /// Randomly generate a fresh keypair.
     pub fn generate() -> Result<ECDHPrivateKey> {
-        ec_key_generate_key()
-            .map(ECDHPrivateKey)
-            .context(err!("generation failed"))
+        ec_key_generate_key().map(ECDHPrivateKey).context(err!("generation failed"))
     }
 
     /// Deserialize bytes into an ECDH keypair
     pub fn from_private_key(buf: &[u8]) -> Result<ECDHPrivateKey> {
-        ec_key_parse_private_key(buf)
-            .map(ECDHPrivateKey)
-            .context(err!("parsing failed"))
+        ec_key_parse_private_key(buf).map(ECDHPrivateKey).context(err!("parsing failed"))
     }
 
     /// Serialize the ECDH key into bytes
@@ -154,12 +144,9 @@ impl ECDHPrivateKey {
             .context(err!("legacy extract on recipient_public_key failed"))?;
         let other_public_key = ec_point_oct_to_point(sender_public_key)
             .context(err!("ec_point_oct_to_point failed"))?;
-        let secret = ecdh_compute_key(
-            other_public_key.get_point(),
-            &self.0,
-            EcdhComputeKeyVersion::Current,
-        )
-        .context(err!("ecdh_compute_key failed"))?;
+        let secret =
+            ecdh_compute_key(other_public_key.get_point(), &self.0, EcdhComputeKeyVersion::Current)
+                .context(err!("ecdh_compute_key failed"))?;
         let prk = omk_legacy_kdf_extract(&secret, &hkdf)
             .context(err!("legacy extract on secret failed"))?;
         let aes_key = omk_legacy_kdf_expand(AES_256_KEY_LENGTH, &prk, b"AES-256-GCM key")
@@ -230,14 +217,10 @@ mod test {
             111, 172, 56, 71, 246, 223, 205, 5, 155, 92, 73, 50, 240, 231, 249, 176, 83, 239, 58,
             141, 174, 211, 30, 164, 142, 227, 154, 156, 222, 131, 64, 57, 39, 53, 207, 202, 124,
         ];
-        let salt = [
-            11, 131, 74, 129, 55, 159, 229, 128, 179, 84, 122, 171, 78, 3, 24, 161,
-        ];
+        let salt = [11, 131, 74, 129, 55, 159, 229, 128, 179, 84, 122, 171, 78, 3, 24, 161];
         let iv = [202, 227, 221, 117, 156, 119, 7, 251, 205, 12, 33, 57];
         let ciphertext = [7, 4, 239, 210, 59, 198, 11, 39, 123, 226, 231];
-        let tag = [
-            164, 27, 179, 133, 250, 249, 176, 134, 148, 201, 51, 132, 227, 255, 222, 88,
-        ];
+        let tag = [164, 27, 179, 133, 250, 249, 176, 134, 148, 201, 51, 132, 227, 255, 222, 88];
         let message =
             recipient.decrypt_message(&sender_public_key, &salt, &iv, &ciphertext, &tag)?;
         let msg: &[u8] = &message;
@@ -267,14 +250,10 @@ mod test {
             8, 146, 252, 240, 28, 80, 183, 60, 121, 205, 106, 131, 202, 179, 76, 14, 66, 135, 70,
             176, 104, 170, 108, 201, 140, 123, 20, 60, 231, 11, 223, 71, 173, 63, 101, 82, 230, 64,
         ];
-        let salt = [
-            198, 36, 146, 129, 103, 221, 7, 77, 143, 143, 152, 194, 246, 56, 181, 189,
-        ];
+        let salt = [198, 36, 146, 129, 103, 221, 7, 77, 143, 143, 152, 194, 246, 56, 181, 189];
         let iv = [97, 196, 14, 111, 173, 36, 59, 38, 13, 215, 172, 100];
         let ciphertext = [116, 97, 162, 238, 173, 96, 82, 13, 9, 186, 99];
-        let tag = [
-            92, 109, 104, 137, 163, 115, 202, 63, 116, 122, 243, 125, 0, 77, 192, 135,
-        ];
+        let tag = [92, 109, 104, 137, 163, 115, 202, 63, 116, 122, 243, 125, 0, 77, 192, 135];
         let message =
             recipient.decrypt_message(&sender_public_key, &salt, &iv, &ciphertext, &tag)?;
         let msg: &[u8] = &message;
@@ -300,15 +279,11 @@ mod test {
             8, 146, 252, 240, 28, 80, 183, 60, 121, 205, 106, 131, 202, 179, 76, 14, 66, 135, 70,
             176, 104, 170, 108, 201, 140, 123, 20, 60, 231, 11, 223, 71, 173, 63, 101, 82, 230, 64,
         ];
-        let salt = [
-            198, 36, 146, 129, 103, 221, 7, 77, 143, 143, 152, 194, 246, 56, 181, 189,
-        ];
+        let salt = [198, 36, 146, 129, 103, 221, 7, 77, 143, 143, 152, 194, 246, 56, 181, 189];
         // Fixed output from the accidental PBKDF2-based HKDF adapter shipped by older OMK builds.
         let iv = [70, 41, 84, 234, 16, 141, 129, 229, 83, 72, 202, 23];
         let ciphertext = [119, 161, 1, 117, 241, 90, 179, 58, 176, 251, 50];
-        let tag = [
-            228, 157, 77, 3, 122, 65, 160, 36, 242, 96, 183, 152, 67, 97, 149, 199,
-        ];
+        let tag = [228, 157, 77, 3, 122, 65, 160, 36, 242, 96, 183, 152, 67, 97, 149, 199];
         assert!(is_decryption_failure(
             &recipient
                 .decrypt_message(&sender_public_key, &salt, &iv, &ciphertext, &tag)

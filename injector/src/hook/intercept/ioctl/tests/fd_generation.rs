@@ -20,9 +20,7 @@ unsafe extern "C" fn invalidate_after_consuming_ioctl(
 
 #[test]
 fn binder_fd_generation_reset_discards_stale_thread_state() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 90;
     reset_binder_fd_for_test(fd);
     drain_transaction_completions(fd);
@@ -31,15 +29,11 @@ fn binder_fd_generation_reset_discards_stale_thread_state() {
     let connection = original.connection;
     record_transaction_completion(fd, false, true, None);
     PREPARED_BC_REPLIES.with(|prepared| {
-        prepared
-            .borrow_mut()
-            .entry(connection)
-            .or_default()
-            .push_back(PreparedBcReply {
-                frame_id: None,
-                data_ptr: 0,
-                transaction: unsafe { std::mem::zeroed() },
-            });
+        prepared.borrow_mut().entry(connection).or_default().push_back(PreparedBcReply {
+            frame_id: None,
+            data_ptr: 0,
+            transaction: unsafe { std::mem::zeroed() },
+        });
     });
     reset_pending_reply_frames_for_test(connection, 1);
 
@@ -60,9 +54,7 @@ fn binder_fd_generation_reset_discards_stale_thread_state() {
 
 #[test]
 fn duplicated_binder_fds_share_connection_state_until_the_last_close() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let original_fd = 94;
     let alias_fd = 95;
     reset_binder_fd_for_test(original_fd);
@@ -79,10 +71,7 @@ fn duplicated_binder_fds_share_connection_state_until_the_last_close() {
 
     record_transaction_completion(original_fd, false, false, None);
     assert_eq!(complete_transaction_submission(alias_fd), Some(()));
-    assert_eq!(
-        unsafe { close_with_binder_fd_lifecycle(original_fd, || 0) },
-        0
-    );
+    assert_eq!(unsafe { close_with_binder_fd_lifecycle(original_fd, || 0) }, 0);
     assert!(binder_fd_token_is_current(alias));
     assert_eq!(unsafe { close_with_binder_fd_lifecycle(alias_fd, || 0) }, 0);
     assert!(!binder_fd_token_is_current(alias));
@@ -92,9 +81,7 @@ fn duplicated_binder_fds_share_connection_state_until_the_last_close() {
 
 #[test]
 fn reused_fd_never_submits_an_ambiguous_write() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 88;
     reset_binder_fd_for_test(fd);
 
@@ -115,29 +102,18 @@ fn reused_fd_never_submits_an_ambiguous_write() {
 
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         -1
     );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EBADF)
-    );
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
     assert_eq!(bwr.write_consumed, 0);
 
     bwr.write_size = 0;
     bwr.write_consumed = 0;
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         0
     );
@@ -148,9 +124,7 @@ fn reused_fd_never_submits_an_ambiguous_write() {
 
 #[test]
 fn completed_ioctl_keeps_its_result_after_fd_reuse() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 92;
     reset_binder_fd_for_test(fd);
     POST_IOCTL_INVALIDATE_FD.store(fd, Ordering::SeqCst);
@@ -167,18 +141,12 @@ fn completed_ioctl_keeps_its_result_after_fd_reuse() {
         read_consumed: 0,
         read_buffer: read.as_mut_ptr() as libc::c_ulong,
     };
-    let previous = OLD_IOCTL.swap(
-        invalidate_after_consuming_ioctl as *mut c_void,
-        Ordering::SeqCst,
-    );
+    let previous =
+        OLD_IOCTL.swap(invalidate_after_consuming_ioctl as *mut c_void, Ordering::SeqCst);
 
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         0
     );

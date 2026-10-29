@@ -24,10 +24,7 @@ fn log_runtime_identity(role: &str) {
     let euid = unsafe { libc::geteuid() };
     let gid = unsafe { libc::getgid() };
     let egid = unsafe { libc::getegid() };
-    info!(
-        "runtime identity role={} uid={} euid={} gid={} egid={}",
-        role, uid, euid, gid, egid
-    );
+    info!("runtime identity role={} uid={} euid={} gid={} egid={}", role, uid, euid, gid, egid);
 }
 
 fn main() {
@@ -68,11 +65,9 @@ fn main() {
             identity.sha256,
             identity.elf,
         ),
-        Err(error) => error!(
-            "failed to describe keystore2 executable {}: {:#}",
-            target_path.display(),
-            error
-        ),
+        Err(error) => {
+            error!("failed to describe keystore2 executable {}: {:#}", target_path.display(), error)
+        }
     }
     let pid = Pid::from_raw(pid);
     match inject::inject_library(pid) {

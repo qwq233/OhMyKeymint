@@ -126,10 +126,8 @@ fn test_user_auth_type() {
         ),
     ];
     for (auth_types, expected) in test_cases {
-        let key_params: Vec<_> = auth_types
-            .iter()
-            .map(|a| create_key_param_with_auth_type(*a))
-            .collect();
+        let key_params: Vec<_> =
+            auth_types.iter().map(|a| create_key_param_with_auth_type(*a)).collect();
         let (_, atom_with_auth_info, _, _) = process_key_creation_event_stats(
             0,
             SecurityLevel::TRUSTED_ENVIRONMENT,
@@ -145,10 +143,7 @@ fn test_user_auth_type() {
 }
 
 fn create_key_param_with_auth_timeout(timeout: i32) -> KeyParameter {
-    KeyParameter {
-        tag: Tag::AUTH_TIMEOUT,
-        value: KeyParameterValue::Integer(timeout),
-    }
+    KeyParameter { tag: Tag::AUTH_TIMEOUT, value: KeyParameterValue::Integer(timeout) }
 }
 
 #[test]
@@ -175,10 +170,8 @@ fn test_log_auth_timeout_seconds() {
         ),
     ];
     for (timeouts, expected) in test_cases {
-        let key_params: Vec<_> = timeouts
-            .iter()
-            .map(|t| create_key_param_with_auth_timeout(*t))
-            .collect();
+        let key_params: Vec<_> =
+            timeouts.iter().map(|t| create_key_param_with_auth_timeout(*t)).collect();
         let (_, atom_with_auth_info, _, _) = process_key_creation_event_stats(
             0,
             SecurityLevel::TRUSTED_ENVIRONMENT,
@@ -197,26 +190,14 @@ fn test_log_auth_timeout_seconds() {
 #[test]
 fn test_security_level() {
     let test_cases = [
-        (
-            SecurityLevel::SOFTWARE,
-            MetricsSecurityLevel::SECURITY_LEVEL_SOFTWARE,
-        ),
+        (SecurityLevel::SOFTWARE, MetricsSecurityLevel::SECURITY_LEVEL_SOFTWARE),
         (
             SecurityLevel::TRUSTED_ENVIRONMENT,
             MetricsSecurityLevel::SECURITY_LEVEL_TRUSTED_ENVIRONMENT,
         ),
-        (
-            SecurityLevel::STRONGBOX,
-            MetricsSecurityLevel::SECURITY_LEVEL_STRONGBOX,
-        ),
-        (
-            SecurityLevel::KEYSTORE,
-            MetricsSecurityLevel::SECURITY_LEVEL_KEYSTORE,
-        ),
-        (
-            SecurityLevel(123),
-            MetricsSecurityLevel::SECURITY_LEVEL_UNSPECIFIED,
-        ),
+        (SecurityLevel::STRONGBOX, MetricsSecurityLevel::SECURITY_LEVEL_STRONGBOX),
+        (SecurityLevel::KEYSTORE, MetricsSecurityLevel::SECURITY_LEVEL_KEYSTORE),
+        (SecurityLevel(123), MetricsSecurityLevel::SECURITY_LEVEL_UNSPECIFIED),
     ];
     for (security_level, expected) in test_cases {
         let (_, atom_with_auth_info, _, _) =
@@ -230,43 +211,22 @@ fn test_security_level() {
 }
 
 fn create_key_param_with_algorithm(algorithm: Algorithm) -> KeyParameter {
-    KeyParameter {
-        tag: Tag::ALGORITHM,
-        value: KeyParameterValue::Algorithm(algorithm),
-    }
+    KeyParameter { tag: Tag::ALGORITHM, value: KeyParameterValue::Algorithm(algorithm) }
 }
 
 fn create_key_param_with_mldsa_variant(variant: MlDsaVariant) -> KeyParameter {
-    KeyParameter {
-        tag: Tag::ML_DSA_VARIANT,
-        value: KeyParameterValue::MlDsaVariant(variant),
-    }
+    KeyParameter { tag: Tag::ML_DSA_VARIANT, value: KeyParameterValue::MlDsaVariant(variant) }
 }
 
 #[test]
 fn test_algorithm() {
     let test_cases: &[(&[KeyParameter], MetricsAlgorithm)] = &[
         (&[], MetricsAlgorithm::ALGORITHM_UNSPECIFIED),
-        (
-            &[create_key_param_with_algorithm(Algorithm::RSA)],
-            MetricsAlgorithm::RSA,
-        ),
-        (
-            &[create_key_param_with_algorithm(Algorithm::EC)],
-            MetricsAlgorithm::EC,
-        ),
-        (
-            &[create_key_param_with_algorithm(Algorithm::AES)],
-            MetricsAlgorithm::AES,
-        ),
-        (
-            &[create_key_param_with_algorithm(Algorithm::TRIPLE_DES)],
-            MetricsAlgorithm::TRIPLE_DES,
-        ),
-        (
-            &[create_key_param_with_algorithm(Algorithm::HMAC)],
-            MetricsAlgorithm::HMAC,
-        ),
+        (&[create_key_param_with_algorithm(Algorithm::RSA)], MetricsAlgorithm::RSA),
+        (&[create_key_param_with_algorithm(Algorithm::EC)], MetricsAlgorithm::EC),
+        (&[create_key_param_with_algorithm(Algorithm::AES)], MetricsAlgorithm::AES),
+        (&[create_key_param_with_algorithm(Algorithm::TRIPLE_DES)], MetricsAlgorithm::TRIPLE_DES),
+        (&[create_key_param_with_algorithm(Algorithm::HMAC)], MetricsAlgorithm::HMAC),
         // Lots of test cases for ML-DSA: the algorithm is determined from the
         // MlDsaVariant parameter, not the Algorithm parameter.
         (
@@ -369,25 +329,15 @@ fn test_log_key_creation_per_uid() {
 
     // Log once
     log_key_creation_event_stats(uid, sec_level, &params, KeyOrigin::GENERATED, &Ok(()));
-    let atoms = METRICS_STORE
-        .get_atoms(AtomID::KEY_CREATION_PER_UID)
-        .unwrap();
-    let atom = atoms
-        .iter()
-        .find(|a| find_creation_atom(a))
-        .expect("Atom should be present");
+    let atoms = METRICS_STORE.get_atoms(AtomID::KEY_CREATION_PER_UID).unwrap();
+    let atom = atoms.iter().find(|a| find_creation_atom(a)).expect("Atom should be present");
     let initial_count = atom.count;
     assert!(initial_count >= 1);
 
     // Log again and check count increases
     log_key_creation_event_stats(uid, sec_level, &params, KeyOrigin::GENERATED, &Ok(()));
-    let atoms = METRICS_STORE
-        .get_atoms(AtomID::KEY_CREATION_PER_UID)
-        .unwrap();
-    let atom = atoms
-        .iter()
-        .find(|a| find_creation_atom(a))
-        .expect("Atom should be present");
+    let atoms = METRICS_STORE.get_atoms(AtomID::KEY_CREATION_PER_UID).unwrap();
+    let atom = atoms.iter().find(|a| find_creation_atom(a)).expect("Atom should be present");
     assert_eq!(atom.count, initial_count + 1);
 }
 
@@ -409,9 +359,7 @@ fn test_log_key_creation_per_uid_verify_fields() {
     ];
 
     log_key_creation_event_stats(uid, sec_level, &params, KeyOrigin::GENERATED, &Ok(()));
-    let atoms = METRICS_STORE
-        .get_atoms(AtomID::KEY_CREATION_PER_UID)
-        .unwrap();
+    let atoms = METRICS_STORE.get_atoms(AtomID::KEY_CREATION_PER_UID).unwrap();
     let _ = atoms
         .iter()
         .find(|a| {
@@ -456,13 +404,8 @@ fn test_log_key_operation_per_uid() {
         false,
         false,
     );
-    let atoms = METRICS_STORE
-        .get_atoms(AtomID::KEY_OPERATION_PER_UID)
-        .unwrap();
-    let atom = atoms
-        .iter()
-        .find(|a| find_operation_atom(a))
-        .expect("Atom should be present");
+    let atoms = METRICS_STORE.get_atoms(AtomID::KEY_OPERATION_PER_UID).unwrap();
+    let atom = atoms.iter().find(|a| find_operation_atom(a)).expect("Atom should be present");
     let initial_count = atom.count;
     assert!(initial_count >= 1);
 
@@ -476,13 +419,8 @@ fn test_log_key_operation_per_uid() {
         false,
         false,
     );
-    let atoms = METRICS_STORE
-        .get_atoms(AtomID::KEY_OPERATION_PER_UID)
-        .unwrap();
-    let atom = atoms
-        .iter()
-        .find(|a| find_operation_atom(a))
-        .expect("Atom should be present");
+    let atoms = METRICS_STORE.get_atoms(AtomID::KEY_OPERATION_PER_UID).unwrap();
+    let atom = atoms.iter().find(|a| find_operation_atom(a)).expect("Atom should be present");
     assert_eq!(atom.count, initial_count + 1);
 }
 
@@ -595,10 +533,7 @@ fn test_log_operation_latency_eccurve() {
 
     let params = vec![
         create_key_param_with_algorithm(Algorithm::EC),
-        KeyParameter {
-            tag: Tag::EC_CURVE,
-            value: KeyParameterValue::EcCurve(EcCurve::P_256),
-        },
+        KeyParameter { tag: Tag::EC_CURVE, value: KeyParameterValue::EcCurve(EcCurve::P_256) },
     ];
 
     log_operation_latency(
@@ -689,9 +624,7 @@ fn test_log_key_operation_streaming_stats() {
 
     // Log once with call count below threshold (5 < 20)
     log_key_operation_streaming_stats(algorithm, is_success, 5, 1024);
-    let atoms = METRICS_STORE
-        .get_atoms(AtomID::KEY_OPERATION_STREAMING_STATS)
-        .unwrap();
+    let atoms = METRICS_STORE.get_atoms(AtomID::KEY_OPERATION_STREAMING_STATS).unwrap();
     let find_atom = |a: &KeystoreAtom| {
         if let KeystoreAtomPayload::KeyOperationStreamingStats(ref payload) = a.payload {
             payload.call_count == 5 && payload.total_input_bytes == 1000
@@ -699,21 +632,13 @@ fn test_log_key_operation_streaming_stats() {
             false
         }
     };
-    let atom = atoms
-        .iter()
-        .find(|a| find_atom(a))
-        .expect("Atom should be present");
+    let atom = atoms.iter().find(|a| find_atom(a)).expect("Atom should be present");
     let initial_count = atom.count;
     assert!(initial_count >= 1);
 
     // Log again and check count increases
     log_key_operation_streaming_stats(algorithm, is_success, 5, 1024);
-    let atoms = METRICS_STORE
-        .get_atoms(AtomID::KEY_OPERATION_STREAMING_STATS)
-        .unwrap();
-    let atom = atoms
-        .iter()
-        .find(|a| find_atom(a))
-        .expect("Atom should be present");
+    let atoms = METRICS_STORE.get_atoms(AtomID::KEY_OPERATION_STREAMING_STATS).unwrap();
+    let atom = atoms.iter().find(|a| find_atom(a)).expect("Atom should be present");
     assert_eq!(atom.count, initial_count + 1);
 }

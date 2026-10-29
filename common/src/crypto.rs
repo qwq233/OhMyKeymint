@@ -64,9 +64,7 @@ pub struct MillisecondsSinceEpoch(pub i64);
 
 impl From<MillisecondsSinceEpoch> for kmr_wire::secureclock::Timestamp {
     fn from(value: MillisecondsSinceEpoch) -> Self {
-        kmr_wire::secureclock::Timestamp {
-            milliseconds: value.0,
-        }
+        kmr_wire::secureclock::Timestamp { milliseconds: value.0 }
     }
 }
 
@@ -310,11 +308,7 @@ impl AsCborValue for KeyMaterial {
                 let curve_type = CurveType::from_cbor_value(a.remove(1))?;
                 let curve = <EcCurve>::from_cbor_value(a.remove(0))?;
                 if opaque {
-                    Ok(Self::Ec(
-                        curve,
-                        curve_type,
-                        OpaqueKeyMaterial(raw_key).into(),
-                    ))
+                    Ok(Self::Ec(curve, curve_type, OpaqueKeyMaterial(raw_key).into()))
                 } else {
                     let key = match (curve, curve_type) {
                         (EcCurve::P224, CurveType::Nist) => ec::Key::P224(ec::NistKey(raw_key)),

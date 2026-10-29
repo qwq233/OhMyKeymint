@@ -80,19 +80,14 @@ fn keystore_target_context() -> anyhow::Result<selinux::Context> {
 
 fn sid_matches_context(sid: &CStr, context: &str) -> bool {
     sid.to_str().is_ok_and(|sid| {
-        sid == context
-            || sid
-                .strip_prefix(context)
-                .is_some_and(|s| s.starts_with(':'))
+        sid == context || sid.strip_prefix(context).is_some_and(|s| s.starts_with(':'))
     })
 }
 
 fn trusted_forwarding_sid(sid: &CStr) -> bool {
     sid.to_bytes().starts_with(b"u:r:keystore:")
         || runtime_service_context().is_some_and(|context| sid_matches_context(sid, context))
-        || TRUSTED_ROOT_SERVICE_CONTEXTS
-            .iter()
-            .any(|context| sid_matches_context(sid, context))
+        || TRUSTED_ROOT_SERVICE_CONTEXTS.iter().any(|context| sid_matches_context(sid, context))
 }
 
 implement_class!(
@@ -311,10 +306,7 @@ pub(crate) fn resolve_caller_info(ctx: Option<&CallerInfo>) -> CallerInfo {
         let calling = CallingContext::default();
         CallerInfo {
             uid: i64::from(calling.uid),
-            sid: calling
-                .sid
-                .map(|sid| sid.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            sid: calling.sid.map(|sid| sid.to_string_lossy().into_owned()).unwrap_or_default(),
             pid: i64::from(calling.pid),
         }
     })
@@ -513,12 +505,7 @@ pub fn check_grant_permission(
         .flatten()
         .ok_or_else(KsError::sys)
         .context("caller SID unavailable for grant permission check")?;
-    check_grant_permission_raw(
-        AppUid(caller.uid as u32 as i64),
-        sid.as_c_str(),
-        access_vec,
-        key,
-    )
+    check_grant_permission_raw(AppUid(caller.uid as u32 as i64), sid.as_c_str(), access_vec, key)
 }
 
 pub fn check_key_permission(
@@ -576,9 +563,8 @@ pub fn require_forwarded_context<'a>(
     ctx: Option<&'a CallerInfo>,
     label: &str,
 ) -> anyhow::Result<&'a CallerInfo> {
-    let ctx = ctx
-        .ok_or_else(KsError::perm)
-        .context(format!("{label} requires forwarded CallerInfo"))?;
+    let ctx =
+        ctx.ok_or_else(KsError::perm).context(format!("{label} requires forwarded CallerInfo"))?;
     validate_forwarded_context(ctx, label)?;
     check_forwarded_caller_provenance(label)?;
     Ok(ctx)
@@ -626,9 +612,8 @@ fn check_android_permission_with_controller(
     permission_denied: KsError,
 ) -> anyhow::Result<()> {
     let controller: rsbinder::Strong<dyn IPermissionController> =
-        get_interface_once(PERMISSION_CONTROLLER_SERVICE).context(format!(
-            "service {PERMISSION_CONTROLLER_SERVICE} unavailable"
-        ))?;
+        get_interface_once(PERMISSION_CONTROLLER_SERVICE)
+            .context(format!("service {PERMISSION_CONTROLLER_SERVICE} unavailable"))?;
     let has_permission = controller
         .checkPermission(permission, caller.pid as i32, caller.uid as i32)
         .map_err(anyhow::Error::new)
@@ -657,15 +642,12 @@ fn check_android_permission_with_manager(
         .as_proxy()
         .ok_or_else(KsError::sys)
         .context("permissionmgr binder was unexpectedly local")?;
-    let mut data = proxy
-        .prepare_transact(true)
-        .context("failed to prepare permissionmgr transaction")?;
-    data.write(&(uid as i32))
-        .context("failed to write permissionmgr uid argument")?;
+    let mut data =
+        proxy.prepare_transact(true).context("failed to prepare permissionmgr transaction")?;
+    data.write(&(uid as i32)).context("failed to write permissionmgr uid argument")?;
     data.write(&permission.to_string())
         .context("failed to write permissionmgr permission argument")?;
-    data.write(&DEFAULT_DEVICE_ID)
-        .context("failed to write permissionmgr deviceId argument")?;
+    data.write(&DEFAULT_DEVICE_ID).context("failed to write permissionmgr deviceId argument")?;
 
     let mut reply = proxy
         .submit_transact(CHECK_UID_PERMISSION_TRANSACTION, &data, 0)
@@ -673,24 +655,19 @@ fn check_android_permission_with_manager(
         .context("permissionmgr returned no reply")?;
     reply.set_data_position(0);
 
-    let status: Status = reply
-        .read()
-        .context("failed to decode permissionmgr reply status")?;
+    let status: Status = reply.read().context("failed to decode permissionmgr reply status")?;
     if !status.is_ok() {
-        return Err(KsError::sys()).context(format!(
-            "permissionmgr checkUidPermission returned non-ok status: {status}"
-        ));
+        return Err(KsError::sys())
+            .context(format!("permissionmgr checkUidPermission returned non-ok status: {status}"));
     }
 
-    let result: i32 = reply
-        .read()
-        .context("failed to decode permissionmgr checkUidPermission result")?;
+    let result: i32 =
+        reply.read().context("failed to decode permissionmgr checkUidPermission result")?;
     if result == PERMISSION_GRANTED {
         Ok(())
     } else {
-        Err(permission_denied).context(format!(
-            "uid {uid} does not hold Android permission {permission}"
-        ))
+        Err(permission_denied)
+            .context(format!("uid {uid} does not hold Android permission {permission}"))
     }
 }
 

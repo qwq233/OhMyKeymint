@@ -22,9 +22,7 @@ unsafe extern "C" fn prefix_only_read_ioctl(_fd: c_int, request: c_int, arg: *mu
 
 #[test]
 fn reset_discards_pending_staged_shadow_but_preserves_live_shadow() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let connection = binder_state_key(20);
     clear_inbound_transaction_shadows(connection);
     let original = [1u8, 2, 3, 4];
@@ -35,10 +33,7 @@ fn reset_discards_pending_staged_shadow_but_preserves_live_shadow() {
         .expect("readable transaction should create a shadow");
     let live_buffer = retain_inbound_transaction_shadow(connection, shadow);
 
-    assert_eq!(
-        inbound_transaction_original_buffer(connection, live_buffer),
-        None
-    );
+    assert_eq!(inbound_transaction_original_buffer(connection, live_buffer), None);
     publish_inbound_transaction_shadows(connection, &[live_buffer]);
     assert_eq!(
         inbound_transaction_original_buffer(connection, live_buffer),
@@ -83,9 +78,7 @@ fn reset_discards_pending_staged_shadow_but_preserves_live_shadow() {
 
 #[test]
 fn read_shadow_only_copies_newly_consumed_bytes() {
-    let _guard = SYNTHETIC_REPLY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fd = 96;
     reset_binder_fd_for_test(fd);
     let mut read = [0x5au8; 3 * size_of::<u32>()];
@@ -101,11 +94,7 @@ fn read_shadow_only_copies_newly_consumed_bytes() {
 
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         0
     );
@@ -114,31 +103,20 @@ fn read_shadow_only_copies_newly_consumed_bytes() {
     OLD_IOCTL.store(partial_read_ioctl as *mut c_void, Ordering::SeqCst);
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         0
     );
     assert_eq!(bwr.read_consumed, 2 * size_of::<u32>());
     assert_eq!(&read[..size_of::<u32>()], &[0x5a; size_of::<u32>()]);
-    assert_eq!(
-        &read[size_of::<u32>()..2 * size_of::<u32>()],
-        &BR_NOOP_CMD.to_ne_bytes()
-    );
+    assert_eq!(&read[size_of::<u32>()..2 * size_of::<u32>()], &BR_NOOP_CMD.to_ne_bytes());
     assert_eq!(&read[2 * size_of::<u32>()..], &[0x5a; size_of::<u32>()]);
 
     read[..size_of::<u32>()].fill(0x33);
     OLD_IOCTL.store(prefix_only_read_ioctl as *mut c_void, Ordering::SeqCst);
     assert_eq!(
         unsafe {
-            new_ioctl(
-                fd,
-                BINDER_WRITE_READ as c_int,
-                (&mut bwr as *mut binder_write_read).cast(),
-            )
+            new_ioctl(fd, BINDER_WRITE_READ as c_int, (&mut bwr as *mut binder_write_read).cast())
         },
         0
     );

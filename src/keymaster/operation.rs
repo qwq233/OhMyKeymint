@@ -221,14 +221,7 @@ impl LoggingInfo {
         key_upgraded: bool,
         is_attested: bool,
     ) -> LoggingInfo {
-        Self {
-            sec_level,
-            purpose,
-            algorithm,
-            op_params,
-            key_upgraded,
-            is_attested,
-        }
+        Self { sec_level, purpose, algorithm, op_params, key_upgraded, is_attested }
     }
 }
 
@@ -356,10 +349,8 @@ impl Operation {
         let guard = self.outcome.lock().expect("In check_active.");
         match *guard {
             Outcome::Unknown => Ok(guard),
-            _ => Err(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE)).context(ks_err!(
-                "Call on finalized operation with outcome: {:?}.",
-                *guard
-            )),
+            _ => Err(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE))
+                .context(ks_err!("Call on finalized operation with outcome: {:?}.", *guard)),
         }
     }
 
@@ -462,11 +453,7 @@ impl Operation {
             })
             .context(ks_err!("Finish failed for {:?}", self.owner))?;
 
-        self.auth_info
-            .lock()
-            .unwrap()
-            .after_finish()
-            .context("In finish.")?;
+        self.auth_info.lock().unwrap().after_finish().context("In finish.")?;
 
         // At this point the operation concluded successfully.
         *outcome = Outcome::Success;
@@ -557,9 +544,7 @@ pub struct OperationDb {
 impl OperationDb {
     /// Creates a new OperationDb.
     pub fn new() -> Self {
-        Self {
-            operations: Mutex::new(Vec::new()),
-        }
+        Self { operations: Mutex::new(Vec::new()) }
     }
 
     /// Creates a new operation.
@@ -611,11 +596,7 @@ impl OperationDb {
     }
 
     fn get(&self, index: usize) -> Option<Arc<Operation>> {
-        self.operations
-            .lock()
-            .expect("In OperationDb::get.")
-            .get(index)
-            .and_then(|op| op.upgrade())
+        self.operations.lock().expect("In OperationDb::get.").get(index).and_then(|op| op.upgrade())
     }
 
     /// Attempts to prune an operation.
@@ -716,11 +697,7 @@ impl OperationDb {
                 });
 
             // If the operation is forced, the caller has a malus of 0.
-            let caller_malus = if forced {
-                0
-            } else {
-                1u64 + *owners.entry(caller).or_default()
-            };
+            let caller_malus = if forced { 0 } else { 1u64 + *owners.entry(caller).or_default() };
 
             // We iterate through all operations computing the malus and finding
             // the candidate with the highest malus which must also be higher
@@ -734,13 +711,7 @@ impl OperationDb {
             let mut oldest_caller_op: Option<CandidateInfo> = None;
             let candidate = pruning_info.iter().fold(
                 None,
-                |acc: Option<CandidateInfo>,
-                 &PruningInfo {
-                     last_usage,
-                     owner,
-                     index,
-                     forced,
-                 }| {
+                |acc: Option<CandidateInfo>, &PruningInfo { last_usage, owner, index, forced }| {
                     // Compute the age of the current operation.
                     let age = now
                         .checked_duration_since(last_usage)
@@ -750,20 +721,12 @@ impl OperationDb {
                     if owner == caller {
                         if let Some(CandidateInfo { age: a, .. }) = oldest_caller_op {
                             if age > a {
-                                oldest_caller_op = Some(CandidateInfo {
-                                    index,
-                                    malus: 0,
-                                    last_usage,
-                                    age,
-                                });
+                                oldest_caller_op =
+                                    Some(CandidateInfo { index, malus: 0, last_usage, age });
                             }
                         } else {
-                            oldest_caller_op = Some(CandidateInfo {
-                                index,
-                                malus: 0,
-                                last_usage,
-                                age,
-                            });
+                            oldest_caller_op =
+                                Some(CandidateInfo { index, malus: 0, last_usage, age });
                         }
                     }
 
@@ -786,38 +749,18 @@ impl OperationDb {
                         // First we have to find any operation that is prunable by the caller.
                         None => {
                             if caller_malus < malus {
-                                Some(CandidateInfo {
-                                    index,
-                                    malus,
-                                    last_usage,
-                                    age,
-                                })
+                                Some(CandidateInfo { index, malus, last_usage, age })
                             } else {
                                 None
                             }
                         }
                         // If we have found one we look for the operation with the worst score.
                         // If there is a tie, the older operation is considered weaker.
-                        Some(CandidateInfo {
-                            index: i,
-                            malus: m,
-                            last_usage: l,
-                            age: a,
-                        }) => {
+                        Some(CandidateInfo { index: i, malus: m, last_usage: l, age: a }) => {
                             if malus > m || (malus == m && age > a) {
-                                Some(CandidateInfo {
-                                    index,
-                                    malus,
-                                    last_usage,
-                                    age,
-                                })
+                                Some(CandidateInfo { index, malus, last_usage, age })
                             } else {
-                                Some(CandidateInfo {
-                                    index: i,
-                                    malus: m,
-                                    last_usage: l,
-                                    age: a,
-                                })
+                                Some(CandidateInfo { index: i, malus: m, last_usage: l, age: a })
                             }
                         }
                     }
@@ -828,12 +771,7 @@ impl OperationDb {
             let candidate = candidate.or(oldest_caller_op);
 
             match candidate {
-                Some(CandidateInfo {
-                    index,
-                    malus: _,
-                    last_usage,
-                    age: _,
-                }) => {
+                Some(CandidateInfo { index, malus: _, last_usage, age: _ }) => {
                     match self.get(index) {
                         Some(op) => {
                             match op.prune(last_usage) {
@@ -894,9 +832,7 @@ impl KeystoreOperation {
     /// we need it for checking Keystore permissions.
     pub fn new_native_binder(operation: Arc<Operation>) -> binder::Strong<dyn IKeystoreOperation> {
         BnKeystoreOperation::new_binder_with_features(
-            Self {
-                operation: Mutex::new(Some(operation)),
-            },
+            Self { operation: Mutex::new(Some(operation)) },
             crate::consts::sid_features(),
         )
     }
@@ -946,10 +882,7 @@ impl IKeystoreOperation for KeystoreOperation {
     fn updateAad(&self, aad_input: &[u8]) -> Result<(), Status> {
         let _wp = wd::watch("IKeystoreOperation::updateAad");
         self.with_locked_operation(
-            |op| {
-                op.update_aad(aad_input)
-                    .context(ks_err!("KeystoreOperation::updateAad"))
-            },
+            |op| op.update_aad(aad_input).context(ks_err!("KeystoreOperation::updateAad")),
             false,
             aad_input.len(),
         )
@@ -959,10 +892,7 @@ impl IKeystoreOperation for KeystoreOperation {
     fn update(&self, input: &[u8]) -> Result<Option<Vec<u8>>, Status> {
         let _wp = wd::watch("IKeystoreOperation::update");
         self.with_locked_operation(
-            |op| {
-                op.update(input)
-                    .context(ks_err!("KeystoreOperation::update"))
-            },
+            |op| op.update(input).context(ks_err!("KeystoreOperation::update")),
             false,
             input.len(),
         )
@@ -975,10 +905,7 @@ impl IKeystoreOperation for KeystoreOperation {
     ) -> Result<Option<Vec<u8>>, Status> {
         let _wp = wd::watch("IKeystoreOperation::finish");
         self.with_locked_operation(
-            |op| {
-                op.finish(input, signature)
-                    .context(ks_err!("KeystoreOperation::finish"))
-            },
+            |op| op.finish(input, signature).context(ks_err!("KeystoreOperation::finish")),
             true,
             input.map_or(0, |v| v.len()),
         )
@@ -988,10 +915,7 @@ impl IKeystoreOperation for KeystoreOperation {
     fn abort(&self) -> Result<(), Status> {
         let _wp = wd::watch("IKeystoreOperation::abort");
         let result = self.with_locked_operation(
-            |op| {
-                op.abort(Outcome::Abort)
-                    .context(ks_err!("KeystoreOperation::abort"))
-            },
+            |op| op.abort(Outcome::Abort).context(ks_err!("KeystoreOperation::abort")),
             true,
             0,
         );

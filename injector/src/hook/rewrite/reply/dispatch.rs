@@ -24,9 +24,7 @@ fn synthetic_target_interface(kind: SyntheticTargetKind) -> &'static str {
 }
 
 fn error_status_code(error: &anyhow::Error) -> Option<StatusCode> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<StatusCode>().copied())
+    error.chain().find_map(|cause| cause.downcast_ref::<StatusCode>().copied())
 }
 
 fn synthetic_parse_error_status_code(error: &anyhow::Error) -> StatusCode {
@@ -35,9 +33,9 @@ fn synthetic_parse_error_status_code(error: &anyhow::Error) -> StatusCode {
 
 fn synthetic_parse_error_reply(status: StatusCode) -> anyhow::Result<SyntheticReply> {
     if status == StatusCode::UnexpectedNull {
-        return Ok(synthetic_parcel_reply(parcel::build_status_reply(
-            &Status::from(ExceptionCode::NullPointer),
-        )?));
+        return Ok(synthetic_parcel_reply(parcel::build_status_reply(&Status::from(
+            ExceptionCode::NullPointer,
+        ))?));
     }
     Ok(SyntheticReply::Status(status.into()))
 }
@@ -76,9 +74,9 @@ fn build_synthetic_aidl_metadata_reply(
             let hash = metadata.hash.to_string();
             Ok(synthetic_parcel_reply(parcel::build_plain_reply(&hash)?))
         }
-        AidlMetadataMethod::GetInterfaceVersion => Ok(synthetic_parcel_reply(
-            parcel::build_plain_reply(&metadata.version)?,
-        )),
+        AidlMetadataMethod::GetInterfaceVersion => {
+            Ok(synthetic_parcel_reply(parcel::build_plain_reply(&metadata.version)?))
+        }
     }
 }
 
@@ -509,18 +507,11 @@ unsafe fn execute_native_transaction(
     );
 
     if let Some(state) = state {
-        return Ok(synthetic_parcel_reply(build_native_operation_reply(
-            &request, state,
-        )?));
+        return Ok(synthetic_parcel_reply(build_native_operation_reply(&request, state)?));
     }
     #[cfg(test)]
     {
-        let pending = PendingOperationCall {
-            request,
-            caller,
-            target,
-            route: RouteTarget::Omk,
-        };
+        let pending = PendingOperationCall { request, caller, target, route: RouteTarget::Omk };
         let reply = build_operation_reply_rewrite(&pending)?;
         Ok(synthetic_reply_from_outbound(reply))
     }

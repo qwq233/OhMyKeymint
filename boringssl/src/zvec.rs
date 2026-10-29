@@ -50,10 +50,7 @@ impl ZVec {
             // SAFETY: The address range is part of our address space.
             unsafe { mlock(NonNull::from(&b).cast(), b.len()) }?;
         }
-        Ok(Self {
-            elems: b,
-            len: size,
-        })
+        Ok(Self { elems: b, len: size })
     }
 
     /// Reduce the length to the given value.  Does nothing if that length is
@@ -111,11 +108,7 @@ impl fmt::Debug for ZVec {
         if self.elems.is_empty() {
             write!(f, "Zvec empty")
         } else {
-            write!(
-                f,
-                "Zvec size: {} [ Sensitive information redacted ]",
-                self.len
-            )
+            write!(f, "Zvec size: {} [ Sensitive information redacted ]", self.len)
         }
     }
 }

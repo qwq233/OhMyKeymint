@@ -55,9 +55,7 @@ static LIB_SELINUX_LOCK: sync::Mutex<()> = sync::Mutex::new(());
 fn redirect_selinux_logs_to_logcat() {
     // `selinux_set_callback` assigns the static lifetime function pointer
     // `selinux_log_callback` to a static lifetime variable.
-    let cb = selinux::selinux_callback {
-        func_log: Some(selinux::selinux_log_callback),
-    };
+    let cb = selinux::selinux_callback { func_log: Some(selinux::selinux_log_callback) };
     unsafe {
         selinux::selinux_set_callback(SELINUX_CB_LOG as i32, cb);
     }
@@ -144,9 +142,10 @@ impl Deref for Context {
 impl Context {
     /// Initializes the `Context::CString` variant from a Rust string slice.
     pub fn new(con: &str) -> Result<Self> {
-        Ok(Self::CString(CString::new(con).with_context(|| {
-            format!("Failed to create Context with \"{con}\"")
-        })?))
+        Ok(Self::CString(
+            CString::new(con)
+                .with_context(|| format!("Failed to create Context with \"{con}\""))?,
+        ))
     }
 }
 

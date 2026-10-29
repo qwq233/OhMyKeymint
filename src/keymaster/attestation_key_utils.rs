@@ -66,12 +66,7 @@ fn get_user_generated_attestation_key(
     let issuer_subject: Vec<u8> = parse_subject_from_certificate(&cert)
         .context(ks_err!("Failed to parse subject from certificate"))?;
 
-    Ok(AttestationKeyInfo::UserGenerated {
-        key_id_guard,
-        blob,
-        issuer_subject,
-        blob_metadata,
-    })
+    Ok(AttestationKeyInfo::UserGenerated { key_id_guard, blob, issuer_subject, blob_metadata })
 }
 
 fn load_attest_key_blob_and_cert(
@@ -97,15 +92,11 @@ fn load_attest_key_blob_and_cert(
             let (blob, blob_metadata) = key_entry
                 .take_key_blob_info()
                 .ok_or(Error::Rc(ResponseCode::INVALID_ARGUMENT))
-                .context(ks_err!(
-                    "Successfully loaded key entry, but KM blob was missing"
-                ))?;
+                .context(ks_err!("Successfully loaded key entry, but KM blob was missing"))?;
             let cert = key_entry
                 .take_cert()
                 .ok_or(Error::Rc(ResponseCode::INVALID_ARGUMENT))
-                .context(ks_err!(
-                    "Successfully loaded key entry, but cert was missing"
-                ))?;
+                .context(ks_err!("Successfully loaded key entry, but cert was missing"))?;
             Ok((key_id_guard, blob, cert, blob_metadata))
         }
     }

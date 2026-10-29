@@ -66,11 +66,7 @@ impl Key {
             16 => Ok(Key::Aes128(data.try_into().unwrap())), // safe: len checked
             24 => Ok(Key::Aes192(data.try_into().unwrap())), // safe: len checked
             32 => Ok(Key::Aes256(data.try_into().unwrap())), // safe: len checked
-            l => Err(km_err!(
-                UnsupportedKeySize,
-                "AES keys must be 16, 24 or 32 bytes not {}",
-                l
-            )),
+            l => Err(km_err!(UnsupportedKeySize, "AES keys must be 16, 24 or 32 bytes not {}", l)),
         }
     }
     /// Create a new [`Key`] from raw data, which must be 16, 24 or 32 bytes long.

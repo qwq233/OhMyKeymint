@@ -23,11 +23,7 @@ use std::{boxed::Box, vec::Vec};
 impl crate::KeyMintTa {
     pub fn set_device_hmac_key(&mut self, key: &[u8]) -> Result<(), Error> {
         if key.len() != kmr_common::crypto::SHA256_DIGEST_LEN {
-            return Err(km_err!(
-                InvalidArgument,
-                "HMAC key len {} not 32",
-                key.len()
-            ));
+            return Err(km_err!(InvalidArgument, "HMAC key len {} not 32", key.len()));
         }
         self.set_device_hmac(Box::new(SoftDeviceHmac {
             key: crypto::hmac::Key::new(key.to_vec()),
@@ -40,11 +36,7 @@ impl crate::KeyMintTa {
         params: SharedSecretParameters,
     ) -> Result<(), Error> {
         if params.nonce.len() != 32 {
-            return Err(km_err!(
-                InvalidArgument,
-                "nonce len {} not 32",
-                params.nonce.len()
-            ));
+            return Err(km_err!(InvalidArgument, "nonce len {} not 32", params.nonce.len()));
         }
         self.shared_secret_params = Some(params);
         Ok(())
@@ -54,10 +46,7 @@ impl crate::KeyMintTa {
         if self.shared_secret_params.is_none() {
             let mut nonce = vec_try![0u8; 32]?;
             self.imp.rng.fill_bytes(&mut nonce);
-            self.shared_secret_params = Some(SharedSecretParameters {
-                seed: Vec::new(),
-                nonce,
-            });
+            self.shared_secret_params = Some(SharedSecretParameters { seed: Vec::new(), nonce });
         }
         Ok(self.shared_secret_params.as_ref().unwrap().clone()) // safe: filled above
     }
@@ -66,18 +55,10 @@ impl crate::KeyMintTa {
         &mut self,
         params: &[SharedSecretParameters],
     ) -> Result<Vec<u8>, Error> {
-        info!(
-            "Setting HMAC key from {} shared secret parameters",
-            params.len()
-        );
+        info!("Setting HMAC key from {} shared secret parameters", params.len());
         let local_params = match &self.shared_secret_params {
             Some(params) => params,
-            None => {
-                return Err(km_err!(
-                    HardwareNotYetAvailable,
-                    "no local shared secret params"
-                ))
-            }
+            None => return Err(km_err!(HardwareNotYetAvailable, "no local shared secret params")),
         };
 
         let context = shared_secret_context(params, local_params)?;
@@ -108,11 +89,7 @@ pub fn shared_secret_context(
     for param in params {
         result.try_extend_from_slice(&param.seed)?;
         if param.nonce.len() != 32 {
-            return Err(km_err!(
-                InvalidArgument,
-                "nonce len {} not 32",
-                param.nonce.len()
-            ));
+            return Err(km_err!(InvalidArgument, "nonce len {} not 32", param.nonce.len()));
         }
         result.try_extend_from_slice(&param.nonce)?;
         if param == must_include {
@@ -120,10 +97,7 @@ pub fn shared_secret_context(
         }
     }
     if !seen {
-        Err(km_err!(
-            InvalidArgument,
-            "shared secret params missing local value"
-        ))
+        Err(km_err!(InvalidArgument, "shared secret params missing local value"))
     } else {
         Ok(result)
     }

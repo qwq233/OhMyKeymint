@@ -6,9 +6,7 @@ pub struct PropertyWatcher {
 
 impl PropertyWatcher {
     pub fn new(name: &str) -> anyhow::Result<Self> {
-        Ok(Self {
-            name: name.to_string(),
-        })
+        Ok(Self { name: name.to_string() })
     }
 
     pub fn read(&self) -> Result<String> {

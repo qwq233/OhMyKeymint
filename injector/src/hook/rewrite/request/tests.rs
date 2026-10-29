@@ -34,11 +34,7 @@ fn grant_and_ungrant_return_system_error_when_omk_unavailable() {
         grantee_uid: 12345,
         access_vector: 7,
     };
-    let caller = CallerInfo {
-        uid: 1000,
-        sid: String::new(),
-        pid: 2000,
-    };
+    let caller = CallerInfo { uid: 1000, sid: String::new(), pid: 2000 };
 
     let result = precompute_omk_grant_service_reply_with(
         &request,
@@ -50,20 +46,11 @@ fn grant_and_ungrant_return_system_error_when_omk_unavailable() {
     let PrecomputedServiceReply::Error(status) = result else {
         panic!("OMK transport failure must return an error");
     };
-    assert_eq!(
-        status.service_specific_error(),
-        ResponseCode::SYSTEM_ERROR.0
-    );
+    assert_eq!(status.service_specific_error(), ResponseCode::SYSTEM_ERROR.0);
 
-    let request = ParsedServiceRequest::Ungrant {
-        key: sample_key_descriptor(),
-        grantee_uid: 12345,
-    };
-    let caller = CallerInfo {
-        uid: 1000,
-        sid: String::new(),
-        pid: 2000,
-    };
+    let request =
+        ParsedServiceRequest::Ungrant { key: sample_key_descriptor(), grantee_uid: 12345 };
+    let caller = CallerInfo { uid: 1000, sid: String::new(), pid: 2000 };
 
     let result = precompute_omk_grant_service_reply_with(
         &request,
@@ -75,10 +62,7 @@ fn grant_and_ungrant_return_system_error_when_omk_unavailable() {
     let PrecomputedServiceReply::Error(status) = result else {
         panic!("OMK transport failure must return an error");
     };
-    assert_eq!(
-        status.service_specific_error(),
-        ResponseCode::SYSTEM_ERROR.0
-    );
+    assert_eq!(status.service_specific_error(), ResponseCode::SYSTEM_ERROR.0);
 }
 
 #[test]
@@ -88,30 +72,19 @@ fn grant_precompute_returns_reachable_omk_business_error() {
         grantee_uid: 12345,
         access_vector: 7,
     };
-    let caller = CallerInfo {
-        uid: 1000,
-        sid: String::new(),
-        pid: 2000,
-    };
+    let caller = CallerInfo { uid: 1000, sid: String::new(), pid: 2000 };
 
     let result = precompute_omk_grant_service_reply_with(
         &request,
         &caller,
-        |_, _, _, _| {
-            Err(anyhow::Error::new(Status::new_service_specific_error(
-                7, None,
-            )))
-        },
+        |_, _, _, _| Err(anyhow::Error::new(Status::new_service_specific_error(7, None))),
         |_, _, _| panic!("grant requests must not call ungrant"),
     );
 
     let PrecomputedServiceReply::Error(status) = result else {
         panic!("reachable OMK business error should be precomputed as an authoritative status");
     };
-    assert_eq!(
-        status.exception_code(),
-        rsbinder::ExceptionCode::ServiceSpecific
-    );
+    assert_eq!(status.exception_code(), rsbinder::ExceptionCode::ServiceSpecific);
     assert_eq!(status.service_specific_error(), 7);
 }
 
@@ -154,12 +127,7 @@ fn service_route_respects_intercept_configuration() {
 fn descriptor_domain_does_not_bypass_scope_or_intercept() {
     for domain in [Domain::APP, Domain::KEY_ID, Domain::GRANT] {
         let request = ParsedServiceRequest::GetKeyEntry {
-            key: KeyDescriptor {
-                domain,
-                nspace: 123,
-                alias: None,
-                blob: None,
-            },
+            key: KeyDescriptor { domain, nspace: 123, alias: None, blob: None },
         };
         for allowed in [false, true] {
             for enabled in [false, true] {
@@ -167,11 +135,7 @@ fn descriptor_domain_does_not_bypass_scope_or_intercept() {
                 intercept.get_key_entry = enabled;
                 assert_eq!(
                     route_for_service_request(&request, allowed, &intercept),
-                    if allowed && enabled {
-                        RouteTarget::Omk
-                    } else {
-                        RouteTarget::System
-                    }
+                    if allowed && enabled { RouteTarget::Omk } else { RouteTarget::System }
                 );
             }
         }

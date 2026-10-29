@@ -84,10 +84,7 @@ impl OpaqueOr<Key> {
     ) -> Result<SubjectPublicKeyInfoRef<'a>, Error> {
         buf.try_extend_from_slice(&mldsa.subject_public_key(self)?)?;
         Ok(SubjectPublicKeyInfo {
-            algorithm: AlgorithmIdentifier {
-                oid: variant_to_oid(variant),
-                parameters: None,
-            },
+            algorithm: AlgorithmIdentifier { oid: variant_to_oid(variant), parameters: None },
             subject_public_key: BitStringRef::from_bytes(buf).unwrap(),
         })
     }
@@ -160,23 +157,14 @@ pub fn import_pkcs8_key(data: &[u8]) -> Result<KeyMaterial, Error> {
     {
         let seed = <[u8; SEED_SIZE]>::try_from(&data[PKCS8_SEED_65_PREFIX.len()..])
             .map_err(|_e| km_err!(UnsupportedKeySize, "ML-DSA key seeds must be 32 bytes"))?;
-        Ok(KeyMaterial::MlDsa(
-            MlDsaVariant::MlDsa65,
-            OpaqueOr::Explicit(Key::MlDsa65(seed)),
-        ))
+        Ok(KeyMaterial::MlDsa(MlDsaVariant::MlDsa65, OpaqueOr::Explicit(Key::MlDsa65(seed))))
     } else if data.len() == PKCS8_SEED_87_PREFIX.len() + SEED_SIZE
         && data[..PKCS8_SEED_87_PREFIX.len()] == PKCS8_SEED_87_PREFIX
     {
         let seed = <[u8; SEED_SIZE]>::try_from(&data[PKCS8_SEED_87_PREFIX.len()..])
             .map_err(|_e| km_err!(UnsupportedKeySize, "ML-DSA key seeds must be 32 bytes"))?;
-        Ok(KeyMaterial::MlDsa(
-            MlDsaVariant::MlDsa87,
-            OpaqueOr::Explicit(Key::MlDsa87(seed)),
-        ))
+        Ok(KeyMaterial::MlDsa(MlDsaVariant::MlDsa87, OpaqueOr::Explicit(Key::MlDsa87(seed))))
     } else {
-        Err(km_err!(
-            InvalidArgument,
-            "PKCS#8 ML-DSA seed data not recognized"
-        ))
+        Err(km_err!(InvalidArgument, "PKCS#8 ML-DSA seed data not recognized"))
     }
 }

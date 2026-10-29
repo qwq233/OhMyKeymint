@@ -24,10 +24,7 @@ impl crypto::Rng for BoringRng {
     fn add_entropy(&mut self, data: &[u8]) {
         // Safety: `data` is a valid slice.
         unsafe {
-            ffi::RAND_seed(
-                data.as_ptr() as *const libc::c_void,
-                data.len() as libc::c_int,
-            );
+            ffi::RAND_seed(data.as_ptr() as *const libc::c_void, data.len() as libc::c_int);
         }
     }
     fn fill_bytes(&mut self, dest: &mut [u8]) {

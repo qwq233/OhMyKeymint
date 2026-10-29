@@ -33,10 +33,7 @@ pub struct Keys {
 impl Keys {
     /// Creates a new `Keys` instance with the given seeds.
     pub fn new(root_kek_seed: [u8; 32], kak_seed: [u8; 32]) -> Self {
-        Self {
-            root_kek_seed,
-            kak_seed,
-        }
+        Self { root_kek_seed, kak_seed }
     }
 }
 

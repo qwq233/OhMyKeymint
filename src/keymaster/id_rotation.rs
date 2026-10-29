@@ -72,9 +72,8 @@ impl IdRotationState {
                     .checked_add(ID_ROTATION_PERIOD * temporal_counter_value.try_into()?)
                     .context(ks_err!("Failed to get ID rotation time."))?;
 
-                let factory_reset_time = metadata
-                    .modified()
-                    .context(ks_err!("File creation time not supported."))?;
+                let factory_reset_time =
+                    metadata.modified().context(ks_err!("File creation time not supported."))?;
 
                 Ok(id_rotation_time <= factory_reset_time)
             }
@@ -123,9 +122,7 @@ mod test {
 
         // Trigger timestamp file creation one second later.
         sleep(Duration::new(1, 0));
-        assert!(id_rotation_state
-            .had_factory_reset_since_id_rotation(&creation_datetime)
-            .unwrap());
+        assert!(id_rotation_state.had_factory_reset_since_id_rotation(&creation_datetime).unwrap());
 
         // Now the timestamp file should exist.
         assert!(timestamp_file_path.exists());
@@ -150,17 +147,13 @@ mod test {
 
         // Timestamp file was backdated to the very beginning of the current ID rotation period.
         // So, this should return true.
-        assert!(id_rotation_state
-            .had_factory_reset_since_id_rotation(&creation_datetime)
-            .unwrap());
+        assert!(id_rotation_state.had_factory_reset_since_id_rotation(&creation_datetime).unwrap());
 
         // Move time forward, but stay in the same ID rotation period.
         creation_datetime += Duration::from_millis(1);
 
         // We should still return true because we're in the same ID rotation period.
-        assert!(id_rotation_state
-            .had_factory_reset_since_id_rotation(&creation_datetime)
-            .unwrap());
+        assert!(id_rotation_state.had_factory_reset_since_id_rotation(&creation_datetime).unwrap());
 
         // Move time to the next ID rotation period.
         creation_datetime += ID_ROTATION_PERIOD;
@@ -175,8 +168,6 @@ mod test {
         let mtime = TimeVal::seconds((ID_ROTATION_PERIOD.as_secs() * 10).try_into().unwrap());
         let atime = TimeVal::seconds((ID_ROTATION_PERIOD.as_secs() * 10).try_into().unwrap());
         utimes(&timestamp_file_path, &atime, &mtime).unwrap();
-        assert!(id_rotation_state
-            .had_factory_reset_since_id_rotation(&creation_datetime)
-            .unwrap());
+        assert!(id_rotation_state.had_factory_reset_since_id_rotation(&creation_datetime).unwrap());
     }
 }

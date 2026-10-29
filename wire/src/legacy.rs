@@ -196,8 +196,7 @@ fn serialize_trusty_response_message<T: TrustySerialize>(
     // mark this as the final response.
     let raw_cmd = (cmd << TRUSTY_CMD_SHIFT) | TRUSTY_RESPONSE_BITMASK | TRUSTY_STOP_BITMASK;
     let mut buf = Vec::new();
-    buf.try_reserve(LEGACY_NON_SEC_RSP_HEADER_SIZE)
-        .map_err(|_e| Error::AllocationFailed)?;
+    buf.try_reserve(LEGACY_NON_SEC_RSP_HEADER_SIZE).map_err(|_e| Error::AllocationFailed)?;
     buf.extend_from_slice(&raw_cmd.to_ne_bytes());
 
     match result {
@@ -222,8 +221,7 @@ pub fn serialize_trusty_rsp(rsp: TrustyPerformOpRsp) -> Result<Vec<u8>, Error> {
 fn serialize_trusty_raw_rsp(cmd: u32, raw_data: &[u8]) -> Result<Vec<u8>, Error> {
     let raw_cmd = (cmd << TRUSTY_CMD_SHIFT) | TRUSTY_RESPONSE_BITMASK | TRUSTY_STOP_BITMASK;
     let mut buf = Vec::new();
-    buf.try_reserve(CMD_SIZE + raw_data.len())
-        .map_err(|_e| Error::AllocationFailed)?;
+    buf.try_reserve(CMD_SIZE + raw_data.len()).map_err(|_e| Error::AllocationFailed)?;
     buf.extend_from_slice(&raw_cmd.to_ne_bytes());
     buf.extend_from_slice(raw_data);
     Ok(buf)
@@ -364,8 +362,7 @@ impl InnerSerialize for Vec<u8> {
         Ok((buf, &rest[len..]))
     }
     fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<(), Error> {
-        buf.try_reserve(4 + self.len())
-            .map_err(|_e| Error::AllocationFailed)?;
+        buf.try_reserve(4 + self.len()).map_err(|_e| Error::AllocationFailed)?;
         let len = self.len() as u32;
         buf.extend_from_slice(&len.to_ne_bytes());
         buf.extend_from_slice(self);
@@ -376,10 +373,7 @@ impl InnerSerialize for Vec<u8> {
 impl InnerSerialize for KmVersion {
     fn deserialize(data: &[u8]) -> Result<(Self, &[u8]), Error> {
         let (v, rest) = <u32>::deserialize(data)?;
-        Ok((
-            Self::try_from(v as i32).map_err(|_e| Error::InvalidEnumValue(v))?,
-            rest,
-        ))
+        Ok((Self::try_from(v as i32).map_err(|_e| Error::InvalidEnumValue(v))?, rest))
     }
     fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<(), Error> {
         (*self as u32).serialize_into(buf)
@@ -389,10 +383,7 @@ impl InnerSerialize for KmVersion {
 impl InnerSerialize for Algorithm {
     fn deserialize(data: &[u8]) -> Result<(Self, &[u8]), Error> {
         let (v, rest) = <u32>::deserialize(data)?;
-        Ok((
-            Self::try_from(v as i32).map_err(|_e| Error::InvalidEnumValue(v))?,
-            rest,
-        ))
+        Ok((Self::try_from(v as i32).map_err(|_e| Error::InvalidEnumValue(v))?, rest))
     }
     fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<(), Error> {
         (*self as u32).serialize_into(buf)
@@ -402,10 +393,7 @@ impl InnerSerialize for Algorithm {
 impl InnerSerialize for VerifiedBootState {
     fn deserialize(data: &[u8]) -> Result<(Self, &[u8]), Error> {
         let (v, rest) = <u32>::deserialize(data)?;
-        Ok((
-            Self::try_from(v as i32).map_err(|_e| Error::InvalidEnumValue(v))?,
-            rest,
-        ))
+        Ok((Self::try_from(v as i32).map_err(|_e| Error::InvalidEnumValue(v))?, rest))
     }
     fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<(), Error> {
         (*self as u32).serialize_into(buf)
@@ -489,8 +477,7 @@ impl InnerSerialize for GetAuthTokenKeyResponse {
         Err(Error::UnexpectedResponse)
     }
     fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<(), Error> {
-        buf.try_reserve(self.key_material.len())
-            .map_err(|_e| Error::AllocationFailed)?;
+        buf.try_reserve(self.key_material.len()).map_err(|_e| Error::AllocationFailed)?;
         buf.extend_from_slice(&self.key_material);
         Ok(())
     }
@@ -512,8 +499,7 @@ impl InnerSerialize for GetDeviceInfoResponse {
         Err(Error::UnexpectedResponse)
     }
     fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<(), Error> {
-        buf.try_reserve(self.device_ids.len())
-            .map_err(|_e| Error::AllocationFailed)?;
+        buf.try_reserve(self.device_ids.len()).map_err(|_e| Error::AllocationFailed)?;
         buf.extend_from_slice(&self.device_ids);
         Ok(())
     }
@@ -784,11 +770,7 @@ mod tests {
     }
     #[test]
     fn test_get_version_serialize() {
-        let msg = GetVersionResponse {
-            major_ver: 1,
-            minor_ver: 2,
-            subminor_ver: 3,
-        };
+        let msg = GetVersionResponse { major_ver: 1, minor_ver: 2, subminor_ver: 3 };
         let data = vec![1, 2, 3];
 
         let mut got_data = Vec::new();
@@ -822,9 +804,8 @@ mod tests {
     }
     #[test]
     fn test_get_uds_certs_rsp_serialize() {
-        let msg = TrustyPerformSecureOpRsp::GetUdsCerts(GetUdsCertsResponse {
-            uds_certs: vec![1, 2, 3],
-        });
+        let msg =
+            TrustyPerformSecureOpRsp::GetUdsCerts(GetUdsCertsResponse { uds_certs: vec![1, 2, 3] });
         #[cfg(target_endian = "little")]
         let data = concat!(
             /* cmd */ "0b000000", /* rc */ "00000000", /* len */ "03000000",

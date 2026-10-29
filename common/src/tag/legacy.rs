@@ -45,10 +45,7 @@ pub fn consume_bool(data: &mut &[u8]) -> Result<(), Error> {
     if b == 0x01 {
         Ok(())
     } else {
-        Err(km_err!(
-            InvalidKeyBlob,
-            "bool value other than 1 encountered"
-        ))
+        Err(km_err!(InvalidKeyBlob, "bool value other than 1 encountered"))
     }
 }
 
@@ -306,10 +303,7 @@ fn consume_blob(
 pub fn deserialize(data: &mut &[u8]) -> Result<Vec<KeyParam>, Error> {
     let blob_data_size = consume_u32(data)? as usize;
     if blob_data_size > data.len() {
-        return Err(km_err!(
-            InvalidKeyBlob,
-            "failed to find {blob_data_size} bytes"
-        ));
+        return Err(km_err!(InvalidKeyBlob, "failed to find {blob_data_size} bytes"));
     }
 
     let blob_data = &data[..blob_data_size];
@@ -440,24 +434,24 @@ pub fn deserialize(data: &mut &[u8]) -> Result<Vec<KeyParam>, Error> {
             }
 
             // `DateTime`-holding variants.
-            Tag::ActiveDatetime => KeyParam::ActiveDatetime(DateTime {
-                ms_since_epoch: consume_i64(data)?,
-            }),
-            Tag::OriginationExpireDatetime => KeyParam::OriginationExpireDatetime(DateTime {
-                ms_since_epoch: consume_i64(data)?,
-            }),
-            Tag::UsageExpireDatetime => KeyParam::UsageExpireDatetime(DateTime {
-                ms_since_epoch: consume_i64(data)?,
-            }),
-            Tag::CreationDatetime => KeyParam::CreationDatetime(DateTime {
-                ms_since_epoch: consume_i64(data)?,
-            }),
-            Tag::CertificateNotBefore => KeyParam::CertificateNotBefore(DateTime {
-                ms_since_epoch: consume_i64(data)?,
-            }),
-            Tag::CertificateNotAfter => KeyParam::CertificateNotAfter(DateTime {
-                ms_since_epoch: consume_i64(data)?,
-            }),
+            Tag::ActiveDatetime => {
+                KeyParam::ActiveDatetime(DateTime { ms_since_epoch: consume_i64(data)? })
+            }
+            Tag::OriginationExpireDatetime => {
+                KeyParam::OriginationExpireDatetime(DateTime { ms_since_epoch: consume_i64(data)? })
+            }
+            Tag::UsageExpireDatetime => {
+                KeyParam::UsageExpireDatetime(DateTime { ms_since_epoch: consume_i64(data)? })
+            }
+            Tag::CreationDatetime => {
+                KeyParam::CreationDatetime(DateTime { ms_since_epoch: consume_i64(data)? })
+            }
+            Tag::CertificateNotBefore => {
+                KeyParam::CertificateNotBefore(DateTime { ms_since_epoch: consume_i64(data)? })
+            }
+            Tag::CertificateNotAfter => {
+                KeyParam::CertificateNotAfter(DateTime { ms_since_epoch: consume_i64(data)? })
+            }
 
             // `Vec<u8>`-holding variants.
             Tag::ApplicationId => {

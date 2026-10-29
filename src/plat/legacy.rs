@@ -58,9 +58,8 @@ pub fn get_application_id(uid: u32) -> Result<KeyAttestationApplicationId> {
         .context("legacy getKeyAttestationApplicationId returned no reply")?;
     reply.set_data_position(0);
 
-    let status: Status = reply
-        .read()
-        .context("failed to decode legacy getKeyAttestationApplicationId status")?;
+    let status: Status =
+        reply.read().context("failed to decode legacy getKeyAttestationApplicationId status")?;
     if !status.is_ok() {
         return Err(anyhow::Error::new(status));
     }
@@ -91,9 +90,7 @@ fn get_provider_binder() -> Result<SIBinder> {
 
 fn read_application_id(parcel: &mut Parcel) -> Result<KeyAttestationApplicationId> {
     read_non_null_parcelable_flag(parcel, "application id")?;
-    Ok(KeyAttestationApplicationId {
-        packageInfos: read_typed_array(parcel, read_package_info)?,
-    })
+    Ok(KeyAttestationApplicationId { packageInfos: read_typed_array(parcel, read_package_info)? })
 }
 
 fn read_package_info(parcel: &mut Parcel) -> Result<KeyAttestationPackageInfo> {
@@ -101,9 +98,7 @@ fn read_package_info(parcel: &mut Parcel) -> Result<KeyAttestationPackageInfo> {
         .read::<Option<String>>()
         .context("failed to decode legacy package name")?
         .unwrap_or_default();
-    let version_code = parcel
-        .read::<i64>()
-        .context("failed to decode legacy package version")?;
+    let version_code = parcel.read::<i64>().context("failed to decode legacy package version")?;
     let signatures = read_typed_array(parcel, read_signature)?;
 
     Ok(KeyAttestationPackageInfo {
@@ -115,9 +110,7 @@ fn read_package_info(parcel: &mut Parcel) -> Result<KeyAttestationPackageInfo> {
 
 fn read_signature(parcel: &mut Parcel) -> Result<Signature> {
     Ok(Signature {
-        data: parcel
-            .read::<Vec<u8>>()
-            .context("failed to decode legacy signature data")?,
+        data: parcel.read::<Vec<u8>>().context("failed to decode legacy signature data")?,
     })
 }
 
@@ -125,9 +118,7 @@ fn read_typed_array<T>(
     parcel: &mut Parcel,
     mut read_value: impl FnMut(&mut Parcel) -> Result<T>,
 ) -> Result<Vec<T>> {
-    let size = parcel
-        .read::<i32>()
-        .context("failed to decode legacy typed array size")?;
+    let size = parcel.read::<i32>().context("failed to decode legacy typed array size")?;
     if size == NULL_VECTOR_SIZE {
         return Ok(Vec::new());
     }

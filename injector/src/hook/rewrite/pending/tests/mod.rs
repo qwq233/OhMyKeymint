@@ -10,9 +10,7 @@ pub(in crate::hook::rewrite) fn take_top_pending(
 ) -> Option<Option<PendingCall>> {
     PENDING_REPLY_QUEUE.with(|slot| {
         let mut slot = slot.borrow_mut();
-        let position = slot
-            .iter()
-            .rposition(|frame| frame.connection == connection)?;
+        let position = slot.iter().rposition(|frame| frame.connection == connection)?;
         Some(slot.remove(position).pending)
     })
 }
@@ -28,12 +26,8 @@ pub(in crate::hook) fn reset_pending_reply_frames_for_test(
 }
 
 pub(in crate::hook) fn pending_reply_frame_count_for_test(connection: BinderStateKey) -> usize {
-    PENDING_REPLY_QUEUE.with(|slot| {
-        slot.borrow()
-            .iter()
-            .filter(|frame| frame.connection == connection)
-            .count()
-    })
+    PENDING_REPLY_QUEUE
+        .with(|slot| slot.borrow().iter().filter(|frame| frame.connection == connection).count())
 }
 
 pub(in crate::hook) fn pending_reply_frame_claims_for_test(
