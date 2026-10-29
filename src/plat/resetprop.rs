@@ -1,6 +1,6 @@
 use std::{
     io::{BufRead, BufReader, Write},
-    os::unix::net::UnixStream,
+    os::unix::{net::UnixStream, process::CommandExt},
     path::Path,
     process::Command,
     sync::{Mutex, OnceLock},
@@ -215,6 +215,7 @@ pub fn find_resetprop_command() -> Result<ResetpropCommand> {
 
 fn execute_write_and_verify(command: &ResetpropCommand, property: &str, value: &str) -> Result<()> {
     let mut process = Command::new(&command.program);
+    process.uid(kmr_common::consts::AID_ROOT);
     if let Some(prepend_arg) = &command.prepend_arg {
         process.arg(prepend_arg);
     }
@@ -338,7 +339,7 @@ fn execute_phone_identifier(kind: PhoneIdentifierKind, slot: i32) -> Result<Opti
     data.write(&slot).with_context(|| format!("failed to write {label} slot"))?;
     data.write(ANDROID_PACKAGE)
         .with_context(|| format!("failed to write {label} calling package"))?;
-    data.write(ANDROID_PACKAGE)
+    data.write(&None::<String>)
         .with_context(|| format!("failed to write {label} calling feature"))?;
 
     let mut reply = proxy
@@ -455,6 +456,10 @@ fn helper_error_response(error: &anyhow::Error) -> String {
 }
 
 fn helper_loop(stream: UnixStream, command: Option<ResetpropCommand>) -> Result<()> {
+    // Keep real/saved root UID so resetprop children can regain root.
+    if unsafe { libc::seteuid(kmr_common::consts::AID_SYSTEM) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to enter system Binder UID");
+    }
     let reader_stream = stream.try_clone().context("failed to clone resetprop helper socket")?;
     let mut reader = BufReader::new(reader_stream);
     let mut writer = stream;
