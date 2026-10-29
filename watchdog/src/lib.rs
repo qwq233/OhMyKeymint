@@ -176,7 +176,7 @@ impl WatchdogState {
         // Sort the groups by start time of the most recent (.last()) of each group.
         // It is panic safe to use unwrap() here because we never add empty vectors to
         // the map.
-        groups.sort_by(|v1, v2| v1.last().unwrap().1.started.cmp(&v2.last().unwrap().1.started));
+        groups.sort_by_key(|v1| v1.last().unwrap().1.started);
 
         for g in groups.iter() {
             for (i, r) in g.iter() {

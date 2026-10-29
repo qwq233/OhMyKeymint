@@ -1,0 +1,67 @@
+[graph]
+targets = ["aarch64-linux-android"]
+exclude-dev = false
+
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+unsound = "all"
+unmaintained = "all"
+yanked = "deny"
+maximum-db-staleness = "P7D"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.93
+unused-allowed-license = "warn"
+include-build = true
+include-dev = true
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "0BSD",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+
+[licenses.private]
+ignore = false
+
+[[licenses.exceptions]]
+crate = "OhMyKeymint"
+allow = ["LicenseRef-GLA-4.0-or-later"]
+
+[[licenses.exceptions]]
+crate = "injector"
+allow = ["LicenseRef-GLA-4.0-or-later"]
+
+[[licenses.clarify]]
+crate = "OhMyKeymint"
+expression = "LicenseRef-GLA-4.0-or-later"
+license-files = [
+    { path = "LICENSE.md", hash = 0x7118255b },
+    { path = "LICENSE-2", hash = 0x47b4758a },
+]
+
+[[licenses.clarify]]
+crate = "injector"
+expression = "LicenseRef-GLA-4.0-or-later"
+license-files = [
+    { path = "../LICENSE.md", hash = 0x7118255b },
+    { path = "../LICENSE-2", hash = 0x47b4758a },
+]
+
+[bans]
+multiple-versions = "allow"
+highlight = "all"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+required-git-spec = "rev"

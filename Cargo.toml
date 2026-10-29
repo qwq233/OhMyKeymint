@@ -2,22 +2,22 @@
 name = "OhMyKeymint"
 version = "1.2.0"
 edition = "2021"
-license = "GLA-4.0-or-later"
+license-file = "LICENSE.md"
 
 [[bin]]
 name = "keymint"
 path = "src/main.rs"
 
 [dependencies]
-kmr-derive = { path = "derive" }
-kmr-common = { path = "common" }
-kmr-crypto-boring = { path = "boringssl" }
-kmr-ta = { path = "ta" }
-kmr-wire = { path = "wire" }
+kmr-derive = { path = "derive", version = "0.1.0" }
+kmr-common = { path = "common", version = "0.1.0" }
+kmr-crypto-boring = { path = "boringssl", version = "0.1.0" }
+kmr-ta = { path = "ta", version = "0.1.0" }
+kmr-wire = { path = "wire", version = "0.1.0" }
 libc = "0.2.190"
 prost = "0.14.4"
 hex = "0.4.3"
-log4rs = "1.4.0"
+log4rs = { version = "1.4.0", default-features = false, features = ["all_components"] }
 log = "0.4.34"
 rsbinder = { version = "0.12.0", features = ["android_12_plus", "rpc"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
@@ -39,7 +39,6 @@ toml = "1.1.8"
 regex = "1.13.1"
 base64 = "0.23.1"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
-ring = "0.17.14"
 android_logger = "0.15.1"
 multi_log = "0.1.2"
 num_cpus = "1.17.0"
@@ -69,12 +68,12 @@ members = [
 ]
 
 [patch.crates-io]
-kmr-derive = { path = "derive" }
-kmr-common = { path = "common" }
-kmr-crypto-boring = { path = "boringssl" }
-kmr-ta = { path = "ta" }
+kmr-derive = { path = "derive", version = "0.1.0" }
+kmr-common = { path = "common", version = "0.1.0" }
+kmr-crypto-boring = { path = "boringssl", version = "0.1.0" }
+kmr-ta = { path = "ta", version = "0.1.0" }
 kmr-tests = { path = "tests" }
-kmr-wire = { path = "wire" }
+kmr-wire = { path = "wire", version = "0.1.0" }
 watchdog_rs = { path = "watchdog" }
 injector = { path = "injector" }
 
