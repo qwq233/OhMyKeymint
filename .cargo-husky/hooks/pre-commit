@@ -7,5 +7,5 @@ cargo fmt --all -- --check
 echo "+ cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings"
 cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings
 
-echo "+ cargo deny check"
-cargo deny check
+echo "+ cargo deny --workspace check"
+cargo deny --workspace check

@@ -17,7 +17,15 @@ mod read;
 mod tests;
 mod write;
 
-pub(in crate::hook) unsafe fn new_ioctl(fd: c_int, request: c_int, arg: *mut c_void) -> c_int {
+/// # Safety
+///
+/// Called by the installed ioctl hook with the same ABI and pointer validity
+/// requirements as libc ioctl. `arg` must be valid for the request being made.
+pub(in crate::hook) unsafe extern "C" fn new_ioctl(
+    fd: c_int,
+    request: c_int,
+    arg: *mut c_void,
+) -> c_int {
     let mut old_ioctl_ptr = OLD_IOCTL.load(Ordering::Relaxed);
     if old_ioctl_ptr.is_null() {
         extern "C" {

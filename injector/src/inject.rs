@@ -131,8 +131,9 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     );
     let mut regs = sys::get_regs(pid)?;
 
-    let local_maps = lsplt_rs::MapInfo::scan("self");
-    let remote_maps = lsplt_rs::MapInfo::scan(pid.as_raw().to_string().as_str());
+    let local_maps = omhook::read_self_maps().context("failed to read injector maps")?;
+    let remote_maps =
+        omhook::read_process_maps(pid.as_raw() as u32).context("failed to read target maps")?;
 
     // Helper closure to resolve function address
     let resolve = |lib: &str, name: &str| -> Result<usize> {

@@ -424,7 +424,11 @@ pub(super) unsafe fn call_binder_connection_ioctl(
     call_binder_ioctl(current, old_ioctl_fn, request, arg)
 }
 
-pub(in crate::hook) unsafe fn new_close(fd: c_int) -> c_int {
+/// # Safety
+///
+/// Called by the installed close hook with the same ABI and fd validity
+/// requirements as libc close.
+pub(in crate::hook) unsafe extern "C" fn new_close(fd: c_int) -> c_int {
     let mut old_close = OLD_CLOSE.load(Ordering::Relaxed);
     if old_close.is_null() {
         extern "C" {
@@ -436,7 +440,11 @@ pub(in crate::hook) unsafe fn new_close(fd: c_int) -> c_int {
     close_with_binder_fd_lifecycle(fd, || close(fd))
 }
 
-pub(in crate::hook) unsafe fn new_fdsan_close(fd: c_int, tag: u64) -> c_int {
+/// # Safety
+///
+/// Called by the installed fdsan hook with the same ABI and ownership-tag
+/// requirements as `android_fdsan_close_with_tag`.
+pub(in crate::hook) unsafe extern "C" fn new_fdsan_close(fd: c_int, tag: u64) -> c_int {
     let old_close = OLD_FDSAN_CLOSE.load(Ordering::Relaxed);
     if old_close.is_null() {
         return new_close(fd);
@@ -445,7 +453,11 @@ pub(in crate::hook) unsafe fn new_fdsan_close(fd: c_int, tag: u64) -> c_int {
     close_with_binder_fd_lifecycle(fd, || close(fd, tag))
 }
 
-pub(in crate::hook) unsafe fn new_dup(fd: c_int) -> c_int {
+/// # Safety
+///
+/// Called by the installed dup hook with the same ABI and fd validity
+/// requirements as libc dup.
+pub(in crate::hook) unsafe extern "C" fn new_dup(fd: c_int) -> c_int {
     let mut old_dup = OLD_DUP.load(Ordering::Relaxed);
     if old_dup.is_null() {
         extern "C" {
@@ -457,7 +469,11 @@ pub(in crate::hook) unsafe fn new_dup(fd: c_int) -> c_int {
     duplicate_binder_fd_with_lifecycle(fd, None, || dup(fd))
 }
 
-pub(in crate::hook) unsafe fn new_dup2(old_fd: c_int, new_fd: c_int) -> c_int {
+/// # Safety
+///
+/// Called by the installed dup2 hook with the same ABI and fd validity
+/// requirements as libc dup2.
+pub(in crate::hook) unsafe extern "C" fn new_dup2(old_fd: c_int, new_fd: c_int) -> c_int {
     let mut old_dup2 = OLD_DUP2.load(Ordering::Relaxed);
     if old_dup2.is_null() {
         extern "C" {
@@ -469,7 +485,15 @@ pub(in crate::hook) unsafe fn new_dup2(old_fd: c_int, new_fd: c_int) -> c_int {
     duplicate_binder_fd_with_lifecycle(old_fd, Some(new_fd), || dup2(old_fd, new_fd))
 }
 
-pub(in crate::hook) unsafe fn new_dup3(old_fd: c_int, new_fd: c_int, flags: c_int) -> c_int {
+/// # Safety
+///
+/// Called by the installed dup3 hook with the same ABI and fd/flag validity
+/// requirements as libc dup3.
+pub(in crate::hook) unsafe extern "C" fn new_dup3(
+    old_fd: c_int,
+    new_fd: c_int,
+    flags: c_int,
+) -> c_int {
     let mut old_dup3 = OLD_DUP3.load(Ordering::Relaxed);
     if old_dup3.is_null() {
         extern "C" {
@@ -481,7 +505,15 @@ pub(in crate::hook) unsafe fn new_dup3(old_fd: c_int, new_fd: c_int, flags: c_in
     duplicate_binder_fd_with_lifecycle(old_fd, Some(new_fd), || dup3(old_fd, new_fd, flags))
 }
 
-pub(in crate::hook) unsafe fn new_fcntl(fd: c_int, command: c_int, arg: libc::c_ulong) -> c_int {
+/// # Safety
+///
+/// Called by the installed fcntl hook. Bionic ignores `arg` for commands that
+/// do not consume the variadic third argument.
+pub(in crate::hook) unsafe extern "C" fn new_fcntl(
+    fd: c_int,
+    command: c_int,
+    arg: libc::c_ulong,
+) -> c_int {
     let mut old_fcntl = OLD_FCNTL.load(Ordering::Relaxed);
     if old_fcntl.is_null() {
         extern "C" {

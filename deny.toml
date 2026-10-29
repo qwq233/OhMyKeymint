@@ -24,6 +24,7 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
+    "LGPL-3.0-or-later"
 ]
 
 [licenses.private]
@@ -51,6 +52,13 @@ expression = "LicenseRef-GLA-4.0-or-later"
 license-files = [
     { path = "../LICENSE.md", hash = 0x7118255b },
     { path = "../LICENSE-2", hash = 0x47b4758a },
+]
+
+[[licenses.clarify]]
+crate = "cargo-husky"
+expression = "MIT"
+license-files = [
+    { path = "LICENSE.txt", hash = 0x1815aaec },
 ]
 
 [bans]
