@@ -20,7 +20,7 @@ In theory, this would make it harder for detectors to identify behavior inconsis
 
 3. Replace template keybox.xml (if you need)
 
-The keybox file should be a **valid** XML file with both EC and RSA chain, which means there should be no extra content in it like watermark or invisible characters.
+The keybox file should be a **valid** XML file with at least the EC chain; when no RSA entry is present, attestation for RSA keys is signed with the EC key and its certificate chain. There should be no extra content in it like watermark or invisible characters.
 
 The active files are `/data/misc/keystore/omk/config.toml` and
 `/data/misc/keystore/omk/injector.toml`. Read the
@@ -45,36 +45,30 @@ which changes need a component restart or a full device reboot.
 
 **YOU MUST AGREE TO BOTH OF THE LICENSE BEFORE USING THIS SOFTWARE.**
 
-`AGPL-3.0-or-later`
+`General License Agreement`
 
 ```plaintext
 OhMyKeymint - Custom keymint implementation for Android Keystore Spoofer
-Copyright (C) 2025 James Clef <qwq233@qwq2333.top>
+Copyright (C) 2026 James Clef <qwq233@qwq2333.top>
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as
-published by the Free Software Foundation, either version 3 of the
+This program is open source software: you can redistribute it and/or 
+modify it under the terms of the General License Agreement as
+published by James Clef, either version 4 of the
 License, or (at your option) any later version.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
+General License Agreement for more details.
 
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the General License Agreement
+along with this program.  If not, see <https://github.com/qwq233/license/>.
 ```
 
 `Oh My Keymint License`
 
 ```plaintext
-1. 您不得将本软件、本软件的任意部分或将本软件作为依赖的软件用于任何商业用途。该
-   商业用途包括但不限于以盈利为目的，将本软件、本软件的任意部分或将本软件作为依
-   赖的软件与其他资源、物品或服务捆绑销售。
-
-2. 您不得暗示或明示本软件与其他软件有任何从属关系。
-
-3. 除经本软件作者书面许可外，不得将本软件名称或与其近似的名称用于修改版、衍生作
+1. 除经本软件作者书面许可外，不得将本软件名称或与其近似的名称用于修改版、衍生作
    品或相关服务的命名、宣传；法律允许的指名性使用除外。本软件的修改版或衍生作品
    如与本软件存在明显区别，须使用其他名称。例如，包含不属于本软件原版的功能或附
    属资源，或使用本软件名称可能导致公众误认为该修改版由原项目作者发布、认可或存
@@ -83,12 +77,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
    责任。即使不属于上述须更名情形的修改版或衍生作品，本软件作者认为有必要时，仍
    有权要求其更名。
 
-4. 除非您所在的司法管辖区的适用法律另行规定，您同意将纠纷或争议提交至中国大陆境
+2. 除非您所在的司法管辖区的适用法律另行规定，您同意将纠纷或争议提交至中国大陆境
    内有管辖权的人民法院管辖。
 
-5. 本协议与GNU Affero General Public License（以下简称AGPL）共同发挥效力，
-   当本协议内容与AGPL冲突时，应当优先应用本协议内容，本协议仅覆盖本软件作者拥有
-   完全著作权的部分，对于使用其他协议的软件代码不发挥效力。
+3. 本协议与General License Agreement共同发挥效力。
 ```
 
 ## Credit
