@@ -104,7 +104,7 @@ jobs:
         components: rustfmt, clippy
 
     - name: Install cargo-deny
-      run: cargo install cargo-deny --version 0.20.2 --locked
+      run: cargo install cargo-deny --locked
 
     - name: Install Android SDK
       uses: android-actions/setup-android@v4
