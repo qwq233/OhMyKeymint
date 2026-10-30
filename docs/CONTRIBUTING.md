@@ -103,6 +103,7 @@ Rust changes must pass:
 cargo fmt --all -- --check
 cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings
 cargo test --target aarch64-linux-android --workspace --no-run
+cargo deny --workspace check
 ```
 
 When an authorized aarch64 Android device is available, run every generated

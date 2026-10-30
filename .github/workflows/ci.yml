@@ -3,7 +3,7 @@ name: Build OhMyKeymint
 on:
   push:
     tags:
-      - 'v*'
+      - '*'
     branches: [ "master" ]
     paths-ignore:
       - '**.md'
@@ -81,6 +81,69 @@ jobs:
         name: boringssl.tar.gz
         path: boringssl.tar.gz
         retention-days: 3
+
+  lint:
+    runs-on: ubuntu-latest
+    needs: build-boringssl
+    permissions:
+      contents: read
+    env:
+      BORINGSSL_BUILD_DIR: ${{ github.workspace }}/boringssl/build
+      CARGO_HUSKY_DONT_INSTALL_HOOKS: '1'
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: nightly
+        target: aarch64-linux-android
+        components: rustfmt, clippy
+
+    - name: Install cargo-deny
+      run: cargo install cargo-deny --version 0.20.2 --locked
+
+    - name: Install Android SDK
+      uses: android-actions/setup-android@v4
+      with:
+        packages: platform-tools
+
+    - name: Install Android build dependencies
+      run: |
+        sdkmanager --install "ndk;30.0.16248370" --sdk_root="$ANDROID_SDK_ROOT"
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler
+
+    - name: Download BoringSSL
+      uses: actions/download-artifact@v8
+      with:
+        name: boringssl.tar.gz
+        path: .
+
+    - name: Configure Cargo for Android target
+      run: |
+        tar xf boringssl.tar.gz
+        python scripts/setup_cargo_config.py \
+          --force \
+          --ndk-root "$ANDROID_SDK_ROOT/ndk/30.0.16248370" \
+          --host-tag linux-x86_64
+        cat >> .cargo/config.toml <<EOF
+
+        [patch.crates-io]
+        bssl-sys = { path = "$GITHUB_WORKSPACE/boringssl/rust/bssl-sys" }
+        EOF
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Check Clippy
+      run: cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings
+
+    - name: Check dependencies
+      run: cargo deny --workspace check
 
   setup-and-build:
     runs-on: ubuntu-latest
