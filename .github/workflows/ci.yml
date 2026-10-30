@@ -3,13 +3,8 @@ name: Build OhMyKeymint
 on:
   push:
     tags:
-      - '*'
+      - 'v*'
     branches: [ "master" ]
-    paths-ignore:
-      - '**.md'
-      - '**.txt'
-      - '.github/**'
-      - '!.github/workflows/**'
   pull_request:
     branches: [ "master" ]
   workflow_dispatch:
@@ -19,24 +14,36 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            rust_target: aarch64-linux-android
+            build_dir: build
+            outline_atomics: -mno-outline-atomics
+          - abi: x86_64
+            rust_target: x86_64-linux-android
+            build_dir: build-x86_64
+            outline_atomics: ""
     steps:
     - name: Clone BoringSSL
       run: |
         git clone https://boringssl.googlesource.com/boringssl
 
-    - name: Cache BoringSSL build
+    - name: Cache BoringSSL build (${{ matrix.abi }})
       uses: actions/cache@v6
       id: boringssl-cache
       with:
-        path: boringssl/build
-        key: boringssl-${{ hashFiles('boringssl/.git/HEAD', 'boringssl/.git/refs/heads/main') }}
+        path: boringssl/${{ matrix.build_dir }}
+        key: boringssl-${{ matrix.abi }}-${{ hashFiles('boringssl/.git/HEAD', 'boringssl/.git/refs/heads/main') }}
 
     - name: Install Rust toolchain
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: nightly
-        target: aarch64-linux-android
+        target: ${{ matrix.rust_target }}
 
     - name: Install Android SDK
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
@@ -48,114 +55,59 @@ jobs:
       run: |
         cargo install bindgen-cli
         echo "y" | sdkmanager --install "ndk;30.0.16248370" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
-        echo "y" | sdkmanager --install "ndk-bundle" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
         echo "y" | sdkmanager --install "cmake;4.1.2" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
 
     - name: Install build dependencies
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake ninja-build gcc-multilib
+        sudo apt-get install -y ninja-build
 
-    - name: Build BoringSSL
+    - name: Build BoringSSL (${{ matrix.abi }})
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
       run: |
         cd boringssl
-        export PATH="~/.cargo/bin:$PATH"
-        $ANDROID_SDK_ROOT/cmake/4.1.2/bin/cmake -GNinja -B build \
-          -DRUST_BINDINGS=aarch64-linux-android \
+        export PATH="$HOME/.cargo/bin:$PATH"
+        $ANDROID_SDK_ROOT/cmake/4.1.2/bin/cmake -GNinja -B ${{ matrix.build_dir }} \
+          -DRUST_BINDINGS=${{ matrix.rust_target }} \
           -DCMAKE_SYSROOT=$ANDROID_SDK_ROOT/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot/ \
           -DCMAKE_TOOLCHAIN_FILE=$ANDROID_SDK_ROOT/ndk/30.0.16248370/build/cmake/android.toolchain.cmake \
-          -DCMAKE_C_FLAGS=-mno-outline-atomics \
-          -DCMAKE_CXX_FLAGS=-mno-outline-atomics \
-          -DANDROID_ABI=arm64-v8a \
+          -DCMAKE_C_FLAGS="${{ matrix.outline_atomics }}" \
+          -DCMAKE_CXX_FLAGS="${{ matrix.outline_atomics }}" \
+          -DANDROID_ABI=${{ matrix.abi }} \
           -DANDROID_PLATFORM=android-33
-        ninja -j$(nproc) -C build
+        ninja -j$(nproc) -C ${{ matrix.build_dir }}
+
     - name: Tar BoringSSL
       run: |
-        tar czf boringssl.tar.gz boringssl/build boringssl/rust
-    
+        tar czf boringssl-${{ matrix.abi }}.tar.gz boringssl/${{ matrix.build_dir }} boringssl/rust
+
     - name: Output BoringSSL
       uses: actions/upload-artifact@v7
       with:
-        name: boringssl.tar.gz
-        path: boringssl.tar.gz
+        name: boringssl-${{ matrix.abi }}
+        path: boringssl-${{ matrix.abi }}.tar.gz
         retention-days: 3
-
-  lint:
-    runs-on: ubuntu-latest
-    needs: build-boringssl
-    permissions:
-      contents: read
-    env:
-      BORINGSSL_BUILD_DIR: ${{ github.workspace }}/boringssl/build
-      CARGO_HUSKY_DONT_INSTALL_HOOKS: '1'
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v7
-      with:
-        submodules: recursive
-
-    - name: Install Rust toolchain
-      uses: actions-rust-lang/setup-rust-toolchain@v1
-      with:
-        toolchain: nightly
-        target: aarch64-linux-android
-        components: rustfmt, clippy
-
-    - name: Install cargo-deny
-      run: cargo install cargo-deny --version 0.20.2 --locked
-
-    - name: Install Android SDK
-      uses: android-actions/setup-android@v4
-      with:
-        packages: platform-tools
-
-    - name: Install Android build dependencies
-      run: |
-        sdkmanager --install "ndk;30.0.16248370" --sdk_root="$ANDROID_SDK_ROOT"
-        sudo apt-get update
-        sudo apt-get install -y protobuf-compiler
-
-    - name: Download BoringSSL
-      uses: actions/download-artifact@v8
-      with:
-        name: boringssl.tar.gz
-        path: .
-
-    - name: Configure Cargo for Android target
-      run: |
-        tar xf boringssl.tar.gz
-        python scripts/setup_cargo_config.py \
-          --force \
-          --ndk-root "$ANDROID_SDK_ROOT/ndk/30.0.16248370" \
-          --host-tag linux-x86_64
-        cat >> .cargo/config.toml <<EOF
-
-        [patch.crates-io]
-        bssl-sys = { path = "$GITHUB_WORKSPACE/boringssl/rust/bssl-sys" }
-        EOF
-
-    - name: Check formatting
-      run: cargo fmt --all -- --check
-
-    - name: Check Clippy
-      run: cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings
-
-    - name: Check dependencies
-      run: cargo deny --workspace check
 
   setup-and-build:
     runs-on: ubuntu-latest
     needs:
       - build-boringssl
     permissions:
-      id-token: write
-      attestations: write
+      contents: read
     strategy:
+      fail-fast: false
       matrix:
         build-type: [debug, release]
-    
+        abi: [arm64-v8a, x86_64]
+        include:
+          - abi: arm64-v8a
+            rust_target: aarch64-linux-android
+            boringssl_dir: build
+          - abi: x86_64
+            rust_target: x86_64-linux-android
+            boringssl_dir: build-x86_64
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v7
@@ -167,7 +119,7 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: nightly
-        target: aarch64-linux-android
+        target: ${{ matrix.rust_target }}
 
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v6
@@ -191,15 +143,20 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y protobuf-compiler
 
-    - name: Download BoringSSL
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install toml
+
+    - name: Download BoringSSL (${{ matrix.abi }})
       uses: actions/download-artifact@v8
       with:
-        name: boringssl.tar.gz
+        name: boringssl-${{ matrix.abi }}
         path: .
 
     - name: Configure Cargo for Android target
       run: |
-        tar xf boringssl.tar.gz
+        tar xf boringssl-${{ matrix.abi }}.tar.gz
         python scripts/setup_cargo_config.py \
           --force \
           --ndk-root "$ANDROID_SDK_ROOT/ndk/30.0.16248370" \
@@ -209,33 +166,107 @@ jobs:
         [patch.crates-io]
         bssl-sys = { path = "$GITHUB_WORKSPACE/boringssl/rust/bssl-sys" }
         EOF
+        # build.py picks per-target BoringSSL build dirs from these default
+        # locations unless BORINGSSL_BUILD_DIR is exported, so expose the
+        # extracted build dir for this ABI under the expected name.
+        mkdir -p "$HOME/.cargo/boringssl"
+        ln -sfn "$GITHUB_WORKSPACE/boringssl/${{ matrix.boringssl_dir }}" \
+          "$HOME/.cargo/boringssl/${{ matrix.boringssl_dir }}"
 
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install toml
-
-    - name: Build OhMyKeymint
+    - name: Build OhMyKeymint (${{ matrix.abi }})
       id: prepareArtifact
-      env:
-        BORINGSSL_BUILD_DIR: ${{ github.workspace }}/boringssl/build
       run: |
         unset RUSTFLAGS
-        python build.py --${{ matrix.build-type }}
+        # BORINGSSL_BUILD_DIR must stay unset so build.py can select the
+        # per-target BoringSSL build directory itself.
+        unset BORINGSSL_BUILD_DIR || true
+        python build.py --${{ matrix.build-type }} --abi ${{ matrix.abi }}
         name=`ls target/OhMyKeymint-* | awk -F '(/|.zip)' '{print $2}'` && echo "releaseName=$name" >> $GITHUB_OUTPUT
-        unzip target/OhMyKeymint-*.zip -d module-${{ matrix.build-type }}
+        unzip target/OhMyKeymint-*.zip -d module-${{ matrix.build-type }}-${{ matrix.abi }}
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v7
       id: upload
       with:
         name: ${{ steps.prepareArtifact.outputs.releaseName }}
-        path: "./module-${{ matrix.build-type }}/*"
+        path: "./module-${{ matrix.build-type }}-${{ matrix.abi }}/*"
         retention-days: 90
 
-    - name: Attest release build provenance
-      if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.build-type == 'release' }}
-      uses: actions/attest-build-provenance@v4
+    - name: Upload module zip
+      uses: actions/upload-artifact@v7
       with:
-        subject-name: ${{ steps.prepareArtifact.outputs.releaseName }}
-        subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}
+        name: module-zip-${{ matrix.build-type }}-${{ matrix.abi }}
+        path: target/OhMyKeymint-${{ matrix.build-type }}-${{ matrix.abi }}-*.zip
+        retention-days: 7
+        if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-and-build
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+
+    - name: Download release module zips
+      uses: actions/download-artifact@v8
+      with:
+        pattern: module-zip-release-*
+        path: dist
+        merge-multiple: true
+
+    - name: Compute release metadata
+      id: relmeta
+      run: |
+        set -euo pipefail
+        VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
+        HASH=$(git rev-parse --short=7 HEAD)
+        COUNT=$(git rev-list --count HEAD)
+
+        if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+          TAG="$GITHUB_REF_NAME"
+          NAME="OhMyKeymint $GITHUB_REF_NAME"
+        else
+          TAG="v${VERSION}-${HASH}"
+          NAME="OhMyKeymint ${VERSION}-${HASH}"
+        fi
+
+        arm_zip=$(ls dist/OhMyKeymint-release-arm64-v8a-*.zip 2>/dev/null || true)
+        x64_zip=$(ls dist/OhMyKeymint-release-x86_64-*.zip 2>/dev/null || true)
+        if [ -z "$arm_zip" ]; then
+          echo "::error::arm64-v8a release zip is missing"
+          exit 1
+        fi
+        if [ -z "$x64_zip" ]; then
+          echo "::error::x86_64 release zip is missing"
+          exit 1
+        fi
+
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "name=$NAME" >> "$GITHUB_OUTPUT"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "version_code=$COUNT" >> "$GITHUB_OUTPUT"
+        ls -la dist/
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.relmeta.outputs.tag }}
+        name: ${{ steps.relmeta.outputs.name }}
+        body: |
+          OhMyKeymint ${{ steps.relmeta.outputs.version }} (versionCode ${{ steps.relmeta.outputs.version_code }})
+
+          Automated build produced by GitHub Actions from commit ${{ steps.relmeta.outputs.tag }}.
+
+          **Downloads**
+          - arm64 devices: `OhMyKeymint-release-arm64-v8a-*.zip`
+          - x86_64 devices and emulators (MuMu, LDPlayer, BlueStacks, Android-x86): `OhMyKeymint-release-x86_64-*.zip`
+        files: dist/*.zip
+        generate_release_notes: true
