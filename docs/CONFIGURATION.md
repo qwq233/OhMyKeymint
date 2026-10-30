@@ -335,6 +335,15 @@ The same restart rule applies as for `vb_key`: restart keymint after a normal
 change, and reboot the whole device when returning from `"random"` to `"auto"`
 so the automatic resolver can pin a stable fallback value when needed.
 
+For both fields, keymint re-applies the resolved value to the matching
+`ro.boot.vbmeta.public_key_digest` or `ro.boot.vbmeta.digest` system property on
+every start whenever the live property does not already carry it. init rebuilds
+the property area on each boot, so a value that was written once and pinned in
+`config.toml` would otherwise vanish from the runtime property after the next
+reboot while attestation keeps reporting it. Re-applying on every start keeps
+devices that pass no `androidboot.vbmeta.digest` (for example MuMu emulators)
+consistent across reboots. A failed re-write is logged and never stops keymint.
+
 #### `verified_boot_state`
 
 `true` reports the verified boot state as verified; `false` reports it as

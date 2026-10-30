@@ -95,7 +95,7 @@ pub fn bootstrap_vbmeta(config_file: &mut ConfigFile) -> Result<ResolvedTrust> {
         log::info!("Pinned random fallback vbmeta trust values in config.toml");
     }
 
-    sync_sysprops_if_needed(&vb_key, &vb_hash)?;
+    sync_sysprops_if_needed(&vb_key, &vb_hash);
     if patches.write_security_patch {
         write_security_patch_with_rollback(
             resetprop::direct_write_and_verify_property,
@@ -419,18 +419,56 @@ fn current_year_month() -> Result<(i32, u32)> {
     }
 }
 
-fn sync_sysprops_if_needed(vb_key: &ResolvedField, vb_hash: &ResolvedField) -> Result<()> {
-    if vb_key.source.needs_sysprop_write() {
-        let value = hex::encode(vb_key.value);
-        resetprop::direct_write_and_verify_property(VBMETA_KEY_PROP, &value)?;
+fn sync_sysprops_if_needed(vb_key: &ResolvedField, vb_hash: &ResolvedField) {
+    for (name, field) in [(VBMETA_KEY_PROP, vb_key), (VBMETA_HASH_PROP, vb_hash)] {
+        let result = sync_sysprop_with_runtime_property(
+            name,
+            field,
+            resetprop::read_string_property,
+            resetprop::direct_write_and_verify_property,
+        );
+        if let Err(error) = result {
+            // A failed sysprop re-write only degrades attested-versus-runtime
+            // consistency; it must not keep keymint from serving keys.
+            log::warn!("failed to sync {name} with resolved trust value: {error:#}");
+        }
     }
+}
 
-    if vb_hash.source.needs_sysprop_write() {
-        let value = hex::encode(vb_hash.value);
-        resetprop::direct_write_and_verify_property(VBMETA_HASH_PROP, &value)?;
+/// Re-apply a resolved trust value whenever the live system property does not already
+/// carry it.
+///
+/// init rebuilds the property area from the kernel command line on every boot, so a
+/// value that was not sourced from the live property itself (explicit config hex, a
+/// pinned random fallback, a computed digest, or an original-TEE probe) must be
+/// rewritten on every keymint start. Otherwise the value written on the first boot
+/// disappears after the next reboot while attestation keeps reporting the pinned
+/// value: on devices whose bootloader passes no `androidboot.vbmeta.digest` (for
+/// example MuMu) `ro.boot.vbmeta.digest` reads empty again from the second boot
+/// onward. This mirrors TEESimulator-RS, which re-runs `resetprop` for its persisted
+/// boot hash whenever the runtime property does not already hold the value in use.
+fn sync_sysprop_with_runtime_property(
+    name: &str,
+    field: &ResolvedField,
+    read_property: impl Fn(&str) -> Option<String>,
+    write_property: impl FnOnce(&str, &str) -> Result<()>,
+) -> Result<()> {
+    let value = hex::encode(field.value);
+    if runtime_property_matches(read_property(name).as_deref(), &value) {
+        log::debug!("runtime property {name} already carries the resolved trust value");
+        return Ok(());
     }
+    log::info!("rewriting {name} to match the resolved trust value (source={})", field.source);
+    write_property(name, &value)
+}
 
-    Ok(())
+/// True when the live property already carries `value`, ignoring case and surrounding
+/// whitespace.
+fn runtime_property_matches(current: Option<&str>, value: &str) -> bool {
+    match current.map(str::trim) {
+        Some(current) => !current.is_empty() && current.eq_ignore_ascii_case(value),
+        None => false,
+    }
 }
 
 fn read_hex_property(name: &str) -> Option<[u8; 32]> {
@@ -447,18 +485,6 @@ fn parse_hex_32(value: &str) -> Result<[u8; 32]> {
     decoded
         .try_into()
         .map_err(|decoded: Vec<u8>| anyhow!("hex value must be 32 bytes, got {}", decoded.len()))
-}
-
-impl TrustValueSource {
-    fn needs_sysprop_write(self) -> bool {
-        matches!(
-            self,
-            TrustValueSource::Computed
-                | TrustValueSource::Original
-                | TrustValueSource::RandomExplicit
-                | TrustValueSource::RandomFallback
-        )
-    }
 }
 
 fn read_abl_boot_patchlevel() -> Result<String> {
@@ -1168,11 +1194,88 @@ ro.vendor.boot_security_patch.extra = ignored
     }
 
     #[test]
-    fn random_sources_still_require_sysprop_writeback() {
-        assert!(TrustValueSource::RandomExplicit.needs_sysprop_write());
-        assert!(TrustValueSource::RandomFallback.needs_sysprop_write());
-        assert!(!TrustValueSource::ExplicitHex.needs_sysprop_write());
-        assert!(!TrustValueSource::Property.needs_sysprop_write());
+    fn pinned_values_resync_an_empty_runtime_property() {
+        // Second boot on a device whose bootloader passes no androidboot.vbmeta.digest
+        // (for example MuMu): init rebuilt the property area, the config carries the
+        // value pinned on the first boot, and the runtime property is empty again.
+        let field = ResolvedField { value: [0x22; 32], source: TrustValueSource::ExplicitHex };
+        let writes = std::cell::Cell::new(0);
+        sync_sysprop_with_runtime_property(
+            VBMETA_HASH_PROP,
+            &field,
+            |_| None,
+            |name, value| {
+                assert_eq!(name, VBMETA_HASH_PROP);
+                assert_eq!(value, hex::encode([0x22; 32]));
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(writes.get(), 1);
+    }
+
+    #[test]
+    fn matching_runtime_property_is_left_alone() {
+        // Resolution tier one: the value came from the live property itself, so the
+        // runtime property already matches (case-insensitively) and is not rewritten.
+        let field = ResolvedField { value: [0x33; 32], source: TrustValueSource::Property };
+        let writes = std::cell::Cell::new(0);
+        let observed = hex::encode([0x33; 32]).to_uppercase();
+        sync_sysprop_with_runtime_property(
+            VBMETA_HASH_PROP,
+            &field,
+            move |_| Some(observed.clone()),
+            |_, _| {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(writes.get(), 0);
+    }
+
+    #[test]
+    fn stale_runtime_property_is_rewritten() {
+        // A live property that carries a different (here: truncated) digest must be
+        // rewritten so the runtime value matches the value used for attestation.
+        let field = ResolvedField { value: [0x44; 32], source: TrustValueSource::ExplicitHex };
+        let writes = std::cell::Cell::new(0);
+        sync_sysprop_with_runtime_property(
+            VBMETA_KEY_PROP,
+            &field,
+            |_| Some("00112233445566778899aabbccddeeff".to_string()),
+            |_, _| {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(writes.get(), 1);
+    }
+
+    #[test]
+    fn sysprop_rewrite_failure_surfaces_from_the_sync_helper() {
+        let field = ResolvedField { value: [0x55; 32], source: TrustValueSource::RandomFallback };
+        let result = sync_sysprop_with_runtime_property(
+            VBMETA_HASH_PROP,
+            &field,
+            |_| None,
+            |_, _| Err(anyhow!("resetprop unavailable")),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn runtime_property_match_requires_the_full_value() {
+        let value = hex::encode([0x66; 32]);
+        assert!(runtime_property_matches(Some(value.as_str()), &value));
+        assert!(runtime_property_matches(Some(&value.to_uppercase()), &value));
+        assert!(!runtime_property_matches(Some(&value[..63]), &value));
+        assert!(!runtime_property_matches(Some("deadbeef"), &value));
+        assert!(!runtime_property_matches(Some(""), &value));
+        assert!(!runtime_property_matches(Some("  "), &value));
+        assert!(!runtime_property_matches(None, &value));
     }
 
     #[test]
