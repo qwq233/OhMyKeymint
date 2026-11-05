@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
+pub(in crate::hook) use fd::is_native_binder_connection;
 use fd::*;
 pub(super) use fd::{
     new_close, new_dup, new_dup2, new_dup3, new_fcntl, new_fdsan_close,

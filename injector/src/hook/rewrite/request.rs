@@ -31,6 +31,19 @@ fn is_known_keystore_interface(interface: &str) -> bool {
     identify::KNOWN_KEYSTORE_INTERFACES.contains(&interface)
 }
 
+unsafe fn receiving_interface_matches(
+    connection: BinderStateKey,
+    tr: &binder_transaction_data,
+    expected: &str,
+) -> anyhow::Result<bool> {
+    if !super::super::intercept::is_native_binder_connection(connection)? {
+        return Ok(false);
+    }
+    target_from_transaction(tr).map_or(Ok(false), |target| {
+        super::super::binder::local_binder_interface_matches(target, expected)
+    })
+}
+
 pub(in crate::hook) unsafe fn handle_br_transaction(
     connection: BinderStateKey,
     tr: &mut binder_transaction_data,
@@ -180,8 +193,16 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
         let precomputed = if pending.route == RouteTarget::Omk
             && matches!(&pending.request, ParsedMaintenanceRequest::MigrateKeyNamespace { .. })
         {
+            let reply = match receiving_interface_matches(connection, tr, &request_interface) {
+                Ok(true) => precompute_omk_migrate_reply(&pending),
+                Ok(false) => return false,
+                Err(error) => {
+                    warn!("event=route failed to validate maintenance receiver: {error:#}");
+                    PrecomputedMaintenanceReply::Error(precomputed_omk_error_reply(&error))
+                }
+            };
             block_system_request(tr);
-            Some(precompute_omk_migrate_reply(&pending))
+            Some(reply)
         } else {
             None
         };
@@ -250,14 +271,29 @@ pub(in crate::hook) unsafe fn handle_br_transaction(
             &cfg.intercept,
         );
 
-        let mut precomputed_service_reply = if route == RouteTarget::Omk
-            && matches!(
-                method,
-                ServiceMethod::UpdateSubcomponent
-                    | ServiceMethod::Grant
-                    | ServiceMethod::Ungrant
-                    | ServiceMethod::DeleteKey
-            ) {
+        let mutator = matches!(
+            method,
+            ServiceMethod::UpdateSubcomponent
+                | ServiceMethod::Grant
+                | ServiceMethod::Ungrant
+                | ServiceMethod::DeleteKey
+        );
+        let receiver_error = if route == RouteTarget::Omk
+            && (mutator || (expects_reply && method != ServiceMethod::GetSecurityLevel))
+        {
+            match receiving_interface_matches(connection, tr, &request_interface) {
+                Ok(true) => None,
+                Ok(false) => return false,
+                Err(error) => Some(error),
+            }
+        } else {
+            None
+        };
+        let mut precomputed_service_reply = if let Some(error) = receiver_error {
+            warn!("event=route failed to validate service receiver: {error:#}");
+            block_system_request(tr);
+            Some(PrecomputedServiceReply::Error(precomputed_omk_error_reply(&error)))
+        } else if route == RouteTarget::Omk && mutator {
             block_system_request(tr);
             Some(precompute_omk_service_mutator_reply(&request, &caller))
         } else if route == RouteTarget::Omk

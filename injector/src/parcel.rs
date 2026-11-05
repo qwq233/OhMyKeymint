@@ -149,7 +149,19 @@ fn read_request_interface_for_check(parcel: &mut Parcel) -> Result<Option<String
     if marker != rsbinder::INTERFACE_HEADER {
         return Ok(None);
     }
-    parcel.read().context("missing interface token").map(Some)
+    read_interface_token(parcel).map(Some)
+}
+
+pub(crate) fn read_interface_token(parcel: &mut Parcel) -> Result<String> {
+    let start = parcel.data_position();
+    let wire_len: i32 = parcel.read().context("missing interface token length")?;
+    parcel.set_data_position(start);
+    let interface: String = parcel.read().context("missing interface token")?;
+    // Interface identity must not change when String16 skips unpaired surrogates.
+    if usize::try_from(wire_len).ok() != Some(interface.encode_utf16().count()) {
+        return Err(StatusCode::BadType.into());
+    }
+    Ok(interface)
 }
 
 fn ensure_no_request_trailing_data(parcel: &Parcel, interface_name: &str) -> Result<()> {
@@ -186,7 +198,7 @@ unsafe fn parse_typed_request<M>(
     Ok((parcel, method))
 }
 
-unsafe fn parcel_from_ipc_parts(
+pub(crate) unsafe fn parcel_from_ipc_parts(
     data: *mut u8,
     data_size: usize,
     offsets: *mut usize,

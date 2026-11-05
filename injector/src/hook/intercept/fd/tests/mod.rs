@@ -60,3 +60,31 @@ pub(in crate::hook::intercept) fn binder_fd_token_is_current(token: BinderFdToke
 pub(in crate::hook::intercept) fn invalidate_binder_fd(fd: c_int) {
     let _ = invalidate_binder_fd_token(binder_fd_token(fd));
 }
+
+#[test]
+fn driver_identity_uses_the_connection_pin_after_original_fd_closes() {
+    use std::os::fd::IntoRawFd;
+    let _guard = SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut checked = 0;
+    for (path, expected) in [
+        ("/dev/binder", Some(true)),
+        ("/dev/hwbinder", Some(false)),
+        ("/dev/vndbinder", Some(true)),
+        ("/dev/null", None),
+    ] {
+        let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path) else {
+            continue;
+        };
+        let fd = file.into_raw_fd();
+        reset_binder_fd_for_test(fd);
+        let token = binder_fd_token(fd);
+        let pin = BinderIoctlGuard::begin(token).unwrap();
+        assert_eq!(is_native_binder_connection(token.connection).ok(), expected);
+        assert_eq!(unsafe { close_with_binder_fd_lifecycle(fd, || libc::close(fd)) }, 0);
+        assert_eq!(is_native_binder_connection(token.connection).ok(), expected);
+        drop(pin);
+        assert!(is_native_binder_connection(token.connection).is_err());
+        checked += 1;
+    }
+    assert!(checked >= 2);
+}

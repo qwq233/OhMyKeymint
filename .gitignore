@@ -32,6 +32,7 @@ cert.der
 
 # Some refs files.
 /refs
+temp
 
 /.cargo/config.toml
 

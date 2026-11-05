@@ -81,6 +81,11 @@ type PlatformParcelWrite = unsafe extern "C" fn(*mut c_void, *const c_void, usiz
 type IpcThreadStateSelf = unsafe extern "C" fn() -> *mut c_void;
 type IpcThreadStateGetCallingSid = unsafe extern "C" fn(*const c_void) -> *const c_char;
 type IpcThreadStateGetLastTransactionBinderFlags = unsafe extern "C" fn(*const c_void) -> u32;
+type PlatformBinderOnTransact =
+    unsafe extern "C" fn(*mut c_void, u32, *const c_void, *mut c_void, u32) -> i32;
+type AttemptIncStrong = unsafe extern "C" fn(*mut c_void, *const c_void) -> bool;
+type WeakRefBase = unsafe extern "C" fn(*const c_void) -> *mut c_void;
+type RefBaseDecStrong = unsafe extern "C" fn(*const c_void, *const c_void);
 
 // Exact AOSP Android 12/13 libs/binder/ndk/parcel_internal.h layout.
 // Android 14+ exposes AParcel_viewPlatformParcel and never uses this fallback.
@@ -115,6 +120,10 @@ struct NativeBinderApi {
     ipc_thread_state_self: IpcThreadStateSelf,
     ipc_thread_state_get_calling_sid: IpcThreadStateGetCallingSid,
     ipc_thread_state_get_last_transaction_binder_flags: IpcThreadStateGetLastTransactionBinderFlags,
+    platform_binder_on_transact: Option<PlatformBinderOnTransact>,
+    attempt_inc_strong: Option<AttemptIncStrong>,
+    weak_ref_base: Option<WeakRefBase>,
+    ref_base_dec_strong: Option<RefBaseDecStrong>,
 }
 
 pub(crate) struct NativeBinder {
@@ -183,6 +192,18 @@ impl Drop for RawBinder {
         unsafe {
             (self.dec_strong)(self.binder as *mut c_void);
         }
+    }
+}
+
+struct LocalStrongRef {
+    base: *const c_void,
+    id: *const c_void,
+    dec_strong: RefBaseDecStrong,
+}
+
+impl Drop for LocalStrongRef {
+    fn drop(&mut self) {
+        unsafe { (self.dec_strong)(self.base, self.id) };
     }
 }
 
@@ -649,6 +670,16 @@ impl NativeBinderApi {
             ipc_thread_state_self,
             ipc_thread_state_get_calling_sid,
             ipc_thread_state_get_last_transaction_binder_flags,
+            platform_binder_on_transact: find_symbol(
+                binder,
+                b"_ZN7android7BBinder10onTransactEjRKNS_6ParcelEPS1_j\0",
+            ),
+            attempt_inc_strong: find_symbol(
+                binder,
+                b"_ZN7android7RefBase12weakref_type16attemptIncStrongEPKv\0",
+            ),
+            weak_ref_base: find_symbol(binder, b"_ZNK7android7RefBase12weakref_type7refBaseEv\0"),
+            ref_base_dec_strong: find_symbol(binder, b"_ZNK7android7RefBase9decStrongEPKv\0"),
         };
         for kind in [NativeBinderKind::SecurityLevel, NativeBinderKind::Operation] {
             drop(create_native_binder_with_api(&api, kind).with_context(|| {
@@ -666,6 +697,81 @@ fn native_binder_api() -> Result<&'static NativeBinderApi> {
         Ok(api) => Ok(api),
         Err(error) => Err(anyhow!(error.clone())),
     }
+}
+
+/// # Safety
+/// `target` must come from a native libbinder BR_TRANSACTION and retain its driver weak reference.
+pub(in crate::hook) unsafe fn local_binder_interface_matches(
+    target: LocalBinderTarget,
+    expected: &str,
+) -> Result<bool> {
+    local_binder_interface_matches_with_api(native_binder_api()?, target, expected)
+}
+
+unsafe fn local_binder_interface_matches_with_api(
+    api: &NativeBinderApi,
+    target: LocalBinderTarget,
+    expected: &str,
+) -> Result<bool> {
+    if target.ptr == 0 || target.cookie == 0 {
+        return Ok(false);
+    }
+    let (Some(on_transact), Some(attempt_inc_strong), Some(ref_base), Some(dec_strong)) = (
+        api.platform_binder_on_transact,
+        api.attempt_inc_strong,
+        api.weak_ref_base,
+        api.ref_base_dec_strong,
+    ) else {
+        bail!("native Binder interface validation API unavailable");
+    };
+    let id = (api as *const NativeBinderApi).cast::<c_void>();
+    if !attempt_inc_strong(target.ptr as *mut c_void, id) {
+        return Ok(false);
+    }
+    // Match IPCThreadState::executeCommand's promotion before dereferencing the cookie.
+    let _strong = LocalStrongRef { base: ref_base(target.ptr as *const c_void), id, dec_strong };
+    let input = (api.parcel_create)();
+    if input.is_null() {
+        bail!("AParcel_create returned null for interface query");
+    }
+    let input = RawParcel { parcel: input, delete: api.parcel_delete };
+    let output = (api.parcel_create)();
+    if output.is_null() {
+        bail!("AParcel_create returned null for interface reply");
+    }
+    let output = RawParcel { parcel: output, delete: api.parcel_delete };
+    let input_platform = api.view_platform_const(input.parcel, std::ptr::null(), true);
+    let output_platform = api.view_platform_mut(output.parcel, std::ptr::null(), true);
+    if input_platform.is_null() || output_platform.is_null() {
+        bail!("native interface query has no platform Parcel");
+    }
+    // The base interface query reads the virtual descriptor without changing Binder thread state.
+    let status = on_transact(
+        target.cookie as *mut c_void,
+        rsbinder::INTERFACE_TRANSACTION,
+        input_platform,
+        output_platform,
+        0,
+    );
+    if status != 0 {
+        bail!("native interface query failed: {status}");
+    }
+    let size = (api.platform_parcel_data_size)(output_platform);
+    let data = (api.platform_parcel_data)(output_platform);
+    if data.is_null()
+        || (api.parcel_get_data_size)(output.parcel) < 0
+        || (api.parcel_get_data_size)(output.parcel) as usize != size
+        || (api.platform_parcel_objects_count)(output_platform) != 0
+    {
+        bail!("invalid native interface reply");
+    }
+    let mut reply =
+        crate::parcel::parcel_from_ipc_parts(data.cast_mut(), size, std::ptr::null_mut(), 0);
+    let actual = crate::parcel::read_interface_token(&mut reply)?;
+    if reply.data_avail() != 0 {
+        bail!("native interface reply has trailing data");
+    }
+    Ok(actual == expected)
 }
 
 fn create_native_binder_with_api(

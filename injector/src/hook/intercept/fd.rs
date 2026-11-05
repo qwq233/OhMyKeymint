@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::MetadataExt;
 
 #[cfg(test)]
 pub(super) mod tests;
@@ -185,6 +186,34 @@ pub(super) fn binder_fd_token(fd: c_int) -> BinderFdToken {
     let lifecycle = ensure_binder_fd_lifecycle(&mut registry, fd);
     let generation = lifecycle.state.lock().expect("binder fd lifecycle poisoned").generation;
     BinderFdToken { fd, generation, connection: lifecycle.connection }
+}
+
+pub(in crate::hook) fn is_native_binder_connection(
+    connection: BinderStateKey,
+) -> anyhow::Result<bool> {
+    let lifecycle = binder_fd_registry()
+        .by_connection
+        .get(&connection)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("unknown Binder connection"))?;
+    let fd = *lifecycle
+        .pinned_fd
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Binder connection has no pin"))?;
+    let mut info: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut info) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if info.st_mode & libc::S_IFMT == libc::S_IFCHR {
+        for (path, native) in
+            [("/dev/binder", true), ("/dev/hwbinder", false), ("/dev/vndbinder", true)]
+        {
+            if std::fs::metadata(path).is_ok_and(|node| node.rdev() == info.st_rdev) {
+                return Ok(native);
+            }
+        }
+    }
+    anyhow::bail!("Binder connection does not match a known driver");
 }
 
 pub(super) fn binder_connection_cleanup_ready(connection: BinderStateKey) -> bool {

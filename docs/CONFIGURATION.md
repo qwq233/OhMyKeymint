@@ -600,6 +600,10 @@ that operation on System. These switches do not migrate existing keys or make
 System-created key references usable by OMK.
 
 An operation selected for OMK returns its OMK result or an AOSP-compatible error.
+Before executing an OMK request ahead of System, the injector checks the native
+receiving Binder's descriptor and preserves the interface token's UTF-16 identity.
+Mismatched requests remain unchanged for the receiving service to reject. HIDL
+connections retain their existing hook coverage and are not queried as native Binders.
 Connection and transaction failures end the current request without retries or
 switching to System. A later independent request may establish a new connection.
 

@@ -1,6 +1,7 @@
 use log::info;
 use std::mem::size_of;
 
+pub(super) use native::local_binder_interface_matches;
 pub(crate) use native::{
     create_native_operation_binder, create_native_security_level_binder, NativeBinder,
     NativeBinderRetirement,
