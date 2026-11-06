@@ -1,5 +1,15 @@
 ## What's changed
 
+This is a minor fix so i will keep old changelog.
+
+- [feat: enable SQLite batch atomic writes and preserve fdatasync](https://github.com/qwq233/OhMyKeymint/commit/45d289107ae45da11ca65266ada38bcec4105fd1)
+- [fix(injector): route isolated callers by host application](https://github.com/qwq233/OhMyKeymint/commit/7ef41b037e1ac0554ec6b6d1c38f6db457b00684)
+- [fix(injector): validate Binder receivers before OMK execution](https://github.com/qwq233/OhMyKeymint/commit/e6844a4648c9525ca7a49fffca00991ff5720e22)
+
+These commit might fix some issue and align AOSP behavior.
+
+### 1.2.5 changes
+
 This release updates the KeyMint and Keystore implementation to Android 17, including KeyMint v5 and ML-DSA support on the TEE path. Compatibility with older Android releases has also been improved through corrected transaction layouts and attestation application-ID resolution. VINTF manifest assembly now follows libvintf more closely, and StrongBox is only exposed when the corresponding system KeyMint HAL is present.
 
 The injector now backs its OMK security-level and operation handles with native Binder objects, and the hooking backend has switched from `lsplt-rs` to `omhook`. Binder replies, interface metadata, one-way transactions, empty key descriptors, and operation cleanup have been corrected. Hook initialization failures no longer panic inside `keystore2`. The injected payload also connects to OMK RPC directly, with separate authentication-token and lifecycle sessions and cached connections to reduce contention and request overhead.
@@ -20,7 +30,6 @@ Additionally, injector and KeyMint overhead was reduced, module updates no longe
 
 ## Attestation
 
-- https://github.com/qwq233/OhMyKeymint/attestations/61782379
+- https://github.com/qwq233/OhMyKeymint/attestations/64354332
 
-**Full Changelog**: https://github.com/qwq233/OhMyKeymint/compare/v1.2.0-67dc5e7...1.2.5-17b0eb6
-
+**Full Changelog**: https://github.com/qwq233/OhMyKeymint/compare/1.2.5-17b0eb6...1.2.6-9069c6c
