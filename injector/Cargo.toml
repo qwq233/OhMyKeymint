@@ -28,4 +28,4 @@ multi_log = "0.1.2"
 num_cpus = "1.17.0"
 
 [build-dependencies]
-rsbinder-aidl = "0.12.0"
+rsbinder-aidl = "0.13.0"
