@@ -21,7 +21,7 @@ libc = "0.2.190"
 log = "0.4.34"
 anyhow = "1.0.104"
 thiserror = "2.0.21"
-nix = { version = "0.31.3", features = ["mman"] }
+nix = { version = "0.32.0", features = ["mman"] }
 openssl = { package = "openssl", version = "0.10.81", features = ["unstable_boringssl", "bindgen"] }
 ffi = { package = "openssl-sys", version = "0.9.117", features = ["bindgen"] }
 bssl_sys = { package = "bssl-sys", version = "0.1.0" }

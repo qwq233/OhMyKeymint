@@ -14,22 +14,31 @@
 
 //! This crate implements the IKeystoreSecurityLevel interface.
 
-use crate::android::hardware::security::keymint::{
-    Algorithm::Algorithm, AttestationKey::AttestationKey,
-    HardwareAuthenticatorType::HardwareAuthenticatorType, IKeyMintDevice::IKeyMintDevice,
-    KeyCreationResult::KeyCreationResult, KeyFormat::KeyFormat,
-    KeyMintHardwareInfo::KeyMintHardwareInfo, KeyOrigin::KeyOrigin, KeyParameter::KeyParameter,
-    KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
-};
+use crate::android::hardware::security::keymint::Algorithm::Algorithm;
+use crate::android::hardware::security::keymint::AttestationKey::AttestationKey;
+use crate::android::hardware::security::keymint::HardwareAuthenticatorType::HardwareAuthenticatorType;
+use crate::android::hardware::security::keymint::IKeyMintDevice::IKeyMintDevice;
+use crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult;
+use crate::android::hardware::security::keymint::KeyFormat::KeyFormat;
+use crate::android::hardware::security::keymint::KeyMintHardwareInfo::KeyMintHardwareInfo;
+use crate::android::hardware::security::keymint::KeyOrigin::KeyOrigin;
+use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
+use crate::android::hardware::security::keymint::KeyParameterValue::KeyParameterValue;
+use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use crate::android::hardware::security::keymint::Tag::Tag;
 use crate::android::security::metrics::OperationType::OperationType;
-use crate::android::system::keystore2::{
-    AuthenticatorSpec::AuthenticatorSpec, CreateOperationResponse::CreateOperationResponse,
-    Domain::Domain, EphemeralStorageKeyResponse::EphemeralStorageKeyResponse,
-    IKeystoreOperation::IKeystoreOperation, IKeystoreSecurityLevel::BnKeystoreSecurityLevel,
-    IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
-    KeyMetadata::KeyMetadata, KeyParameters::KeyParameters, ResponseCode::ResponseCode,
+use crate::android::system::keystore2::AuthenticatorSpec::AuthenticatorSpec;
+use crate::android::system::keystore2::CreateOperationResponse::CreateOperationResponse;
+use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::EphemeralStorageKeyResponse::EphemeralStorageKeyResponse;
+use crate::android::system::keystore2::IKeystoreOperation::IKeystoreOperation;
+use crate::android::system::keystore2::IKeystoreSecurityLevel::{
+    BnKeystoreSecurityLevel, IKeystoreSecurityLevel,
 };
-use crate::err as ks_err;
+use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
+use crate::android::system::keystore2::KeyMetadata::KeyMetadata;
+use crate::android::system::keystore2::KeyParameters::KeyParameters;
+use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::global::{DB, ENFORCEMENTS, SUPER_KEY};
 use crate::keymaster::attestation_key_utils::{get_attest_key_info, AttestationKeyInfo};
 use crate::keymaster::audit_log::{
@@ -41,13 +50,15 @@ use crate::keymaster::db::{
 };
 use crate::keymaster::error::{self, into_logged_binder, map_km_error, Error, ErrorCode};
 use crate::keymaster::id_rotation::IdRotationState;
-use crate::keymaster::key_parameter::KeyParameterValue as KsKeyParamValue;
-use crate::keymaster::key_parameter::{KeyParameter as KsKeyParam, KmKeyParameter};
+use crate::keymaster::key_parameter::{
+    KeyParameter as KsKeyParam, KeyParameterValue as KsKeyParamValue, KmKeyParameter,
+};
 use crate::keymaster::keymint_device::{get_keymint_wrapper, KeyMintWrapper};
 use crate::keymaster::metrics_store::{
     log_key_creation_event_stats, log_operation_latency, parse_key_parameters,
 };
 use crate::keymaster::operation::{KeystoreOperation, LoggingInfo, OperationDb};
+use crate::keymaster::permission::CallingContext;
 use crate::keymaster::permission::{
     check_device_attestation_permissions, check_key_permission,
     check_unique_id_attestation_permissions, require_omk_ctx, KeyPerm,
@@ -60,21 +71,17 @@ use crate::keymaster::utils::{
     upgrade_keyblob_if_required_with, AndroidUserId, AppUid, Challenge, UNDEFINED_NOT_AFTER,
 };
 use crate::plat::utils as plat_utils;
-use crate::top::qwq2333::ohmykeymint::{
-    CallerInfo::CallerInfo,
-    IOhMySecurityLevel::{BnOhMySecurityLevel, IOhMySecurityLevel},
+use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
+use crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::{
+    BnOhMySecurityLevel, IOhMySecurityLevel,
 };
-use crate::watchdog as wd;
+use crate::{err as ks_err, watchdog as wd};
 use anyhow::{Context, Result};
 use log::error;
-use std::convert::TryInto;
-use std::ops::Deref;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use rsbinder as binder;
-use rsbinder::thread_state::CallingContext;
-use rsbinder::{Status, Strong};
+use binder::{Status, Strong};
 
 /// The fallback limit on the number of keys per app.  All apps must stay within this limit.
 const DEFAULT_PER_UID_KEY_LIMIT: i32 = 200_000;
@@ -82,37 +89,13 @@ const DEFAULT_PER_UID_KEY_LIMIT: i32 = 200_000;
 /// The limit on the number of keys per app for apps with a target SDK level of 37+.
 const API_37_PER_UID_KEY_LIMIT: i32 = 50_000;
 
-/// Implementation of the IKeystoreSecurityLevel Interface.
+/// Implementation of the IKeystoreSecurityLevel interface.
 pub struct KeystoreSecurityLevel {
     security_level: SecurityLevel,
     keymint: KeyMintWrapper,
     hw_info: KeyMintHardwareInfo,
-    operation_db: OperationDb,
+    operation_db: Arc<OperationDb>,
     id_rotation_state: IdRotationState,
-}
-
-struct AospSecurityLevelWrapper {
-    inner: Arc<KeystoreSecurityLevel>,
-}
-
-struct OmkSecurityLevelWrapper {
-    inner: Arc<KeystoreSecurityLevel>,
-}
-
-impl Deref for AospSecurityLevelWrapper {
-    type Target = KeystoreSecurityLevel;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl Deref for OmkSecurityLevelWrapper {
-    type Target = KeystoreSecurityLevel;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
 }
 
 // Blob of 32 zeroes used as empty masking key.
@@ -128,7 +111,7 @@ impl KeystoreSecurityLevel {
             security_level,
             keymint: dev,
             hw_info,
-            operation_db: OperationDb::new(),
+            operation_db: Arc::new(OperationDb::new()),
             id_rotation_state,
         })
     }
@@ -137,30 +120,26 @@ impl KeystoreSecurityLevel {
         security_level: SecurityLevel,
         id_rotation_state: IdRotationState,
     ) -> Result<(Strong<dyn IKeystoreSecurityLevel>, Strong<dyn IOhMySecurityLevel>)> {
-        let inner = Arc::new(Self::new(security_level, id_rotation_state)?);
-        let aosp = BnKeystoreSecurityLevel::new_binder_with_features(
-            AospSecurityLevelWrapper { inner: inner.clone() },
-            crate::consts::sid_features(),
-        );
-        let omk = BnOhMySecurityLevel::new_binder_with_features(
-            OmkSecurityLevelWrapper { inner },
-            crate::consts::sid_features(),
-        );
-        Ok((aosp, omk))
+        let service = Self::new(security_level, id_rotation_state)?;
+        let private = Self {
+            security_level: service.security_level,
+            keymint: service.keymint.clone(),
+            hw_info: service.hw_info.clone(),
+            operation_db: Arc::clone(&service.operation_db),
+            id_rotation_state: service.id_rotation_state.clone(),
+        };
+        Ok((
+            BnKeystoreSecurityLevel::new_binder(service, crate::consts::sid_features()),
+            BnOhMySecurityLevel::new_binder(private, crate::consts::sid_features()),
+        ))
     }
 
-    /// Creates a new security level instance wrapped in a
-    /// BnKeystoreSecurityLevel proxy object. It also enables
-    /// `BinderFeatures::set_requesting_sid` on the new interface, because
-    /// we need it for checking keystore permissions.
     pub fn new_native_binder(
         security_level: SecurityLevel,
         id_rotation_state: IdRotationState,
     ) -> Result<(Strong<dyn IKeystoreSecurityLevel>, Uuid)> {
-        let km_uuid = Uuid::from(security_level);
-        let (result, _) = Self::new_binders(security_level, id_rotation_state)
-            .context(ks_err!("KeystoreSecurityLevel::new_native_binder."))?;
-        Ok((result, km_uuid))
+        let (binder, _) = Self::new_binders(security_level, id_rotation_state)?;
+        Ok((binder, Uuid::from(security_level)))
     }
 
     fn watch_millis(&self, id: &'static str, millis: u64) -> Option<wd::WatchPoint> {
@@ -394,6 +373,7 @@ impl KeystoreSecurityLevel {
             .unwrap_key_if_required_with_omk_compatibility(&blob_metadata, km_blob)
             .context(ks_err!("Failed to handle super encryption."))?;
 
+        let immediate_hat = auth_info.localize_auth_token(immediate_hat.as_ref())?;
         let (begin_result, upgraded_blob) = self
             .upgrade_keyblob_if_required_with(
                 key_id_guard,
@@ -1151,10 +1131,9 @@ fn caller_uid(ctx: Option<&CallerInfo>) -> AppUid {
     AppUid(ctx.map(|ctx| ctx.uid).unwrap_or_else(|| CallingContext::default().uid.into()))
 }
 
-impl binder::Interface for AospSecurityLevelWrapper {}
-impl binder::Interface for OmkSecurityLevelWrapper {}
+impl binder::Interface for KeystoreSecurityLevel {}
 
-impl IKeystoreSecurityLevel for AospSecurityLevelWrapper {
+impl IKeystoreSecurityLevel for KeystoreSecurityLevel {
     fn createOperation(
         &self,
         key: &KeyDescriptor,
@@ -1298,7 +1277,7 @@ impl IKeystoreSecurityLevel for AospSecurityLevelWrapper {
     }
 }
 
-impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
+impl IOhMySecurityLevel for KeystoreSecurityLevel {
     fn createOperation(
         &self,
         ctx: Option<&CallerInfo>,
@@ -1451,12 +1430,12 @@ impl IOhMySecurityLevel for OmkSecurityLevelWrapper {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::keymaster::keymint_device::tests as keymint_tests;
     use tempfile::TempDir;
 
-    fn test_security_level() -> (TempDir, KeystoreSecurityLevel) {
+    pub(crate) fn test_security_level() -> (TempDir, KeystoreSecurityLevel) {
         crate::keymaster::utils::tests::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let keymint = keymint_tests::wrapper(keymint_tests::test_ta());
@@ -1465,7 +1444,7 @@ mod tests {
             security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
             keymint,
             hw_info,
-            operation_db: OperationDb::new(),
+            operation_db: Arc::default(),
             id_rotation_state: IdRotationState::new(temp_dir.path()),
         };
         (temp_dir, security_level)

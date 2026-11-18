@@ -14,27 +14,21 @@
 
 //! Implements the IKeystoreMetrics AIDL interface for the OMK RPC surface.
 
-use crate::android::security::metrics::{
-    AtomID::AtomID,
-    IKeystoreMetrics::{BnKeystoreMetrics, IKeystoreMetrics},
-    KeystoreAtom::KeystoreAtom,
-};
-use crate::err as ks_err;
+use crate::android::security::metrics::AtomID::AtomID;
+use crate::android::security::metrics::IKeystoreMetrics::{BnKeystoreMetrics, IKeystoreMetrics};
+use crate::android::security::metrics::KeystoreAtom::KeystoreAtom;
 use crate::keymaster::error::into_logged_binder;
 use crate::keymaster::metrics_store::METRICS_STORE;
 use crate::keymaster::permission::{check_keystore_permission, KeystorePerm};
-use crate::watchdog as wd;
+use crate::{err as ks_err, watchdog as wd};
 use anyhow::{Context, Result};
-use rsbinder::BinderResult;
-use rsbinder::{BinderFeatures, Interface, Strong};
+use binder::{Interface, Result as BinderResult, Strong};
 
 pub struct Metrics;
 
 impl Metrics {
     pub fn new_native_binder() -> Result<Strong<dyn IKeystoreMetrics>> {
-        let mut features = BinderFeatures::default();
-        features.set_requesting_sid = true;
-        Ok(BnKeystoreMetrics::new_binder_with_features(Self, features))
+        Ok(BnKeystoreMetrics::new_binder(Self, crate::consts::sid_features()))
     }
 
     fn pull_metrics(&self, atom_id: AtomID) -> Result<Vec<KeystoreAtom>> {

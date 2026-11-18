@@ -2,24 +2,24 @@
 #![feature(once_cell_try)]
 
 use anyhow::{Context, Result};
+use std::ffi::CString;
+use std::os::unix::fs::PermissionsExt;
 use std::panic;
+use std::path::Path;
 use std::sync::Arc;
-use std::{ffi::CString, os::unix::fs::PermissionsExt, path::Path};
 
+use binder::ext::rpc::RpcServer;
 use kmr_common::consts::{KEYSTORE_GID, KEYSTORE_UID};
 use kmr_common::rpc;
 use kmr_common::selinux::{clear_sockcreate_con, set_sockcreate_con};
 use log::{debug, error, info, warn, LevelFilter};
-use rsbinder::rpc::{PeerIdentity, RpcServer};
 
-use crate::{
-    consts::RPC_SOCKET_CONTEXT,
-    keymaster::service::KeystoreService,
-    keymaster::{
-        authorization::AuthorizationManager, maintenance::MaintenanceManager, metrics::Metrics,
-    },
-    top::qwq2333::ohmykeymint::IOhMyKsService::BnOhMyKsService,
-};
+use crate::consts::RPC_SOCKET_CONTEXT;
+use crate::keymaster::authorization::AuthorizationManager;
+use crate::keymaster::maintenance::MaintenanceManager;
+use crate::keymaster::metrics::Metrics;
+use crate::keymaster::service::KeystoreService;
+use crate::top::qwq2333::ohmykeymint::IOhMyKsService::BnOhMyKsService;
 
 pub mod att_mgr;
 pub mod config;
@@ -36,8 +36,7 @@ pub mod selinux;
 pub mod utils;
 pub mod watchdog;
 
-include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
-// include!( "./aidl.rs"); // for development only
+pub use kmr_common::aidl::{android, top};
 
 fn storage_warn(message: String) {
     if log::log_enabled!(log::Level::Warn) {
@@ -161,22 +160,9 @@ fn create_rpc_server() -> Result<Arc<RpcServer>> {
         clear_sockcreate_con().context("failed to clear OMK RPC socket SELinux context");
     let server = server.context("failed to bind OMK RPC socket")?;
     clear_result?;
-    server.set_android13plus(rpc::WIRE_MAX_VERSION);
     server.set_max_threads(num_cpus::get() as u32);
     std::fs::set_permissions(rpc::SOCKET, std::fs::Permissions::from_mode(0o660))
         .context("failed to chmod OMK RPC socket")?;
-
-    server.set_authorizer(|peer| {
-        let allowed = matches!(
-            peer,
-            PeerIdentity::Local { uid, .. } if *uid == KEYSTORE_UID
-        );
-        if !allowed {
-            warn!("rejected OMK RPC peer {peer}");
-        }
-        allowed
-    });
-
     Ok(server)
 }
 
@@ -246,9 +232,6 @@ fn run() -> Result<()> {
     plat::resetprop::bootstrap_privileged_helper()
         .context("failed to bootstrap resetprop helper")?;
 
-    info!("initial process state");
-    let _ = rsbinder::ProcessState::init_default();
-
     let resolved_trust =
         plat::vbmeta::bootstrap_vbmeta(&mut config_file).context("failed to bootstrap vbmeta")?;
     prepare_android_storage();
@@ -288,21 +271,20 @@ fn run() -> Result<()> {
     info!("setting uid/gid={} role=keystore", KEYSTORE_UID);
     set_keystore_identity()?;
 
-    let injector_rpc_server = create_rpc_server()?;
+    let server = create_rpc_server()?;
 
     crate::keymaster::metrics_store::update_keystore_crash_count();
 
     info!("starting thread pool");
-    rsbinder::ProcessState::start_thread_pool();
+    binder::ProcessState::start_thread_pool();
 
     info!("using injector backend");
-    let server = injector_rpc_server;
 
     info!("creating keystore service");
     let dev = KeystoreService::new_native_binder().context("failed to create omk service")?;
 
     info!("adding OMK service to RPC server");
-    let service = BnOhMyKsService::new_binder_with_features(dev, consts::sid_features());
+    let service = BnOhMyKsService::new_binder(dev, consts::sid_features());
     server
         .add_service(rpc::SERVICE, service.as_binder())
         .context("failed to add OMK RPC service")?;
@@ -329,7 +311,6 @@ fn run() -> Result<()> {
     server
         .add_service(rpc::METRICS_SERVICE, metrics.as_binder())
         .context("failed to add OMK metrics RPC service")?;
-
     info!("serving OMK RPC socket={}", rpc::SOCKET);
     server.run().context("OMK RPC server stopped")?;
     Ok(())

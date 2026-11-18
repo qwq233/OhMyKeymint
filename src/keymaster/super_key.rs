@@ -12,39 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::android::hardware::security::keymint::{
-    Algorithm::Algorithm, BlockMode::BlockMode, HardwareAuthToken::HardwareAuthToken,
-    HardwareAuthenticatorType::HardwareAuthenticatorType, KeyFormat::KeyFormat,
-    KeyParameter::KeyParameter as KmKeyParameter, KeyPurpose::KeyPurpose, PaddingMode::PaddingMode,
-    SecurityLevel::SecurityLevel,
-};
-use crate::android::system::keystore2::{Domain::Domain, KeyDescriptor::KeyDescriptor};
+use crate::android::hardware::security::keymint::Algorithm::Algorithm;
+use crate::android::hardware::security::keymint::BlockMode::BlockMode;
+use crate::android::hardware::security::keymint::HardwareAuthToken::HardwareAuthToken;
+use crate::android::hardware::security::keymint::HardwareAuthenticatorType::HardwareAuthenticatorType;
+use crate::android::hardware::security::keymint::KeyFormat::KeyFormat;
+use crate::android::hardware::security::keymint::KeyParameter::KeyParameter as KmKeyParameter;
+use crate::android::hardware::security::keymint::KeyPurpose::KeyPurpose;
+use crate::android::hardware::security::keymint::PaddingMode::PaddingMode;
+use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use crate::err as ks_err;
-use crate::keymaster::{
-    boot_key::{get_level_zero_key, BootLevel, BootLevelKeyCache, LegacyBootLevelKeyCache},
-    crypto::{
-        aes_gcm_decrypt, aes_gcm_encrypt, generate_aes256_key, generate_salt,
-        is_decryption_failure, ECDHPrivateKey, Password, ZVec, AES_256_KEY_LENGTH,
-    },
-    db::{
-        BlobMetaData, BlobMetaEntry, EncryptedBy, KeyEntry, KeyEntryLoadBits, KeyIdGuard,
-        KeyMetaData, KeyMetaEntry, KeyType, KeystoreDB,
-    },
-    enforcements::Enforcements,
-    error::{Error, ResponseCode},
-    key_parameter::{KeyParameter, KeyParameterValue},
-    keymint_device::{KeyMintDevice, OneStepKeyOperation},
-    utils::{watchdog as wd, AesGcm, AndroidUserId, SecureUserId, AID_KEYSTORE},
+use crate::keymaster::boot_key::{
+    get_level_zero_key, BootLevel, BootLevelKeyCache, LegacyBootLevelKeyCache,
 };
+use crate::keymaster::crypto::{
+    aes_gcm_decrypt, aes_gcm_encrypt, generate_aes256_key, generate_salt, is_decryption_failure,
+    ECDHPrivateKey, Password, ZVec, AES_256_KEY_LENGTH,
+};
+use crate::keymaster::db::{
+    BlobMetaData, BlobMetaEntry, EncryptedBy, KeyEntry, KeyEntryLoadBits, KeyIdGuard, KeyMetaData,
+    KeyMetaEntry, KeyType, KeystoreDB,
+};
+use crate::keymaster::enforcements::Enforcements;
+use crate::keymaster::error::{Error, ResponseCode};
+use crate::keymaster::key_parameter::{KeyParameter, KeyParameterValue};
+use crate::keymaster::keymint_device::{KeyMintDevice, OneStepKeyOperation};
+use crate::keymaster::utils::{watchdog as wd, AesGcm, AndroidUserId, SecureUserId, AID_KEYSTORE};
 use crate::plat::property_watcher::PropertyWatcher;
 use anyhow::{Context, Result};
 use log::{error, info, warn};
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    sync::{Mutex, RwLock, Weak},
-};
-use std::{convert::TryFrom, ops::Deref};
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 const MAX_MAX_BOOT_LEVEL: BootLevel = BootLevel(1_000_000_000);
 

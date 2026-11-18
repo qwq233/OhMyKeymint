@@ -31,10 +31,8 @@ pub use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
 pub use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::keymaster::utils::AppUid;
 use crate::selinux;
+use binder::{ExceptionCode, Result as BinderResult, Status as BinderStatus, StatusCode};
 use log::{log, warn, Level};
-use rsbinder::BinderResult;
-use rsbinder::{ExceptionCode, Status as BinderStatus, StatusCode};
-use std::cmp::PartialEq;
 
 #[cfg(test)]
 pub mod tests;
@@ -127,7 +125,7 @@ pub fn get_log_level(e: &anyhow::Error) -> Option<Level> {
 pub fn map_km_error<T>(r: BinderResult<T>) -> Result<T, Error> {
     r.map_err(|s| {
         match s.exception_code() {
-            ExceptionCode::ServiceSpecific => {
+            ExceptionCode::SERVICE_SPECIFIC => {
                 let se = s.service_specific_error();
                 if se < 0 {
                     // Negative service specific errors are KM error codes.
@@ -136,10 +134,10 @@ pub fn map_km_error<T>(r: BinderResult<T>) -> Result<T, Error> {
                     // Non negative error codes cannot be KM error codes.
                     // So we create an `Error::Binder` variant to preserve
                     // the service specific error code for logging.
-                    Error::Binder(ExceptionCode::ServiceSpecific, se)
+                    Error::Binder(ExceptionCode::SERVICE_SPECIFIC, se)
                 }
             }
-            ExceptionCode::TransactionFailed => {
+            ExceptionCode::TRANSACTION_FAILED => {
                 let e = s.transaction_error();
                 Error::BinderTransaction(e)
             }
@@ -155,11 +153,11 @@ pub fn map_km_error<T>(r: BinderResult<T>) -> Result<T, Error> {
 /// service specific exception.
 pub fn map_binder_status<T>(r: BinderResult<T>) -> Result<T, Error> {
     r.map_err(|s| match s.exception_code() {
-        ExceptionCode::ServiceSpecific => {
+        ExceptionCode::SERVICE_SPECIFIC => {
             let se = s.service_specific_error();
-            Error::Binder(ExceptionCode::ServiceSpecific, se)
+            Error::Binder(ExceptionCode::SERVICE_SPECIFIC, se)
         }
-        ExceptionCode::TransactionFailed => {
+        ExceptionCode::TRANSACTION_FAILED => {
             let e = s.transaction_error();
             Error::BinderTransaction(e)
         }
@@ -174,9 +172,13 @@ pub fn map_binder_status_code<T>(r: Result<T, StatusCode>) -> Result<T, Error> {
 
 pub fn map_ks_error(e: Error) -> BinderStatus {
     match e {
-        Error::Rc(rc) => BinderStatus::new_service_specific_error(rc.0, Some(format!("{rc:?}"))),
-        Error::Km(ec) => BinderStatus::new_service_specific_error(ec.0, Some(format!("{ec:?}"))),
-        Error::Binder(ExceptionCode::ServiceSpecific, se) => {
+        Error::Rc(rc) => {
+            BinderStatus::new_service_specific_error_str(rc.0, Some(format!("{rc:?}")))
+        }
+        Error::Km(ec) => {
+            BinderStatus::new_service_specific_error_str(ec.0, Some(format!("{ec:?}")))
+        }
+        Error::Binder(ExceptionCode::SERVICE_SPECIFIC, se) => {
             BinderStatus::new_service_specific_error(se, None)
         }
         Error::Binder(ec, _se) => BinderStatus::from(ec),
@@ -212,7 +214,7 @@ pub fn anyhow_error_to_cstring(e: &anyhow::Error) -> Option<String> {
 /// Convert an [`anyhow::Error`] to a [`binder::Status`].
 pub fn into_binder(e: anyhow::Error) -> BinderStatus {
     let rc = anyhow_error_to_serialized_error(&e);
-    BinderStatus::new_service_specific_error(rc.0, anyhow_error_to_cstring(&e))
+    BinderStatus::new_service_specific_error_str(rc.0, anyhow_error_to_cstring(&e))
 }
 
 /// This type is used to send error codes on the wire.

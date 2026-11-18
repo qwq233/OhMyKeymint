@@ -1,272 +1,38 @@
-use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
+use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::{
+    transactions, IKeyAttestationApplicationIdProvider,
+};
 use crate::filter::PackageResolution;
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
-use crate::top::qwq2333::ohmykeymint::IOhMyAuthorizationService::IOhMyAuthorizationService;
-use crate::top::qwq2333::ohmykeymint::IOhMyKsService::IOhMyKsService;
-use crate::top::qwq2333::ohmykeymint::IOhMyMaintenanceService::IOhMyMaintenanceService;
 use anyhow::{Context, Result};
-use kmr_common::rpc;
-use log::{debug, warn};
-use rsbinder::rpc::{RpcClientConfig, RpcSession};
-use rsbinder::{
-    hub, DeathRecipient, ExceptionCode, FromIBinder, Status, StatusCode, Strong, WIBinder,
-};
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Once};
-use std::thread::LocalKey;
+use binder::binder_impl::Parcel;
+use binder::{ExceptionCode, SpIBinder, Status, StatusCode, Strong};
+use kmr_common::legacy_aaid::{self, LegacyApplicationId, LEGACY_PROVIDER_DESCRIPTOR};
+use log::warn;
+use std::sync::Mutex;
 
-#[cfg(test)]
-mod tests;
+use kmr_common::legacy_aaid::PROVIDER_SERVICE as PM_SERVICE;
 
-const PM_SERVICE: &str = "sec_key_att_app_id_provider";
+static PROVIDER: Mutex<Option<SpIBinder>> = Mutex::new(None);
+type ModernProvider = Strong<dyn IKeyAttestationApplicationIdProvider>;
+static MODERN_PROVIDER: Mutex<Option<ModernProvider>> = Mutex::new(None);
 
-type CachedRpcClient<T> = Option<Arc<RpcClient<T>>>;
-
-thread_local! {
-    static PM: RefCell<Option<Strong<dyn IKeyAttestationApplicationIdProvider>>> = const { RefCell::new(None) };
-    static PM_DEATH: RefCell<Option<Arc<dyn DeathRecipient>>> = const { RefCell::new(None) };
-    static LOCAL_SERVICE: RefCell<CachedRpcClient<Strong<dyn IOhMyKsService>>> = RefCell::default();
-    static LOCAL_AUTH_TOKEN: RefCell<CachedRpcClient<Strong<dyn IOhMyAuthorizationService>>> = RefCell::default();
-    static LOCAL_LIFECYCLE: RefCell<CachedRpcClient<LifecycleServices>> = RefCell::default();
+pub fn resolve_packages_for_caller_in_callback(caller: &CallerInfo) -> (u32, PackageResolution) {
+    let _guard = crate::forward::BypassGuard::enter();
+    resolve_packages_for_caller_with(caller, query_package_names_for_uid)
 }
 
-static PROCESS_STATE_INIT: Once = Once::new();
-
-static RPC_CACHE: Mutex<RpcCache> =
-    Mutex::new(RpcCache { service: None, auth_token: None, lifecycle: None });
-static SERVICE_CONNECT: Mutex<()> = Mutex::new(());
-static AUTH_TOKEN_CONNECT: Mutex<()> = Mutex::new(());
-static LIFECYCLE_CONNECT: Mutex<()> = Mutex::new(());
-
-struct RpcClient<T> {
-    session: RpcSession,
-    service: T,
-    active: AtomicBool,
-}
-
-impl<T> RpcClient<T> {
-    fn is_current(&self) -> bool {
-        self.active.load(Ordering::Acquire) && !self.session.is_ended()
-    }
-}
-
-struct LifecycleServices {
-    authorization: Strong<dyn IOhMyAuthorizationService>,
-    maintenance: Strong<dyn IOhMyMaintenanceService>,
-}
-
-struct RpcCache {
-    service: CachedRpcClient<Strong<dyn IOhMyKsService>>,
-    auth_token: CachedRpcClient<Strong<dyn IOhMyAuthorizationService>>,
-    lifecycle: CachedRpcClient<LifecycleServices>,
-}
-
-struct PmDeathRecipient;
-
-impl DeathRecipient for PmDeathRecipient {
-    fn binder_died(&self, _who: &WIBinder) {
-        clear_pm_cache();
-        warn!("{} binder died; cache cleared", PM_SERVICE);
-    }
-}
-
-pub fn ensure_process_state() {
-    PROCESS_STATE_INIT.call_once(|| {
-        let _ = rsbinder::ProcessState::init_default();
-        debug!("rsbinder process state initialized");
-    });
-}
-
-fn with_rpc_client<T: 'static, R>(
-    connect: impl FnOnce() -> Result<RpcSession>,
-    cache: &Mutex<RpcCache>,
-    connecting: &Mutex<()>,
-    local: &'static LocalKey<RefCell<CachedRpcClient<T>>>,
-    slot: fn(&mut RpcCache) -> &mut CachedRpcClient<T>,
-    resolve: impl FnOnce(&RpcSession) -> Result<T>,
-    f: impl FnOnce(&T) -> Result<R>,
-) -> Result<R> {
-    ensure_process_state();
-    let get_cached = || {
-        let (client, retired) = {
-            let mut cache = cache.lock().expect("RPC cache poisoned");
-            let slot = slot(&mut cache);
-            let retired = if slot.as_ref().is_some_and(|client| !client.is_current()) {
-                slot.take()
-            } else {
-                None
-            };
-            (slot.as_ref().map(Arc::clone), retired)
-        };
-        drop(retired);
-        client
-    };
-    let invoke = |client: &Arc<RpcClient<T>>| {
-        let result = f(&client.service);
-        if client.session.is_ended()
-            || result.as_ref().err().is_some_and(is_rpc_cache_invalidating_error)
-        {
-            client.active.store(false, Ordering::Release);
-            let retired = {
-                let mut cache = cache.lock().expect("RPC cache poisoned");
-                let slot = slot(&mut cache);
-                if slot.as_ref().is_some_and(|cached| Arc::ptr_eq(cached, client)) {
-                    slot.take()
-                } else {
-                    None
-                }
-            };
-            drop(retired);
-        }
-        result
-    };
-    local.with(|local| {
-        if let Ok(cached) = local.try_borrow() {
-            if let Some(client) = cached.as_ref().filter(|client| client.is_current()) {
-                return invoke(client);
-            }
-        }
-        let client = match get_cached() {
-            Some(client) => client,
-            None => {
-                let _connecting = connecting.lock().expect("RPC connector poisoned");
-                match get_cached() {
-                    Some(client) => client,
-                    None => {
-                        let session = connect()?;
-                        let service = resolve(&session)?;
-                        let client =
-                            Arc::new(RpcClient { session, service, active: AtomicBool::new(true) });
-                        {
-                            let mut cache = cache.lock().expect("RPC cache poisoned");
-                            *slot(&mut cache) = Some(Arc::clone(&client));
-                        }
-                        client
-                    }
-                }
-            }
-        };
-        // A reentrant call may borrow the old TLS entry; its slow path must not replace it.
-        let retired =
-            local.try_borrow_mut().ok().and_then(|mut cached| cached.replace(Arc::clone(&client)));
-        drop(retired);
-        invoke(&client)
-    })
-}
-
-fn connect_rpc_session(outgoing_connections: u32) -> Result<RpcSession> {
-    RpcSession::setup_client_android13plus_with_config(
-        RpcClientConfig::unix(std::path::Path::new(rpc::SOCKET), rpc::WIRE_MAX_VERSION)
-            .outgoing_connections(outgoing_connections),
-    )
-    .context("failed to connect OMK RPC socket")
-}
-
-pub fn with_omk_once<T>(f: impl FnOnce(&Strong<dyn IOhMyKsService>) -> Result<T>) -> Result<T> {
-    with_rpc_client(
-        || connect_rpc_session(num_cpus::get() as u32),
-        &RPC_CACHE,
-        &SERVICE_CONNECT,
-        &LOCAL_SERVICE,
-        |cache| &mut cache.service,
-        |session| session.get_interface(rpc::SERVICE).context("failed to connect to omk service"),
-        f,
-    )
-}
-
-pub fn with_omk_auth_token_once<T>(
-    f: impl FnOnce(&Strong<dyn IOhMyAuthorizationService>) -> Result<T>,
-) -> Result<T> {
-    with_rpc_client(
-        || connect_rpc_session(1),
-        &RPC_CACHE,
-        &AUTH_TOKEN_CONNECT,
-        &LOCAL_AUTH_TOKEN,
-        |cache| &mut cache.auth_token,
-        |session| {
-            session
-                .get_interface(rpc::AUTHORIZATION_SERVICE)
-                .context("failed to connect to omk_authorization service")
-        },
-        f,
-    )
-}
-
-fn with_lifecycle_once<T>(f: impl FnOnce(&LifecycleServices) -> Result<T>) -> Result<T> {
-    with_rpc_client(
-        || connect_rpc_session(1),
-        &RPC_CACHE,
-        &LIFECYCLE_CONNECT,
-        &LOCAL_LIFECYCLE,
-        |cache| &mut cache.lifecycle,
-        |session| {
-            Ok(LifecycleServices {
-                authorization: session
-                    .get_interface(rpc::AUTHORIZATION_SERVICE)
-                    .context("failed to connect to omk_authorization service")?,
-                maintenance: session
-                    .get_interface(rpc::MAINTENANCE_SERVICE)
-                    .context("failed to connect to omk_maintenance service")?,
-            })
-        },
-        f,
-    )
-}
-
-pub fn with_omk_authorization_once<T>(
-    f: impl FnOnce(&Strong<dyn IOhMyAuthorizationService>) -> Result<T>,
-) -> Result<T> {
-    with_lifecycle_once(|services| f(&services.authorization))
-}
-
-pub fn with_omk_maintenance_once<T>(
-    f: impl FnOnce(&Strong<dyn IOhMyMaintenanceService>) -> Result<T>,
-) -> Result<T> {
-    with_lifecycle_once(|services| f(&services.maintenance))
-}
-
-fn with_binder_retry<T, B, Get, Clear, Retry, F>(
-    tag: &'static str,
-    mut get: Get,
-    mut clear: Clear,
-    retryable: Retry,
-    mut f: F,
-) -> Result<T>
-where
-    B: FromIBinder + ?Sized,
-    Get: FnMut() -> Result<Strong<B>>,
-    Clear: FnMut(&Strong<B>),
-    Retry: Fn(&anyhow::Error) -> bool,
-    F: FnMut(&Strong<B>) -> Result<T>,
-{
-    let client = get()?;
-    match f(&client) {
-        Ok(value) => Ok(value),
-        Err(error) if retryable(&error) => {
-            warn!("{tag} transaction hit a stale Binder; refreshing client and retrying once");
-            clear(&client);
-            let client = get()?;
-            let result = f(&client);
-            if result.as_ref().err().is_some_and(retryable) {
-                clear(&client);
-            }
-            result
-        }
-        Err(error) => Err(error),
-    }
-}
-
-pub fn resolve_packages_for_caller(caller: &CallerInfo) -> (u32, PackageResolution) {
-    ensure_process_state();
+fn resolve_packages_for_caller_with(
+    caller: &CallerInfo,
+    query: impl FnOnce(u32) -> Result<Vec<String>>,
+) -> (u32, PackageResolution) {
     let uid = caller.uid as u32;
     let package_uid =
         match non_isolated_package_uid(uid, kmr_common::android_version::android_major_version()) {
             Some(uid) => Some(uid),
-            None => match with_omk_once(|omk| {
-                Ok(u32::try_from(omk.r#getIsolatedOwnerUid(Some(caller))?).ok())
+            None => match kmr_common::rpc::with_admin(|omk| {
+                Ok(u32::try_from(omk.getIsolatedOwnerUid(Some(caller))?).ok())
             }) {
-                Ok(owner) => owner,
+                Ok(owner) => owner.flatten(),
                 Err(error) => {
                     warn!(
                         "failed to resolve isolated caller uid={} pid={}: {error:#}",
@@ -279,7 +45,7 @@ pub fn resolve_packages_for_caller(caller: &CallerInfo) -> (u32, PackageResoluti
     let Some(package_uid) = package_uid else {
         return (uid, PackageResolution::Unknown);
     };
-    let resolution = match resolve_package_names_for_uid(package_uid) {
+    let resolution = match query(package_uid) {
         Ok(packages) if packages.is_empty() => PackageResolution::Unknown,
         Ok(packages) => PackageResolution::Known(packages),
         Err(error) => {
@@ -300,19 +66,33 @@ fn non_isolated_package_uid(uid: u32, android_major: Option<i32>) -> Option<u32>
     }
 }
 
-fn resolve_package_names_for_uid(uid: u32) -> Result<Vec<String>> {
-    if crate::legacy::should_use_aaid_provider() {
-        crate::legacy::resolve_package_names_for_uid(uid)
+fn query_package_names_for_uid(uid: u32) -> Result<Vec<String>> {
+    if legacy_aaid::should_use_aaid_provider() {
+        match resolve_legacy_package_names_once(uid) {
+            Err(error) if is_dead_object_error(&error) => {
+                warn!("legacy provider hit DeadObject; clearing cache and retrying once");
+                *PROVIDER.lock().expect("legacy provider cache poisoned") = None;
+                resolve_legacy_package_names_once(uid)
+            }
+            result => result,
+        }
     } else {
         resolve_package_names_for_uid_once(uid)
     }
 }
 
 fn resolve_package_names_for_uid_once(uid: u32) -> Result<Vec<String>> {
-    let app_id = with_pm_retry(|pm| {
-        pm.getKeyAttestationApplicationId(uid as i32)
-            .context("getKeyAttestationApplicationId failed")
-    })?;
+    let app_id = with_pm_retry(
+        &MODERN_PROVIDER,
+        || {
+            binder::check_interface(PM_SERVICE)
+                .context("failed to connect to sec_key_att_app_id_provider")
+        },
+        |pm| {
+            pm.getKeyAttestationApplicationId(uid as i32)
+                .context("getKeyAttestationApplicationId failed")
+        },
+    )?;
     Ok(app_id
         .packageInfos
         .into_iter()
@@ -321,38 +101,46 @@ fn resolve_package_names_for_uid_once(uid: u32) -> Result<Vec<String>> {
         .collect())
 }
 
-fn get_pm() -> Result<Strong<dyn IKeyAttestationApplicationIdProvider>> {
-    ensure_process_state();
-    PM.with(|slot| {
-        if let Some(client) = slot.borrow().as_ref() {
-            return Ok(client.clone());
+fn with_pm_retry<T>(
+    cache: &Mutex<Option<ModernProvider>>,
+    mut lookup: impl FnMut() -> Result<ModernProvider>,
+    mut call: impl FnMut(&ModernProvider) -> Result<T>,
+) -> Result<T> {
+    let cached = cache.lock().expect("provider cache poisoned").clone();
+    let client = match cached {
+        Some(client) => client,
+        None => {
+            let candidate = lookup()?;
+            cache.lock().expect("provider cache poisoned").get_or_insert(candidate).clone()
         }
-
-        let client: Strong<dyn IKeyAttestationApplicationIdProvider> =
-            hub::check_interface(PM_SERVICE)
-                .context("failed to connect to sec_key_att_app_id_provider")?;
-        let recipient: Arc<dyn DeathRecipient> = Arc::new(PmDeathRecipient);
-        client
-            .as_binder()
-            .link_to_death(Arc::downgrade(&recipient))
-            .context("failed to watch sec_key_att_app_id_provider death")?;
-        PM_DEATH.with(|death| *death.borrow_mut() = Some(recipient));
-        *slot.borrow_mut() = Some(client.clone());
-        Ok(client)
-    })
-}
-
-fn with_pm_retry<T, F>(mut f: F) -> Result<T>
-where
-    F: FnMut(&Strong<dyn IKeyAttestationApplicationIdProvider>) -> Result<T>,
-{
-    with_binder_retry(
-        "sec_key_att_app_id_provider",
-        get_pm,
-        |_| clear_pm_cache(),
-        is_dead_object_error,
-        &mut f,
-    )
+    };
+    let mut invoke = |client: &ModernProvider| {
+        let result = call(client);
+        if result.as_ref().is_err_and(is_dead_object_error) {
+            let mut cached = cache.lock().expect("provider cache poisoned");
+            if cached.as_ref() == Some(client) {
+                *cached = None;
+            }
+        }
+        result
+    };
+    match invoke(&client) {
+        Err(error) if is_dead_object_error(&error) => {
+            warn!(
+                "{} transaction hit DEAD_OBJECT; looking up service and retrying once",
+                PM_SERVICE
+            );
+            let refreshed = lookup()?;
+            {
+                let mut cached = cache.lock().expect("provider cache poisoned");
+                if cached.is_none() || cached.as_ref() == Some(&client) {
+                    *cached = Some(refreshed.clone());
+                }
+            }
+            invoke(&refreshed)
+        }
+        result => result,
+    }
 }
 
 pub(crate) fn is_dead_object_error(error: &anyhow::Error) -> bool {
@@ -360,41 +148,265 @@ pub(crate) fn is_dead_object_error(error: &anyhow::Error) -> bool {
         cause.downcast_ref::<Status>().is_some_and(is_dead_object_status)
             || cause
                 .downcast_ref::<StatusCode>()
-                .is_some_and(|status| *status == StatusCode::DeadObject)
-    })
-}
-
-pub(crate) fn is_stale_rpc_status_code(status: StatusCode) -> bool {
-    matches!(status, StatusCode::DeadObject | StatusCode::RpcError | StatusCode::NotEnoughData)
-}
-
-pub(crate) fn is_rpc_cache_invalidating_status_code(status: StatusCode) -> bool {
-    is_stale_rpc_status_code(status)
-        || status == StatusCode::NoInit
-        || matches!(status, StatusCode::Errno(errno) if matches!(
-            errno.abs(),
-            libc::ENOENT | libc::ECONNREFUSED | libc::ECONNRESET | libc::ENOTCONN | libc::EPIPE
-        ))
-}
-
-fn is_rpc_cache_invalidating_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause.downcast_ref::<Status>().is_some_and(|status| {
-            status.exception_code() == ExceptionCode::TransactionFailed
-                && (is_rpc_cache_invalidating_status_code(status.transaction_error())
-                    || status.transaction_error() == StatusCode::Unknown)
-        }) || cause
-            .downcast_ref::<StatusCode>()
-            .is_some_and(|status| is_rpc_cache_invalidating_status_code(*status))
+                .is_some_and(|status| *status == StatusCode::DEAD_OBJECT)
     })
 }
 
 fn is_dead_object_status(status: &Status) -> bool {
-    status.exception_code() == ExceptionCode::TransactionFailed
-        && status.transaction_error() == StatusCode::DeadObject
+    status.exception_code() == ExceptionCode::TRANSACTION_FAILED
+        && status.transaction_error() == StatusCode::DEAD_OBJECT
 }
 
-fn clear_pm_cache() {
-    PM.with(|slot| *slot.borrow_mut() = None);
-    PM_DEATH.with(|slot| *slot.borrow_mut() = None);
+fn resolve_legacy_package_names_once(uid: u32) -> Result<Vec<String>> {
+    let binder = get_provider_binder()?;
+    let mut reply = legacy_aaid::request_application_id(
+        &binder,
+        transactions::r#getKeyAttestationApplicationId,
+        uid,
+    )?;
+    read_package_names(&mut reply)
+}
+
+fn get_provider_binder() -> Result<SpIBinder> {
+    if let Some(provider) = PROVIDER.lock().expect("legacy provider cache poisoned").as_ref() {
+        return Ok(provider.clone());
+    }
+
+    let provider = binder::check_service(PM_SERVICE)
+        .ok_or_else(|| anyhow::anyhow!("service {PM_SERVICE} unavailable"))?;
+    binder::ext::associate_descriptor(&provider, LEGACY_PROVIDER_DESCRIPTOR)
+        .context("legacy key attestation provider descriptor mismatch")?;
+
+    *PROVIDER.lock().expect("legacy provider cache poisoned") = Some(provider.clone());
+    Ok(provider)
+}
+
+fn read_package_names(parcel: &mut Parcel) -> Result<Vec<String>> {
+    let app: LegacyApplicationId = parcel.read().context("failed to read legacy application id")?;
+    Ok(app
+        .packages
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter_map(|package| package.name.filter(|name| !name.is_empty()))
+        .collect())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use kmr_common::legacy_aaid::AAID_MAX_VECTOR_LEN;
+    use kmr_common::rpc::{
+        is_rpc_cache_invalidating_status, is_rpc_cache_invalidating_status_code,
+        is_stale_rpc_status_code,
+    };
+
+    #[test]
+    fn package_uid_matches_android_process_uid_ranges() {
+        for version in 13..=17 {
+            for user in [0, 1, 10] {
+                let base = user * kmr_common::consts::AID_USER_OFFSET;
+                for app_id in [0, 1000, 9999, 10_000, 19_999, 40_000, 89_999] {
+                    assert_eq!(
+                        non_isolated_package_uid(base + app_id, Some(version)),
+                        Some(base + app_id)
+                    );
+                }
+                for app_id in [20_000, 20_123, 29_999] {
+                    assert_eq!(
+                        non_isolated_package_uid(base + app_id, Some(version)),
+                        Some(base + app_id - 10_000)
+                    );
+                }
+                for app_id in [30_000, 30_123, 39_999] {
+                    assert_eq!(
+                        non_isolated_package_uid(base + app_id, Some(version)),
+                        Some(base + app_id - if version >= 17 { 20_000 } else { 0 })
+                    );
+                }
+                for app_id in [90_000, 98_999, 99_000, 99_999] {
+                    assert_eq!(non_isolated_package_uid(base + app_id, Some(version)), None);
+                }
+            }
+        }
+        assert_eq!(non_isolated_package_uid(20_123, Some(12)), Some(20_123));
+        assert_eq!(non_isolated_package_uid(20_123, None), Some(20_123));
+    }
+
+    #[test]
+    fn binder_status_classification() {
+        let status = Status::from(StatusCode::DEAD_OBJECT as i32);
+        assert!(is_dead_object_status(&status));
+
+        let status = Status::from(StatusCode::OK as i32);
+        assert!(!is_dead_object_status(&status));
+
+        for status in [StatusCode::DEAD_OBJECT, StatusCode::NOT_ENOUGH_DATA] {
+            assert!(is_stale_rpc_status_code(status));
+            assert!(is_rpc_cache_invalidating_status(&Status::from(status as i32)));
+            assert!(is_rpc_cache_invalidating_status_code(status));
+        }
+
+        assert!(is_rpc_cache_invalidating_status_code(StatusCode::NO_INIT));
+        assert!(is_rpc_cache_invalidating_status(&Status::from(StatusCode::NO_INIT as i32)));
+        assert!(!is_stale_rpc_status_code(StatusCode::NO_INIT));
+        for (errno, expected, invalidates) in [
+            (libc::ENOENT, StatusCode::NAME_NOT_FOUND, false),
+            (libc::ECONNREFUSED, StatusCode::UNKNOWN_ERROR, true),
+            (libc::ECONNRESET, StatusCode::UNKNOWN_ERROR, true),
+            (libc::ENOTCONN, StatusCode::UNKNOWN_ERROR, true),
+            (libc::EPIPE, StatusCode::DEAD_OBJECT, true),
+        ] {
+            let status = Status::from(-errno);
+            assert_eq!(status.exception_code(), ExceptionCode::TRANSACTION_FAILED);
+            assert_eq!(status.transaction_error(), expected, "errno={errno}");
+            assert_eq!(is_rpc_cache_invalidating_status(&status), invalidates, "errno={errno}");
+        }
+
+        let status = Status::from(StatusCode::UNKNOWN_ERROR as i32);
+        assert!(!is_stale_rpc_status_code(StatusCode::UNKNOWN_ERROR));
+        assert!(is_rpc_cache_invalidating_status(&status));
+        let stale = anyhow::Error::new(status);
+        assert!(!is_dead_object_error(&stale));
+
+        assert!(!is_rpc_cache_invalidating_status_code(StatusCode::UNKNOWN_ERROR));
+
+        let business = Status::new_service_specific_error(1, None);
+        assert!(!is_rpc_cache_invalidating_status(&business));
+    }
+
+    #[test]
+    fn pm_lookup_and_calls_retry_only_the_first_dead_object() {
+        use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::BnKeyAttestationApplicationIdProvider;
+        use crate::android::security::keystore::KeyAttestationApplicationId::KeyAttestationApplicationId;
+        use std::cell::Cell;
+
+        struct Provider;
+        impl binder::Interface for Provider {}
+        impl IKeyAttestationApplicationIdProvider for Provider {
+            fn getKeyAttestationApplicationId(
+                &self,
+                _: i32,
+            ) -> binder::Result<KeyAttestationApplicationId> {
+                Ok(Default::default())
+            }
+        }
+        let provider = BnKeyAttestationApplicationIdProvider::new_binder(
+            Provider,
+            binder::BinderFeatures::default(),
+        );
+        for (
+            failed_lookup,
+            first_error,
+            second_error,
+            expected_lookups,
+            expected_calls,
+            expected_error,
+        ) in [
+            (Some(1), None, None, 1, 0, true),
+            (None, None, None, 1, 1, false),
+            (None, Some(StatusCode::PERMISSION_DENIED), None, 1, 1, true),
+            (None, Some(StatusCode::DEAD_OBJECT), None, 2, 2, false),
+            (Some(2), Some(StatusCode::DEAD_OBJECT), None, 2, 1, true),
+            (None, Some(StatusCode::DEAD_OBJECT), Some(StatusCode::DEAD_OBJECT), 2, 2, true),
+            (None, Some(StatusCode::DEAD_OBJECT), Some(StatusCode::PERMISSION_DENIED), 2, 2, true),
+        ] {
+            let lookups = Cell::new(0);
+            let calls = Cell::new(0);
+            let result = with_pm_retry(
+                &Mutex::new(None),
+                || {
+                    lookups.set(lookups.get() + 1);
+                    if failed_lookup == Some(lookups.get()) {
+                        Err(anyhow::Error::new(StatusCode::NAME_NOT_FOUND))
+                    } else {
+                        Ok(provider.clone())
+                    }
+                },
+                |_| {
+                    calls.set(calls.get() + 1);
+                    let status = if calls.get() == 1 { first_error } else { second_error };
+                    match status {
+                        Some(status) => Err(anyhow::Error::new(status)),
+                        None => Ok(7),
+                    }
+                },
+            );
+            assert_eq!(lookups.get(), expected_lookups);
+            assert_eq!(calls.get(), expected_calls);
+            assert_eq!(result.is_err(), expected_error);
+        }
+        let cache = Mutex::new(None);
+        let lookups = Cell::new(0);
+        for package in ["first.package", "next.package"] {
+            let names = with_pm_retry(
+                &cache,
+                || {
+                    lookups.set(lookups.get() + 1);
+                    Ok(provider.clone())
+                },
+                |_| Ok(vec![package]),
+            )
+            .unwrap();
+            assert_eq!(names, [package]);
+        }
+        assert_eq!(lookups.get(), 1);
+
+        let replacement =
+            BnKeyAttestationApplicationIdProvider::new_binder(Provider, Default::default());
+        let retry = with_pm_retry(
+            &cache,
+            || {
+                // A concurrent cold lookup publishes the dead handle during the refresh.
+                *cache.lock().unwrap() = Some(provider.clone());
+                Ok(replacement.clone())
+            },
+            |client| {
+                if client == &provider {
+                    return Err(anyhow::Error::new(StatusCode::DEAD_OBJECT));
+                }
+                Ok(client == &replacement)
+            },
+        );
+        assert!(retry.unwrap());
+        assert!(cache.lock().unwrap().as_ref() == Some(&replacement));
+    }
+
+    #[test]
+    fn legacy_java_typed_arrays_keep_nullable_elements_and_skip_empty_names() {
+        let mut parcel = Parcel::new();
+        for value in [1_i32, 3, 0, 1] {
+            parcel.write(&value).unwrap();
+        }
+        parcel.write(&Some("com.example.app".to_string())).unwrap();
+        parcel.write(&7_i64).unwrap();
+        for value in [2_i32, 0, 1] {
+            parcel.write(&value).unwrap();
+        }
+        parcel.write(&vec![1_u8, 2, 3]).unwrap();
+        parcel.write(&1_i32).unwrap();
+        parcel.write(&None::<String>).unwrap();
+        parcel.write(&8_i64).unwrap();
+        parcel.write(&(-1_i32)).unwrap();
+        // SAFETY: The fixture is a valid Parcel, whose start is always in bounds.
+        unsafe {
+            parcel.set_data_position(0).unwrap();
+        }
+        assert_eq!(read_package_names(&mut parcel).unwrap(), vec!["com.example.app"]);
+        assert_eq!(parcel.get_data_position(), parcel.get_data_size());
+    }
+
+    #[test]
+    fn legacy_typed_array_length_is_validated_before_allocating() {
+        for length in [-2_i32, AAID_MAX_VECTOR_LEN + 1] {
+            let mut parcel = Parcel::new();
+            parcel.write(&1_i32).unwrap();
+            parcel.write(&length).unwrap();
+            // SAFETY: The fixture is a valid Parcel, whose start is always in bounds.
+            unsafe {
+                parcel.set_data_position(0).unwrap();
+            }
+            assert!(read_package_names(&mut parcel).is_err());
+        }
+    }
 }

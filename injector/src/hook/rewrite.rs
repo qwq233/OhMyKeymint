@@ -1,199 +1,260 @@
-use super::binder::{
-    binder_transaction_data, create_native_operation_binder, create_native_security_level_binder,
-    describe_transaction_objects, format_target, parse_local_binder_target_from_parcel_bytes,
-    LocalBinderTarget, NativeBinder, NativeBinderRetirement,
-};
-use super::{BinderFdToken, BinderStateKey};
-use crate::android::system::keystore2::IKeystoreOperation::IKeystoreOperation as AospKeystoreOperation;
-use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
-use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
-use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::config;
-use crate::filter::{self, FilterReason, PackageResolution};
-use crate::forward::{self, BypassGuard};
-use crate::identify::{
-    self, AidlMetadataMethod, AuthorizationMethod, OperationMethod, SecurityLevelMethod,
-    ServiceMethod,
-};
-use crate::ipc;
-use crate::parcel::{
-    self, ParsedAuthorizationRequest, ParsedMaintenanceRequest, ParsedOperationRequest,
-    ParsedSecurityLevelRequest, ParsedServiceRequest,
-};
+use crate::filter::{self, FilterDecision, PackageResolution};
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
-use crate::tracker::{self, SecurityLevelTargetInfo};
-use log::{debug, info, warn};
-use rsbinder::{ExceptionCode, Status, StatusCode, Strong};
-use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, LazyLock, Mutex, Weak,
-};
-use std::time::{Duration, Instant};
 
-use mirror::*;
-use pending::*;
-pub(super) use reply::handle_native_br_transaction;
-use reply::*;
-use request::*;
-use synthetic::*;
-pub(super) use synthetic::{
-    bind_operation_publication_connection, cancel_operation_publication_acquire_pending,
-    finish_local_operation_publication, finish_operation_publication_probe, lookup_native_binder,
-    lookup_native_binder_for, lookup_synthetic_target,
-    mark_operation_publication_acquire_committed, mark_operation_publication_acquire_pending,
-    mark_operation_publication_completed, next_operation_publication_probe_deadline,
-    operation_publication_acquire_is_pending, operation_publication_pending_acquire,
-    retire_binder_connection_publications, retire_synthetic_operation_retirement,
-    take_operation_publication_probe, NativeOperationState, OperationPublicationProbe,
-    SyntheticReply, SyntheticTargetKind,
-};
-pub(crate) use synthetic::{drop_synthetic_operation_retirement, retire_native_operation_target};
+pub(super) use pending::{clear_binder_fd_thread_state, discard_received_frame};
 
-pub(super) use pending::{
-    abort_bc_reply, clear_binder_fd_thread_state, clear_outbound_reply_buffers, commit_bc_reply,
-    handle_bc_reply, pending_reply_has_trusted_payload, pending_reply_requires_payload,
-    push_native_pending_frame, push_pending_frame, remember_native_reply,
-};
-pub(super) use request::handle_br_transaction;
-
-mod mirror;
-mod pending;
-mod reply;
-mod request;
-mod synthetic;
-#[cfg(test)]
-pub(super) mod tests;
-
-type OutboundReply = parcel::OwnedReply;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RouteTarget {
-    System,
-    Omk,
-}
-
-type AospOperationBinder = Strong<dyn AospKeystoreOperation>;
-
-fn evaluate_caller(
-    caller: &CallerInfo,
-    cfg: &config::InjectorConfig,
-) -> crate::filter::FilterDecision {
-    evaluate_caller_with(caller, cfg, |caller| {
-        let _guard = BypassGuard::enter();
-        ipc::resolve_packages_for_caller(caller)
-    })
-}
+pub(in crate::hook) mod native;
+pub(in crate::hook) mod pending;
 
 fn evaluate_caller_with(
     caller: &CallerInfo,
     cfg: &config::InjectorConfig,
     resolve: impl FnOnce(&CallerInfo) -> (u32, PackageResolution),
-) -> crate::filter::FilterDecision {
-    let uid = caller.uid as u32;
-    let preflight = filter::evaluate(&cfg.scoop, &cfg.filter, uid, PackageResolution::Unknown);
-    if matches!(preflight.reason, FilterReason::RejectedAndroidPackage | FilterReason::Disabled) {
+) -> FilterDecision {
+    let preflight =
+        filter::evaluate(&cfg.scoop, &cfg.filter, caller.uid as u32, &PackageResolution::Unknown);
+    if matches!(preflight, FilterDecision::RejectedAndroidPackage | FilterDecision::Disabled) {
         return preflight;
     }
-
-    let (package_uid, package_resolution) = resolve(caller);
-    filter::evaluate(&cfg.scoop, &cfg.filter, package_uid, package_resolution)
+    let (uid, packages) = resolve(caller);
+    let decision = filter::evaluate(&cfg.scoop, &cfg.filter, uid, &packages);
+    log::debug!("event=route identity uid={} pid={} package_uid={uid} packages={packages:?} decision={decision:?}", caller.uid, caller.pid);
+    decision
 }
 
-fn precompute_omk_service_mutator_reply(
-    request: &ParsedServiceRequest,
-    caller: &CallerInfo,
-) -> PrecomputedServiceReply {
-    let _guard = BypassGuard::enter();
-    match request {
-        ParsedServiceRequest::UpdateSubcomponent { key, public_cert, certificate_chain } => {
-            match ipc::with_omk_once(|omk| {
-                Ok(omk.r#updateSubcomponent(
-                    Some(caller),
-                    key,
-                    public_cert.as_deref(),
-                    certificate_chain.as_deref(),
-                )?)
-            }) {
-                Ok(()) => PrecomputedServiceReply::UpdateSubcomponentSuccess,
-                Err(error) => PrecomputedServiceReply::Error(precomputed_omk_error_reply(&error)),
-            }
-        }
-        ParsedServiceRequest::DeleteKey { key } => {
-            match ipc::with_omk_once(|omk| Ok(omk.r#deleteKey(Some(caller), key)?)) {
-                Ok(()) => PrecomputedServiceReply::DeleteKeySuccess,
-                Err(error) => PrecomputedServiceReply::Error(precomputed_omk_error_reply(&error)),
-            }
-        }
-        ParsedServiceRequest::Grant { .. } | ParsedServiceRequest::Ungrant { .. } => {
-            precompute_omk_grant_service_reply_with(
-                request,
-                caller,
-                |caller_info, key, grantee_uid, access_vector| {
-                    ipc::with_omk_once(|omk| {
-                        Ok(omk.r#grant(Some(caller_info), key, grantee_uid, access_vector)?)
-                    })
-                },
-                |caller_info, key, grantee_uid| {
-                    ipc::with_omk_once(|omk| {
-                        Ok(omk.r#ungrant(Some(caller_info), key, grantee_uid)?)
-                    })
-                },
+#[cfg(test)]
+pub(in crate::hook) mod tests {
+    use crate::android::hardware::security::keymint::{SecurityLevel::SecurityLevel, Tag::Tag};
+    use crate::android::system::keystore2::IKeystoreOperation::BnKeystoreOperation;
+    use crate::android::system::keystore2::{
+        Domain::Domain,
+        IKeystoreSecurityLevel::IKeystoreSecurityLevel,
+        IKeystoreService::{BnKeystoreService, IKeystoreService},
+        KeyDescriptor::KeyDescriptor,
+        KeyEntryResponse::KeyEntryResponse,
+    };
+    use crate::hook::binder as hook_binder;
+    use crate::hook::binder::parse_local_binder_target_from_parcel_bytes;
+    use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
+    use binder::binder_impl::{BorrowedParcel, Parcel};
+    use binder::{Interface, SpIBinder, Status, StatusCode, Strong};
+    pub use kmr_common::rpc::Backend;
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    pub(in crate::hook) fn retained_receiver(
+        binder: &SpIBinder,
+        descriptor: &str,
+    ) -> Arc<binder::ext::LocalBinderReceiver> {
+        let mut parcel = binder::binder_impl::Parcel::new();
+        parcel.write(binder).unwrap();
+        // SAFETY: parcel and binder retain the matching local object throughout promotion.
+        let target = unsafe {
+            parse_local_binder_target_from_parcel_bytes(
+                &binder::ext::parcel_bytes(&parcel).unwrap(),
             )
         }
-        _ => unreachable!("only service mutators are precomputed"),
+        .unwrap();
+        Arc::new(
+            unsafe {
+                binder::ext::local_binder_receiver(
+                    target.ptr as usize,
+                    target.cookie as usize,
+                    descriptor,
+                )
+            }
+            .unwrap()
+            .unwrap(),
+        )
     }
-}
 
-fn precompute_omk_grant_service_reply_with(
-    request: &ParsedServiceRequest,
-    caller: &CallerInfo,
-    mut grant: impl FnMut(&CallerInfo, &KeyDescriptor, i32, i32) -> anyhow::Result<KeyDescriptor>,
-    mut ungrant: impl FnMut(&CallerInfo, &KeyDescriptor, i32) -> anyhow::Result<()>,
-) -> PrecomputedServiceReply {
-    match request {
-        ParsedServiceRequest::Grant { key, grantee_uid, access_vector } => {
-            match grant(caller, key, *grantee_uid, *access_vector) {
-                Ok(omk_grant) => PrecomputedServiceReply::GrantSuccess(omk_grant),
-                Err(error) => PrecomputedServiceReply::Error(precomputed_omk_error_reply(&error)),
+    pub(in crate::hook) struct TestService {
+        pub(in crate::hook) level: Option<Strong<dyn IKeystoreSecurityLevel>>,
+        pub(in crate::hook) calls: Arc<AtomicUsize>,
+    }
+    impl Interface for TestService {}
+    impl IKeystoreService for TestService {
+        fn getSecurityLevel(
+            &self,
+            _: SecurityLevel,
+        ) -> binder::Result<Strong<dyn IKeystoreSecurityLevel>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.level.clone().ok_or_else(|| Status::new_service_specific_error(17, None))
+        }
+        fn getKeyEntry(&self, _: &KeyDescriptor) -> binder::Result<KeyEntryResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(Status::new_service_specific_error(17, None))
+        }
+        fn updateSubcomponent(
+            &self,
+            _: &KeyDescriptor,
+            _: Option<&[u8]>,
+            _: Option<&[u8]>,
+        ) -> binder::Result<()> {
+            Err(StatusCode::UNKNOWN_TRANSACTION.into())
+        }
+        fn listEntries(&self, _: Domain, _: i64) -> binder::Result<Vec<KeyDescriptor>> {
+            Err(StatusCode::UNKNOWN_TRANSACTION.into())
+        }
+        fn deleteKey(&self, _: &KeyDescriptor) -> binder::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(Status::new_service_specific_error(17, None))
+        }
+        fn grant(&self, _: &KeyDescriptor, _: i32, _: i32) -> binder::Result<KeyDescriptor> {
+            Err(StatusCode::UNKNOWN_TRANSACTION.into())
+        }
+        fn ungrant(&self, _: &KeyDescriptor, _: i32) -> binder::Result<()> {
+            Err(StatusCode::UNKNOWN_TRANSACTION.into())
+        }
+        fn getNumberOfEntries(&self, _: Domain, _: i64) -> binder::Result<i32> {
+            Err(StatusCode::UNKNOWN_TRANSACTION.into())
+        }
+        fn listEntriesBatched(
+            &self,
+            _: Domain,
+            _: i64,
+            _: Option<&str>,
+        ) -> binder::Result<Vec<KeyDescriptor>> {
+            Err(StatusCode::UNKNOWN_TRANSACTION.into())
+        }
+        fn getSupplementaryAttestationInfo(&self, _: Tag) -> binder::Result<Vec<u8>> {
+            Err(StatusCode::UNKNOWN_TRANSACTION.into())
+        }
+    }
+
+    pub(in crate::hook) fn test_service_receiver() -> Arc<binder::ext::LocalBinderReceiver> {
+        let service = BnKeystoreService::new_binder(
+            TestService { level: None, calls: Arc::new(AtomicUsize::new(0)) },
+            binder::BinderFeatures::default(),
+        );
+        retained_receiver(&service.as_binder(), hook_binder::KEYSTORE_SERVICE_INTERFACE)
+    }
+
+    pub(super) fn sample_key_descriptor() -> KeyDescriptor {
+        KeyDescriptor {
+            domain: Domain::APP,
+            nspace: 7,
+            alias: Some("alias".to_string()),
+            blob: None,
+        }
+    }
+
+    #[test]
+    fn application_owner_controls_scope_without_changing_caller() {
+        use super::*;
+        let caller = CallerInfo { uid: 99_001, pid: 2000, sid: "isolated".into() };
+        let cfg = config::InjectorConfig {
+            scoop: vec!["com.example.scooped".into()],
+            filter: config::FilterConfig {
+                deny_packages: vec!["com.example.denied".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (owner, packages, expected) in [
+            (10_123, vec!["com.example.scooped"], FilterDecision::Allowed),
+            (10_124, vec!["com.example.other"], FilterDecision::RejectedNotInScope),
+            (
+                10_123,
+                vec!["com.example.scooped", "com.example.denied"],
+                FilterDecision::RejectedByDenylist,
+            ),
+            (1000, vec!["com.example.scooped"], FilterDecision::RejectedAndroidPackage),
+            (10_123, vec!["android"], FilterDecision::RejectedAndroidPackage),
+        ] {
+            let actual = evaluate_caller_with(&caller, &cfg, |actual| {
+                assert!(std::ptr::eq(actual, &caller));
+                (owner, PackageResolution::Known(packages.into_iter().map(str::to_owned).collect()))
+            });
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn owner_resolution_preserves_preflight_and_unknown_policy() {
+        use super::*;
+        let mut cfg = config::InjectorConfig::default();
+        let mut caller = CallerInfo { uid: 1000, pid: 2000, sid: "system".into() };
+        assert_eq!(
+            evaluate_caller_with(&caller, &cfg, |_| panic!("core caller queried packages")),
+            FilterDecision::RejectedAndroidPackage
+        );
+        caller.uid = 99_001;
+        cfg.filter.enabled = false;
+        assert_eq!(
+            evaluate_caller_with(&caller, &cfg, |_| panic!("disabled filter queried packages")),
+            FilterDecision::Disabled
+        );
+        cfg.filter.enabled = true;
+        for allowed in [false, true] {
+            cfg.filter.allow_unknown_package = allowed;
+            assert_eq!(
+                evaluate_caller_with(&caller, &cfg, |_| (99_001, PackageResolution::Unknown))
+                    .allowed(),
+                allowed
+            );
+        }
+    }
+
+    pub(in crate::hook) struct TestReply {
+        pub status: Result<(), StatusCode>,
+        pub values: Parcel,
+    }
+    pub(in crate::hook) type TestBackend =
+        Arc<dyn Fn(&CallerInfo, (u32, u32), &BorrowedParcel<'_>) -> binder::Result<TestReply>>;
+    #[derive(Clone)]
+    struct TestConnection {
+        backend: Option<TestBackend>,
+        ready: bool,
+    }
+    thread_local! { static BACKEND: RefCell<Option<TestConnection>> = RefCell::default(); }
+    pub(in crate::hook) fn may_intercept() -> bool {
+        BACKEND.with_borrow(Option::is_some) || kmr_common::rpc::may_intercept()
+    }
+    pub(in crate::hook) fn wait_until_ready() -> bool {
+        BACKEND.with_borrow_mut(|slot| {
+            let Some(connection) = slot else { return false };
+            connection.ready = true;
+            true
+        }) || kmr_common::rpc::wait_until_ready()
+    }
+    pub(in crate::hook) fn dispatch(
+        backend: Backend<'_>,
+        caller: &CallerInfo,
+        transaction: (u32, u32),
+        input: &BorrowedParcel<'_>,
+        output: &mut BorrowedParcel<'_>,
+        level: impl FnOnce(SecurityLevel) -> Result<SpIBinder, StatusCode>,
+        operation: impl FnOnce(u64, Arc<BnKeystoreOperation>) -> Result<SpIBinder, StatusCode>,
+    ) -> binder::Result<Option<()>> {
+        if !matches!(backend, Backend::Operation { .. }) {
+            if let Some(connection) = BACKEND.with_borrow(Clone::clone) {
+                let Some(target) = connection.backend.filter(|_| connection.ready) else {
+                    return Ok(None);
+                };
+                let reply = target(caller, transaction, input)?;
+                reply.status?;
+                output.append_all_from(&reply.values)?;
+                return Ok(Some(()));
             }
         }
-        ParsedServiceRequest::Ungrant { key, grantee_uid } => {
-            match ungrant(caller, key, *grantee_uid) {
-                Ok(()) => PrecomputedServiceReply::UngrantSuccess,
-                Err(error) => PrecomputedServiceReply::Error(precomputed_omk_error_reply(&error)),
+        kmr_common::rpc::dispatch(backend, caller, transaction, input, output, level, operation)
+    }
+    pub(in crate::hook) fn with_test_backend<T>(
+        backend: impl Into<Option<TestBackend>>,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        struct Restore(Option<TestConnection>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                drop(BACKEND.replace(self.0.take()));
             }
         }
-        _ => unreachable!("only grant/ungrant requests are precomputed"),
-    }
-}
-
-unsafe fn transaction_parts(tr: &binder_transaction_data) -> (*mut u8, usize, *mut usize, usize) {
-    (
-        tr.data.ptr.buffer as *mut u8,
-        tr.data_size,
-        tr.data.ptr.offsets as *mut usize,
-        tr.offsets_size,
-    )
-}
-
-fn synthetic_fallback_reply() -> parcel::OwnedReply {
-    build_service_specific_reply(ResponseCode::SYSTEM_ERROR.0)
-        .expect("synthetic system-error status should serialize")
-}
-
-fn precompute_omk_migrate_reply(call: &PendingMaintenanceCall) -> PrecomputedMaintenanceReply {
-    let ParsedMaintenanceRequest::MigrateKeyNamespace { source, destination } = &call.request
-    else {
-        unreachable!("OMK migrate precompute called for {:?}", call.request.method());
-    };
-    debug_assert_eq!(call.route, RouteTarget::Omk);
-    let _guard = BypassGuard::enter();
-    match ipc::with_omk_maintenance_once(|maintenance| {
-        Ok(maintenance.r#migrateKeyNamespace(Some(&call.caller), source, destination)?)
-    }) {
-        Ok(()) => PrecomputedMaintenanceReply::Success,
-        Err(error) => PrecomputedMaintenanceReply::Error(precomputed_omk_error_reply(&error)),
+        let _restore = Restore(
+            BACKEND.replace(Some(TestConnection { backend: backend.into(), ready: false })),
+        );
+        run()
     }
 }

@@ -14,46 +14,43 @@
 
 //! Provide the [`KeyMintDevice`] wrapper for operating directly on a KeyMint device.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Mutex, OnceLock, RwLock,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock, RwLock};
 
-use crate::android::hardware::security::keymint::IKeyMintOperation::BnKeyMintOperation;
-use crate::android::hardware::security::keymint::{
-    HardwareAuthToken::HardwareAuthToken, IKeyMintDevice::IKeyMintDevice,
-    IKeyMintOperation::IKeyMintOperation, KeyCharacteristics::KeyCharacteristics,
-    KeyCreationResult::KeyCreationResult, KeyParameter::KeyParameter,
-    KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, SecurityLevel::SecurityLevel,
-    Tag::Tag,
+use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
+use crate::android::hardware::security::keymint::HardwareAuthToken::HardwareAuthToken;
+use crate::android::hardware::security::keymint::IKeyMintDevice::IKeyMintDevice;
+use crate::android::hardware::security::keymint::IKeyMintOperation::{
+    BnKeyMintOperation, IKeyMintOperation,
 };
-use crate::android::system::keystore2::{
-    Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
-};
+use crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics;
+use crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult;
+use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
+use crate::android::hardware::security::keymint::KeyParameterValue::KeyParameterValue;
+use crate::android::hardware::security::keymint::KeyPurpose::KeyPurpose;
+use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use crate::android::hardware::security::keymint::Tag::Tag;
+use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
+use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::config::{config, Config, CryptoConfig};
 use crate::global::DB;
-use crate::keymaster::db::Uuid;
-use crate::keymaster::error::{map_km_error, map_ks_error};
+use crate::keymaster::db::{
+    BlobInfo, BlobMetaData, BlobMetaEntry, CertificateInfo, DateTime, KeyEntry, KeyEntryLoadBits,
+    KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType, KeymasterDb as KeystoreDB, SubComponentType,
+    Uuid,
+};
+use crate::keymaster::error::{map_km_error, map_ks_error, KsError as Error};
+use crate::keymaster::super_key::KeyBlob;
 use crate::keymaster::utils::{
     key_characteristics_to_internal, key_creation_result_to_aidl,
     key_parameter_conversion_error_code, key_parameters_to_km, key_params_to_aidl, AppUid,
+    HardwareAuthTokenExt,
 };
 use crate::keymint::{clock, sdd, soft};
-use crate::{
-    android::hardware::security::keymint::ErrorCode::ErrorCode,
-    err,
-    keymaster::{
-        db::{
-            BlobInfo, BlobMetaData, BlobMetaEntry, CertificateInfo, DateTime, KeyEntry,
-            KeyEntryLoadBits, KeyIdGuard, KeyMetaData, KeyMetaEntry, KeyType,
-            KeymasterDb as KeystoreDB, SubComponentType,
-        },
-        error::KsError as Error,
-        super_key::KeyBlob,
-    },
-    watchdog as wd,
-};
+use crate::{err, watchdog as wd};
 use anyhow::{anyhow, Context, Result};
+use binder::{ExceptionCode, Interface, Status, Strong};
 use kmr_common::consts::AID_KEYSTORE;
 use kmr_crypto_boring::ec::BoringEc;
 use kmr_crypto_boring::hmac::BoringHmac;
@@ -66,7 +63,6 @@ use kmr_wire::rpc::MINIMUM_SUPPORTED_KEYS_IN_CSR;
 use kmr_wire::*;
 use log::{error, info, warn};
 use regex::Regex;
-use rsbinder::{ExceptionCode, Interface, Status, Strong};
 
 // The OS version property is of form "12" or "12.1" or "12.1.3".
 const OS_VERSION_REGEX: &str = r"^(?P<major>\d{1,2})(\.(?P<minor>\d{1,2}))?(\.(?P<sub>\d{1,2}))?$";
@@ -245,7 +241,7 @@ impl KeyMintDevice {
         creator: F,
     ) -> Result<()>
     where
-        F: FnOnce(&dyn IKeyMintDevice) -> Result<KeyCreationResult, rsbinder::Status>,
+        F: FnOnce(&dyn IKeyMintDevice) -> Result<KeyCreationResult, binder::Status>,
     {
         let creation_result =
             map_km_error(creator(&self.km_dev)).context(err!("creator failed"))?;
@@ -437,6 +433,7 @@ impl KeyMintDevice {
         one_step: OneStepKeyOperation<'_>,
     ) -> Result<Vec<u8>> {
         let key_blob = KeyBlob::Ref(one_step.key_blob);
+        let auth_token = one_step.auth_token.map(localize_auth_token_for_omk).transpose()?;
 
         let (begin_result, _) = self
             .upgrade_keyblob_if_required_with(db, key_id_guard, key_blob, |blob| {
@@ -449,7 +446,7 @@ impl KeyMintDevice {
                     one_step.purpose,
                     blob,
                     one_step.parameters,
-                    one_step.auth_token,
+                    auth_token.as_ref(),
                 );
                 map_km_error(result)
             })
@@ -567,7 +564,8 @@ impl IKeyMintDevice for KeyMintWrapper {
             self.clone(),
             result.op_handle,
         );
-        let operation = BnKeyMintOperation::new_binder(operation);
+        let operation =
+            BnKeyMintOperation::new_binder(operation, binder::BinderFeatures::default());
 
         let out_params = key_params_to_aidl(&result.params, version_number);
         let out_params = out_params.map_err(|error| {
@@ -599,7 +597,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         })
     }
 
-    fn addRngEntropy(&self, data: &[u8]) -> rsbinder::BinderResult<()> {
+    fn addRngEntropy(&self, data: &[u8]) -> binder::Result<()> {
         let req = PerformOpReq::DeviceAddRngEntropy(AddRngEntropyRequest { data: data.to_vec() });
         self.process_status_only(req).map_err(map_ks_error)
     }
@@ -610,7 +608,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         attestation_key: Option<
             &crate::android::hardware::security::keymint::AttestationKey::AttestationKey,
         >,
-    ) -> rsbinder::BinderResult<
+    ) -> binder::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
         let version_number = resolve_hardware_profile(self.security_level).version_number;
@@ -650,7 +648,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         attestation_key: Option<
             &crate::android::hardware::security::keymint::AttestationKey::AttestationKey,
         >,
-    ) -> rsbinder::BinderResult<
+    ) -> binder::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
         let version_number = resolve_hardware_profile(self.security_level).version_number;
@@ -695,7 +693,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         unwrapping_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
         password_sid: i64,
         biometric_sid: i64,
-    ) -> rsbinder::BinderResult<
+    ) -> binder::Result<
         crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult,
     > {
         let version_number = resolve_hardware_profile(self.security_level).version_number;
@@ -727,7 +725,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         &self,
         key_blob_to_upgrade: &[u8],
         upgrade_params: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
-    ) -> rsbinder::BinderResult<Vec<u8>> {
+    ) -> binder::Result<Vec<u8>> {
         let version_number = resolve_hardware_profile(self.security_level).version_number;
         let upgrade_params = key_parameters_to_km(upgrade_params, version_number)
             .map_err(key_parameter_conversion_status)?;
@@ -749,16 +747,16 @@ impl IKeyMintDevice for KeyMintWrapper {
         Ok(result)
     }
 
-    fn deleteKey(&self, key_blob: &[u8]) -> rsbinder::BinderResult<()> {
+    fn deleteKey(&self, key_blob: &[u8]) -> binder::Result<()> {
         self.delete_Key(key_blob).map_err(map_ks_error)
     }
 
-    fn deleteAllKeys(&self) -> rsbinder::BinderResult<()> {
+    fn deleteAllKeys(&self) -> binder::Result<()> {
         let req = PerformOpReq::DeviceDeleteAllKeys(DeleteAllKeysRequest {});
         self.process_status_only(req).map_err(map_ks_error)
     }
 
-    fn destroyAttestationIds(&self) -> rsbinder::BinderResult<()> {
+    fn destroyAttestationIds(&self) -> binder::Result<()> {
         let req = PerformOpReq::DeviceDestroyAttestationIds(DestroyAttestationIdsRequest {});
         self.process_status_only(req).map_err(map_ks_error)
     }
@@ -769,20 +767,17 @@ impl IKeyMintDevice for KeyMintWrapper {
         _timestamp_token: Option<
             &crate::android::hardware::security::secureclock::TimeStampToken::TimeStampToken,
         >,
-    ) -> rsbinder::BinderResult<()> {
-        Result::Err(Status::from(ExceptionCode::UnsupportedOperation))
+    ) -> binder::Result<()> {
+        Result::Err(Status::from(ExceptionCode::UNSUPPORTED_OPERATION))
     }
 
-    fn earlyBootEnded(&self) -> rsbinder::BinderResult<()> {
+    fn earlyBootEnded(&self) -> binder::Result<()> {
         EARLY_BOOT_ENDED.store(true, Ordering::Release);
         let req = PerformOpReq::DeviceEarlyBootEnded(EarlyBootEndedRequest {});
         self.process_status_only(req).map_err(map_ks_error)
     }
 
-    fn convertStorageKeyToEphemeral(
-        &self,
-        storage_key_blob: &[u8],
-    ) -> rsbinder::BinderResult<Vec<u8>> {
+    fn convertStorageKeyToEphemeral(&self, storage_key_blob: &[u8]) -> binder::Result<Vec<u8>> {
         let req =
             PerformOpReq::DeviceConvertStorageKeyToEphemeral(ConvertStorageKeyToEphemeralRequest {
                 storage_key_blob: storage_key_blob.to_vec(),
@@ -803,7 +798,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         key_blob: &[u8],
         app_id: &[u8],
         app_data: &[u8],
-    ) -> rsbinder::BinderResult<
+    ) -> binder::Result<
         Vec<crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics>,
     > {
         let req = PerformOpReq::DeviceGetKeyCharacteristics(GetKeyCharacteristicsRequest {
@@ -832,7 +827,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         }).collect()
     }
 
-    fn getRootOfTrustChallenge(&self) -> rsbinder::BinderResult<[u8; 16]> {
+    fn getRootOfTrustChallenge(&self) -> binder::Result<[u8; 16]> {
         let req = PerformOpReq::GetRootOfTrustChallenge(GetRootOfTrustChallengeRequest {});
 
         let result = self.inner.execute(req);
@@ -847,7 +842,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         Ok(result)
     }
 
-    fn getRootOfTrust(&self, challenge: &[u8; 16]) -> rsbinder::BinderResult<Vec<u8>> {
+    fn getRootOfTrust(&self, challenge: &[u8; 16]) -> binder::Result<Vec<u8>> {
         let req = PerformOpReq::GetRootOfTrust(GetRootOfTrustRequest { challenge: *challenge });
 
         let result = self.inner.execute(req);
@@ -860,7 +855,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         Ok(result)
     }
 
-    fn sendRootOfTrust(&self, root_of_trust: &[u8]) -> rsbinder::BinderResult<()> {
+    fn sendRootOfTrust(&self, root_of_trust: &[u8]) -> binder::Result<()> {
         let req = PerformOpReq::SendRootOfTrust(SendRootOfTrustRequest {
             root_of_trust: root_of_trust.to_vec(),
         });
@@ -870,7 +865,7 @@ impl IKeyMintDevice for KeyMintWrapper {
     fn setAdditionalAttestationInfo(
         &self,
         info: &[crate::android::hardware::security::keymint::KeyParameter::KeyParameter],
-    ) -> rsbinder::BinderResult<()> {
+    ) -> binder::Result<()> {
         let version_number = resolve_hardware_profile(self.security_level).version_number;
         let additional_info =
             key_parameters_to_km(info, version_number).map_err(key_parameter_conversion_status)?;
@@ -898,7 +893,7 @@ impl KeyMintWrapper {
         self.inner.keymint.lock().unwrap().clear_attestation_cache();
     }
 
-    pub fn localize_auth_token(&self, auth_token: &HardwareAuthToken) -> Result<HardwareAuthToken> {
+    fn localize_auth_token(&self, auth_token: &HardwareAuthToken) -> Result<HardwareAuthToken> {
         let km_token = auth_token.to_km().context(err!("invalid auth token fields"))?;
         let mac_input = kmr_ta::hardware_auth_token_mac_input(&km_token)
             .map_err(|error| anyhow::anyhow!("{error:?}"))
@@ -926,7 +921,7 @@ impl KeyMintWrapper {
         let error_code = self.inner.execute(req).error_code;
         match error_code {
             0 => Ok(()),
-            _ => Err(Error::Binder(ExceptionCode::ServiceSpecific, error_code)),
+            _ => Err(Error::Binder(ExceptionCode::SERVICE_SPECIFIC, error_code)),
         }
     }
 
@@ -955,7 +950,7 @@ impl KeyMintWrapper {
         let _result: UpdateAadResponse = match result.rsp {
             Some(PerformOpRsp::OperationUpdateAad(rsp)) => rsp,
             Some(_) => return Err(Error::Km(ErrorCode::UNKNOWN_ERROR)),
-            None => return Err(Error::Binder(ExceptionCode::ServiceSpecific, error_code)),
+            None => return Err(Error::Binder(ExceptionCode::SERVICE_SPECIFIC, error_code)),
         };
 
         Ok(())
@@ -986,7 +981,7 @@ impl KeyMintWrapper {
         let result: UpdateResponse = match result.rsp {
             Some(PerformOpRsp::OperationUpdate(rsp)) => rsp,
             Some(_) => return Err(Error::Km(ErrorCode::UNKNOWN_ERROR)),
-            None => return Err(Error::Binder(ExceptionCode::ServiceSpecific, error_code)),
+            None => return Err(Error::Binder(ExceptionCode::SERVICE_SPECIFIC, error_code)),
         };
 
         Ok(result.ret)
@@ -1024,7 +1019,7 @@ impl KeyMintWrapper {
         let result: FinishResponse = match result.rsp {
             Some(PerformOpRsp::OperationFinish(rsp)) => rsp,
             Some(_) => return Err(Error::Km(ErrorCode::UNKNOWN_ERROR)),
-            None => return Err(Error::Binder(ExceptionCode::ServiceSpecific, error_code)),
+            None => return Err(Error::Binder(ExceptionCode::SERVICE_SPECIFIC, error_code)),
         };
 
         Ok(result.ret)
@@ -1037,7 +1032,7 @@ impl KeyMintWrapper {
         let _result: AbortResponse = match result.rsp {
             Some(PerformOpRsp::OperationAbort(rsp)) => rsp,
             Some(_) => return Err(Error::Km(ErrorCode::UNKNOWN_ERROR)),
-            None => return Err(Error::Binder(ExceptionCode::ServiceSpecific, error_code)),
+            None => return Err(Error::Binder(ExceptionCode::SERVICE_SPECIFIC, error_code)),
         };
 
         Ok(())
@@ -1309,6 +1304,11 @@ pub fn get_keymint_wrapper(security_level: SecurityLevel) -> Result<KeyMintWrapp
 }
 
 pub fn localize_auth_token_for_omk(auth_token: &HardwareAuthToken) -> Result<HardwareAuthToken> {
+    super::authorization::verify_auth_token_for_omk(auth_token)?;
+    #[cfg(test)]
+    if let Some(wrapper) = tests::AUTH_TOKEN_WRAPPER.with_borrow(Clone::clone) {
+        return wrapper.localize_auth_token(auth_token);
+    }
     get_keymint_wrapper(SecurityLevel::TRUSTED_ENVIRONMENT)?.localize_auth_token(auth_token)
 }
 
@@ -1424,6 +1424,10 @@ fn shared_keymint_wrapper_inner(
 pub(crate) mod tests {
     use super::*;
 
+    thread_local! {
+        pub(crate) static AUTH_TOKEN_WRAPPER: std::cell::RefCell<Option<KeyMintWrapper>> = std::cell::RefCell::default();
+    }
+
     fn test_crypto() -> kmr_common::crypto::Implementation {
         kmr_common::crypto::Implementation {
             rng: Box::new(BoringRng),
@@ -1496,6 +1500,123 @@ pub(crate) mod tests {
                 keymint: Mutex::new(ta),
             })),
         }
+    }
+
+    pub(crate) fn auth_wrapper(key: &[u8; 32]) -> KeyMintWrapper {
+        let mut ta = test_ta();
+        assert_eq!(set_boot_info(&mut ta), 0);
+        assert_eq!(
+            ta.process_req(PerformOpReq::SetHalInfo(SetHalInfoRequest {
+                os_version: 170000,
+                os_patchlevel: 202610,
+                vendor_patchlevel: 20261005,
+            }))
+            .error_code,
+            0
+        );
+        ta.set_device_hmac_key(key).unwrap();
+        wrapper(ta)
+    }
+
+    pub(crate) fn signed_auth_token(challenge: i64, key: &[u8; 32]) -> HardwareAuthToken {
+        use kmr_common::crypto::MonotonicClock;
+        let mut token = HardwareAuthToken {
+            challenge, userId: 11, authenticatorId: 13,
+            authenticatorType: crate::android::hardware::security::keymint::HardwareAuthenticatorType::HardwareAuthenticatorType::PASSWORD,
+            ..Default::default()
+        };
+        token.timestamp.milliSeconds = clock::StdClock.now().0;
+        let input = kmr_ta::hardware_auth_token_mac_input(&token.to_km().unwrap()).unwrap();
+        token.mac = kmr_common::crypto::hmac_sha256(&BoringHmac, key, &input).unwrap();
+        token
+    }
+
+    pub(crate) fn auth_key(device: &KeyMintWrapper, timed: bool) -> Vec<u8> {
+        use kmr_wire::keymint::{Algorithm, Digest, KeyPurpose};
+        let mut params = vec![
+            KeyParam::Purpose(KeyPurpose::Sign),
+            KeyParam::Algorithm(Algorithm::Hmac),
+            KeyParam::KeySize(KeySizeInBits(256)),
+            KeyParam::Digest(Digest::Sha256),
+            KeyParam::MinMacLength(256),
+            KeyParam::UserSecureId(11),
+            KeyParam::UserAuthType(1),
+        ];
+        if timed {
+            params.push(KeyParam::AuthTimeout(3600));
+        }
+        let params = key_params_to_aidl(&params, KeyMintDevice::KEY_MINT_V5).unwrap();
+        device.generateKey(&params, None).unwrap().keyBlob
+    }
+
+    #[test]
+    fn original_system_mac_is_required_before_local_mac_can_authenticate() {
+        use crate::keymaster::authorization::{self, tests::with_system_keymint};
+        let system = auth_wrapper(&[0x41; 32]);
+        let omk = auth_wrapper(&[0x73; 32]);
+        let original = signed_auth_token(37, &[0x41; 32]);
+        let system_key = auth_key(&system, true);
+        let omk_key = auth_key(&omk, true);
+        let op_params = key_params_to_aidl(
+            &[KeyParam::Digest(kmr_wire::keymint::Digest::Sha256), KeyParam::MacLength(256)],
+            KeyMintDevice::KEY_MINT_V5,
+        )
+        .unwrap();
+        with_system_keymint(system.clone(), || {
+            authorization::verify_auth_token_for_omk(&original).unwrap();
+            let localized = omk.localize_auth_token(&original).unwrap();
+            assert_ne!(localized.mac, original.mac);
+            assert_eq!(original, signed_auth_token_at(&original, &[0x41; 32]));
+            let result =
+                omk.begin(KeyPurpose::SIGN, &omk_key, &op_params, Some(&localized)).unwrap();
+            result.operation.unwrap().abort().unwrap();
+            let rejected =
+                omk.begin(KeyPurpose::SIGN, &omk_key, &op_params, Some(&original)).unwrap_err();
+            assert_eq!(rejected.service_specific_error(), ErrorCode::KEY_USER_NOT_AUTHENTICATED.0);
+            let rejected = system
+                .begin(KeyPurpose::SIGN, &system_key, &op_params, Some(&localized))
+                .unwrap_err();
+            assert_eq!(rejected.service_specific_error(), ErrorCode::KEY_USER_NOT_AUTHENTICATED.0);
+            let mut bad_mac = original.clone();
+            bad_mac.mac[0] ^= 1;
+            for bad in [bad_mac, localized] {
+                let error = localize_auth_token_for_omk(&bad).unwrap_err();
+                assert!(
+                    matches!(error.root_cause().downcast_ref::<Error>(), Some(Error::Km(code)) if *code == ErrorCode::KEY_USER_NOT_AUTHENTICATED)
+                );
+            }
+            let changed = HardwareAuthToken { challenge: 38, ..original.clone() };
+            assert!(authorization::verify_auth_token_for_omk(&changed).is_err());
+
+            let system_key = auth_key(&system, false);
+            let omk_key = auth_key(&omk, false);
+            let system_op = system.begin(KeyPurpose::SIGN, &system_key, &op_params, None).unwrap();
+            let omk_op = omk.begin(KeyPurpose::SIGN, &omk_key, &op_params, None).unwrap();
+            assert_ne!(system_op.challenge, omk_op.challenge);
+            let system_token = signed_auth_token(system_op.challenge, &[0x41; 32]);
+            let omk_token = signed_auth_token(omk_op.challenge, &[0x41; 32]);
+            for token in [&system_token, &omk_token] {
+                authorization::verify_auth_token_for_omk(token).unwrap();
+            }
+            system_op
+                .operation
+                .unwrap()
+                .finish(Some(b"message"), None, Some(&system_token), None, None)
+                .unwrap();
+            let localized = omk.localize_auth_token(&omk_token).unwrap();
+            omk_op
+                .operation
+                .unwrap()
+                .finish(Some(b"message"), None, Some(&localized), None, None)
+                .unwrap();
+        });
+    }
+
+    fn signed_auth_token_at(token: &HardwareAuthToken, key: &[u8; 32]) -> HardwareAuthToken {
+        let mut signed = token.clone();
+        let input = kmr_ta::hardware_auth_token_mac_input(&signed.to_km().unwrap()).unwrap();
+        signed.mac = kmr_common::crypto::hmac_sha256(&BoringHmac, key, &input).unwrap();
+        signed
     }
 
     fn param(tag: Tag, value: KeyParameterValue) -> KeyParameter {

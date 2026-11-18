@@ -16,6 +16,8 @@
 
 extern crate std;
 
+include!(concat!(env!("OUT_DIR"), "/aidl.rs"));
+
 use core::convert::From;
 use core::num::TryFromIntError;
 use der::ErrorKind as DerErrorKind;
@@ -29,6 +31,7 @@ pub mod apex;
 pub mod consts;
 pub mod crypto;
 pub mod keyblob;
+pub mod legacy_aaid;
 pub mod rpc;
 pub mod runtime;
 pub mod selinux;

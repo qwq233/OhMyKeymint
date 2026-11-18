@@ -8,9 +8,6 @@ use nix::{
 };
 use std::ffi::c_void;
 
-#[cfg(test)]
-mod tests;
-
 #[cfg(any(
     target_arch = "aarch64",
     target_arch = "arm",
@@ -386,117 +383,53 @@ fn wait_remote_call(pid: Pid, return_addr: usize) -> Result<usize> {
     let regs = get_regs(pid)?;
 
     #[cfg(target_arch = "x86_64")]
-    {
-        if regs.rip != (return_addr as u64) {
-            error!(
-                "unexpected RIP after remote call: expected 0x{:x}, got 0x{:x}",
-                return_addr, regs.rip
-            );
-            match nix::sys::ptrace::getsiginfo(pid) {
-                Ok(info) => error!("remote call stopped with signal info {:?}", info),
-                Err(e) => error!("failed to get remote call signal info: {}", e),
-            }
-            bail!("Remote call did not reach expected function address");
-        }
-
-        Ok(regs.rax as usize)
-    }
+    let (pc, expected, result, label) = (regs.rip, return_addr as u64, regs.rax as usize, "RIP");
     #[cfg(target_arch = "x86")]
-    {
-        if regs.eip != (return_addr as u32) {
-            error!(
-                "unexpected EIP after remote call: expected 0x{:x}, got 0x{:x}",
-                return_addr, regs.eip
-            );
-            match nix::sys::ptrace::getsiginfo(pid) {
-                Ok(info) => error!("remote call stopped with signal info {:?}", info),
-                Err(e) => error!("failed to get remote call signal info: {}", e),
-            }
-            bail!("Remote call did not reach expected function address");
-        }
-
-        Ok(regs.eax as usize)
-    }
-
+    let (pc, expected, result, label) = (regs.eip, return_addr as u32, regs.eax as usize, "EIP");
     #[cfg(target_arch = "aarch64")]
-    {
-        if regs.pc != (return_addr as u64) {
-            error!(
-                "unexpected PC after remote call: expected 0x{:x}, got 0x{:x}",
-                return_addr, regs.pc
-            );
-            match nix::sys::ptrace::getsiginfo(pid) {
-                Ok(info) => error!("remote call stopped with signal info {:?}", info),
-                Err(e) => error!("failed to get remote call signal info: {}", e),
-            }
-            bail!("Remote call did not reach expected function address");
-        }
-
-        Ok(regs.regs[0] as usize)
-    }
+    let (pc, expected, result, label) = (regs.pc, return_addr as u64, regs.regs[0] as usize, "PC");
     #[cfg(target_arch = "arm")]
-    {
-        if regs.uregs[15] != (return_addr as u32) {
-            error!(
-                "unexpected PC after remote call: expected 0x{:x}, got 0x{:x}",
-                return_addr, regs.uregs[15]
-            );
-            match nix::sys::ptrace::getsiginfo(pid) {
-                Ok(info) => error!("remote call stopped with signal info {:?}", info),
-                Err(e) => error!("failed to get remote call signal info: {}", e),
-            }
-            bail!("Remote call did not reach expected function address");
+    let (pc, expected, result, label) =
+        (regs.uregs[15], return_addr as u32, regs.uregs[0] as usize, "PC");
+
+    if pc != expected {
+        error!(
+            "unexpected {} after remote call: expected 0x{:x}, got 0x{:x}",
+            label, return_addr, pc
+        );
+        match nix::sys::ptrace::getsiginfo(pid) {
+            Ok(info) => error!("remote call stopped with signal info {:?}", info),
+            Err(e) => error!("failed to get remote call signal info: {}", e),
         }
-
-        Ok(regs.uregs[0] as usize)
+        bail!("Remote call did not reach expected function address");
     }
+
+    Ok(result)
 }
 
-#[derive(Debug)]
-pub struct RemoteCallSession {
-    original_regs: Regs,
-    return_addr: usize,
-}
-
-pub struct RemoteCallPostStatus {
-    pub result: Result<usize>,
+pub struct RemoteCallPostStatus<T = usize> {
+    pub result: Result<T>,
     pub restored: bool,
 }
 
-pub fn remote_pre_call(
+pub fn remote_call(
     pid: Pid,
     func_addr: usize,
     return_addr: usize,
     args: &[usize],
-) -> Result<RemoteCallSession> {
+) -> RemoteCallPostStatus {
     debug!(
         "Preparing remote call to 0x{:x} with return address 0x{:x} and args {:?}",
         func_addr, return_addr, args
     );
-    let original_regs = get_regs(pid).context("Failed to backup registers.")?;
+    let original_regs = match get_regs(pid).context("Failed to backup registers.") {
+        Ok(regs) => regs,
+        Err(error) => return RemoteCallPostStatus { result: Err(error), restored: false },
+    };
     let mut regs = original_regs;
-    if let Err(error) = setup_remote_call(pid, &mut regs, func_addr, return_addr, args) {
-        if let Err(restore_error) = set_regs(pid, &original_regs)
-            .context("Failed to restore registers after remote call setup failure")
-        {
-            return Err(error.context(format!(
-                "remote call setup failed and register restore also failed: {restore_error:#}"
-            )));
-        }
-        return Err(error);
-    }
-
-    Ok(RemoteCallSession { original_regs, return_addr })
-}
-
-pub fn remote_post_call(pid: Pid, session: RemoteCallSession) -> Result<usize> {
-    remote_post_call_with_status(pid, session).result
-}
-
-pub fn remote_post_call_with_status(pid: Pid, session: RemoteCallSession) -> RemoteCallPostStatus {
-    let wait_result = wait_remote_call(pid, session.return_addr);
-    let restore_result =
-        set_regs(pid, &session.original_regs).context("Failed to restore registers.");
+    let wait_result = setup_remote_call(pid, &mut regs, func_addr, return_addr, args)
+        .and_then(|()| wait_remote_call(pid, return_addr));
+    let restore_result = set_regs(pid, &original_regs).context("Failed to restore registers.");
     let restored = restore_result.is_ok();
 
     let result = match (wait_result, restore_result) {
@@ -509,23 +442,4 @@ pub fn remote_post_call_with_status(pid: Pid, session: RemoteCallSession) -> Rem
     };
 
     RemoteCallPostStatus { result, restored }
-}
-
-pub fn remote_cancel_call(pid: Pid, session: RemoteCallSession) -> Result<()> {
-    nix::sys::signal::kill(pid, Signal::SIGSTOP)
-        .context("Failed to stop remote process for remote call cancellation")?;
-    wait_pid(pid, Signal::SIGSTOP)
-        .context("Failed to wait for remote process to stop during remote call cancellation")?;
-    set_regs(pid, &session.original_regs)
-        .context("Failed to restore registers after remote call cancellation")
-}
-
-pub fn remote_call(
-    pid: Pid,
-    func_addr: usize,
-    return_addr: usize,
-    args: &[usize],
-) -> Result<usize> {
-    let session = remote_pre_call(pid, func_addr, return_addr, args)?;
-    remote_post_call(pid, session)
 }

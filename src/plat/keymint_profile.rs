@@ -1,15 +1,14 @@
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, bail, Context, Result};
+use binder::Strong;
 use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::sha256::BoringSha256;
-use rsbinder::{hub, Strong};
 
 use super::resetprop;
-use crate::android::hardware::security::keymint::{
-    IKeyMintDevice::IKeyMintDevice, KeyMintHardwareInfo::KeyMintHardwareInfo,
-    SecurityLevel::SecurityLevel,
-};
+use crate::android::hardware::security::keymint::IKeyMintDevice::IKeyMintDevice;
+use crate::android::hardware::security::keymint::KeyMintHardwareInfo::KeyMintHardwareInfo;
+use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
 use crate::keymaster::utils::get_interface_once;
 
 const KEYMINT_V1: i32 = 100;
@@ -60,7 +59,8 @@ pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMint
 fn detect_strongbox_keymint_present() -> bool {
     let security_level = SecurityLevel::STRONGBOX;
     if system_keymint_service_name(security_level).is_some_and(|service| {
-        hub::is_declared(service) || keymint_instance_declared_in_vintf(security_level)
+        binder::is_declared(service).unwrap_or(false)
+            || keymint_instance_declared_in_vintf(security_level)
     }) {
         return true;
     }
@@ -159,7 +159,7 @@ fn probe_system_keymint_hardware_info(
         .ok_or_else(|| anyhow!("unsupported security level for system KeyMint probe"))?;
     let keymint: Strong<dyn IKeyMintDevice> =
         get_interface_once(service).with_context(|| format!("connect {service}"))?;
-    if keymint.as_binder().as_proxy().is_none() {
+    if !keymint.as_binder().is_remote() {
         bail!("system KeyMint service {service} resolved to a local binder");
     }
 

@@ -1,0 +1,30 @@
+[package]
+name = "android-binder"
+version = "0.1.1"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "binder"
+
+[features]
+android_ndk_compat_symbols = []
+default = ["android_ndk_compat_symbols"]
+
+[dependencies]
+binder-ndk-sys = { package = "android-binder-ndk-sys", version = "0.1", path = "../binder-sys" }
+downcast-rs = "2.0.2"
+libc = { version = "0.2.191", features = ["extra_traits"] }
+log = "0.4.35"
+static_assertions = "1.1.0"
+zerocopy = { version = "0.8.63", features = ["std"] }
+
+[lints.rust.unexpected_cfgs]
+check-cfg = [
+    "cfg(android_vendor)",
+    "cfg(android_ndk)",
+    "cfg(android_vndk)",
+    "cfg(trusty)",
+    "cfg(single_threaded)",
+]
+level = "warn"

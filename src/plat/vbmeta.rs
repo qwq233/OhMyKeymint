@@ -1,33 +1,32 @@
-use std::{
-    fs::File,
-    io::{Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
-    sync::mpsc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
+use binder::Strong;
 use kmr_common::crypto::{Rng, Sha256};
-use kmr_crypto_boring::{rng::BoringRng, sha256::BoringSha256};
-use rsbinder::Strong;
+use kmr_crypto_boring::rng::BoringRng;
+use kmr_crypto_boring::sha256::BoringSha256;
 
-use crate::{
-    android::{
-        hardware::security::keymint::{
-            Algorithm::Algorithm, Digest::Digest, EcCurve::EcCurve, KeyParameter::KeyParameter,
-            KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose,
-            SecurityLevel::SecurityLevel, Tag::Tag,
-        },
-        system::keystore2::{
-            Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
-            KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata,
-        },
-    },
-    config::{
-        ConfigFile, OsVersionSpec, RawTrustConfig, ResolvedTrust, TrustValueSource, TrustValueSpec,
-    },
-    plat::{attestation, resetprop, utils::get_keystore_service},
+use crate::android::hardware::security::keymint::Algorithm::Algorithm;
+use crate::android::hardware::security::keymint::Digest::Digest;
+use crate::android::hardware::security::keymint::EcCurve::EcCurve;
+use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
+use crate::android::hardware::security::keymint::KeyParameterValue::KeyParameterValue;
+use crate::android::hardware::security::keymint::KeyPurpose::KeyPurpose;
+use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use crate::android::hardware::security::keymint::Tag::Tag;
+use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::IKeystoreSecurityLevel::IKeystoreSecurityLevel;
+use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
+use crate::android::system::keystore2::KeyMetadata::KeyMetadata;
+use crate::config::{
+    ConfigFile, OsVersionSpec, RawTrustConfig, ResolvedTrust, TrustValueSource, TrustValueSpec,
 };
+use crate::plat::utils::get_keystore_service;
+use crate::plat::{attestation, resetprop};
 
 const SECURITY_PATCH_PROP: &str = "ro.build.version.security_patch";
 const SECURITY_PATCH_FALLBACK: &str = "2025-06-05";

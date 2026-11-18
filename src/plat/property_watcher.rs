@@ -10,9 +10,8 @@ impl PropertyWatcher {
     }
 
     pub fn read(&self) -> Result<String> {
-        rsproperties::system_properties()
-            .get_with_result(self.name.as_str())
-            .context(anyhow!("Property '{}' not found", self.name))
+        rsproperties::get(&self.name)
+            .with_context(|| format!("Failed to read property '{}'", self.name))
     }
 
     pub fn read_and_parse<T, F>(&self, mut f: F) -> Result<T>
@@ -23,20 +22,20 @@ impl PropertyWatcher {
     }
 
     pub fn wait(&self, old_value: Option<&str>) -> Result<()> {
-        let system_props = rsproperties::system_properties();
-        let val = system_props
+        let system_props = rsproperties::system_properties()?;
+        let index = system_props
             .find(&self.name)?
             .ok_or_else(|| anyhow!("Property '{}' not found", self.name))?;
         let serial = system_props
-            .serial(&val)
-            .ok_or_else(|| anyhow!("Failed to read property '{}' serial", self.name))?;
+            .serial(index)
+            .with_context(|| format!("Failed to read property '{}' serial", self.name))?;
         if let Some(old_value) = old_value {
             let current = self.read()?;
             if current != old_value {
                 return Ok(());
             }
         }
-        system_props.wait(Some(&val), Some(serial), None);
+        system_props.wait(index, serial)?;
         Ok(())
     }
 }

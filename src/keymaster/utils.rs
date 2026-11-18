@@ -16,44 +16,41 @@
 //! implementation.
 
 use crate::android::content::pm::IPackageManagerNative::{IPackageManagerNative, LOCATION_SYSTEM};
-use crate::android::hardware::security::keymint::{
-    Algorithm::Algorithm, Certificate::Certificate, HardwareAuthToken::HardwareAuthToken,
-    HardwareAuthenticatorType::HardwareAuthenticatorType, IKeyMintDevice::IKeyMintDevice,
-    KeyCharacteristics::KeyCharacteristics, KeyCreationResult::KeyCreationResult,
-    KeyParameter::KeyParameter as KmKeyParameter, KeyParameterValue::KeyParameterValue,
-    MlDsaVariant::MlDsaVariant as AidlMlDsaVariant, SecurityLevel::SecurityLevel, Tag::Tag,
-};
-use crate::android::system::keystore2::{
-    Authorization::Authorization, Domain::Domain, KeyDescriptor::KeyDescriptor,
-    ResponseCode::ResponseCode,
-};
-use crate::err as ks_err;
+use crate::android::hardware::security::keymint::Algorithm::Algorithm;
+use crate::android::hardware::security::keymint::Certificate::Certificate;
+use crate::android::hardware::security::keymint::HardwareAuthToken::HardwareAuthToken;
+use crate::android::hardware::security::keymint::HardwareAuthenticatorType::HardwareAuthenticatorType;
+use crate::android::hardware::security::keymint::IKeyMintDevice::IKeyMintDevice;
+use crate::android::hardware::security::keymint::KeyCharacteristics::KeyCharacteristics;
+use crate::android::hardware::security::keymint::KeyCreationResult::KeyCreationResult;
+use crate::android::hardware::security::keymint::KeyParameter::KeyParameter as KmKeyParameter;
+use crate::android::hardware::security::keymint::KeyParameterValue::KeyParameterValue;
+use crate::android::hardware::security::keymint::MlDsaVariant::MlDsaVariant as AidlMlDsaVariant;
+use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use crate::android::hardware::security::keymint::Tag::Tag;
+use crate::android::system::keystore2::Authorization::Authorization;
+use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
+use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::keymaster::crypto::{aes_gcm_decrypt, aes_gcm_encrypt, ZVec};
+use crate::keymaster::db::{KeyType, KeystoreDB};
 use crate::keymaster::error::{map_km_error, map_ks_error, Error, ErrorCode};
 use crate::keymaster::key_parameter::KeyParameter;
-use crate::keymaster::permission;
+use crate::keymaster::keymint_device::KeyMintDevice;
 use crate::keymaster::permission::{KeyPerm, KeyPermSet, KeystorePerm};
-use crate::keymaster::sw_keyblob;
+use crate::keymaster::{permission, sw_keyblob};
 use crate::plat::utils as user_utils;
 pub use crate::watchdog;
-use crate::{
-    consts,
-    keymaster::{
-        db::{KeyType, KeystoreDB},
-        keymint_device::KeyMintDevice,
-    },
-};
+use crate::{consts, err as ks_err};
 use anyhow::{anyhow, Context, Result};
+use binder::binder_impl::IBinderInternal;
+use binder::{FromIBinder, SpIBinder, Status, StatusCode, Strong};
 use kmr_common::consts::{
     AID_KEYSTORE as RAW_AID_KEYSTORE, AID_ROOT, AID_SYSTEM as RAW_AID_SYSTEM,
 };
 use kmr_wire::keymint::{self, KeyParam};
 use kmr_wire::{KeySizeInBits, ValueNotRecognized};
 use log::{debug, error, info, warn};
-use rsbinder::{
-    get_calling_uid, hub, FromIBinder, ProcessState, SIBinder, Status, StatusCode, Strong,
-};
-use std::iter::IntoIterator;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -87,7 +84,7 @@ impl AppUid {
 
     /// Get the calling uid for the current thread.
     pub fn calling() -> Self {
-        Self(get_calling_uid() as i64)
+        Self(crate::keymaster::permission::CallingContext::default().uid as i64)
     }
 }
 
@@ -473,8 +470,12 @@ pub fn key_parameter_conversion_error_code(error: ValueNotRecognized) -> ErrorCo
     }
 }
 
-impl HardwareAuthToken {
-    pub fn to_km(&self) -> Result<kmr_wire::keymint::HardwareAuthToken, Error> {
+pub trait HardwareAuthTokenExt {
+    fn to_km(&self) -> Result<kmr_wire::keymint::HardwareAuthToken, Error>;
+}
+
+impl HardwareAuthTokenExt for HardwareAuthToken {
+    fn to_km(&self) -> Result<kmr_wire::keymint::HardwareAuthToken, Error> {
         Ok(kmr_wire::keymint::HardwareAuthToken {
             challenge: self.challenge,
             user_id: self.userId,
@@ -491,14 +492,22 @@ impl HardwareAuthToken {
     }
 }
 
-impl KmKeyParameter {
-    pub fn to_km(self) -> Result<KeyParam> {
+pub trait KeyParameterExt {
+    fn to_km(self) -> Result<KeyParam>;
+    fn to_km_optional(
+        self,
+        km_dev_version: i32,
+    ) -> std::result::Result<Option<KeyParam>, ValueNotRecognized>;
+}
+
+impl KeyParameterExt for KmKeyParameter {
+    fn to_km(self) -> Result<KeyParam> {
         self.to_km_optional(KeyMintDevice::KEY_MINT_V5)
             .map_err(|error| anyhow!("Failed to convert key parameter: {error:?}"))?
             .ok_or_else(|| anyhow!(ks_err!("Invalid tag")))
     }
 
-    pub fn to_km_optional(
+    fn to_km_optional(
         self,
         km_dev_version: i32,
     ) -> std::result::Result<Option<KeyParam>, ValueNotRecognized> {
@@ -807,14 +816,14 @@ fn blob_param(
 pub fn key_creation_result_to_aidl(
     result: kmr_wire::keymint::KeyCreationResult,
     km_dev_version: i32,
-) -> Result<KeyCreationResult, rsbinder::Status> {
+) -> Result<KeyCreationResult, binder::Status> {
     let certificates: Vec<Certificate> = result
         .certificate_chain
         .iter()
         .map(|c| Certificate { encodedCertificate: c.encoded_certificate.clone() })
         .collect();
 
-    let key_characteristics: Result<Vec<KeyCharacteristics>, rsbinder::Status> = result
+    let key_characteristics: Result<Vec<KeyCharacteristics>, binder::Status> = result
         .key_characteristics
         .iter()
         .map(|kc| {
@@ -1068,13 +1077,13 @@ impl<T: AesGcmKey> AesGcm for T {
     }
 }
 
-/// Preserve the deprecated `get_interface` wrapper's single `getService` lookup and
-/// lazy-service start without inheriting its version-dependent wait behavior.
+/// Resolve an interface through the device's native ServiceManager, including its
+/// lazy-service start and version-dependent waiting behavior.
 pub(crate) fn get_interface_once<T: FromIBinder + ?Sized>(
     name: &str,
 ) -> Result<Strong<T>, StatusCode> {
     let binder =
-        hub::default()?.try_get_service(name).ok().flatten().ok_or(StatusCode::NameNotFound)?;
+        binder::ext::get_service_once(name).ok().flatten().ok_or(StatusCode::NAME_NOT_FOUND)?;
     FromIBinder::try_from(binder)
 }
 
@@ -1142,14 +1151,16 @@ fn package_manager_native_layout(android_major: Option<i32>) -> PackageManagerNa
 
 fn legacy_pm_transactions(
     layout: PackageManagerNativeLayout,
-) -> (rsbinder::TransactionCode, rsbinder::TransactionCode) {
+) -> (binder::binder_impl::TransactionCode, binder::binder_impl::TransactionCode) {
     match layout {
-        PackageManagerNativeLayout::Android12To14 => {
-            (rsbinder::FIRST_CALL_TRANSACTION + 5, rsbinder::FIRST_CALL_TRANSACTION + 4)
-        }
-        PackageManagerNativeLayout::Android15Or16 => {
-            (rsbinder::FIRST_CALL_TRANSACTION + 6, rsbinder::FIRST_CALL_TRANSACTION + 5)
-        }
+        PackageManagerNativeLayout::Android12To14 => (
+            binder::binder_impl::FIRST_CALL_TRANSACTION + 5,
+            binder::binder_impl::FIRST_CALL_TRANSACTION + 4,
+        ),
+        PackageManagerNativeLayout::Android15Or16 => (
+            binder::binder_impl::FIRST_CALL_TRANSACTION + 6,
+            binder::binder_impl::FIRST_CALL_TRANSACTION + 5,
+        ),
         PackageManagerNativeLayout::Android17 => unreachable!("Android 17 uses generated AIDL"),
     }
 }
@@ -1164,7 +1175,7 @@ pub fn app_info_for_uid(uid: AppUid) -> AppInfo {
         is_system_app: matches!(app_id, AID_ROOT | RAW_AID_SYSTEM | RAW_AID_KEYSTORE),
     };
 
-    if !ProcessState::is_initialized() {
+    if !binder::ext::process_state_is_initialized() {
         return app_info;
     }
 
@@ -1242,7 +1253,8 @@ fn app_info_for_uid_legacy_pm(
         }
     };
 
-    let binder = match hub::try_get_service(PACKAGE_MANAGER_NATIVE_SERVICE).ok().flatten() {
+    let binder = match binder::ext::get_service_once(PACKAGE_MANAGER_NATIVE_SERVICE).ok().flatten()
+    {
         Some(binder) => binder,
         None => {
             warn!("failed to connect to PackageManager service binder");
@@ -1315,22 +1327,23 @@ fn update_app_info_with_location_flags<E: std::fmt::Debug>(
 }
 
 fn package_manager_native_get_i32_for_package(
-    binder: &SIBinder,
-    transaction: rsbinder::TransactionCode,
+    binder: &SpIBinder,
+    transaction: binder::binder_impl::TransactionCode,
     package_name: &str,
     label: &str,
 ) -> Result<i32> {
-    let proxy = binder.as_proxy().context("PackageManager binder was unexpectedly local")?;
+    binder::ext::associate_descriptor(binder, "android.content.pm.IPackageManagerNative")
+        .context("PackageManager descriptor mismatch")?;
     let mut data =
-        proxy.prepare_transact(true).context("failed to prepare PackageManager transaction")?;
+        binder.prepare_transact().context("failed to prepare PackageManager transaction")?;
     data.write(package_name)
         .with_context(|| format!("failed to write PackageManager {label} package name"))?;
 
-    let mut reply = proxy
-        .submit_transact(transaction, &data, rsbinder::FLAG_CLEAR_BUF)
-        .with_context(|| format!("PackageManager {label} transact failed"))?
-        .with_context(|| format!("PackageManager {label} returned no reply"))?;
-    reply.set_data_position(0);
+    let reply = binder
+        .submit_transact(transaction, data, binder::binder_impl::FLAG_CLEAR_BUF)
+        .with_context(|| format!("PackageManager {label} transact failed"))?;
+    // SAFETY: Zero is within every valid Parcel.
+    unsafe { reply.set_data_position(0)? };
 
     let status: Status =
         reply.read().with_context(|| format!("failed to decode PackageManager {label} status"))?;

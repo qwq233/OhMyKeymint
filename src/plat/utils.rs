@@ -2,26 +2,25 @@ use crate::android::apex::IApexService::IApexService;
 use crate::android::security::keystore::IKeyAttestationApplicationIdProvider::IKeyAttestationApplicationIdProvider;
 use crate::android::security::keystore::KeyAttestationApplicationId::KeyAttestationApplicationId;
 use crate::android::security::keystore::KeyAttestationPackageInfo::KeyAttestationPackageInfo;
-use crate::android::system::keystore2::{
-    IKeystoreService::IKeystoreService, ResponseCode::ResponseCode,
-};
+use crate::android::system::keystore2::IKeystoreService::IKeystoreService;
+use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::err;
 use crate::keymaster::apex::ApexModuleInfo;
 use crate::keymaster::error::KsError;
 use crate::keymaster::utils::get_interface_once;
+use binder::{DeathRecipient, IBinder};
 use der::asn1::SetOfVec;
 use der::Encode;
 use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::sha256::BoringSha256;
 use log::{debug, error};
-use rsbinder::DeathRecipient;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub use kmr_common::consts::AID_USER_OFFSET;
 
 thread_local! {
-    static PM: Mutex<Option<rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider>>> = Mutex::new(None);
+    static PM: Mutex<Option<binder::Strong<dyn IKeyAttestationApplicationIdProvider>>> = Mutex::new(None);
 }
 
 const KEYSTORE_SERVICE: &str = "android.system.keystore2.IKeystoreService/default";
@@ -32,8 +31,8 @@ static KEYSTORE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 struct KeystoreServiceCache {
-    service: Option<rsbinder::Strong<dyn IKeystoreService>>,
-    death_recipient: Option<Arc<dyn DeathRecipient>>,
+    service: Option<binder::Strong<dyn IKeystoreService>>,
+    death_recipient: Option<DeathRecipient>,
     generation: u64,
 }
 
@@ -45,7 +44,7 @@ fn keystore_init_lock() -> &'static Mutex<()> {
     KEYSTORE_INIT.get_or_init(|| Mutex::new(()))
 }
 
-fn keystore_service_is_alive(service: &rsbinder::Strong<dyn IKeystoreService>) -> bool {
+fn keystore_service_is_alive(service: &binder::Strong<dyn IKeystoreService>) -> bool {
     service.as_binder().ping_binder().is_ok()
 }
 
@@ -54,8 +53,8 @@ struct KeystoreDeathRecipient {
     generation: u64,
 }
 
-impl rsbinder::DeathRecipient for KeystoreDeathRecipient {
-    fn binder_died(&self, _who: &rsbinder::WIBinder) {
+impl KeystoreDeathRecipient {
+    fn binder_died(&self) {
         self.died.store(true, Ordering::Release);
         let mut guard = keystore_cache().lock().unwrap();
         if guard.generation != self.generation {
@@ -67,14 +66,14 @@ impl rsbinder::DeathRecipient for KeystoreDeathRecipient {
     }
 }
 
-fn get_pm() -> anyhow::Result<rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider>> {
+fn get_pm() -> anyhow::Result<binder::Strong<dyn IKeyAttestationApplicationIdProvider>> {
     PM.with(|slot| {
         let mut slot = slot.lock().unwrap();
         if let Some(client) = slot.as_ref() {
             return Ok(client.clone());
         }
 
-        let client: rsbinder::Strong<dyn IKeyAttestationApplicationIdProvider> =
+        let client: binder::Strong<dyn IKeyAttestationApplicationIdProvider> =
             get_interface_once("sec_key_att_app_id_provider")?;
         *slot = Some(client.clone());
         Ok(client)
@@ -94,7 +93,7 @@ fn reset_pm() {
     debug!("reset cached PM instance to None");
 }
 
-pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreService>> {
+pub fn get_keystore_service() -> anyhow::Result<binder::Strong<dyn IKeystoreService>> {
     let _init_guard = keystore_init_lock().lock().unwrap();
     let cached = keystore_cache().lock().unwrap().service.clone();
     if let Some(service) = cached {
@@ -107,12 +106,13 @@ pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreSe
         guard.death_recipient = None;
     }
 
-    let service: rsbinder::Strong<dyn IKeystoreService> = get_interface_once(KEYSTORE_SERVICE)
+    let service: binder::Strong<dyn IKeystoreService> = get_interface_once(KEYSTORE_SERVICE)
         .map_err(|error| anyhow::anyhow!("failed to connect to {KEYSTORE_SERVICE}: {error:?}"))?;
     let generation = KEYSTORE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let recipient = Arc::new(KeystoreDeathRecipient { died: AtomicBool::new(false), generation });
-    let death_recipient: Arc<dyn DeathRecipient> = recipient.clone();
-    service.as_binder().link_to_death(Arc::downgrade(&death_recipient))?;
+    let callback = recipient.clone();
+    let mut death_recipient = DeathRecipient::new(move || callback.binder_died());
+    service.as_binder().link_to_death(&mut death_recipient)?;
     if recipient.died.load(Ordering::Acquire) || !keystore_service_is_alive(&service) {
         return Err(anyhow::anyhow!(
             "connected to {KEYSTORE_SERVICE} but binder died during initialization"
@@ -200,18 +200,18 @@ fn get_application_id_from_provider(uid: u32) -> anyhow::Result<KeyAttestationAp
 
 fn is_transaction_failed_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause.downcast_ref::<rsbinder::Status>().is_some_and(|status| {
-            status.exception_code() == rsbinder::ExceptionCode::TransactionFailed
+        cause.downcast_ref::<binder::Status>().is_some_and(|status| {
+            status.exception_code() == binder::ExceptionCode::TRANSACTION_FAILED
         }) || cause
-            .downcast_ref::<rsbinder::StatusCode>()
-            .is_some_and(|status| *status == rsbinder::StatusCode::DeadObject)
+            .downcast_ref::<binder::StatusCode>()
+            .is_some_and(|status| *status == binder::StatusCode::DEAD_OBJECT)
     })
 }
 
 fn is_get_attestation_application_id_failed(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause.downcast_ref::<rsbinder::Status>().is_some_and(|status| {
-            status.exception_code() == rsbinder::ExceptionCode::ServiceSpecific
+        cause.downcast_ref::<binder::Status>().is_some_and(|status| {
+            status.exception_code() == binder::ExceptionCode::SERVICE_SPECIFIC
                 && status.service_specific_error() == ERROR_GET_ATTESTATION_APPLICATION_ID_FAILED
         })
     })
@@ -282,7 +282,7 @@ fn encode_application_id(
 }
 
 pub fn get_apex_module_info() -> anyhow::Result<Vec<ApexModuleInfo>> {
-    let apex: rsbinder::Strong<dyn IApexService> = get_interface_once("apexservice")?;
+    let apex: binder::Strong<dyn IApexService> = get_interface_once("apexservice")?;
     let result: Vec<crate::android::apex::ApexInfo::ApexInfo> =
         apex.getActivePackages().map_err(|e| {
             log::error!("failed to get active packages: {:?}", e);

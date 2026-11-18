@@ -12,7 +12,7 @@ In theory, this would make it harder for detectors to identify behavior inconsis
 
 ## Install and configure
 
-**Android 12 or above required.**
+**Android 13 or above required.**
 
 1. Install this module.
 

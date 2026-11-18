@@ -41,7 +41,7 @@ responsibility for the contribution.
 - Android is the only production and acceptance target. Target-specific build,
   check, and test commands must use `aarch64-linux-android`; host or x86_64
   success alone is insufficient.
-- Preserve compatibility with Android 12-17, Linux kernels 4.14-6.18, and newer
+- Preserve compatibility with Android 13-17, Linux kernels 4.14-6.18, and newer
   LTS kernels. Do not claim that a platform was validated without evidence.
 - Do not add a non-Rust product.
 - Do not force-add files matched by `.gitignore`.
@@ -75,10 +75,10 @@ State in the pull request what behavior remains unchanged.
 - Do not provide key or descriptor continuity between System and OMK. Pass old,
   externally supplied, and System-created descriptors to the selected backend
   unchanged. An OMK business error for such a descriptor is authoritative.
-- Return OMK business errors unchanged. Reachable transport, boundary, or
-  injector failures that are not OMK-unavailable must not fall back to a
-  successful System reply. Normalize them through the existing AOSP-compatible
-  error path, such as `SYSTEM_ERROR` where applicable.
+- Return OMK business errors and actual Binder failures unchanged. Injector
+  and common middleware must not synthesize wire error codes. Internal invariant
+  failures that prevent safe continuation must record a native fatal diagnostic
+  and panic; they must not become successful System replies.
 - Only confirmed OMK-unavailable failures may preserve the original System
   reply. These include a missing service or backend, a connection failure, and
   stale or dead RPC transport failures such as `DeadObject`, `RpcError`, and
@@ -106,6 +106,13 @@ The [CI workflow](../.github/workflows/ci.yml) is the source of truth for the
 current toolchain and Android build environment. Use Rust nightly, the
 `aarch64-linux-android` target, an Android NDK version matching CI, and the
 CMake, Ninja, and bindgen tools required to build BoringSSL.
+
+The generator has host-only checks, separate from Android production validation:
+
+```sh
+cargo test --manifest-path libs/aidl/Cargo.toml
+cargo clippy --manifest-path libs/aidl/Cargo.toml --all-targets -- -D warnings
+```
 
 Generate the local Cargo configuration and build with the existing scripts:
 

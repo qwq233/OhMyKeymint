@@ -1,132 +1,57 @@
 use log::info;
 use std::mem::size_of;
 
-pub(super) use native::local_binder_interface_matches;
-pub(crate) use native::{
-    create_native_operation_binder, create_native_security_level_binder, NativeBinder,
-    NativeBinderRetirement,
+use binder::ext::driver;
+pub(crate) use driver::{
+    binder_transaction_data, binder_transaction_data_secctx, binder_transaction_data_sg,
+    binder_version, binder_write_read, flat_binder_object, BINDER_TYPE_BINDER,
+    BINDER_TYPE_WEAK_BINDER, BINDER_VERSION, BINDER_WRITE_READ, FLAT_BINDER_FLAG_TXN_SECURITY_CTX,
+    TF_ONE_WAY,
 };
 
-mod native;
 #[cfg(test)]
-pub(super) mod tests;
+pub(in crate::hook) use native::create_native_security_level_binder;
+pub(super) use native::local_binder_receiver;
+pub(in crate::hook) use native::{
+    create_receiver_binder, init_request_binders, receiver_proxy,
+    register_synthetic_security_level_binder, remember_security_level_target,
+    remember_system_dump_peer, retire_receivers, SyntheticTargetKind,
+};
+
+#[cfg(test)]
+pub(in crate::hook) use native::tests::state_test_guard;
+
+mod native;
+
+pub(in crate::hook) const KEYSTORE_AUTHORIZATION_INTERFACE: &str =
+    "android.security.authorization.IKeystoreAuthorization";
+pub(in crate::hook) const KEYSTORE_MAINTENANCE_INTERFACE: &str =
+    "android.security.maintenance.IKeystoreMaintenance";
+pub(in crate::hook) const KEYSTORE_SERVICE_INTERFACE: &str =
+    "android.system.keystore2.IKeystoreService";
+pub(in crate::hook) const KEYSTORE_SECURITY_LEVEL_INTERFACE: &str =
+    "android.system.keystore2.IKeystoreSecurityLevel";
+pub(in crate::hook) const KEYSTORE_OPERATION_INTERFACE: &str =
+    "android.system.keystore2.IKeystoreOperation";
 
 const PARCEL_PREVIEW_CHARS: usize = 50;
-const B_TYPE_LARGE: u32 = 0x85;
 
-pub(crate) const BINDER_WRITE_READ: u32 = 0xc0306201;
-pub(crate) const BC_TRANSACTION_NR: u32 = 0;
-pub(crate) const BC_REPLY_NR: u32 = 1;
-pub(crate) const BC_FREE_BUFFER_NR: u32 = 3;
-pub(crate) const BC_ACQUIRE_DONE_NR: u32 = 9;
-pub(crate) const BC_TRANSACTION_SG_NR: u32 = 17;
-pub(crate) const BC_REPLY_SG_NR: u32 = 18;
-pub(crate) const BR_TRANSACTION_NR: u32 = 2;
-pub(crate) const BR_REPLY_NR: u32 = 3;
-pub(crate) const BR_DEAD_REPLY_NR: u32 = 5;
-pub(crate) const BR_TRANSACTION_COMPLETE_NR: u32 = 6;
-pub(crate) const BR_ACQUIRE_NR: u32 = 8;
-pub(crate) const BR_FAILED_REPLY_NR: u32 = 17;
-pub(crate) const BR_FROZEN_REPLY_NR: u32 = 18;
-pub(crate) const BR_ONEWAY_SPAM_SUSPECT_NR: u32 = 19;
-pub(crate) const BR_TRANSACTION_PENDING_FROZEN_NR: u32 = 20;
-pub(crate) const TF_ONE_WAY: u32 = 0x01;
-pub(crate) const TF_STATUS_CODE: u32 = 0x08;
-pub(crate) const BINDER_TYPE_BINDER: u32 = b_pack_chars(b's', b'b', b'*', B_TYPE_LARGE as u8);
-pub(crate) const BINDER_TYPE_WEAK_BINDER: u32 = b_pack_chars(b'w', b'b', b'*', B_TYPE_LARGE as u8);
-pub(crate) const BINDER_TYPE_HANDLE: u32 = b_pack_chars(b's', b'h', b'*', B_TYPE_LARGE as u8);
-pub(crate) const BINDER_TYPE_WEAK_HANDLE: u32 = b_pack_chars(b'w', b'h', b'*', B_TYPE_LARGE as u8);
-pub(crate) const BINDER_TYPE_FD: u32 = b_pack_chars(b'f', b'd', b'*', B_TYPE_LARGE as u8);
-const FLAT_BINDER_FLAG_TXN_SECURITY_CTX: u32 = 0x1000;
+#[cfg(test)]
+use driver::{_IOC_NONE as IOC_NONE, _IOC_WRITE as IOC_WRITE};
 
-pub(crate) fn vintf_stability_wire() -> i32 {
-    if matches!(
-        kmr_common::android_version::android_major_version(),
-        Some(version) if version <= 12
-    ) {
-        0x3f00_0001
-    } else {
-        0x3f
-    }
+#[cfg(test)]
+const fn ioc(direction: u32, kind: u32, number: u32, size: usize) -> u32 {
+    (direction << driver::_IOC_DIRSHIFT)
+        | (kind << driver::_IOC_TYPESHIFT)
+        | (number << driver::_IOC_NRSHIFT)
+        | ((size as u32) << driver::_IOC_SIZESHIFT)
 }
 
-const fn b_pack_chars(c1: u8, c2: u8, c3: u8, c4: u8) -> u32 {
-    ((c1 as u32) << 24) | ((c2 as u32) << 16) | ((c3 as u32) << 8) | (c4 as u32)
-}
-
-const IOC_NRBITS: u32 = 8;
-const IOC_TYPEBITS: u32 = 8;
-const IOC_SIZEBITS: u32 = 14;
-
-const IOC_NRSHIFT: u32 = 0;
-const IOC_TYPESHIFT: u32 = IOC_NRSHIFT + IOC_NRBITS;
-const IOC_SIZESHIFT: u32 = IOC_TYPESHIFT + IOC_TYPEBITS;
-const IOC_DIRSHIFT: u32 = IOC_SIZESHIFT + IOC_SIZEBITS;
-
-const IOC_NONE: u32 = 0;
-const IOC_WRITE: u32 = 1;
-const IOC_READ: u32 = 2;
-
-const fn ioc(dir: u32, type_: u32, nr: u32, size: usize) -> u32 {
-    (dir << IOC_DIRSHIFT)
-        | (type_ << IOC_TYPESHIFT)
-        | (nr << IOC_NRSHIFT)
-        | ((size as u32) << IOC_SIZESHIFT)
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct binder_object_header {
-    pub type_: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) union flat_binder_object_handle_or_ptr {
-    pub binder: libc::c_ulong,
-    pub handle: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct flat_binder_object {
-    pub hdr: binder_object_header,
-    pub flags: u32,
-    pub handle_or_ptr: flat_binder_object_handle_or_ptr,
-    pub cookie: libc::c_ulong,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct binder_ptr_cookie {
-    pub ptr: libc::c_ulong,
-    pub cookie: libc::c_ulong,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub(crate) struct binder_node_debug_info {
-    pub ptr: libc::c_ulong,
-    pub cookie: libc::c_ulong,
-    pub has_strong_ref: u32,
-    pub has_weak_ref: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub(crate) struct binder_version {
-    pub protocol_version: i32,
-}
-
-pub(crate) const BINDER_VERSION: u32 =
-    ioc(IOC_READ | IOC_WRITE, b'b' as u32, 9, size_of::<binder_version>());
-pub(crate) const BINDER_GET_NODE_DEBUG_INFO: u32 =
-    ioc(IOC_READ | IOC_WRITE, b'b' as u32, 11, size_of::<binder_node_debug_info>());
-
-pub(crate) const BR_TRANSACTION_COMPLETE_CMD: u32 =
-    ioc(IOC_NONE, b'r' as u32, BR_TRANSACTION_COMPLETE_NR, 0);
-pub(crate) const BC_ACQUIRE_DONE_CMD: u32 =
-    ioc(IOC_WRITE, b'c' as u32, BC_ACQUIRE_DONE_NR, size_of::<binder_ptr_cookie>());
+pub(crate) const BC_TRANSACTION_NR: u32 = _ioc_nr(driver::BC_TRANSACTION);
+pub(crate) const BC_REPLY_NR: u32 = _ioc_nr(driver::BC_REPLY);
+pub(crate) const BC_TRANSACTION_SG_NR: u32 = _ioc_nr(driver::BC_TRANSACTION_SG);
+pub(crate) const BC_REPLY_SG_NR: u32 = _ioc_nr(driver::BC_REPLY_SG);
+pub(crate) const BR_TRANSACTION_NR: u32 = _ioc_nr(driver::BR_TRANSACTION);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct LocalBinderTarget {
@@ -134,76 +59,16 @@ pub(crate) struct LocalBinderTarget {
     pub cookie: libc::c_ulong,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct binder_write_read {
-    pub write_size: libc::size_t,
-    pub write_consumed: libc::size_t,
-    pub write_buffer: libc::c_ulong,
-    pub read_size: libc::size_t,
-    pub read_consumed: libc::size_t,
-    pub read_buffer: libc::c_ulong,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) union binder_transaction_data_target {
-    pub handle: u32,
-    pub ptr: libc::c_ulong,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) union binder_transaction_data_data {
-    pub ptr: binder_transaction_data_data_ptr,
-    pub buf: [u8; 8],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct binder_transaction_data_data_ptr {
-    pub buffer: libc::c_ulong,
-    pub offsets: libc::c_ulong,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct binder_transaction_data {
-    pub target: binder_transaction_data_target,
-    pub cookie: libc::c_ulong,
-    pub code: u32,
-    pub flags: u32,
-    pub sender_pid: i32,
-    pub sender_euid: i32,
-    pub data_size: libc::size_t,
-    pub offsets_size: libc::size_t,
-    pub data: binder_transaction_data_data,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct binder_transaction_data_secctx {
-    pub transaction_data: binder_transaction_data,
-    pub secctx: libc::c_ulong,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct binder_transaction_data_sg {
-    pub transaction_data: binder_transaction_data,
-    pub buffers_size: libc::size_t,
-}
-
 pub(crate) fn _ioc_dir(cmd: u32) -> u32 {
-    (cmd >> 30) & 0x3
+    (cmd >> driver::_IOC_DIRSHIFT) & driver::_IOC_DIRMASK
 }
 
-pub(crate) fn _ioc_nr(cmd: u32) -> u32 {
-    cmd & 0xFF
+pub(crate) const fn _ioc_nr(cmd: u32) -> u32 {
+    (cmd >> driver::_IOC_NRSHIFT) & driver::_IOC_NRMASK
 }
 
 pub(crate) fn _ioc_size(cmd: u32) -> usize {
-    ((cmd >> 16) & 0x3FFF) as usize
+    ((cmd >> driver::_IOC_SIZESHIFT) & driver::_IOC_SIZEMASK) as usize
 }
 
 pub(crate) unsafe fn log_write_transaction(command_name: &str, tr: &binder_transaction_data) {
@@ -222,7 +87,7 @@ pub(crate) unsafe fn log_write_transaction(command_name: &str, tr: &binder_trans
 }
 
 pub(crate) unsafe fn preview_transaction_parcel(tr: &binder_transaction_data) -> String {
-    let data_size = tr.data_size;
+    let data_size = tr.data_size as usize;
     if data_size == 0 {
         return "<empty>".to_string();
     }
@@ -232,100 +97,18 @@ pub(crate) unsafe fn preview_transaction_parcel(tr: &binder_transaction_data) ->
         return "<null>".to_string();
     }
 
-    let preview_len = data_size.min(128);
-    let bytes = std::slice::from_raw_parts(buffer, preview_len);
-    let mut preview = String::new();
-
-    for byte in bytes {
-        for ch in byte.escape_ascii() {
-            if preview.chars().count() >= PARCEL_PREVIEW_CHARS {
-                preview.push('…');
-                return preview;
-            }
-            preview.push(ch as char);
-        }
+    let mut preview_bytes = [0_u8; 128];
+    let preview_len = data_size.min(preview_bytes.len());
+    let bytes = &mut preview_bytes[..preview_len];
+    if crate::sys::read_process_exact(nix::unistd::Pid::this(), buffer as usize, bytes).is_err() {
+        return "<unreadable>".to_string();
     }
-
-    if data_size > preview_len {
+    let mut escaped = bytes.iter().flat_map(|byte| byte.escape_ascii());
+    let mut preview: String = escaped.by_ref().take(PARCEL_PREVIEW_CHARS).map(char::from).collect();
+    if escaped.next().is_some() || data_size > preview_len {
         preview.push('…');
     }
-
-    if preview.is_empty() {
-        "<binary>".to_string()
-    } else {
-        preview
-    }
-}
-
-pub(crate) unsafe fn describe_transaction_objects(tr: &binder_transaction_data) -> String {
-    let offsets_size = tr.offsets_size;
-    if offsets_size == 0 {
-        return "[]".to_string();
-    }
-
-    let offsets_ptr = tr.data.ptr.offsets as *const usize;
-    if offsets_ptr.is_null() {
-        return "[<null offsets>]".to_string();
-    }
-
-    let count = offsets_size / size_of::<usize>();
-    if count == 0 {
-        return "[]".to_string();
-    }
-
-    let data_size = tr.data_size;
-    let offsets = std::slice::from_raw_parts(offsets_ptr, count);
-    let bytes = match transaction_data_bytes(tr) {
-        Some(bytes) => bytes,
-        None => return "[<null data>]".to_string(),
-    };
-
-    let mut out = Vec::with_capacity(count);
-    for &offset in offsets {
-        let object_size = size_of::<flat_binder_object>();
-        if offset > data_size || data_size.saturating_sub(offset) < object_size {
-            out.push(format!("{{offset={}, invalid=true}}", offset));
-            continue;
-        }
-
-        let object =
-            std::ptr::read_unaligned(bytes.as_ptr().add(offset) as *const flat_binder_object);
-        let type_name = match object.hdr.type_ {
-            BINDER_TYPE_BINDER => "BINDER",
-            BINDER_TYPE_WEAK_BINDER => "WEAK_BINDER",
-            BINDER_TYPE_HANDLE => "HANDLE",
-            BINDER_TYPE_WEAK_HANDLE => "WEAK_HANDLE",
-            other => {
-                out.push(format!(
-                    "{{offset={}, type=0x{:x}, flags=0x{:x}, handle_or_ptr=0x{:x}, cookie=0x{:x}}}",
-                    offset, other, object.flags, object.handle_or_ptr.binder, object.cookie
-                ));
-                continue;
-            }
-        };
-
-        let stability_offset = offset + object_size;
-        let stability = if data_size.saturating_sub(stability_offset) >= size_of::<i32>() {
-            Some(std::ptr::read_unaligned(bytes.as_ptr().add(stability_offset) as *const i32))
-        } else {
-            None
-        };
-
-        out.push(format!(
-            "{{offset={}, type={}, flags=0x{:x}, handle=0x{:x}, ptr=0x{:x}, cookie=0x{:x}, stability={}}}",
-            offset,
-            type_name,
-            object.flags,
-            object.handle_or_ptr.handle,
-            object.handle_or_ptr.binder,
-            object.cookie,
-            stability
-                .map(|value| format!("0x{:x}", value))
-                .unwrap_or_else(|| "<missing>".to_string())
-        ));
-    }
-
-    format!("[{}]", out.join(", "))
+    preview
 }
 
 pub(crate) unsafe fn format_target(tr: &binder_transaction_data) -> String {
@@ -335,20 +118,6 @@ pub(crate) unsafe fn format_target(tr: &binder_transaction_data) -> String {
     } else {
         format!("ptr:0x{:x}", tr.target.ptr)
     }
-}
-
-pub(crate) unsafe fn transaction_data_bytes<'a>(tr: &binder_transaction_data) -> Option<&'a [u8]> {
-    let data_size = tr.data_size;
-    if data_size == 0 {
-        return Some(&[]);
-    }
-
-    let buffer = tr.data.ptr.buffer as *const u8;
-    if buffer.is_null() {
-        return None;
-    }
-
-    Some(std::slice::from_raw_parts(buffer, data_size))
 }
 
 pub(crate) unsafe fn parse_local_binder_target_from_parcel_bytes(
@@ -363,10 +132,25 @@ pub(crate) unsafe fn parse_local_binder_target_from_parcel_bytes(
         return None;
     }
 
-    let ptr = object.handle_or_ptr.binder;
+    let ptr = object.__bindgen_anon_1.binder;
     if ptr == 0 || object.cookie == 0 {
         return None;
     }
 
     Some(LocalBinderTarget { ptr, cookie: object.cookie })
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::{binder_transaction_data, BC_REPLY_NR, IOC_NONE, IOC_WRITE};
+    use std::mem;
+
+    const BR_NOOP_NR: u32 = 12;
+
+    pub(in crate::hook) const BR_NOOP_CMD: u32 = super::ioc(IOC_NONE, b'r' as u32, BR_NOOP_NR, 0);
+
+    pub(in crate::hook) const BC_FREE_BUFFER_CMD: u32 = super::driver::BC_FREE_BUFFER;
+
+    pub(in crate::hook) const BC_REPLY_CMD: u32 =
+        super::ioc(IOC_WRITE, b'c' as u32, BC_REPLY_NR, mem::size_of::<binder_transaction_data>());
 }

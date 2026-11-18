@@ -1,9 +1,29 @@
 use std::{
+    cell::Cell,
     string::{String, ToString},
     sync::OnceLock,
 };
 
 static ANDROID_MAJOR_VERSION: OnceLock<Option<i32>> = OnceLock::new();
+
+thread_local! {
+    static FRAMEWORK_PARCEL_API: Cell<Option<i32>> = Cell::default();
+}
+
+pub fn with_framework_parcel<T>(api: i32, decode: impl FnOnce() -> T) -> T {
+    struct Restore(Option<i32>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FRAMEWORK_PARCEL_API.set(self.0);
+        }
+    }
+    let _restore = Restore(FRAMEWORK_PARCEL_API.replace(Some(api)));
+    decode()
+}
+
+pub fn framework_keymint_v5_union() -> bool {
+    FRAMEWORK_PARCEL_API.get().is_none_or(|api| api >= 37)
+}
 
 pub fn android_major_version() -> Option<i32> {
     *ANDROID_MAJOR_VERSION.get_or_init(|| android_major_version_with(read_string_property))

@@ -74,40 +74,23 @@ pub fn inject_library(pid: Pid) -> Result<()> {
     nix::sys::ptrace::attach(pid).with_context(|| format!("Failed to attach to process {pid}"))?;
     debug!("attached to process {}", pid);
 
-    if let Err(e) = wait_pid(pid, Signal::SIGSTOP) {
-        warn!("wait for process stop failed; detaching: {}", e);
-        if let Err(detach_error) = nix::sys::ptrace::detach(pid, None)
-            .with_context(|| format!("Failed to detach from process {pid} after wait failure"))
-        {
-            return Err(e.context(format!(
-                "Failed to wait for process {pid} to stop; cleanup also failed: {detach_error:#}"
-            )));
-        }
-        return Err(e.context(format!("Failed to wait for process {pid} to stop")));
-    }
+    let mut backup_regs = None;
+    let result = (|| {
+        wait_pid(pid, Signal::SIGSTOP)
+            .with_context(|| format!("Failed to wait for process {pid} to stop"))?;
+        backup_regs = Some(sys::get_regs(pid).context("Failed to backup registers.")?);
 
-    let backup_regs = match sys::get_regs(pid).context("Failed to backup registers.") {
-        Ok(regs) => regs,
-        Err(error) => {
-            if let Err(detach_error) = nix::sys::ptrace::detach(pid, None).with_context(|| {
-                format!("Failed to detach from process {pid} after get_regs failure")
-            }) {
-                return Err(error.context(format!(
-                    "cleanup after get_regs failure also failed: {detach_error:#}"
-                )));
-            }
-            return Err(error);
-        }
-    };
-
-    // Run actual injection; regardless of success/failure we MUST restore regs and detach
-    let result = do_inject(pid, &self_path);
+        // Run actual injection; regardless of success/failure we MUST restore regs and detach
+        do_inject(pid, &self_path)
+    })();
 
     // === CLEANUP: Always restore registers and detach ===
     debug!("restoring registers and detaching");
     let mut cleanup_errors = Vec::new();
-    if let Err(e) = sys::set_regs(pid, &backup_regs) {
-        cleanup_errors.push(e.context("Failed to restore registers"));
+    if let Some(backup_regs) = backup_regs {
+        if let Err(e) = sys::set_regs(pid, &backup_regs) {
+            cleanup_errors.push(e.context("Failed to restore registers"));
+        }
     }
     if let Err(e) = nix::sys::ptrace::detach(pid, None)
         .with_context(|| format!("Failed to detach from process {pid}"))
@@ -144,24 +127,15 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 
     // Helper to push data to remote stack and update regs SP
     let mut push_to_remote_stack = |data: &[u8]| -> Result<usize> {
-        let sp = {
-            #[cfg(target_arch = "x86_64")]
-            {
-                regs.rsp as usize
-            }
-            #[cfg(target_arch = "x86")]
-            {
-                regs.esp as usize
-            }
-            #[cfg(target_arch = "aarch64")]
-            {
-                regs.sp as usize
-            }
-            #[cfg(target_arch = "arm")]
-            {
-                regs.uregs[13] as usize
-            }
-        };
+        #[cfg(target_arch = "x86_64")]
+        let sp_register = &mut regs.rsp;
+        #[cfg(target_arch = "x86")]
+        let sp_register = &mut regs.esp;
+        #[cfg(target_arch = "aarch64")]
+        let sp_register = &mut regs.sp;
+        #[cfg(target_arch = "arm")]
+        let sp_register = &mut regs.uregs[13];
+        let sp = *sp_register as usize;
         let tentative_sp =
             sp.checked_sub(data.len()).context("stack underflow while reserving remote storage")?;
         let new_sp = tentative_sp & !0xf;
@@ -172,22 +146,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         let new_sp = sys::push_stack(pid, write_base, data)?;
 
         // Update local regs copy
-        #[cfg(target_arch = "x86_64")]
-        {
-            regs.rsp = new_sp as u64;
-        }
-        #[cfg(target_arch = "x86")]
-        {
-            regs.esp = new_sp as u32;
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            regs.sp = new_sp as u64;
-        }
-        #[cfg(target_arch = "arm")]
-        {
-            regs.uregs[13] = new_sp as u32;
-        }
+        *sp_register = new_sp as _;
 
         // Commit SP change to remote process so subsequent remote_call works correctly
         sys::set_regs(pid, &regs)?;
@@ -218,12 +177,12 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
 
     let read_remote_dlerror = || -> Result<Option<String>> {
         if let (Some(err_fn), Some(str_fn)) = (dlerror_addr, strlen_addr) {
-            let err_ptr = sys::remote_call(pid, err_fn, libc_return_addr, &[])?;
+            let err_ptr = sys::remote_call(pid, err_fn, libc_return_addr, &[]).result?;
             if err_ptr == 0 {
                 return Ok(None);
             }
 
-            let len = sys::remote_call(pid, str_fn, libc_return_addr, &[err_ptr])?;
+            let len = sys::remote_call(pid, str_fn, libc_return_addr, &[err_ptr]).result?;
             if len == 0 || len > 1024 {
                 return Ok(Some(format!(
                     "remote dlerror pointer=0x{err_ptr:x} returned invalid length {len}"
@@ -238,24 +197,34 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         Ok(None)
     };
 
-    let get_remote_errno = || -> Result<i32> {
+    let get_remote_errno = || -> sys::RemoteCallPostStatus<i32> {
         if let Some(addr) = errno_addr {
-            let ptr = sys::remote_call(pid, addr, libc_return_addr, &[])?;
-            let mut buf = [0u8; 4];
-            sys::read_stack(pid, ptr, &mut buf)?;
-            Ok(i32::from_ne_bytes(buf))
+            let call = sys::remote_call(pid, addr, libc_return_addr, &[]);
+            let result = call.result.and_then(|ptr| {
+                let mut buf = [0u8; 4];
+                sys::read_stack(pid, ptr, &mut buf)?;
+                Ok(i32::from_ne_bytes(buf))
+            });
+            sys::RemoteCallPostStatus { result, restored: call.restored }
         } else {
-            Ok(0)
+            sys::RemoteCallPostStatus { result: Ok(0), restored: true }
         }
     };
 
-    let close_remote = |fd: i32| -> Result<()> {
-        let close_res = sys::remote_call(pid, close_addr, libc_return_addr, &[fd as usize])?;
-        if close_res != 0 {
-            let err = get_remote_errno().unwrap_or(0);
-            bail!("Remote close failed for fd {}: result={} errno={}", fd, close_res, err);
-        }
-        Ok(())
+    let close_remote = |fd: i32| -> sys::RemoteCallPostStatus<()> {
+        let mut call = sys::remote_call(pid, close_addr, libc_return_addr, &[fd as usize]);
+        let result = call.result.and_then(|close_res| {
+            if close_res != 0 {
+                let errno = get_remote_errno();
+                call.restored = errno.restored;
+                let err = errno.result.context(format!(
+                    "Remote close failed for fd {fd}: result={close_res}; errno lookup failed"
+                ))?;
+                bail!("Remote close failed for fd {}: result={} errno={}", fd, close_res, err);
+            }
+            Ok(())
+        });
+        sys::RemoteCallPostStatus { result, restored: call.restored }
     };
 
     let local_lib_file = std::fs::File::open(self_path).with_context(|| {
@@ -281,7 +250,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         libc_return: libc_return_addr,
     };
 
-    let remote_lib_fd = match send_fd_to_remote(
+    let handoff = send_fd_to_remote(
         pid,
         local_lib_fd,
         "payload image",
@@ -289,8 +258,10 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         &mut push_to_remote_stack,
         &get_remote_errno,
         &close_remote,
-    ) {
+    );
+    let remote_lib_fd = match handoff.result {
         Ok(fd) => fd,
+        Err(error) if !handoff.restored => return Err(error),
         Err(error) => {
             warn!(
                 "payload fd handoff failed: {error:#}. Trying direct fallback via {}.",
@@ -340,7 +311,8 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         dlopen_addr,
         libc_return_addr,
         &[remote_path_ptr, libc::RTLD_NOW as usize, remote_info_ptr],
-    )?;
+    )
+    .result?;
 
     debug!(
         "Remote dlopen handle: 0x{:x} using identifier={} fd={}",
@@ -351,19 +323,23 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
         if let Some(error_message) = read_remote_dlerror()? {
             error!("android_dlopen_ext failed: {}", error_message);
         }
-        close_remote(remote_lib_fd)?;
+        close_remote(remote_lib_fd).result?;
         bail!("Remote dlopen failed");
     }
 
-    close_remote(remote_lib_fd)?;
+    close_remote(remote_lib_fd).result?;
 
     if let Some(err_fn) = dlerror_addr {
-        let _ = sys::remote_call(pid, err_fn, libc_return_addr, &[]);
+        let cleared = sys::remote_call(pid, err_fn, libc_return_addr, &[]);
+        if !cleared.restored {
+            cleared.result?;
+        }
     }
     let entry_symbol = std::ffi::CString::new("entry")?;
     let remote_entry_symbol_ptr = push_to_remote_stack(entry_symbol.as_bytes_with_nul())?;
     let injector_entry =
-        sys::remote_call(pid, dlsym_addr, libc_return_addr, &[handle, remote_entry_symbol_ptr])?;
+        sys::remote_call(pid, dlsym_addr, libc_return_addr, &[handle, remote_entry_symbol_ptr])
+            .result?;
     if injector_entry == 0 {
         if let Some(error_message) = read_remote_dlerror()? {
             error!("dlsym(entry) failed: {}", error_message);
@@ -372,7 +348,7 @@ fn do_inject(pid: Pid, self_path: &std::path::Path) -> Result<()> {
     }
     debug!("resolved remote entry via dlsym address=0x{:x}", injector_entry);
 
-    let entry_result = sys::remote_call(pid, injector_entry, libc_return_addr, &[handle])?;
+    let entry_result = sys::remote_call(pid, injector_entry, libc_return_addr, &[handle]).result?;
     if entry_result == 0 {
         bail!("Remote entry returned false");
     }

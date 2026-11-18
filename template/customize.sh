@@ -3,7 +3,7 @@ SKIPUNZIP=1
 
 SONAME="Oh My Keymint"
 SUPPORTED_ABIS="arm64 x64"
-MIN_SDK=29
+MIN_SDK=33
 
 if [ "$BOOTMODE" ] && [ "$KSU" ]; then
   ui_print "- Installing from KernelSU app"

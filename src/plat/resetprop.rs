@@ -1,16 +1,17 @@
-use std::{
-    fs::File,
-    io::{BufRead, BufReader, Read, Write},
-    os::unix::{net::UnixStream, process::CommandExt},
-    path::Path,
-    process::Command,
-    sync::{Mutex, OnceLock},
-};
+use binder::binder_impl::IBinderInternal;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, bail, Context, Result};
-use nix::{fcntl::OFlag, unistd::pipe2};
+use binder::{Status, StatusCode};
+use nix::fcntl::OFlag;
+use nix::unistd::pipe2;
 use prost::Message;
-use rsbinder::{hub, Status, StatusCode};
 
 const ANDROID_PACKAGE: &str = "android";
 const ACTIVITY_SERVICE: &str = "activity";
@@ -24,8 +25,8 @@ const PHONE_SUB_INFO_SERVICE: &str = "iphonesubinfo";
 const TELEPHONY_FEATURE: &str = "android.hardware.telephony";
 const TELEPHONY_GSM_FEATURE: &str = "android.hardware.telephony.gsm";
 const TELEPHONY_CDMA_FEATURE: &str = "android.hardware.telephony.cdma";
-const GET_DEVICE_ID_FOR_PHONE_TRANSACTION: rsbinder::TransactionCode =
-    rsbinder::FIRST_CALL_TRANSACTION + 3;
+const GET_DEVICE_ID_FOR_PHONE_TRANSACTION: binder::binder_impl::TransactionCode =
+    binder::binder_impl::FIRST_CALL_TRANSACTION + 3;
 
 // Preserve the Android 13-17 field numbers; other process state is not needed here.
 #[derive(Clone, PartialEq, Message)]
@@ -48,8 +49,8 @@ struct ProcessRecordProto {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TelephonyTransactions {
-    get_imei_for_slot: rsbinder::TransactionCode,
-    get_meid_for_slot: Option<rsbinder::TransactionCode>,
+    get_imei_for_slot: binder::binder_impl::TransactionCode,
+    get_meid_for_slot: Option<binder::binder_impl::TransactionCode>,
 }
 
 #[derive(Clone, Copy)]
@@ -102,10 +103,13 @@ pub struct TelephonyFeatures {
 #[error("service {0} unavailable")]
 pub(crate) struct BinderServiceUnavailable(pub(crate) String);
 
-fn require_binder_service<T>(name: &str, lookup: rsbinder::Result<Option<T>>) -> Result<T> {
+fn require_binder_service<T>(
+    name: &str,
+    lookup: Result<Option<T>, binder::StatusCode>,
+) -> Result<T> {
     match lookup {
         Ok(Some(service)) => Ok(service),
-        Ok(None) | Err(StatusCode::DeadObject) | Err(StatusCode::NotEnoughData) => {
+        Ok(None) | Err(StatusCode::DEAD_OBJECT) | Err(StatusCode::NOT_ENOUGH_DATA) => {
             Err(BinderServiceUnavailable(name.to_string()).into())
         }
         // FailedTransaction is deliberately excluded: rsbinder also uses it for AIDL exceptions.
@@ -349,17 +353,12 @@ fn execute_isolated_owner_uid(uid: u32, pid: i32) -> Result<Option<u32>> {
     if pid <= 0 || !(90_000..=99_999).contains(&(uid % kmr_common::consts::AID_USER_OFFSET)) {
         bail!("invalid isolated caller");
     }
-    rsbinder::ProcessState::init_default()
-        .map_err(|error| anyhow!("failed to initialize Binder in privileged helper: {error}"))?;
-    let binder = require_binder_service(ACTIVITY_SERVICE, hub::try_get_service(ACTIVITY_SERVICE))?;
-    if binder.descriptor() != ACTIVITY_DESCRIPTOR {
-        bail!("ActivityManager descriptor mismatch");
-    }
-    let proxy = binder.as_proxy().context("ActivityManager binder was unexpectedly local")?;
+    let mut binder =
+        require_binder_service(ACTIVITY_SERVICE, binder::ext::get_service_once(ACTIVITY_SERVICE))?;
+    binder::ext::associate_descriptor(&binder, ACTIVITY_DESCRIPTOR)
+        .context("ActivityManager descriptor mismatch")?;
     let data = capture_binder_dump(|fd| {
-        proxy
-            .dump(fd, &["--proto".to_string(), "processes".to_string()])
-            .context("ActivityManager process dump failed")
+        binder.dump(&fd, &["--proto", "processes"]).context("ActivityManager process dump failed")
     })?;
     isolated_owner_from_proto(&data, uid, pid)
 }
@@ -400,9 +399,6 @@ fn isolated_owner_from_proto(data: &[u8], uid: u32, pid: i32) -> Result<Option<u
 }
 
 fn execute_phone_identifier(kind: PhoneIdentifierKind, slot: i32) -> Result<Option<String>> {
-    rsbinder::ProcessState::init_default()
-        .map_err(|error| anyhow!("failed to initialize Binder in privileged helper: {error}"))?;
-
     let transactions = telephony_transactions();
     let (service, expected_descriptor, transaction, label) = match kind {
         PhoneIdentifierKind::DeviceId => (
@@ -422,15 +418,11 @@ fn execute_phone_identifier(kind: PhoneIdentifierKind, slot: i32) -> Result<Opti
         return Ok(None);
     };
 
-    let binder = require_binder_service(service, hub::try_get_service(service))?;
-    let descriptor = binder.descriptor();
-    if descriptor != expected_descriptor {
-        bail!("{service} descriptor mismatch: {descriptor}");
-    }
-    let proxy =
-        binder.as_proxy().with_context(|| format!("{service} binder was unexpectedly local"))?;
-    let mut data = proxy
-        .prepare_transact(true)
+    let binder = require_binder_service(service, binder::ext::get_service_once(service))?;
+    binder::ext::associate_descriptor(&binder, expected_descriptor)
+        .with_context(|| format!("{label} descriptor mismatch"))?;
+    let mut data = binder
+        .prepare_transact()
         .with_context(|| format!("failed to prepare {label} transaction"))?;
     data.write(&slot).with_context(|| format!("failed to write {label} slot"))?;
     data.write(ANDROID_PACKAGE)
@@ -438,11 +430,11 @@ fn execute_phone_identifier(kind: PhoneIdentifierKind, slot: i32) -> Result<Opti
     data.write(&None::<String>)
         .with_context(|| format!("failed to write {label} calling feature"))?;
 
-    let mut reply = proxy
-        .submit_transact(transaction, &data, rsbinder::FLAG_CLEAR_BUF)
-        .with_context(|| format!("{label} transact failed"))?
-        .with_context(|| format!("{label} returned no reply"))?;
-    reply.set_data_position(0);
+    let reply = binder
+        .submit_transact(transaction, data, binder::binder_impl::FLAG_CLEAR_BUF)
+        .with_context(|| format!("{label} transact failed"))?;
+    // SAFETY: Zero is within every valid Parcel.
+    unsafe { reply.set_data_position(0)? };
 
     let status: Status =
         reply.read().with_context(|| format!("failed to decode {label} reply status"))?;
@@ -466,32 +458,26 @@ fn execute_phone_identifier(kind: PhoneIdentifierKind, slot: i32) -> Result<Opti
 }
 
 fn execute_has_system_feature(feature: &str) -> Result<bool> {
-    rsbinder::ProcessState::init_default()
-        .map_err(|error| anyhow!("failed to initialize Binder in privileged helper: {error}"))?;
-
     let binder = require_binder_service(
         PACKAGE_MANAGER_NATIVE_SERVICE,
-        hub::try_get_service(PACKAGE_MANAGER_NATIVE_SERVICE),
+        binder::ext::get_service_once(PACKAGE_MANAGER_NATIVE_SERVICE),
     )?;
-    let descriptor = binder.descriptor();
-    if descriptor != PACKAGE_MANAGER_NATIVE_DESCRIPTOR {
-        bail!("PackageManager descriptor mismatch: {descriptor}");
-    }
-    let proxy = binder.as_proxy().context("PackageManager binder was unexpectedly local")?;
+    binder::ext::associate_descriptor(&binder, PACKAGE_MANAGER_NATIVE_DESCRIPTOR)
+        .context("PackageManager descriptor mismatch")?;
     let mut data =
-        proxy.prepare_transact(true).context("failed to prepare PackageManager transaction")?;
+        binder.prepare_transact().context("failed to prepare PackageManager transaction")?;
     data.write(feature).context("failed to write PackageManager feature name")?;
     data.write(&0_i32).context("failed to write PackageManager feature version")?;
 
-    let mut reply = proxy
+    let reply = binder
         .submit_transact(
             has_system_feature_transaction(kmr_common::android_version::android_major_version()),
-            &data,
-            rsbinder::FLAG_CLEAR_BUF,
+            data,
+            binder::binder_impl::FLAG_CLEAR_BUF,
         )
-        .context("PackageManager hasSystemFeature transact failed")?
-        .context("PackageManager hasSystemFeature returned no reply")?;
-    reply.set_data_position(0);
+        .context("PackageManager hasSystemFeature transact failed")?;
+    // SAFETY: Zero is within every valid Parcel.
+    unsafe { reply.set_data_position(0)? };
 
     let status: Status =
         reply.read().context("failed to decode PackageManager hasSystemFeature status")?;
@@ -501,14 +487,16 @@ fn execute_has_system_feature(feature: &str) -> Result<bool> {
     reply.read().context("failed to decode PackageManager hasSystemFeature result")
 }
 
-fn has_system_feature_transaction(android_major: Option<i32>) -> rsbinder::TransactionCode {
+fn has_system_feature_transaction(
+    android_major: Option<i32>,
+) -> binder::binder_impl::TransactionCode {
     let offset = match android_major {
         Some(..=13) => 12,
         Some(14) => 9,
         Some(15 | 16) | None => 10,
         Some(17..) => 13,
     };
-    rsbinder::FIRST_CALL_TRANSACTION + offset
+    binder::binder_impl::FIRST_CALL_TRANSACTION + offset
 }
 
 fn telephony_transactions() -> TelephonyTransactions {
@@ -525,8 +513,9 @@ fn telephony_transactions_for(android_major: Option<i32>) -> TelephonyTransactio
     };
 
     TelephonyTransactions {
-        get_imei_for_slot: rsbinder::FIRST_CALL_TRANSACTION + imei_offset,
-        get_meid_for_slot: meid_offset.map(|offset| rsbinder::FIRST_CALL_TRANSACTION + offset),
+        get_imei_for_slot: binder::binder_impl::FIRST_CALL_TRANSACTION + imei_offset,
+        get_meid_for_slot: meid_offset
+            .map(|offset| binder::binder_impl::FIRST_CALL_TRANSACTION + offset),
     }
 }
 
@@ -711,7 +700,7 @@ mod tests {
 
     #[test]
     fn telephony_transactions_match_android_12_through_17() {
-        use rsbinder::FIRST_CALL_TRANSACTION;
+        use binder::binder_impl::FIRST_CALL_TRANSACTION;
 
         assert_eq!(GET_DEVICE_ID_FOR_PHONE_TRANSACTION, FIRST_CALL_TRANSACTION + 3);
         for (version, offset) in [(12, 12), (13, 12), (14, 9), (15, 10), (16, 10), (17, 13)] {
@@ -763,8 +752,8 @@ mod tests {
     fn service_lookup_only_retries_missing_or_transport_failures() {
         assert_eq!(require_binder_service(PHONE_SERVICE, Ok(Some(7_u8))).unwrap(), 7);
 
-        let unavailable: [rsbinder::Result<Option<()>>; 3] =
-            [Ok(None), Err(StatusCode::DeadObject), Err(StatusCode::NotEnoughData)];
+        let unavailable: [Result<Option<()>, binder::StatusCode>; 3] =
+            [Ok(None), Err(StatusCode::DEAD_OBJECT), Err(StatusCode::NOT_ENOUGH_DATA)];
         for lookup in unavailable {
             let error = require_binder_service(PHONE_SERVICE, lookup).unwrap_err();
             assert!(is_binder_service_unavailable(&error));
@@ -772,12 +761,12 @@ mod tests {
         }
 
         for status in [
-            StatusCode::NameNotFound,
-            StatusCode::PermissionDenied,
-            StatusCode::FailedTransaction,
-            StatusCode::WouldBlock,
-            StatusCode::TimedOut,
-            StatusCode::RpcError,
+            StatusCode::NAME_NOT_FOUND,
+            StatusCode::PERMISSION_DENIED,
+            StatusCode::FAILED_TRANSACTION,
+            StatusCode::WOULD_BLOCK,
+            StatusCode::TIMED_OUT,
+            StatusCode::UNKNOWN_ERROR,
         ] {
             let error = require_binder_service::<()>(PHONE_SERVICE, Err(status)).unwrap_err();
             assert!(!is_binder_service_unavailable(&error));

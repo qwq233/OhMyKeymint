@@ -23,37 +23,33 @@ use kmr_common::consts::{AID_KEYSTORE, AID_ROOT, AID_SYSTEM};
 use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
 use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
 use crate::android::hardware::security::keymint::Tag::Tag;
-use crate::android::system::keystore2::{
-    Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
-    IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor,
-    KeyEntryResponse::KeyEntryResponse, KeyMetadata::KeyMetadata, ResponseCode::ResponseCode,
-};
-use crate::err;
+use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::IKeystoreSecurityLevel::IKeystoreSecurityLevel;
+use crate::android::system::keystore2::IKeystoreService::IKeystoreService;
+use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
+use crate::android::system::keystore2::KeyEntryResponse::KeyEntryResponse;
+use crate::android::system::keystore2::KeyMetadata::KeyMetadata;
+use crate::android::system::keystore2::ResponseCode::ResponseCode;
 use crate::global::{db_root_path, DB, SUPER_KEY};
-use crate::keybox;
 use crate::keymaster::audit_log::log_key_deleted;
-use crate::keymaster::db::Uuid;
-use crate::keymaster::db::KEYSTORE_UUID;
-use crate::keymaster::db::{KeyEntryLoadBits, KeyType, SubComponentType};
+use crate::keymaster::db::{KeyEntryLoadBits, KeyType, SubComponentType, Uuid, KEYSTORE_UUID};
 use crate::keymaster::error::{into_logged_binder, KsError as Error};
 use crate::keymaster::id_rotation::IdRotationState;
 use crate::keymaster::permission::{
     check_grant_permission, check_key_permission, check_keystore_permission, require_omk_ctx,
-    KeyPerm, KeyPermSet, KeystorePerm,
+    CallingContext, KeyPerm, KeyPermSet, KeystorePerm,
 };
 use crate::keymaster::security_level::KeystoreSecurityLevel;
 use crate::keymaster::utils::{
     count_key_entries, key_parameters_to_authorizations, list_key_entries, AppUid,
 };
-use crate::selinux;
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 use crate::top::qwq2333::ohmykeymint::IOhMyKsService::IOhMyKsService;
 use crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::IOhMySecurityLevel;
-use crate::watchdog as wd;
+use crate::{err, keybox, selinux, watchdog as wd};
 use anyhow::{Context, Result};
+use binder::{Status, Strong};
 use log::debug;
-use rsbinder::thread_state::CallingContext;
-use rsbinder::{Status, Strong};
 
 /// Implementation of the IKeystoreService.
 pub struct KeystoreService {
@@ -77,15 +73,6 @@ struct SecurityLevels {
     i_sec_level_by_uuid: HashMap<Uuid, Strong<dyn IKeystoreSecurityLevel>>,
     i_osec_level_by_uuid: HashMap<Uuid, Strong<dyn IOhMySecurityLevel>>,
     uuid_by_sec_level: HashMap<SecurityLevel, Uuid>,
-}
-
-impl SecurityLevels {
-    fn unregister(&mut self, sec_level: SecurityLevel) -> Option<Uuid> {
-        let cur_uuid = self.uuid_by_sec_level.remove(&sec_level)?;
-        self.i_sec_level_by_uuid.remove(&cur_uuid);
-        self.i_osec_level_by_uuid.remove(&cur_uuid);
-        Some(cur_uuid)
-    }
 }
 
 impl KeystoreService {
@@ -175,60 +162,46 @@ impl KeystoreService {
 
     fn register_security_level(&self, sec_level: SecurityLevel) -> Result<()> {
         debug!("Registering security level {sec_level:?}");
-        let uuid = Uuid::from(sec_level);
-
-        let old_uuid_to_terminate = {
-            let security_levels = self.security_levels.read().unwrap();
-            if let Some(&cur_uuid) = security_levels.uuid_by_sec_level.get(&sec_level) {
-                (uuid != cur_uuid).then_some(cur_uuid)
+        loop {
+            let uuid = Uuid::from(sec_level);
+            let previous =
+                self.security_levels.read().unwrap().uuid_by_sec_level.get(&sec_level).copied();
+            if previous == Some(uuid) {
+                return Ok(());
+            }
+            if previous.is_some() {
+                self.retire_stale_keybox_bound_entries()
+                    .context(err!("retiring stale keybox-bound entries before UUID refresh"))?;
+            }
+            let candidate = if previous.is_none() {
+                Some(KeystoreSecurityLevel::new_binders(sec_level, self.id_rotation_state.clone())?)
             } else {
                 None
-            }
-        };
-
-        if let Some(cur_uuid) = old_uuid_to_terminate {
-            log::warn!("Security level {sec_level:?} was registered with a different UUID {cur_uuid:?}, overwriting with {uuid:?}.");
-            log::warn!("Retiring stale keybox-bound entries from database.");
-
-            self.retire_stale_keybox_bound_entries().map_err(|e| {
-                anyhow::anyhow!(err!(
-                    "Failed to retire stale keybox-bound entries for old UUID {cur_uuid:?}: {e:?}"
-                ))
-            })?;
-
-            let mut security_levels = self.security_levels.write().unwrap();
-            if security_levels.uuid_by_sec_level.get(&sec_level) == Some(&cur_uuid) {
-                security_levels.unregister(sec_level);
-                log::warn!(
-                    "Unregistered stale security level {sec_level:?} for UUID {cur_uuid:?}."
-                );
-            }
-        }
-
-        let (i_sec_level, i_osec_level) =
-            match KeystoreSecurityLevel::new_binders(sec_level, self.id_rotation_state.clone()) {
-                Result::Ok(v) => v,
-                Err(e) => {
-                    log::error!("Failed to construct security level {sec_level:?}: {e:?}");
-                    return Err(e.context(err!("Trying to construct security level {sec_level:?}")));
-                }
             };
-
-        let mut security_levels = self.security_levels.write().unwrap();
-        if let Some(cur_uuid) = security_levels.unregister(sec_level) {
-            log::warn!("Security level {sec_level:?} was already registered, overwriting.");
-            if cur_uuid != uuid {
-                log::warn!(
-                    "Overwriting stale security level {sec_level:?} UUID {cur_uuid:?} with {uuid:?}."
-                );
+            let mut levels = self.security_levels.write().unwrap();
+            if levels.uuid_by_sec_level.get(&sec_level).copied() != previous {
+                drop(levels);
+                drop(candidate);
+                continue;
             }
+            let (binder, private) = match previous {
+                Some(previous) => (
+                    levels
+                        .i_sec_level_by_uuid
+                        .remove(&previous)
+                        .expect("registered security level"),
+                    levels
+                        .i_osec_level_by_uuid
+                        .remove(&previous)
+                        .expect("registered private security level"),
+                ),
+                None => candidate.expect("new security level"),
+            };
+            levels.i_sec_level_by_uuid.insert(uuid, binder);
+            levels.i_osec_level_by_uuid.insert(uuid, private);
+            levels.uuid_by_sec_level.insert(sec_level, uuid);
+            return Ok(());
         }
-
-        security_levels.i_sec_level_by_uuid.insert(uuid, i_sec_level);
-        security_levels.i_osec_level_by_uuid.insert(uuid, i_osec_level);
-        security_levels.uuid_by_sec_level.insert(sec_level, uuid);
-
-        Ok(())
     }
 
     fn uuid_to_sec_level(&self, uuid: &Uuid) -> SecurityLevel {
@@ -606,10 +579,10 @@ impl KeystoreService {
 }
 
 fn calling_uid(ctx: Option<&CallerInfo>) -> AppUid {
-    AppUid(ctx.map(|ctx| ctx.uid).unwrap_or(CallingContext::default().uid.into()))
+    AppUid(ctx.map(|ctx| ctx.uid).unwrap_or_else(|| CallingContext::default().uid.into()))
 }
 
-impl rsbinder::Interface for KeystoreService {}
+impl binder::Interface for KeystoreService {}
 
 // Implementation of IKeystoreService. See AIDL spec at
 // system/security/keystore2/binder/android/security/keystore2/IKeystoreService.aidl
@@ -805,7 +778,7 @@ impl IOhMyKsService for KeystoreService {
         ctx: Option<&CallerInfo>,
         key: &[u8],
         chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
-    ) -> rsbinder::BinderResult<()> {
+    ) -> binder::Result<()> {
         let ctx = require_omk_ctx(ctx, "IOhMyKsService::updateEcKeybox")?;
         self.enforce_keybox_admin(ctx).map_err(into_logged_binder)?;
         let chain: Vec<kmr_wire::keymint::Certificate> = chain
@@ -825,7 +798,7 @@ impl IOhMyKsService for KeystoreService {
         ctx: Option<&CallerInfo>,
         key: &[u8],
         chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
-    ) -> rsbinder::BinderResult<()> {
+    ) -> binder::Result<()> {
         let ctx = require_omk_ctx(ctx, "IOhMyKsService::updateRsaKeybox")?;
         self.enforce_keybox_admin(ctx).map_err(into_logged_binder)?;
         let chain: Vec<kmr_wire::keymint::Certificate> = chain
@@ -855,5 +828,58 @@ impl IOhMyKsService for KeystoreService {
         crate::plat::resetprop::runtime_get_isolated_owner_uid(uid, pid)
             .map(|owner| owner.and_then(|uid| i32::try_from(uid).ok()).unwrap_or(-1))
             .map_err(into_logged_binder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::android::system::keystore2::IKeystoreSecurityLevel::BnKeystoreSecurityLevel;
+    use std::sync::Arc;
+
+    #[test]
+    fn uuid_refresh_reuses_the_level_binder_under_concurrent_lookups() {
+        let (_private_directory, private_level) =
+            super::super::security_level::tests::test_security_level();
+        let private_level =
+            crate::top::qwq2333::ohmykeymint::IOhMySecurityLevel::BnOhMySecurityLevel::new_binder(
+                private_level,
+                crate::consts::sid_features(),
+            );
+        let (_directory, level) = super::super::security_level::tests::test_security_level();
+        let binder = BnKeystoreSecurityLevel::new_binder(level, crate::consts::sid_features());
+        let security_level = SecurityLevel::TRUSTED_ENVIRONMENT;
+        let current = Uuid::from(security_level);
+        let mut digest = keybox::current_identity_digest();
+        digest[0] ^= 0xff;
+        let previous = Uuid::from_keybox_digest(security_level, digest);
+        let service = Arc::new(KeystoreService::default());
+        {
+            let mut levels = service.security_levels.write().unwrap();
+            levels.i_sec_level_by_uuid.insert(previous, binder.clone());
+            levels.i_osec_level_by_uuid.insert(previous, private_level);
+            levels.uuid_by_sec_level.insert(security_level, previous);
+        }
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let service = Arc::clone(&service);
+                let expected = binder.as_binder();
+                scope.spawn(move || {
+                    assert_eq!(
+                        service.get_security_level(security_level).unwrap().as_binder(),
+                        expected
+                    );
+                });
+            }
+        });
+        let levels = service.security_levels.read().unwrap();
+        assert_eq!(levels.uuid_by_sec_level[&security_level], current);
+        assert!(!levels.i_sec_level_by_uuid.contains_key(&previous));
+        assert_eq!(levels.i_sec_level_by_uuid.len(), 1);
+        drop(levels);
+        assert_eq!(
+            service.get_i_sec_level_by_uuid(&previous).unwrap().as_binder(),
+            binder.as_binder()
+        );
     }
 }

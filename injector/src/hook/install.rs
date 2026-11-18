@@ -11,10 +11,9 @@ use super::intercept::{
     new_close, new_dup, new_dup2, new_dup3, new_fcntl, new_fdsan_close, new_ioctl,
 };
 use super::{
-    intercept, HOOK_INIT, OLD_CLOSE, OLD_DUP, OLD_DUP2, OLD_DUP3, OLD_FCNTL, OLD_FDSAN_CLOSE,
-    OLD_IOCTL,
+    HOOK_INIT, OLD_CLOSE, OLD_DUP, OLD_DUP2, OLD_DUP3, OLD_FCNTL, OLD_FDSAN_CLOSE, OLD_IOCTL,
 };
-use crate::{config, ipc};
+use crate::config;
 
 pub(super) fn init_hook() -> Result<()> {
     let result = HOOK_INIT.get_or_init(|| install_hooks().map_err(|error| format!("{error:#}")));
@@ -48,8 +47,8 @@ fn install_hooks() -> Result<()> {
     }
 
     let _ = config::get();
+    super::rewrite::native::init()?;
     info!("initializing binder ioctl hook");
-    ipc::ensure_process_state();
 
     let maps = read_self_maps().context("failed to read self maps for binder hook discovery")?;
     let mut targets = Vec::new();
@@ -148,7 +147,6 @@ fn install_hooks() -> Result<()> {
         bail!("Failed to commit any binder close hooks");
     }
 
-    intercept::start_operation_publication_worker().map_err(|error| anyhow!(error))?;
     info!(
         "committed {} binder ioctl hook(s) and {} close hook(s)",
         ioctl_committed, close_committed

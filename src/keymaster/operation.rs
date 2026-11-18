@@ -126,37 +126,31 @@
 //! or it transitions to its end-of-life, which means we may get a free slot.
 //! Either way, we have to revaluate the pruning scores.
 
-use crate::android::hardware::security::keymint::{
-    IKeyMintOperation::IKeyMintOperation, KeyParameter::KeyParameter, KeyPurpose::KeyPurpose,
-    SecurityLevel::SecurityLevel,
+use crate::android::hardware::security::keymint::IKeyMintOperation::IKeyMintOperation;
+use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
+use crate::android::hardware::security::keymint::KeyPurpose::KeyPurpose;
+use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use crate::android::security::metrics::Algorithm::Algorithm as MetricsAlgorithm;
+use crate::android::security::metrics::OperationType::OperationType;
+use crate::android::system::keystore2::IKeystoreOperation::{
+    BnKeystoreOperation, IKeystoreOperation,
 };
-use crate::android::security::metrics::{
-    Algorithm::Algorithm as MetricsAlgorithm, OperationType::OperationType,
-};
-use crate::android::system::keystore2::{
-    IKeystoreOperation::BnKeystoreOperation, IKeystoreOperation::IKeystoreOperation,
-};
-use crate::err as ks_err;
 use crate::keymaster::enforcements::AuthInfo;
 use crate::keymaster::error::{
-    error_to_serialized_error, into_binder, into_logged_binder, map_km_error, Error, ErrorCode,
-    ResponseCode, SerializedError,
+    anyhow_error_to_serialized_error, into_binder, into_logged_binder, map_km_error, Error,
+    ErrorCode, ResponseCode, SerializedError,
 };
 use crate::keymaster::metrics_store::{
     log_key_operation_event_stats, log_key_operation_streaming_stats, log_operation_latency,
 };
 use crate::keymaster::utils::AppUid;
-use crate::log_client_err;
-use crate::watchdog as wd;
+use crate::{err as ks_err, log_client_err, watchdog as wd};
 use anyhow::{anyhow, Context, Result};
+use binder::{Status, Strong};
 use log::{error, warn};
-use rsbinder as binder;
-use rsbinder::{Status, Strong};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard, Weak},
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::{Duration, Instant};
 
 /// Operations have `Outcome::Unknown` as long as they are active. They transition
 /// to one of the other variants exactly once. The distinction in outcome is mainly
@@ -329,13 +323,9 @@ impl Operation {
     // The precondition to this call must be *locked_outcome == Outcome::Unknown.
     // Ideally the `locked_outcome` came from a successful call to `check_active`
     // see below.
-    fn update_outcome<T>(
-        &self,
-        locked_outcome: &mut Outcome,
-        err: Result<T, Error>,
-    ) -> Result<T, Error> {
+    fn update_outcome<T>(&self, locked_outcome: &mut Outcome, err: Result<T>) -> Result<T> {
         if let Err(e) = &err {
-            *locked_outcome = Outcome::ErrorCode(error_to_serialized_error(e))
+            *locked_outcome = Outcome::ErrorCode(anyhow_error_to_serialized_error(e))
         }
         err
     }
@@ -387,10 +377,22 @@ impl Operation {
             .before_update()
             .context(ks_err!("Trying to get auth tokens for {:?}", self.owner))?;
 
-        self.update_outcome(&mut outcome, {
-            let _wp = self.watch("Operation::update_aad: calling IKeyMintOperation::updateAad");
-            map_km_error(self.km_op.updateAad(aad_input, hat.as_ref(), tst.as_ref()))
-        })
+        self.update_outcome(
+            &mut outcome,
+            (|| {
+                let hat =
+                    self.auth_info.lock().unwrap().localize_auth_token(hat.as_ref()).inspect_err(
+                        |_| {
+                            if let Err(status) = self.km_op.abort() {
+                                warn!("auth-token failure cleanup failed: {status}");
+                            }
+                        },
+                    )?;
+                let _wp = self.watch("Operation::update_aad: calling IKeyMintOperation::updateAad");
+                map_km_error(self.km_op.updateAad(aad_input, hat.as_ref(), tst.as_ref()))
+                    .map_err(Into::into)
+            })(),
+        )
         .context(ks_err!("Update failed for {:?}", self.owner))?;
 
         Ok(())
@@ -411,10 +413,24 @@ impl Operation {
             .context(ks_err!("Trying to get auth tokens for {:?}", self.owner))?;
 
         let output = self
-            .update_outcome(&mut outcome, {
-                let _wp = self.watch("Operation::update: calling IKeyMintOperation::update");
-                map_km_error(self.km_op.update(input, hat.as_ref(), tst.as_ref()))
-            })
+            .update_outcome(
+                &mut outcome,
+                (|| {
+                    let hat = self
+                        .auth_info
+                        .lock()
+                        .unwrap()
+                        .localize_auth_token(hat.as_ref())
+                        .inspect_err(|_| {
+                            if let Err(status) = self.km_op.abort() {
+                                warn!("auth-token failure cleanup failed: {status}");
+                            }
+                        })?;
+                    let _wp = self.watch("Operation::update: calling IKeyMintOperation::update");
+                    map_km_error(self.km_op.update(input, hat.as_ref(), tst.as_ref()))
+                        .map_err(Into::into)
+                })(),
+            )
             .context(ks_err!("Update failed for {:?}", self.owner))?;
 
         if output.is_empty() {
@@ -441,16 +457,30 @@ impl Operation {
             .context(ks_err!("Trying to get auth tokens for {:?}", self.owner))?;
 
         let output = self
-            .update_outcome(&mut outcome, {
-                let _wp = self.watch("Operation::finish: calling IKeyMintOperation::finish");
-                map_km_error(self.km_op.finish(
-                    input,
-                    signature,
-                    hat.as_ref(),
-                    tst.as_ref(),
-                    confirmation_token.as_deref(),
-                ))
-            })
+            .update_outcome(
+                &mut outcome,
+                (|| {
+                    let hat = self
+                        .auth_info
+                        .lock()
+                        .unwrap()
+                        .localize_auth_token(hat.as_ref())
+                        .inspect_err(|_| {
+                            if let Err(status) = self.km_op.abort() {
+                                warn!("auth-token failure cleanup failed: {status}");
+                            }
+                        })?;
+                    let _wp = self.watch("Operation::finish: calling IKeyMintOperation::finish");
+                    map_km_error(self.km_op.finish(
+                        input,
+                        signature,
+                        hat.as_ref(),
+                        tst.as_ref(),
+                        confirmation_token.as_deref(),
+                    ))
+                    .map_err(Into::into)
+                })(),
+            )
             .context(ks_err!("Finish failed for {:?}", self.owner))?;
 
         self.auth_info.lock().unwrap().after_finish().context("In finish.")?;
@@ -831,7 +861,7 @@ impl KeystoreOperation {
     /// `BinderFeatures::set_requesting_sid` on the new interface, because
     /// we need it for checking Keystore permissions.
     pub fn new_native_binder(operation: Arc<Operation>) -> binder::Strong<dyn IKeystoreOperation> {
-        BnKeystoreOperation::new_binder_with_features(
+        BnKeystoreOperation::new_binder(
             Self { operation: Mutex::new(Some(operation)) },
             crate::consts::sid_features(),
         )
@@ -929,5 +959,151 @@ impl IKeystoreOperation for KeystoreOperation {
             };
             into_binder(e)
         })
+    }
+}
+
+#[cfg(test)]
+mod auth_token_tests {
+    use super::*;
+    use crate::android::hardware::security::keymint::IKeyMintDevice::IKeyMintDevice;
+    use crate::keymaster::authorization::tests::with_system_keymint;
+    use crate::keymaster::enforcements::tests::auth_info_with_token;
+    use crate::keymaster::keymint_device::{tests as keymint_tests, KeyMintDevice};
+    use kmr_wire::keymint::{Digest, KeyParam};
+
+    #[test]
+    fn rejected_original_mac_finalizes_and_releases_the_keymint_operation() {
+        let system = keymint_tests::auth_wrapper(&[0x41; 32]);
+        let omk = keymint_tests::auth_wrapper(&[0x73; 32]);
+        let key = keymint_tests::auth_key(&omk, false);
+        let params = crate::keymaster::utils::key_params_to_aidl(
+            &[KeyParam::Digest(Digest::Sha256), KeyParam::MacLength(256)],
+            KeyMintDevice::KEY_MINT_V5,
+        )
+        .unwrap();
+        with_system_keymint(system, || {
+            for method in 0..3 {
+                let result = omk.begin(KeyPurpose::SIGN, &key, &params, None).unwrap();
+                let raw = result.operation.unwrap();
+                let mut token = keymint_tests::signed_auth_token(result.challenge, &[0x41; 32]);
+                token.mac[0] ^= 1;
+                let operation = Operation::new(
+                    0,
+                    raw.clone(),
+                    AppUid(10002),
+                    auth_info_with_token(token),
+                    false,
+                    LoggingInfo::new(
+                        SecurityLevel::TRUSTED_ENVIRONMENT,
+                        KeyPurpose::SIGN,
+                        MetricsAlgorithm::HMAC,
+                        params.clone(),
+                        false,
+                        false,
+                    ),
+                );
+                let error = match method {
+                    0 => operation.update_aad(&[]),
+                    1 => operation.update(&[]).map(|_| ()),
+                    _ => operation.finish(None, None).map(|_| ()),
+                }
+                .unwrap_err();
+                assert_eq!(
+                    anyhow_error_to_serialized_error(&error).0,
+                    ErrorCode::KEY_USER_NOT_AUTHENTICATED.0
+                );
+                assert_eq!(
+                    *operation.outcome.lock().unwrap(),
+                    Outcome::ErrorCode(SerializedError(ErrorCode::KEY_USER_NOT_AUTHENTICATED.0))
+                );
+                let error = operation.update(&[]).unwrap_err();
+                assert_eq!(
+                    anyhow_error_to_serialized_error(&error).0,
+                    ErrorCode::INVALID_OPERATION_HANDLE.0
+                );
+                assert_eq!(
+                    raw.abort().unwrap_err().service_specific_error(),
+                    ErrorCode::INVALID_OPERATION.0
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn authenticated_operation_reuses_its_token_when_system_slots_are_full() {
+        let system = keymint_tests::auth_wrapper(&[0x41; 32]);
+        let omk = keymint_tests::auth_wrapper(&[0x73; 32]);
+        let key = keymint_tests::auth_key(&omk, false);
+        let filler_key = keymint_tests::auth_key(&system, false);
+        let params = crate::keymaster::utils::key_params_to_aidl(
+            &[KeyParam::Digest(Digest::Sha256), KeyParam::MacLength(256)],
+            KeyMintDevice::KEY_MINT_V5,
+        )
+        .unwrap();
+        with_system_keymint(system.clone(), || {
+            for aad in [false, true] {
+                let begin = omk.begin(KeyPurpose::SIGN, &key, &params, None).unwrap();
+                let token = keymint_tests::signed_auth_token(begin.challenge, &[0x41; 32]);
+                let operation = Operation::new(
+                    0,
+                    begin.operation.unwrap(),
+                    AppUid(10002),
+                    auth_info_with_token(token.clone()),
+                    false,
+                    LoggingInfo::new(
+                        SecurityLevel::TRUSTED_ENVIRONMENT,
+                        KeyPurpose::SIGN,
+                        MetricsAlgorithm::HMAC,
+                        params.clone(),
+                        false,
+                        false,
+                    ),
+                );
+                operation.update(&[1]).unwrap();
+                let mut fillers = Vec::new();
+                for index in 0..=16 {
+                    match system.begin(KeyPurpose::SIGN, &filler_key, &params, None) {
+                        Ok(begin) => {
+                            assert!(index < 16);
+                            fillers.push(begin.operation.unwrap());
+                        }
+                        Err(error) => {
+                            assert_eq!(
+                                error.service_specific_error(),
+                                ErrorCode::TOO_MANY_OPERATIONS.0
+                            );
+                            break;
+                        }
+                    }
+                }
+                assert_eq!(fillers.len(), 16);
+                if aad {
+                    let error = operation.update_aad(&[]).unwrap_err();
+                    assert_eq!(
+                        anyhow_error_to_serialized_error(&error).0,
+                        ErrorCode::INVALID_TAG.0
+                    );
+                } else {
+                    operation.update(&[2]).unwrap();
+                    assert_eq!(operation.finish(Some(&[3]), None).unwrap().unwrap().len(), 32);
+                }
+                assert_eq!(
+                    operation.auth_info.lock().unwrap().before_update().unwrap().0,
+                    Some(token)
+                );
+                let begin = omk.begin(KeyPurpose::SIGN, &key, &params, None).unwrap();
+                let token = keymint_tests::signed_auth_token(begin.challenge, &[0x41; 32]);
+                let mut fresh = auth_info_with_token(token.clone());
+                let error = fresh.localize_auth_token(Some(&token)).unwrap_err();
+                assert_eq!(
+                    anyhow_error_to_serialized_error(&error).0,
+                    ErrorCode::TOO_MANY_OPERATIONS.0
+                );
+                begin.operation.unwrap().abort().unwrap();
+                for filler in fillers {
+                    filler.abort().unwrap();
+                }
+            }
+        });
     }
 }

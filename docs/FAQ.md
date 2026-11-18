@@ -33,13 +33,11 @@ from both attempts instead of guessing.
 
 The supported production range is:
 
-- Android 12 through Android 17;
+- Android 13 through Android 17;
 - `arm64-v8a` devices; and
 - Linux kernels 4.14 through 6.18, plus newer LTS kernels.
 
-Android 11 and older are not supported. An installer may run on another
-version or architecture, but that does not make it an officially supported
-setup.
+The installer requires API level 33 or higher.
 
 ### Does OMK add StrongBox to a phone that does not have it?
 
@@ -383,14 +381,12 @@ or the authorization may have expired before the operation started. A log such
 as `KEY_USER_NOT_AUTHENTICATED` does not always mean OMK is broken.
 
 After System accepts an authentication or maintenance update, the injector
-forwards it to OMK once before returning the System reply. Auth tokens use a
-separate RPC session from key operations and lifecycle updates. Business RPC
-sessions use up to four connections; auth-token and lifecycle sessions each use
-one. Failed updates are discarded without retries or a global recovery gate.
-A mirror failure returns an OMK error for a caller allowed by the filter and
-preserves the System reply for other callers. A stalled synchronous RPC can still
-wait without a separate timeout. Authentication and lock-state checks apply when
-the operation runs.
+forwards it once to OMK when the private service is available. Auth tokens use a
+separate RPC session from key operations and lifecycle updates. One-way updates
+follow the same execution path and discard the external reply. Authentication and
+lock-state checks apply when the operation runs. Tokens retain their original
+MAC in the cache. System KeyMint must verify it before OMK translates it for
+use by its own KeyMint.
 
 Authenticate in the way the app requests and retry promptly. Keep
 `force_skip_system_biometric_hat_verification` at `false` unless a maintainer

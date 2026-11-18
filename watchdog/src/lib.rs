@@ -17,6 +17,7 @@
 
 //! This module implements a watchdog thread.
 
+use jiff::{Timestamp, ZonedDateTime};
 use std::{
     cmp::min,
     collections::HashMap,
@@ -67,9 +68,14 @@ impl Record {
     // Times are hard. This may not be accurate (e.g. if the system clock has been modified since
     // the watchdog started), but it's _really_ useful to get a starting wall time for overrunning
     // watchdogs.
-    fn started_utc(&self) -> String {
-        let started_utc = chrono::Utc::now() - self.started.elapsed();
-        format!("{}", started_utc.format("%m-%d %H:%M:%S%.3f UTC"))
+    fn started_local(&self) -> String {
+        let now = ZonedDateTime::now();
+        now.timestamp()
+            .saturating_sub(self.started.elapsed())
+            .unwrap_or(Timestamp::MIN)
+            .to_zoned_datetime(now.offset().to_time_zone())
+            .strftime("%m-%d %H:%M:%S%.3f UTC%:z")
+            .to_string()
     }
 }
 
@@ -186,7 +192,7 @@ impl WatchdogState {
                             "{:?} {} Started: {} Pending: {:?} Overdue {:?} for {:?}",
                             i.tid,
                             i.id,
-                            r.started_utc(),
+                            r.started_local(),
                             r.started.elapsed(),
                             r.deadline.elapsed(),
                             ctx
@@ -197,7 +203,7 @@ impl WatchdogState {
                             "{:?} {} Started: {} Pending: {:?} Overdue {:?}",
                             i.tid,
                             i.id,
-                            r.started_utc(),
+                            r.started_local(),
                             r.started.elapsed(),
                             r.deadline.elapsed()
                         );
@@ -219,7 +225,7 @@ impl WatchdogState {
                         "Watchdog complete for: {:?} {} Started: {} Pending: {:?} Overdue {:?} for {:?}",
                         index.tid,
                         index.id,
-                        record.started_utc(),
+                        record.started_local(),
                         record.started.elapsed(),
                         record.deadline.elapsed(),
                         ctx
@@ -228,7 +234,7 @@ impl WatchdogState {
                         "Watchdog complete for: {:?} {} Started: {} Pending: {:?} Overdue {:?}",
                         index.tid,
                         index.id,
-                        record.started_utc(),
+                        record.started_local(),
                         record.started.elapsed(),
                         record.deadline.elapsed()
                     ),

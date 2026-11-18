@@ -29,7 +29,6 @@ use anyhow::{anyhow, Result};
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io;
-use std::marker::{Send, Sync};
 pub use std::ops::Deref;
 use std::os::raw::c_char;
 use std::ptr;

@@ -113,7 +113,7 @@ jobs:
 
     - name: Install Android build dependencies
       run: |
-        sdkmanager --install "ndk;30.0.16248370" --sdk_root="$ANDROID_SDK_ROOT"
+        sdkmanager --install "ndk;30.0.16248370" "build-tools;37.0.0" --sdk_root="$ANDROID_SDK_ROOT"
         sudo apt-get update
         sudo apt-get install -y protobuf-compiler
 
@@ -168,6 +168,7 @@ jobs:
       with:
         toolchain: nightly
         target: aarch64-linux-android
+        components: rustfmt, clippy
 
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v6
@@ -185,7 +186,7 @@ jobs:
         packages: platform-tools
     - name: Install Android NDK
       run: |
-        echo "y" | sdkmanager --install "ndk;30.0.16248370" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
+        echo "y" | sdkmanager --install "ndk;30.0.16248370" "build-tools;37.0.0" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
     - name: Install protoc
       run: |
         sudo apt-get update

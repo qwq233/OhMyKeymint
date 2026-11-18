@@ -1,15 +1,11 @@
 use super::*;
 use std::os::unix::fs::MetadataExt;
 
-#[cfg(test)]
-pub(super) mod tests;
-
 #[derive(Default)]
 pub(super) struct BinderFdLifecycleState {
     pub(super) generation: u64,
     pub(super) in_flight: usize,
     pub(super) retired: bool,
-    pub(super) protocol_error: bool,
 }
 
 pub(super) struct BinderFdLifecycle {
@@ -17,6 +13,7 @@ pub(super) struct BinderFdLifecycle {
     pub(super) state: Mutex<BinderFdLifecycleState>,
     // Closing a Binder dup flushes and wakes every looper, so keep one pin per connection.
     pub(super) pinned_fd: OnceLock<c_int>,
+    native: OnceLock<bool>,
 }
 
 impl Drop for BinderFdLifecycle {
@@ -42,66 +39,6 @@ struct BinderFdRegistry {
 static NEXT_BINDER_CONNECTION: AtomicU64 = AtomicU64::new(1);
 static BINDER_FD_REGISTRY: LazyLock<Mutex<BinderFdRegistry>> =
     LazyLock::new(|| Mutex::new(BinderFdRegistry::default()));
-static OPERATION_PUBLICATION_WAKE: LazyLock<(Mutex<()>, Condvar)> =
-    LazyLock::new(|| (Mutex::new(()), Condvar::new()));
-static OPERATION_PUBLICATION_WORKER: OnceLock<Result<(), String>> = OnceLock::new();
-
-pub(in crate::hook) fn wake_operation_publication_worker() {
-    let (lock, wake) = &*OPERATION_PUBLICATION_WAKE;
-    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    wake.notify_one();
-}
-
-pub(in crate::hook) fn start_operation_publication_worker() -> Result<(), String> {
-    match OPERATION_PUBLICATION_WORKER.get_or_init(|| {
-        std::thread::Builder::new()
-            .name("omk-binder-publication".to_string())
-            .spawn(operation_publication_worker)
-            .map(|_| ())
-            .map_err(|error| format!("failed to start operation publication worker: {error}"))
-    }) {
-        Ok(()) => Ok(()),
-        Err(error) => Err(error.clone()),
-    }
-}
-
-fn operation_publication_worker() {
-    loop {
-        wait_for_operation_publication_deadline();
-
-        let old_ioctl = OLD_IOCTL.load(Ordering::Acquire);
-        if old_ioctl.is_null() {
-            warn!("event=synthetic operation publication worker stopped because original ioctl is unavailable");
-            return;
-        }
-        let old_ioctl_fn: unsafe extern "C" fn(c_int, c_int, *mut c_void) -> c_int =
-            unsafe { std::mem::transmute(old_ioctl) };
-        unsafe { super::ioctl::flush_native_binder_lifecycle(old_ioctl_fn) };
-    }
-}
-
-fn wait_for_operation_publication_deadline() {
-    let (lock, wake) = &*OPERATION_PUBLICATION_WAKE;
-    let mut guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    loop {
-        match next_operation_publication_probe_deadline() {
-            None => {
-                guard = wake.wait(guard).unwrap_or_else(|poisoned| poisoned.into_inner());
-            }
-            Some(deadline) => {
-                let now = Instant::now();
-                if deadline <= now {
-                    return;
-                }
-                let (next_guard, _) = wake
-                    .wait_timeout(guard, deadline.saturating_duration_since(now))
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                guard = next_guard;
-            }
-        }
-    }
-}
-
 struct SignalMaskGuard {
     previous: libc::sigset_t,
     active: bool,
@@ -175,12 +112,14 @@ fn ensure_binder_fd_lifecycle(
         connection: NEXT_BINDER_CONNECTION.fetch_add(1, Ordering::Relaxed),
         state: Mutex::new(BinderFdLifecycleState::default()),
         pinned_fd: OnceLock::new(),
+        native: OnceLock::new(),
     });
     registry.by_connection.insert(lifecycle.connection, lifecycle.clone());
     registry.by_fd.insert(fd, lifecycle.clone());
     lifecycle
 }
 
+#[cfg(test)]
 pub(super) fn binder_fd_token(fd: c_int) -> BinderFdToken {
     let mut registry = binder_fd_registry();
     let lifecycle = ensure_binder_fd_lifecycle(&mut registry, fd);
@@ -188,32 +127,29 @@ pub(super) fn binder_fd_token(fd: c_int) -> BinderFdToken {
     BinderFdToken { fd, generation, connection: lifecycle.connection }
 }
 
-pub(in crate::hook) fn is_native_binder_connection(
-    connection: BinderStateKey,
-) -> anyhow::Result<bool> {
-    let lifecycle = binder_fd_registry()
+pub(in crate::hook) fn is_native_binder_connection(connection: BinderStateKey) -> bool {
+    binder_fd_registry()
         .by_connection
         .get(&connection)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("unknown Binder connection"))?;
-    let fd = *lifecycle
-        .pinned_fd
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("Binder connection has no pin"))?;
+        .and_then(|lifecycle| lifecycle.native.get().copied())
+        .unwrap_or(false)
+}
+
+fn is_native_driver(fd: c_int) -> bool {
     let mut info: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut info) } < 0 {
-        return Err(std::io::Error::last_os_error().into());
+        return false;
     }
     if info.st_mode & libc::S_IFMT == libc::S_IFCHR {
         for (path, native) in
             [("/dev/binder", true), ("/dev/hwbinder", false), ("/dev/vndbinder", true)]
         {
             if std::fs::metadata(path).is_ok_and(|node| node.rdev() == info.st_rdev) {
-                return Ok(native);
+                return native;
             }
         }
     }
-    anyhow::bail!("Binder connection does not match a known driver");
+    false
 }
 
 pub(super) fn binder_connection_cleanup_ready(connection: BinderStateKey) -> bool {
@@ -336,23 +272,18 @@ where
 
 pub(super) struct BinderIoctlGuard {
     pub(super) lifecycle: Arc<BinderFdLifecycle>,
+    pub(super) token: BinderFdToken,
     pinned_fd: c_int,
 }
 
 impl BinderIoctlGuard {
-    pub(super) fn begin(token: BinderFdToken) -> Result<Self, c_int> {
-        let registry = binder_fd_registry();
-        let lifecycle = registry.by_fd.get(&token.fd).ok_or(libc::EBADF)?.clone();
-        if lifecycle.connection != token.connection {
-            return Err(libc::ESTALE);
-        }
+    pub(super) fn begin(fd: c_int) -> Option<Self> {
+        let mut registry = binder_fd_registry();
+        let lifecycle = ensure_binder_fd_lifecycle(&mut registry, fd);
         let mut state = lifecycle.state.lock().expect("binder fd lifecycle poisoned");
-        if state.retired || state.generation != token.generation {
-            return Err(libc::ESTALE);
-        }
-        if state.protocol_error {
-            return Err(libc::EPROTO);
-        }
+        assert!(!state.retired, "active Binder fd refers to a retired connection: fd={fd}");
+        let token =
+            BinderFdToken { fd, generation: state.generation, connection: lifecycle.connection };
         let pinned_fd = if let Some(&pinned_fd) = lifecycle.pinned_fd.get() {
             pinned_fd
         } else {
@@ -361,7 +292,14 @@ impl BinderIoctlGuard {
             };
             #[cfg(not(test))]
             if raw_pin < 0 {
-                return Err(unsafe { *libc::__errno() });
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EBADF) {
+                    drop(state);
+                    registry.by_fd.remove(&fd);
+                    retire_unaliased_lifecycle(&mut registry, &lifecycle);
+                    return None;
+                }
+                panic!("failed to pin Binder fd={fd} connection={}: {error}", token.connection);
             }
             // Mock-ioctl tests use synthetic fd numbers; real-fd tests still exercise the pin.
             if raw_pin < 0 {
@@ -374,10 +312,11 @@ impl BinderIoctlGuard {
                 raw_pin
             }
         };
+        lifecycle.native.get_or_init(|| is_native_driver(pinned_fd));
         state.in_flight += 1;
         drop(state);
         drop(registry);
-        Ok(Self { lifecycle, pinned_fd })
+        Some(Self { lifecycle, token, pinned_fd })
     }
 
     pub(super) fn fd(&self) -> c_int {
@@ -398,59 +337,13 @@ impl Drop for BinderIoctlGuard {
         drop(state);
         drop(registry);
         if let Some(connection) = retired {
-            retire_binder_connection_publications(connection);
+            reset_current_thread_binder_state(connection);
+            crate::hook::binder::retire_receivers(connection);
         }
         unsafe {
             *libc::__errno() = error;
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BinderIoctlCall {
-    Called(c_int),
-    Stale,
-    Retired,
-}
-
-pub(super) unsafe fn call_binder_ioctl(
-    token: BinderFdToken,
-    old_ioctl_fn: unsafe extern "C" fn(c_int, c_int, *mut c_void) -> c_int,
-    request: c_int,
-    arg: *mut c_void,
-) -> BinderIoctlCall {
-    let Ok(guard) = BinderIoctlGuard::begin(token) else {
-        return BinderIoctlCall::Stale;
-    };
-    BinderIoctlCall::Called(old_ioctl_fn(guard.fd(), request, arg))
-}
-
-pub(super) unsafe fn call_binder_connection_ioctl(
-    token: BinderFdToken,
-    old_ioctl_fn: unsafe extern "C" fn(c_int, c_int, *mut c_void) -> c_int,
-    request: c_int,
-    arg: *mut c_void,
-) -> BinderIoctlCall {
-    let (fd, lifecycle, generation) = {
-        let registry = binder_fd_registry();
-        let Some(lifecycle) = registry.by_connection.get(&token.connection).cloned() else {
-            return BinderIoctlCall::Retired;
-        };
-        let fd = registry
-            .by_fd
-            .iter()
-            .find_map(|(fd, candidate)| Arc::ptr_eq(candidate, &lifecycle).then_some(*fd));
-        let Some(fd) = fd else {
-            return BinderIoctlCall::Stale;
-        };
-        let generation = lifecycle.state.lock().expect("binder fd lifecycle poisoned").generation;
-        (fd, lifecycle, generation)
-    };
-    let current = BinderFdToken { fd, generation, connection: lifecycle.connection };
-    if generation != token.generation {
-        return BinderIoctlCall::Retired;
-    }
-    call_binder_ioctl(current, old_ioctl_fn, request, arg)
 }
 
 /// # Safety
@@ -556,5 +449,254 @@ pub(in crate::hook) unsafe extern "C" fn new_fcntl(
         duplicate_binder_fd_with_lifecycle(fd, None, || fcntl(fd, command, arg))
     } else {
         fcntl(fd, command, arg)
+    }
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use crate::hook::intercept::tests::{reset_binder_fd_for_test, SYNTHETIC_REPLY_TEST_LOCK};
+    use std::sync::{Barrier, LazyLock};
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn blocking_binder_read_does_not_hold_the_fd_lifecycle_lock() {
+        let _guard =
+            SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut pipe = [-1; 2];
+        assert_eq!(unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let fd = pipe[0];
+        reset_binder_fd_for_test(fd);
+        let token = binder_fd_token(fd);
+        let lifecycle = existing_binder_fd_lifecycle(fd).unwrap();
+        let ioctl_thread = std::thread::spawn(move || unsafe {
+            let guard = BinderIoctlGuard::begin(token.fd).unwrap();
+            blocking_ioctl(guard.fd(), BINDER_WRITE_READ as c_int, std::ptr::null_mut())
+        });
+        PINNED_IOCTL_ENTERED.wait();
+        let pinned_fd = *lifecycle.pinned_fd.get().unwrap();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let close_thread = std::thread::spawn(move || {
+            let result = unsafe { close_with_binder_fd_lifecycle(fd, || 7) };
+            done_tx.send(result).unwrap();
+        });
+        let close_result = done_rx.recv_timeout(Duration::from_secs(1));
+        assert!(unsafe { libc::fcntl(pinned_fd, libc::F_GETFD) } >= 0);
+        PINNED_IOCTL_RELEASE.wait();
+
+        assert_eq!(ioctl_thread.join().unwrap(), 0);
+        close_thread.join().unwrap();
+        assert_eq!(close_result.unwrap(), 7);
+        drop(lifecycle);
+        assert_eq!(unsafe { libc::fcntl(pinned_fd, libc::F_GETFD) }, -1);
+        unsafe {
+            libc::syscall(libc::SYS_close, pipe[0]);
+            libc::syscall(libc::SYS_close, pipe[1]);
+        }
+        reset_binder_fd_for_test(fd);
+    }
+
+    #[test]
+    fn binder_ioctl_reuses_one_pin_until_connection_retires() {
+        let _guard =
+            SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut pipe = [-1; 2];
+        assert_eq!(unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let fd = pipe[0];
+        reset_binder_fd_for_test(fd);
+        let token = binder_fd_token(fd);
+
+        let first = BinderIoctlGuard::begin(token.fd).unwrap();
+        let pinned_fd = first.fd();
+        assert_ne!(pinned_fd, fd);
+        drop(first);
+        assert!(unsafe { libc::fcntl(pinned_fd, libc::F_GETFD) } >= 0);
+
+        let second = BinderIoctlGuard::begin(token.fd).unwrap();
+        assert_eq!(second.fd(), pinned_fd);
+        drop(second);
+
+        assert_eq!(unsafe { close_with_binder_fd_lifecycle(fd, || libc::close(fd)) }, 0);
+        assert_eq!(unsafe { libc::fcntl(pinned_fd, libc::F_GETFD) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        unsafe { libc::close(pipe[1]) };
+    }
+
+    #[test]
+    fn real_fd_replacement_selects_the_current_lifecycle_and_preserves_inflight_pin() {
+        let _guard =
+            SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for hold_old in [false, true] {
+            let mut first = [-1; 2];
+            let mut second = [-1; 2];
+            assert_eq!(unsafe { libc::pipe2(first.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+            assert_eq!(unsafe { libc::pipe2(second.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+            let fd = first[0];
+            reset_binder_fd_for_test(fd);
+            reset_binder_fd_for_test(second[0]);
+            let old_token = binder_fd_token(fd);
+            let source = binder_fd_token(second[0]);
+            let old_guard = hold_old.then(|| BinderIoctlGuard::begin(fd).unwrap());
+            assert_eq!(
+                unsafe {
+                    duplicate_binder_fd_with_lifecycle(second[0], Some(fd), || {
+                        libc::dup2(second[0], fd)
+                    })
+                },
+                fd
+            );
+            let current = BinderIoctlGuard::begin(fd).unwrap();
+            assert_ne!(current.token.connection, old_token.connection);
+            assert_eq!(current.token.connection, source.connection);
+            assert_eq!(unsafe { libc::write(second[1], b"n".as_ptr().cast(), 1) }, 1);
+            let mut value = 0_u8;
+            assert_eq!(unsafe { libc::read(current.fd(), (&mut value as *mut u8).cast(), 1) }, 1);
+            assert_eq!(value, b'n');
+            if let Some(old) = old_guard {
+                assert_eq!(unsafe { libc::write(first[1], b"o".as_ptr().cast(), 1) }, 1);
+                assert_eq!(unsafe { libc::read(old.fd(), (&mut value as *mut u8).cast(), 1) }, 1);
+                assert_eq!(value, b'o');
+                drop(old);
+            }
+            drop(current);
+            assert_eq!(unsafe { close_with_binder_fd_lifecycle(fd, || libc::close(fd)) }, 0);
+            assert_eq!(
+                unsafe { close_with_binder_fd_lifecycle(second[0], || libc::close(second[0])) },
+                0
+            );
+            unsafe {
+                libc::close(first[1]);
+                libc::close(second[1]);
+            }
+            reset_binder_fd_for_test(fd);
+            reset_binder_fd_for_test(second[0]);
+        }
+    }
+    #[test]
+    fn binder_fd_duplicated_before_first_io_shares_its_lifecycle() {
+        let _guard =
+            SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fd = unsafe { libc::open(c"/dev/binder".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        assert!(fd >= 0, "test requires the Android Binder driver");
+        assert!(existing_binder_fd_lifecycle(fd).is_none());
+
+        let alias = unsafe { duplicate_binder_fd_with_lifecycle(fd, None, || libc::dup(fd)) };
+        assert!(alias >= 0);
+        let source = existing_binder_fd_lifecycle(fd).expect("source should be registered");
+        let destination =
+            existing_binder_fd_lifecycle(alias).expect("destination should inherit source");
+        assert!(Arc::ptr_eq(&source, &destination));
+
+        assert_eq!(unsafe { close_with_binder_fd_lifecycle(alias, || libc::close(alias)) }, 0);
+        assert_eq!(unsafe { close_with_binder_fd_lifecycle(fd, || libc::close(fd)) }, 0);
+    }
+
+    #[test]
+    fn binder_fd_close_and_replacement_serialize_with_ioctl() {
+        let _guard =
+            SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fd = 91;
+        reset_binder_fd_for_test(fd);
+        let original = binder_fd_token(fd);
+        assert!(binder_fd_token_is_current(original));
+        let lifecycle = binder_fd_lifecycle(fd);
+        let ioctl = lifecycle.state.lock().expect("binder fd lifecycle poisoned");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let close_thread = std::thread::spawn(move || {
+            let result = unsafe {
+                close_with_binder_fd_lifecycle(fd, || {
+                    started_tx.send(()).unwrap();
+                    0
+                })
+            };
+            done_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx.try_recv().is_err());
+        drop(ioctl);
+        assert_eq!(done_rx.recv().unwrap(), 0);
+        close_thread.join().unwrap();
+        assert!(!binder_fd_token_is_current(original));
+
+        let after_close = binder_fd_token(fd);
+        unsafe { *libc::__errno() = libc::EIO };
+        assert_eq!(
+            unsafe {
+                duplicate_binder_fd_with_lifecycle(fd + 1, Some(fd), || {
+                    *libc::__errno() = libc::EPERM;
+                    -1
+                })
+            },
+            -1
+        );
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+        assert!(binder_fd_token_is_current(after_close));
+        assert_eq!(unsafe { duplicate_binder_fd_with_lifecycle(fd + 1, Some(fd), || fd) }, fd);
+        assert!(!binder_fd_token_is_current(after_close));
+        reset_binder_fd_for_test(fd);
+        reset_binder_fd_for_test(fd + 1);
+    }
+
+    static PINNED_IOCTL_ENTERED: LazyLock<Barrier> = LazyLock::new(|| Barrier::new(2));
+    static PINNED_IOCTL_RELEASE: LazyLock<Barrier> = LazyLock::new(|| Barrier::new(2));
+
+    unsafe extern "C" fn blocking_ioctl(_fd: c_int, _request: c_int, _arg: *mut c_void) -> c_int {
+        PINNED_IOCTL_ENTERED.wait();
+        PINNED_IOCTL_RELEASE.wait();
+        0
+    }
+
+    fn binder_fd_lifecycle(fd: c_int) -> Arc<BinderFdLifecycle> {
+        let mut registry = binder_fd_registry();
+        ensure_binder_fd_lifecycle(&mut registry, fd)
+    }
+
+    fn existing_binder_fd_lifecycle(fd: c_int) -> Option<Arc<BinderFdLifecycle>> {
+        binder_fd_registry().by_fd.get(&fd).cloned()
+    }
+
+    pub(in crate::hook::intercept) fn binder_fd_token_is_current(token: BinderFdToken) -> bool {
+        existing_binder_fd_lifecycle(token.fd).is_some_and(|lifecycle| {
+            lifecycle.connection == token.connection
+                && lifecycle.state.lock().expect("binder fd lifecycle poisoned").generation
+                    == token.generation
+        })
+    }
+
+    pub(in crate::hook::intercept) fn invalidate_binder_fd(fd: c_int) {
+        let _ = invalidate_binder_fd_token(binder_fd_token(fd));
+    }
+
+    #[test]
+    fn driver_identity_uses_the_connection_pin_after_original_fd_closes() {
+        use std::os::fd::IntoRawFd;
+        let _guard =
+            SYNTHETIC_REPLY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut checked = 0;
+        for (path, expected) in [
+            ("/dev/binder", Some(true)),
+            ("/dev/hwbinder", Some(false)),
+            ("/dev/vndbinder", Some(true)),
+            ("/dev/null", None),
+        ] {
+            let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path) else {
+                continue;
+            };
+            let fd = file.into_raw_fd();
+            reset_binder_fd_for_test(fd);
+            let token = binder_fd_token(fd);
+            let pin = BinderIoctlGuard::begin(fd).unwrap();
+            assert_eq!(is_native_binder_connection(token.connection), expected.unwrap_or(false));
+            assert_eq!(unsafe { close_with_binder_fd_lifecycle(fd, || libc::close(fd)) }, 0);
+            assert_eq!(is_native_binder_connection(token.connection), expected.unwrap_or(false));
+            drop(pin);
+            assert!(!is_native_binder_connection(token.connection));
+            checked += 1;
+        }
+        assert!(checked >= 2);
     }
 }

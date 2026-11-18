@@ -12,5 +12,5 @@ license = "Apache-2.0"
 
 
 [dependencies]
-chrono = "0.4.45"
+jiff = "1.0.1"
 log = "0.4.34"

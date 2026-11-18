@@ -1,4 +1,4 @@
-use rsbinder::BinderFeatures;
+use binder::BinderFeatures;
 
 /// Magic prefix used by the km_compat C++ code to mark a key that is owned by an
 /// underlying Keymaster hardware device that has been wrapped by km_compat. (The
@@ -13,8 +13,5 @@ pub const KEYMASTER_BLOB_SW_PREFIX: &[u8] = b"pKMblob\x01";
 pub const RPC_SOCKET_CONTEXT: &str = "u:r:keystore:s0";
 
 pub fn sid_features() -> BinderFeatures {
-    let mut features = BinderFeatures::default();
-    features.set_requesting_sid = true;
-
-    features
+    BinderFeatures { set_requesting_sid: true, ..BinderFeatures::default() }
 }

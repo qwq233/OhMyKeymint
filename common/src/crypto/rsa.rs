@@ -19,7 +19,7 @@ use crate::{km_err, tag, try_to_vec, Error, FallibleAllocExt};
 use der::asn1::BitStringRef;
 use kmr_wire::keymint::{Digest, KeyParam, PaddingMode};
 use pkcs1::der::{Decode as Pkcs1Decode, Encode as Pkcs1Encode};
-use pkcs1::RsaPrivateKey;
+use pkcs1::RsaPrivateKeyRef;
 use spki::{AlgorithmIdentifier, SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use std::vec::Vec;
 use zeroize::ZeroizeOnDrop;
@@ -78,7 +78,7 @@ impl Key {
     ///        publicExponent     INTEGER  }  -- e
     ///     ```
     pub fn subject_public_key(&self) -> Result<Vec<u8>, Error> {
-        let rsa_pvt_key = RsaPrivateKey::from_der(self.0.as_slice())
+        let rsa_pvt_key = RsaPrivateKeyRef::from_der(self.0.as_slice())
             .map_err(|e| pkcs1_der_error(e, format_args!("failed to parse RsaPrivateKey")))?;
 
         let rsa_pub_key = rsa_pvt_key.public_key();
@@ -91,7 +91,7 @@ impl Key {
 
     /// Size of the key in bytes.
     pub fn size(&self) -> usize {
-        let rsa_pvt_key = match RsaPrivateKey::from_der(self.0.as_slice()) {
+        let rsa_pvt_key = match RsaPrivateKeyRef::from_der(self.0.as_slice()) {
             Ok(k) => k,
             Err(e) => {
                 log::error!("failed to determine RSA key length: {:?}", e);
@@ -235,7 +235,7 @@ pub fn import_pkcs1_key(
     let key = Key(try_to_vec(private_key)?);
 
     // Need to parse it to find size/exponent.
-    let parsed_key = pkcs1::RsaPrivateKey::try_from(private_key)
+    let parsed_key = RsaPrivateKeyRef::try_from(private_key)
         .map_err(|_| km_err!(InvalidArgument, "failed to parse inner PKCS#1 key"))?;
     let key_size = parsed_key.modulus.as_bytes().len() as u32 * 8;
 

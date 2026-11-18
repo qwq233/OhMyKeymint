@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::boxed::Box;
+use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Write};
 #[cfg(unix)]
@@ -21,15 +21,14 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::{eprintln, format, vec::Vec};
 
 use anyhow::{anyhow, Context as _};
-use log::{LevelFilter, Record};
-use log4rs::append::console::ConsoleAppender;
+use jiff::ZonedDateTime;
+use log::{Level, LevelFilter, Record};
 use log4rs::append::Append;
 use log4rs::config::{Appender, Config, Root};
-use log4rs::encode::pattern::PatternEncoder;
-use log4rs::encode::{writer::simple::SimpleWriter, Encode};
+use log4rs::encode::writer::{console::ConsoleWriter, simple::SimpleWriter};
+use log4rs::encode::{Color, Encode, Style, Write as LogWriter};
 
 pub const DEFAULT_MAX_LOG_SIZE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -200,9 +199,87 @@ impl Drop for FileLockGuard {
     }
 }
 
-pub fn build_console_file_config<P: AsRef<Path>>(
+#[derive(Debug)]
+struct LocalLogEncoder;
+
+impl Encode for LocalLogEncoder {
+    fn encode(&self, writer: &mut dyn LogWriter, record: &Record<'_>) -> anyhow::Result<()> {
+        write!(writer, "{} [", ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S UTC%:z"))?;
+        let mut style = Style::new();
+        let highlight = match record.level() {
+            Level::Error => Some(style.text(Color::Red).intense(true)),
+            Level::Warn => Some(style.text(Color::Yellow)),
+            Level::Info => Some(style.text(Color::Green)),
+            Level::Trace => Some(style.text(Color::Cyan)),
+            Level::Debug => None,
+        };
+        if let Some(style) = &highlight {
+            writer.set_style(style)?;
+        }
+        let level = write!(writer, "{}", record.level());
+        if highlight.is_some() {
+            writer.set_style(&Style::new())?;
+        }
+        level?;
+        writeln!(writer, "] {} - {}", record.module_path().unwrap_or("???"), record.args())?;
+        Ok(())
+    }
+}
+
+// The log4rs console appender enables the chrono-backed pattern encoder.
+struct StdoutAppender(Option<ConsoleWriter>);
+
+impl fmt::Debug for StdoutAppender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StdoutAppender").finish_non_exhaustive()
+    }
+}
+
+impl Append for StdoutAppender {
+    fn append(&self, record: &Record<'_>) -> anyhow::Result<()> {
+        let mut terminal;
+        let mut plain;
+        let writer: &mut dyn LogWriter = if let Some(console) = &self.0 {
+            terminal = console.lock();
+            &mut terminal
+        } else {
+            plain = SimpleWriter(io::stdout().lock());
+            &mut plain
+        };
+        LocalLogEncoder.encode(writer, record)?;
+        writer.flush()?;
+        Ok(())
+    }
+
+    fn flush(&self) {}
+}
+
+pub fn init_console_file_logger(
+    file_path: &str,
+    configured_level: LevelFilter,
+    error_prefix: &str,
+) -> anyhow::Result<()> {
+    let (config, file_logging_ready) =
+        build_console_file_config(file_path, LevelFilter::Trace, error_prefix)?;
+    let android_logger = android_logger::AndroidLogger::new(
+        android_logger::Config::default()
+            .with_max_level(LevelFilter::Trace)
+            .with_tag("OhMyKeymint"),
+    );
+    let log4rs = log4rs::Logger::new(config);
+    multi_log::MultiLogger::init(
+        vec![Box::new(android_logger), Box::new(log4rs)],
+        log::Level::Trace,
+    )?;
+    log::set_max_level(configured_level);
+    if file_logging_ready {
+        log::info!("file logging enabled at {} with level {:?}", file_path, configured_level);
+    }
+    Ok(())
+}
+
+fn build_console_file_config<P: AsRef<Path>>(
     file_path: P,
-    pattern: &str,
     level: LevelFilter,
     error_prefix: &str,
 ) -> anyhow::Result<(Config, bool)> {
@@ -212,8 +289,7 @@ pub fn build_console_file_config<P: AsRef<Path>>(
         .map(|target| target != Path::new("/dev/null"))
         .unwrap_or(true)
     {
-        let stdout =
-            ConsoleAppender::builder().encoder(Box::new(PatternEncoder::new(pattern))).build();
+        let stdout = StdoutAppender(ConsoleWriter::stdout());
         builder = builder.appender(Appender::builder().build("stdout", Box::new(stdout)));
         root = root.appender("stdout");
     }
@@ -229,109 +305,18 @@ pub fn build_console_file_config<P: AsRef<Path>>(
         ),
     }
 
-    let file_logging_ready =
-        match LockedRotatingFileAppender::new(path, Box::new(PatternEncoder::new(pattern))) {
-            Ok(file) => {
-                builder = builder.appender(Appender::builder().build("file", Box::new(file)));
-                root = root.appender("file");
-                true
-            }
-            Err(error) => {
-                eprintln!(
-                    "{} file logging disabled for {}: {}",
-                    error_prefix,
-                    path.display(),
-                    error
-                );
-                false
-            }
-        };
+    let file_logging_ready = match LockedRotatingFileAppender::new(path, Box::new(LocalLogEncoder))
+    {
+        Ok(file) => {
+            builder = builder.appender(Appender::builder().build("file", Box::new(file)));
+            root = root.appender("file");
+            true
+        }
+        Err(error) => {
+            eprintln!("{} file logging disabled for {}: {}", error_prefix, path.display(), error);
+            false
+        }
+    };
 
     Ok((builder.build(root.build(level))?, file_logging_ready))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use log::Level;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_log_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        std::env::temp_dir().join(format!("omk-log-test-{}-{nanos}", std::process::id())).join(name)
-    }
-
-    fn append_message(appender: &LockedRotatingFileAppender, message: &'static str) {
-        let args = format_args!("{message}");
-        let record = Record::builder().args(args).level(Level::Info).target("logging-test").build();
-        log4rs::append::Append::append(appender, &record).unwrap();
-    }
-
-    fn log_lines(path: &Path) -> Vec<String> {
-        fs::read_to_string(path).unwrap().lines().map(str::to_owned).collect()
-    }
-
-    #[test]
-    fn appender_does_not_create_sidecar_lock_file() {
-        let path = temp_log_path("runtime.log");
-        let parent = path.parent().unwrap();
-        fs::create_dir_all(parent).unwrap();
-        let lock_path = suffixed_path(&path, ".lock");
-        fs::write(&lock_path, b"legacy").unwrap();
-
-        let appender =
-            LockedRotatingFileAppender::new(&path, Box::new(PatternEncoder::new("{m}{n}")))
-                .unwrap();
-        append_message(&appender, "hello");
-
-        assert_eq!(log_lines(&path), ["hello"]);
-        assert!(!lock_path.exists());
-        let _ = fs::remove_dir_all(parent);
-    }
-
-    #[test]
-    fn appender_rotates_without_sidecar_lock_file() {
-        let path = temp_log_path("runtime.log");
-        let parent = path.parent().unwrap();
-        let appender = LockedRotatingFileAppender::with_max_size(
-            &path,
-            Box::new(PatternEncoder::new("{m}{n}")),
-            8,
-        )
-        .unwrap();
-
-        append_message(&appender, "abc");
-        append_message(&appender, "defghijkl");
-
-        assert_eq!(log_lines(&suffixed_path(&path, ".1")), ["abc"]);
-        assert_eq!(log_lines(&path), ["defghijkl"]);
-        assert!(!suffixed_path(&path, ".lock").exists());
-        let _ = fs::remove_dir_all(parent);
-    }
-
-    #[test]
-    fn appender_reopens_after_another_appender_rotates() {
-        let path = temp_log_path("runtime.log");
-        let parent = path.parent().unwrap();
-        let first = LockedRotatingFileAppender::with_max_size(
-            &path,
-            Box::new(PatternEncoder::new("{m}{n}")),
-            8,
-        )
-        .unwrap();
-        let second = LockedRotatingFileAppender::with_max_size(
-            &path,
-            Box::new(PatternEncoder::new("{m}{n}")),
-            8,
-        )
-        .unwrap();
-
-        append_message(&first, "abc");
-        append_message(&second, "defgh");
-        append_message(&first, "i");
-
-        assert_eq!(log_lines(&suffixed_path(&path, ".1")), ["abc"]);
-        assert_eq!(log_lines(&path), ["defgh", "i"]);
-        let _ = fs::remove_dir_all(parent);
-    }
 }

@@ -41,51 +41,40 @@
 //! from the database module these functions take permission check
 //! callbacks.
 
-use crate::android::hardware::security::keymint::{
-    HardwareAuthToken::HardwareAuthToken, HardwareAuthenticatorType::HardwareAuthenticatorType,
-    SecurityLevel::SecurityLevel,
-};
-use crate::android::security::metrics::{
-    Storage::Storage as MetricsStorage, StorageStats::StorageStats,
-};
-use crate::android::system::keystore2::{Domain::Domain, KeyDescriptor::KeyDescriptor};
-use crate::err as ks_err;
-use crate::impl_metadata;
+use crate::android::hardware::security::keymint::HardwareAuthToken::HardwareAuthToken;
+use crate::android::hardware::security::keymint::HardwareAuthenticatorType::HardwareAuthenticatorType;
+use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use crate::android::security::metrics::Storage::Storage as MetricsStorage;
+use crate::android::security::metrics::StorageStats::StorageStats;
+use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use crate::keymaster::crypto::ZVec;
 use crate::keymaster::database::{perboot, utils, versioning};
+use crate::keymaster::error::{Error as KsError, ErrorCode, ResponseCode};
 use crate::keymaster::gc::Gc;
 use crate::keymaster::key_parameter::{KeyParameter, KeyParameterValue, Tag};
 use crate::keymaster::permission::KeyPermSet;
+use crate::keymaster::super_key::SuperKeyType;
 use crate::keymaster::utils::{
     get_current_time_in_milliseconds, watchdog as wd, AndroidUserId, AppUid, Challenge,
     SecureUserId, AID_USER_OFFSET,
 };
-use crate::keymaster::{
-    error::{Error as KsError, ErrorCode, ResponseCode},
-    super_key::SuperKeyType,
-};
 use crate::plat::attestation::{parse_tlv, ANDROID_ATTESTATION_OID};
+use crate::{err as ks_err, impl_metadata};
 use anyhow::{anyhow, Context, Result};
 use log::info;
 use rand::random;
-use rusqlite::{
-    params, params_from_iter,
-    types::FromSql,
-    types::FromSqlResult,
-    types::ToSqlOutput,
-    types::{FromSqlError, Value, ValueRef},
-    Connection, OptionalExtension, ToSql, Transaction,
-};
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-    sync::{Arc, Condvar, Mutex},
-    time::{Duration, SystemTime},
-};
-use std::{convert::TryFrom, convert::TryInto, ops::Deref, sync::LazyLock, time::SystemTimeError};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Value, ValueRef};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql, Transaction};
+use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
+use std::path::Path;
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::time::{Duration, SystemTime, SystemTimeError};
 use utils as db_utils;
 use utils::SqlField;
-use x509_cert::{der::Decode, Certificate};
+use x509_cert::der::Decode;
+use x509_cert::Certificate;
 
 use TransactionBehavior::Immediate;
 
@@ -3849,11 +3838,11 @@ mod tests {
 
     #[test]
     fn password_wrapped_omk_legacy_super_key_is_readable() {
-        use crate::keymaster::{
-            crypto::{aes_gcm_decrypt, aes_gcm_encrypt, Password, AES_256_KEY_LENGTH},
-            super_key::{SuperEncryptionAlgorithm, SuperKeyManager},
-            utils::AesGcm,
+        use crate::keymaster::crypto::{
+            aes_gcm_decrypt, aes_gcm_encrypt, Password, AES_256_KEY_LENGTH,
         };
+        use crate::keymaster::super_key::{SuperEncryptionAlgorithm, SuperKeyManager};
+        use crate::keymaster::utils::AesGcm;
 
         let mut metadata = BlobMetaData::new();
         metadata.add(BlobMetaEntry::EncryptedBy(EncryptedBy::Password));

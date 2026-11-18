@@ -1,0 +1,16 @@
+[package]
+name = "android-binder-ndk-sys"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+libc = "0.2.191"
+libloading = "0.9.0"
+
+[lib]
+name = "binder_ndk_sys"
+path = "lib.rs"
+
+[build-dependencies]
+bindgen = { version = "0.73.2", default-features = false, features = ["runtime"] }

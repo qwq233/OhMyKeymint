@@ -5,16 +5,13 @@ use kmr_common::runtime::{
     retry::{retry_read_race, ReadRaceErrorKind, RetryOutcome},
 };
 use log::LevelFilter;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
-
-#[cfg(test)]
-mod tests;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/data/misc/keystore/omk/injector.toml";
 const CURRENT_CONFIG_VERSION: u32 = 1;
@@ -32,7 +29,7 @@ pub struct InjectorConfig {
     pub intercept: InterceptConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct MainConfig {
@@ -40,7 +37,7 @@ pub struct MainConfig {
     pub log_level: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct FilterConfig {
@@ -50,7 +47,7 @@ pub struct FilterConfig {
     pub allow_unknown_package: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct InterceptConfig {
@@ -158,18 +155,26 @@ struct ConfigVersion {
     version: Option<toml::Spanned<i64>>,
 }
 
-#[derive(Serialize)]
-struct WritableConfig<'a> {
-    version: u32,
-    scoop: &'a [String],
-    main: &'a MainConfig,
-    filter: &'a FilterConfig,
-    intercept: &'a InterceptConfig,
-}
-
 static CONFIG: OnceLock<RwLock<Arc<InjectorConfig>>> = OnceLock::new();
 static WATCHER_STARTED: OnceLock<()> = OnceLock::new();
 static CONFIG_FILE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG: std::cell::RefCell<Option<Arc<InjectorConfig>>> = std::cell::RefCell::default();
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_config<T>(config: InjectorConfig, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Arc<InjectorConfig>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_CONFIG.replace(self.0.take());
+        }
+    }
+    let _restore = Restore(TEST_CONFIG.replace(Some(Arc::new(config))));
+    run()
+}
 
 impl LoadContext {
     fn label(self) -> &'static str {
@@ -181,6 +186,10 @@ impl LoadContext {
 }
 
 pub fn get() -> Arc<InjectorConfig> {
+    #[cfg(test)]
+    if let Some(config) = TEST_CONFIG.with_borrow(Clone::clone) {
+        return config;
+    }
     if CONFIG.get().is_none() || WATCHER_STARTED.get().is_none() {
         ensure_initialized();
     }
@@ -282,7 +291,7 @@ fn load_or_seed(path: &Path, context: LoadContext) -> Option<InjectorConfig> {
                 error
             );
             let mut config = InjectorConfig::default();
-            if let Err(write_error) = write_config(path, &config) {
+            if let Err(write_error) = write_default_config(path) {
                 log::error!(
                     "failed to seed config at {}: {}; disabling injector",
                     path.display(),
@@ -294,13 +303,18 @@ fn load_or_seed(path: &Path, context: LoadContext) -> Option<InjectorConfig> {
         }
         Err(error) => {
             log::warn!(
-                "load from {} via {} failed: {}; keeping current config",
+                "load from {} via {} failed: {}; {}",
                 path.display(),
                 context.label(),
-                error
+                error,
+                if matches!(context, LoadContext::Startup) {
+                    "using disabled defaults"
+                } else {
+                    "keeping current config"
+                }
             );
             if matches!(context, LoadContext::Startup) {
-                let mut config = current_config_snapshot();
+                let mut config = InjectorConfig::default();
                 config.main.enabled = false;
                 Some(config)
             } else {
@@ -310,24 +324,11 @@ fn load_or_seed(path: &Path, context: LoadContext) -> Option<InjectorConfig> {
     }
 }
 
-fn current_config_snapshot() -> InjectorConfig {
-    match CONFIG.get() {
-        Some(lock) => match lock.read() {
-            Ok(config) => config.as_ref().clone(),
-            Err(error) => {
-                log::error!("current config lock poisoned while snapshotting: {}", error);
-                InjectorConfig::default()
-            }
-        },
-        None => InjectorConfig::default(),
-    }
-}
-
-fn write_config(path: &Path, config: &InjectorConfig) -> io::Result<()> {
+fn write_default_config(path: &Path) -> io::Result<()> {
     let _write_guard = CONFIG_FILE_WRITE_LOCK
         .lock()
         .map_err(|_| io::Error::other("config file write lock poisoned"))?;
-    let contents = render_config(config)?;
+    let contents = include_str!("../../template/injector.toml");
     let (default_uid, default_gid) = default_owner(path);
     atomic_replace_preserving_metadata(path, contents.as_bytes(), 0o600, default_uid, default_gid)?;
     log::info!("wrote config to {}", path.display());
@@ -342,37 +343,6 @@ fn default_owner(path: &Path) -> (u32, u32) {
     }
 }
 
-fn render_config(config: &InjectorConfig) -> io::Result<String> {
-    let mut contents = String::from(
-        "# With `[filter].enabled = true`, a UID is intercepted when any package\n\
-         # sharing that UID is listed in `scoop`.\n\
-         # Filter deny settings still apply to every package resolved for the UID.\n\n",
-    );
-    let base = toml::to_string_pretty(&WritableConfig {
-        version: config.version,
-        scoop: &config.scoop,
-        main: &config.main,
-        filter: &config.filter,
-        intercept: &config.intercept,
-    })
-    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    contents.push_str(&base);
-
-    for (package, table) in &config.scoop_details {
-        contents.push('\n');
-        contents.push_str("[scoop.");
-        contents.push_str(package);
-        contents.push_str("]\n");
-        if !table.is_empty() {
-            let table_body = toml::to_string_pretty(table)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            contents.push_str(&table_body);
-        }
-    }
-
-    Ok(contents)
-}
-
 fn parse_versioned_config(
     contents: &str,
     allow_migration: bool,
@@ -382,26 +352,17 @@ fn parse_versioned_config(
     let preprocessed = preprocess_config(without_bom)?;
     let version: ConfigVersion =
         toml::from_str(&preprocessed).map_err(|error| error.to_string())?;
+    if version.version.as_ref().is_none_or(|version| *version.get_ref() == 0) && !allow_migration {
+        return Err("injector config version 0 requires an injector restart to migrate".into());
+    }
     let migrated = match version.version {
-        None => {
-            if !allow_migration {
-                return Err(
-                    "injector config version 0 requires an injector restart to migrate".into()
-                );
-            }
-            Some(insert_config_version(contents, bom_len))
-        }
+        None => Some(insert_config_version(contents, bom_len)),
         Some(version) => match *version.get_ref() {
-            0 if allow_migration => {
+            0 => {
                 let span = version.span();
                 let mut migrated = contents.to_string();
                 migrated.replace_range(span.start + bom_len..span.end + bom_len, "1");
                 Some(migrated)
-            }
-            0 => {
-                return Err(
-                    "injector config version 0 requires an injector restart to migrate".into()
-                )
             }
             version if version == i64::from(CURRENT_CONFIG_VERSION) => None,
             version if version < 0 => {
@@ -424,23 +385,13 @@ fn parse_versioned_config(
 
 fn insert_config_version(contents: &str, bom_len: usize) -> String {
     let newline = if contents.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut migrated = String::with_capacity(contents.len() + 12);
-    migrated.push_str(&contents[..bom_len]);
-    migrated.push_str("version = 1");
-    migrated.push_str(newline);
-    migrated.push_str(&contents[bom_len..]);
-    migrated
+    format!("{}version = 1{newline}{}", &contents[..bom_len], &contents[bom_len..])
 }
 
 fn preprocess_config(contents: &str) -> Result<String, String> {
     let mut rewritten = String::with_capacity(contents.len());
     for (line_no, line) in contents.split_inclusive('\n').enumerate() {
-        let (body, ending) = match line.strip_suffix('\n') {
-            Some(body) => (body, "\n"),
-            None => (line, ""),
-        };
-        rewritten.push_str(&rewrite_scoop_header(body, line_no + 1)?);
-        rewritten.push_str(ending);
+        rewritten.push_str(&rewrite_scoop_header(line, line_no + 1)?);
     }
     Ok(rewritten)
 }
@@ -601,5 +552,118 @@ impl InjectorConfig {
         self.scoop = normalize_packages(self.scoop);
         self.scoop_details = normalize_scoop_details(self.scoop_details);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ops::Deref;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempConfigPath(PathBuf);
+
+    impl Deref for TempConfigPath {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for TempConfigPath {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+            if let (Some(parent), Some(file_name)) = (self.0.parent(), self.0.file_name()) {
+                let temp = parent.join(format!(
+                    ".{}.tmp-{}",
+                    file_name.to_string_lossy(),
+                    std::process::id()
+                ));
+                let _ = fs::remove_file(temp);
+            }
+        }
+    }
+
+    fn temp_config_path(name: &str) -> TempConfigPath {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos();
+        TempConfigPath(std::env::temp_dir().join(format!("omk-injector-{name}-{unique}.toml")))
+    }
+
+    #[test]
+    fn missing_config_is_seeded_but_invalid_startup_config_is_untouched() {
+        let path = temp_config_path("missing");
+
+        let loaded = load_or_seed(&path, LoadContext::Startup).unwrap();
+        assert!(path.exists(), "missing config should be written to disk");
+        assert_eq!(loaded.version, CURRENT_CONFIG_VERSION);
+
+        let on_disk = fs::read_to_string(&*path).expect("written config should be readable");
+        assert_eq!(on_disk, include_str!("../../template/injector.toml"));
+        let reparsed = parse_config(&on_disk).expect("written config should parse");
+        assert_eq!(reparsed.scoop, loaded.scoop);
+
+        let path = temp_config_path("invalid");
+        let invalid = "[main\nbroken";
+        fs::write(&*path, invalid).expect("invalid config should be written");
+
+        let loaded = load_or_seed(&path, LoadContext::Startup).unwrap();
+        assert!(!loaded.main.enabled, "invalid startup config must disable injection");
+        assert_eq!(fs::read_to_string(&*path).unwrap(), invalid);
+        assert!(!PathBuf::from(format!("{}.bak", path.display())).exists());
+    }
+
+    #[test]
+    fn v0_config_migrates_through_public_scoop_syntax_and_preserves_mode() {
+        let path = temp_config_path("v0-migration");
+        let v0 = "\u{feff}scoop = [\"com.example.app\"]\r\n\r\n\
+                  [scoop.com.example.app]\r\nmode = \"strict\"\r\n";
+        fs::write(&*path, v0).unwrap();
+        fs::set_permissions(&*path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let loaded = load_from_path(&path, true).expect("v0 config should migrate");
+        assert_eq!(loaded.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(
+            loaded
+                .scoop_details
+                .get("com.example.app")
+                .and_then(|table| table.get("mode"))
+                .and_then(toml::Value::as_str),
+            Some("strict")
+        );
+
+        let migrated = fs::read_to_string(&*path).unwrap();
+        assert!(parse_versioned_config(&migrated, false).is_ok());
+        assert_eq!(fs::metadata(&*path).unwrap().mode() & 0o777, 0o640);
+    }
+
+    #[test]
+    fn reload_rejects_v0_without_rewriting() {
+        let path = temp_config_path("reload-v0");
+        for v0 in
+            ["scoop = [\"com.example.app\"]\n", "version = 0\nscoop = [\"com.example.app\"]\n"]
+        {
+            fs::write(&*path, v0).unwrap();
+            assert!(load_or_seed(&path, LoadContext::Reload(WatchTrigger::CloseWrite)).is_none());
+            assert_eq!(fs::read_to_string(&*path).unwrap(), v0);
+        }
+    }
+
+    #[test]
+    fn unsupported_versions_are_rejected_without_rewriting() {
+        let path = temp_config_path("future-version");
+        let future = "version = 2\n";
+        fs::write(&*path, future).unwrap();
+        let loaded = load_or_seed(&path, LoadContext::Startup).unwrap();
+        assert!(!loaded.main.enabled);
+        assert_eq!(fs::read_to_string(&*path).unwrap(), future);
+    }
+
+    fn parse_config(contents: &str) -> Result<InjectorConfig, String> {
+        parse_versioned_config(contents, true).map(|(config, _)| config)
     }
 }

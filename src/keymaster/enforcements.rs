@@ -34,6 +34,7 @@ use crate::keymaster::boot_key::BootLevel;
 use crate::keymaster::db::{AuthTokenEntry, BootTime, KeystoreDB};
 use crate::keymaster::error::{map_binder_status, Error, ErrorCode};
 use crate::keymaster::key_parameter::{KeyParameter, KeyParameterValue};
+use crate::keymaster::keymint_device::localize_auth_token_for_omk;
 use crate::keymaster::super_key::SuperEncryptionType;
 use crate::keymaster::utils::{watchdog as wd, AndroidUserId, Challenge, SecureUserId};
 use anyhow::{Context, Result};
@@ -142,6 +143,7 @@ enum DeferredAuthState {
 #[derive(Debug)]
 pub struct AuthInfo {
     state: DeferredAuthState,
+    localized_auth_token: Option<HardwareAuthToken>,
     /// An optional key id required to update the usage count if the key usage is limited.
     key_usage_limited: Option<i64>,
     confirmation_token_receiver: Option<ConfirmationTokenReceiver>,
@@ -245,6 +247,17 @@ fn timestamp_token_request(challenge: Challenge, sender: Sender<Result<TimeStamp
 }
 
 impl AuthInfo {
+    pub(super) fn localize_auth_token(
+        &mut self,
+        token: Option<&HardwareAuthToken>,
+    ) -> Result<Option<HardwareAuthToken>> {
+        let Some(token) = token else { return Ok(None) };
+        if self.localized_auth_token.is_none() {
+            self.localized_auth_token = Some(localize_auth_token_for_omk(token)?);
+        }
+        Ok(self.localized_auth_token.clone())
+    }
+
     /// This function gets called after an operation was successfully created.
     /// It makes all the preparations required, so that the operation has all the authentication
     /// related artifacts to advance on update and finish.
@@ -415,6 +428,7 @@ impl Enforcements {
                     None,
                     AuthInfo {
                         state: DeferredAuthState::NoAuthRequired,
+                        localized_auth_token: None,
                         key_usage_limited: None,
                         confirmation_token_receiver: None,
                     },
@@ -646,7 +660,15 @@ impl Enforcements {
                 ),
             )
         };
-        Ok((hat, AuthInfo { state, key_usage_limited, confirmation_token_receiver }))
+        Ok((
+            hat,
+            AuthInfo {
+                state,
+                localized_auth_token: None,
+                key_usage_limited,
+                confirmation_token_receiver,
+            },
+        ))
     }
 
     fn find_auth_token<F>(p: F) -> Option<AuthTokenEntry>
@@ -844,4 +866,67 @@ impl Enforcements {
     }
 }
 
-// TODO: Add tests to enforcement module (b/175578618).
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+
+    pub(crate) fn auth_info_with_token(hat: HardwareAuthToken) -> AuthInfo {
+        AuthInfo {
+            state: DeferredAuthState::Token(hat, None),
+            localized_auth_token: None,
+            key_usage_limited: None,
+            confirmation_token_receiver: None,
+        }
+    }
+
+    #[test]
+    fn matching_bad_token_consumes_waiter_before_a_later_good_token() {
+        let request = AuthRequest::op_auth();
+        let map = TokenReceiverMap::default();
+        map.add_receiver(
+            Challenge(37),
+            TokenReceiver {
+                req: Arc::downgrade(&request),
+                sids: vec![SecureUserId(11)],
+                auth_type: HardwareAuthenticatorType::PASSWORD,
+            },
+        );
+        let good = crate::keymaster::keymint_device::tests::signed_auth_token(37, &[0x41; 32]);
+        let wrong_challenge = HardwareAuthToken { challenge: 38, ..good.clone() };
+        map.add_auth_token(wrong_challenge);
+        assert_eq!(map.map_and_cleanup_counter.lock().unwrap().0.len(), 1);
+        let mut bad = good.clone();
+        bad.mac[0] ^= 1;
+        map.add_auth_token(bad.clone());
+        map.add_auth_token(good);
+        assert!(map.map_and_cleanup_counter.lock().unwrap().0.is_empty());
+        let (received, timestamp) = request.get_auth_tokens().unwrap();
+        assert_eq!(received, bad);
+        assert!(timestamp.is_none());
+        assert!(request.get_auth_tokens().is_err());
+    }
+
+    #[test]
+    fn cached_immediate_token_does_not_bypass_timestamp_authorization() {
+        use crate::keymaster::keymint_device::tests::{auth_wrapper, signed_auth_token};
+        crate::keymaster::authorization::tests::with_system_keymint(
+            auth_wrapper(&[0x41; 32]),
+            || {
+                let token = signed_auth_token(37, &[0x41; 32]);
+                let mut auth = auth_info_with_token(token.clone());
+                let local = auth.localize_auth_token(Some(&token)).unwrap().unwrap();
+                assert_eq!(local.challenge, token.challenge);
+                assert_eq!(local.timestamp, token.timestamp);
+                assert_ne!(local.mac, token.mac);
+                let (sender, receiver) = channel();
+                auth.state = DeferredAuthState::Waiting(AuthRequest::timestamp(token, receiver));
+                sender.send(Err(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED))).unwrap();
+                let error = auth.before_update().unwrap_err();
+                assert_eq!(
+                    crate::keymaster::error::anyhow_error_to_serialized_error(&error).0,
+                    Ec::KEY_USER_NOT_AUTHENTICATED.0
+                );
+            },
+        );
+    }
+}

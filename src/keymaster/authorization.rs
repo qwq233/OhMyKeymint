@@ -14,48 +14,51 @@
 
 //! This module implements IKeystoreAuthorization AIDL interface.
 
-use crate::android::hardware::security::keymint::{
-    HardwareAuthToken::HardwareAuthToken, HardwareAuthenticatorType::HardwareAuthenticatorType,
-    IKeyMintDevice::IKeyMintDevice, KeyParameter::KeyParameter, KeyPurpose::KeyPurpose,
+use crate::android::hardware::security::keymint::HardwareAuthToken::HardwareAuthToken;
+use crate::android::hardware::security::keymint::HardwareAuthenticatorType::HardwareAuthenticatorType;
+use crate::android::hardware::security::keymint::IKeyMintDevice::IKeyMintDevice;
+use crate::android::hardware::security::keymint::KeyParameter::KeyParameter;
+use crate::android::hardware::security::keymint::KeyPurpose::KeyPurpose;
+use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use crate::android::security::authorization::AuthorizationTokens::AuthorizationTokens;
+use crate::android::security::authorization::IKeystoreAuthorization::{
+    BnKeystoreAuthorization, IKeystoreAuthorization,
 };
-use crate::android::security::authorization::{
-    AuthorizationTokens::AuthorizationTokens, IKeystoreAuthorization::BnKeystoreAuthorization,
-    IKeystoreAuthorization::IKeystoreAuthorization, ResponseCode::ResponseCode,
-};
+use crate::android::security::authorization::ResponseCode::ResponseCode;
+use crate::android::security::compat::IKeystoreCompatService::IKeystoreCompatService;
 use crate::android::system::keystore2::ResponseCode::ResponseCode as KsResponseCode;
-use crate::err as ks_err;
+use crate::config::config;
+use crate::global::{DB, ENFORCEMENTS, SUPER_KEY};
 use crate::keymaster::async_task::AsyncTask;
 use crate::keymaster::crypto::{Password, ZVec};
-use crate::keymaster::error::anyhow_error_to_cstring;
-use crate::keymaster::error::Error as KeystoreError;
-use crate::keymaster::keymint_device::{localize_auth_token_for_omk, KeyMintDevice};
+use crate::keymaster::error::{
+    anyhow_error_to_cstring, map_binder_status, map_km_error, Error as KeystoreError, ErrorCode,
+};
+use crate::keymaster::keymint_device::KeyMintDevice;
 use crate::keymaster::permission::{self, require_forwarded_context, KeystorePerm};
 use crate::keymaster::super_key::WipeKeyOption;
 use crate::keymaster::utils::{
     check_keystore_permission, get_interface_once, key_params_to_aidl, watchdog as wd,
     AndroidUserId, Challenge, SecureUserId,
 };
-use crate::selinux;
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 use crate::top::qwq2333::ohmykeymint::IOhMyAuthorizationService::{
     BnOhMyAuthorizationService, IOhMyAuthorizationService,
 };
-use crate::{
-    config::config,
-    global::{DB, ENFORCEMENTS, SUPER_KEY},
-    log_client_err,
-};
+use crate::{err as ks_err, log_client_err, selinux};
 use anyhow::{Context, Result};
-use kmr_wire::{
-    keymint::{Algorithm as KmAlgorithm, Digest as KmDigest, KeyParam, KeyPurpose as KmKeyPurpose},
-    KeySizeInBits,
+use binder::{
+    DeathRecipient, ExceptionCode, IBinder, Interface, Result as BinderResult,
+    Status as BinderStatus, StatusCode, Strong,
 };
+use kmr_wire::keymint::{
+    Algorithm as KmAlgorithm, Digest as KmDigest, KeyParam, KeyPurpose as KmKeyPurpose,
+};
+use kmr_wire::KeySizeInBits;
 use log::{error, info};
-use rsbinder::BinderResult;
-use rsbinder::{
-    DeathRecipient, ExceptionCode, Interface, Status as BinderStatus, StatusCode, Strong, WIBinder,
-};
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// This is the Authorization error type, it wraps binder exceptions and the
 /// Authorization ResponseCode
@@ -100,7 +103,7 @@ pub fn into_logged_binder(e: anyhow::Error) -> BinderStatus {
             // as well.
             _ => ResponseCode::SYSTEM_ERROR.0,
         };
-        BinderStatus::new_service_specific_error(rc, anyhow_error_to_cstring(&e))
+        BinderStatus::new_service_specific_error_str(rc, anyhow_error_to_cstring(&e))
     } else {
         let rc = match root_cause.downcast_ref::<Error>() {
             Some(Error::Rc(rcode)) => rcode.0,
@@ -110,7 +113,7 @@ pub fn into_logged_binder(e: anyhow::Error) -> BinderStatus {
                 _ => ResponseCode::SYSTEM_ERROR.0,
             },
         };
-        BinderStatus::new_service_specific_error(rc, anyhow_error_to_cstring(&e))
+        BinderStatus::new_service_specific_error_str(rc, anyhow_error_to_cstring(&e))
     }
 }
 
@@ -260,12 +263,12 @@ impl AuthorizationManager {
     /// Create a new instance of Keystore Authorization service.
     pub fn new_native_binder() -> Result<Strong<dyn IKeystoreAuthorization>> {
         let mgr = Self::new_manager();
-        Ok(BnKeystoreAuthorization::new_binder_with_features(mgr, crate::consts::sid_features()))
+        Ok(BnKeystoreAuthorization::new_binder(mgr, crate::consts::sid_features()))
     }
 
     pub fn new_omk_binder() -> Result<Strong<dyn IOhMyAuthorizationService>> {
         let mgr = Self::new_manager();
-        Ok(BnOhMyAuthorizationService::new_binder_with_features(mgr, crate::consts::sid_features()))
+        Ok(BnOhMyAuthorizationService::new_binder(mgr, crate::consts::sid_features()))
     }
 
     /// Act on a lock state notification.
@@ -286,11 +289,7 @@ impl AuthorizationManager {
         }
     }
 
-    fn add_auth_token(
-        &self,
-        ctx: Option<&CallerInfo>,
-        auth_token: &HardwareAuthToken,
-    ) -> Result<()> {
+    fn add_auth_token(&self, auth_token: &HardwareAuthToken) {
         info!(
             "add_auth_token(challenge={}, userId={}, authId={}, authType={:#x}, timestamp={}ms)",
             auth_token.challenge,
@@ -300,37 +299,10 @@ impl AuthorizationManager {
             auth_token.timestamp.milliSeconds,
         );
         if auth_token.userId == 0 {
-            if ctx.is_some() {
-                log::debug!(
-                    "mirrored auth token has zero GK SID, indicating an authenticator problem"
-                );
-            } else {
-                error!("Auth token has zero GK SID, indicating an authenticator problem");
-            }
+            error!("Auth token has zero GK SID, indicating an authenticator problem");
         }
 
-        // Android keystore2 accepts HAT contents at the addAuthToken ingestion boundary. Mirrored
-        // calls only arrive after System returned success, so preserve that result and attempt to
-        // localize the token without applying OMK-only shape or MAC checks. Direct service calls
-        // retain the stricter OMK boundary checks.
-        validate_auth_token_shape_for_source(ctx, auth_token)?;
-        if should_skip_system_auth_token_verification(ctx) {
-            log::debug!(
-                "system auth token MAC verification skipped for mirrored/config fallback authType={:#x} challengeTag={:04x}",
-                auth_token.authenticatorType.0,
-                challenge_tag(auth_token.challenge),
-            );
-        } else {
-            verify_system_auth_token(auth_token)
-                .context(ks_err!("system KeyMint did not verify the auth token MAC"))?;
-        }
-
-        if let Some(localized) =
-            localize_auth_token_for_source(ctx, auth_token, localize_auth_token_for_omk)?
-        {
-            ENFORCEMENTS.add_auth_token(localized);
-        }
-        Ok(())
+        ENFORCEMENTS.add_auth_token(auth_token.clone());
     }
 
     fn get_auth_tokens_for_credstore(
@@ -392,33 +364,13 @@ fn check_omk_keystore_permission(
         .map_err(into_logged_binder)
 }
 
-fn validate_auth_token_shape_for_source(
-    ctx: Option<&CallerInfo>,
-    auth_token: &HardwareAuthToken,
-) -> Result<()> {
-    if ctx.is_some() {
+pub(super) fn verify_auth_token_for_omk(auth_token: &HardwareAuthToken) -> Result<()> {
+    if should_skip_system_auth_token_verification() {
+        validate_auth_token_shape(auth_token)?;
+        log::debug!("system auth token MAC verification explicitly disabled by config");
         Ok(())
     } else {
-        validate_auth_token_shape(auth_token)
-    }
-}
-
-fn localize_auth_token_for_source(
-    ctx: Option<&CallerInfo>,
-    auth_token: &HardwareAuthToken,
-    localize: impl FnOnce(&HardwareAuthToken) -> Result<HardwareAuthToken>,
-) -> Result<Option<HardwareAuthToken>> {
-    match localize(auth_token).context(ks_err!("localizing trusted auth token for OMK")) {
-        Ok(localized) => Ok(Some(localized)),
-        Err(error) if ctx.is_some() => {
-            log::warn!(
-                "dropping auth token mirrored after System success because OMK localization failed authType={:#x} challengeTag={:04x}: {error:#}",
-                auth_token.authenticatorType.0,
-                challenge_tag(auth_token.challenge),
-            );
-            Ok(None)
-        }
-        Err(error) => Err(error),
+        verify_system_auth_token(auth_token)
     }
 }
 
@@ -444,11 +396,7 @@ fn validate_auth_token_shape(auth_token: &HardwareAuthToken) -> Result<()> {
     Ok(())
 }
 
-fn should_skip_system_auth_token_verification(ctx: Option<&CallerInfo>) -> bool {
-    if ctx.is_some() {
-        return true;
-    }
-
+fn should_skip_system_auth_token_verification() -> bool {
     match config().read() {
         Ok(config) => config.main.force_skip_system_biometric_hat_verification,
         Err(_) => {
@@ -460,22 +408,11 @@ fn should_skip_system_auth_token_verification(ctx: Option<&CallerInfo>) -> bool 
 
 thread_local! {
     static SYSTEM_KEYMINT_CACHE: RefCell<Option<HashMap<&'static str, Strong<dyn IKeyMintDevice>>>> =
-        const { RefCell::new(None) };
-    static SYSTEM_KEYMINT_DEATH: RefCell<Option<HashMap<&'static str, Arc<dyn DeathRecipient>>>> =
-        const { RefCell::new(None) };
+        RefCell::default();
+    static SYSTEM_KEYMINT_DEATH: RefCell<Option<HashMap<&'static str, DeathRecipient>>> =
+        RefCell::default();
     static SYSTEM_VERIFIER_KEY_CACHE: RefCell<HashMap<VerifierKeyCacheKey, Vec<u8>>> =
-        RefCell::new(HashMap::new());
-}
-
-struct SystemKeymintDeath {
-    service: &'static str,
-}
-
-impl DeathRecipient for SystemKeymintDeath {
-    fn binder_died(&self, _who: &WIBinder) {
-        clear_system_keymint(self.service);
-        log::warn!("system KeyMint verifier service {} died; cache cleared", self.service);
-    }
+        RefCell::default();
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -500,22 +437,25 @@ fn verify_system_auth_token(auth_token: &HardwareAuthToken) -> Result<()> {
     const SYSTEM_KEYMINT_STRONGBOX: &str =
         "android.hardware.security.keymint.IKeyMintDevice/strongbox";
 
-    let services = [SYSTEM_KEYMINT_DEFAULT, SYSTEM_KEYMINT_STRONGBOX];
+    let services = [
+        (SYSTEM_KEYMINT_DEFAULT, SecurityLevel::TRUSTED_ENVIRONMENT),
+        (SYSTEM_KEYMINT_STRONGBOX, SecurityLevel::STRONGBOX),
+    ];
     let key_params = verifier_key_params(auth_token)
         .context(ks_err!("failed to build system verifier key parameters"))?;
     let op_params = key_params_to_aidl(
-        &[KeyParam::MacLength(VERIFIER_MAC_LENGTH_BITS as u32)],
+        &[KeyParam::Digest(KmDigest::Sha256), KeyParam::MacLength(VERIFIER_MAC_LENGTH_BITS as u32)],
         KeyMintDevice::KEY_MINT_V5,
     )
     .context(ks_err!("failed to build system verifier operation parameters"))?;
-    let mut saw_rejection = false;
-    let mut failures = Vec::new();
+    let mut failure = None;
 
-    for service in services {
-        let keymint = match get_system_keymint(service) {
-            Ok(keymint) => keymint,
+    for (service, level) in services {
+        let keymint = match get_system_keymint(service, level) {
+            Ok(Some(keymint)) => keymint,
+            Ok(None) => continue,
             Err(error) => {
-                failures.push(format!("{service}: connect failed: {error:#}"));
+                failure = Some(error.context(format!("connect System verifier {service}")));
                 continue;
             }
         };
@@ -532,7 +472,12 @@ fn verify_system_auth_token(auth_token: &HardwareAuthToken) -> Result<()> {
                 if is_dead_object_status(&status) {
                     clear_system_keymint(service);
                 }
-                failures.push(format!("{service}: verifier key generation failed: {status}"));
+                failure = Some(
+                    anyhow::Error::new(
+                        map_km_error::<()>(Err(status)).expect_err("a failed Binder call"),
+                    )
+                    .context(format!("generate System verifier key {service}")),
+                );
                 continue;
             }
         };
@@ -558,20 +503,21 @@ fn verify_system_auth_token(auth_token: &HardwareAuthToken) -> Result<()> {
                 if is_dead_object_status(&status) {
                     clear_system_keymint(service);
                 }
-                saw_rejection = true;
-                failures.push(format!("{service}: verifier begin rejected token: {status}"));
+                let rejected = status.exception_code() == ExceptionCode::SERVICE_SPECIFIC
+                    && status.service_specific_error() == ErrorCode::KEY_USER_NOT_AUTHENTICATED.0;
+                let error = anyhow::Error::new(
+                    map_km_error::<()>(Err(status)).expect_err("a failed Binder call"),
+                )
+                .context(format!("System verifier begin {service}"));
+                if rejected {
+                    return Err(error);
+                }
+                failure = Some(error);
             }
         }
     }
 
-    let detail = failures.join("; ");
-    if saw_rejection {
-        return Err(Error::Rc(ResponseCode::SYSTEM_ERROR))
-            .with_context(|| format!("system KeyMint rejected auth token: {detail}"));
-    }
-
-    Err(Error::Rc(ResponseCode::SYSTEM_ERROR))
-        .with_context(|| format!("no system KeyMint verifier was available: {detail}"))
+    Err(failure.expect("the default System verifier was attempted"))
 }
 
 fn verifier_key_params(auth_token: &HardwareAuthToken) -> Result<Vec<KeyParameter>> {
@@ -595,27 +541,59 @@ fn verifier_key_params(auth_token: &HardwareAuthToken) -> Result<Vec<KeyParamete
     key_params_to_aidl(&params, KeyMintDevice::KEY_MINT_V5)
 }
 
-fn get_system_keymint(service: &'static str) -> Result<Strong<dyn IKeyMintDevice>> {
+fn get_system_keymint(
+    service: &'static str,
+    level: SecurityLevel,
+) -> Result<Option<Strong<dyn IKeyMintDevice>>> {
     SYSTEM_KEYMINT_CACHE.with(|cache| {
         if let Some(keymint) =
             cache.borrow().as_ref().and_then(|services| services.get(service).cloned())
         {
-            return Ok(keymint);
+            return Ok(Some(keymint));
         }
 
-        let keymint: Strong<dyn IKeyMintDevice> =
-            get_interface_once(service).with_context(|| format!("connect {service}"))?;
-        let recipient: Arc<dyn DeathRecipient> = Arc::new(SystemKeymintDeath { service });
+        let keymint = if binder::is_declared(service)? {
+            get_interface_once(service).with_context(|| format!("connect {service}"))?
+        } else {
+            let compatibility: Strong<dyn IKeystoreCompatService> =
+                get_interface_once("android.security.compat")
+                    .context("connect System KeyMint compatibility service")?;
+            let Some(keymint) = keymint_from_compatibility(&*compatibility, level)? else {
+                return Ok(None);
+            };
+            keymint
+        };
+        let mut recipient = DeathRecipient::new(move || {
+            clear_system_keymint(service);
+            log::warn!("system KeyMint verifier service {} died; cache cleared", service);
+        });
         keymint
             .as_binder()
-            .link_to_death(Arc::downgrade(&recipient))
+            .link_to_death(&mut recipient)
             .with_context(|| format!("watch {service} death"))?;
         SYSTEM_KEYMINT_DEATH.with(|death| {
             death.borrow_mut().get_or_insert_with(HashMap::new).insert(service, recipient);
         });
         cache.borrow_mut().get_or_insert_with(HashMap::new).insert(service, keymint.clone());
-        Ok(keymint)
+        Ok(Some(keymint))
     })
+}
+
+fn keymint_from_compatibility(
+    compatibility: &dyn IKeystoreCompatService,
+    level: SecurityLevel,
+) -> Result<Option<Strong<dyn IKeyMintDevice>>> {
+    match compatibility.getKeyMintDevice(level) {
+        Ok(keymint) => Ok(Some(keymint)),
+        Err(status)
+            if level == SecurityLevel::STRONGBOX
+                && status.exception_code() == ExceptionCode::TRANSACTION_FAILED
+                && status.transaction_error() == StatusCode::NAME_NOT_FOUND =>
+        {
+            Ok(None)
+        }
+        Err(status) => map_binder_status(Err(status)).context("get System compatibility KeyMint"),
+    }
 }
 
 fn clear_system_keymint(service: &'static str) {
@@ -670,7 +648,7 @@ fn begin_system_verifier(
 ) -> std::result::Result<(), BinderStatus> {
     match begin_system_verifier_once(keymint, &key.blob, op_params, auth_token) {
         Ok(()) => Ok(()),
-        Err(_) if key.reused => {
+        Err(status) if key.reused && verifier_key_needs_refresh(&status) => {
             SYSTEM_VERIFIER_KEY_CACHE.with(|cache| {
                 cache.borrow_mut().remove(key_id);
             });
@@ -679,6 +657,11 @@ fn begin_system_verifier(
         }
         Err(status) => Err(status),
     }
+}
+
+fn verifier_key_needs_refresh(status: &BinderStatus) -> bool {
+    status.exception_code() == ExceptionCode::SERVICE_SPECIFIC
+        && matches!(status.service_specific_error(), value if value == ErrorCode::INVALID_KEY_BLOB.0 || value == ErrorCode::KEY_REQUIRES_UPGRADE.0)
 }
 
 fn begin_system_verifier_once(
@@ -695,8 +678,8 @@ fn begin_system_verifier_once(
 }
 
 fn is_dead_object_status(status: &BinderStatus) -> bool {
-    status.exception_code() == ExceptionCode::TransactionFailed
-        && status.transaction_error() == StatusCode::DeadObject
+    status.exception_code() == ExceptionCode::TRANSACTION_FAILED
+        && status.transaction_error() == StatusCode::DEAD_OBJECT
 }
 
 fn sid_shape(key_id: &VerifierKeyCacheKey) -> &'static str {
@@ -721,7 +704,8 @@ impl IKeystoreAuthorization for AuthorizationManager {
             .context(ks_err!("caller missing AddAuth permissions"))
             .map_err(into_logged_binder)?;
 
-        self.add_auth_token(None, auth_token).map_err(into_logged_binder)
+        self.add_auth_token(auth_token);
+        Ok(())
     }
 
     fn onDeviceUnlocked(&self, user_id: i32, password: Option<&[u8]>) -> BinderResult<()> {
@@ -853,7 +837,8 @@ impl IOhMyAuthorizationService for AuthorizationManager {
             "caller missing AddAuth permissions",
         )?;
 
-        self.add_auth_token(Some(ctx), auth_token).map_err(into_logged_binder)
+        self.add_auth_token(auth_token);
+        Ok(())
     }
 
     fn onDeviceUnlocked(
@@ -992,153 +977,179 @@ impl IOhMyAuthorizationService for AuthorizationManager {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+    use crate::android::hardware::security::keymint::IKeyMintDevice::BnKeyMintDevice;
+    use crate::keymaster::keymint_device::{tests as keymint_tests, KeyMintWrapper};
+    use std::sync::{Mutex, RwLock};
 
-    fn mirrored_caller() -> CallerInfo {
-        CallerInfo { uid: 1000, sid: "u:r:system_server:s0".to_string(), pid: 2000 }
-    }
+    static AUTH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn valid_auth_token() -> HardwareAuthToken {
-        HardwareAuthToken {
-            challenge: 7,
-            userId: 11,
-            authenticatorId: 13,
-            authenticatorType: HardwareAuthenticatorType::PASSWORD,
-            mac: vec![0; AUTH_TOKEN_MAC_LEN],
-            ..Default::default()
+    #[test]
+    fn compatibility_absence_only_means_missing_strongbox_hardware() {
+        use crate::android::hardware::security::secureclock::ISecureClock::ISecureClock;
+        use crate::android::hardware::security::sharedsecret::ISharedSecret::ISharedSecret;
+        struct Compat(Strong<dyn IKeyMintDevice>, Option<fn() -> BinderStatus>);
+        impl Interface for Compat {}
+        impl IKeystoreCompatService for Compat {
+            fn getKeyMintDevice(
+                &self,
+                _: SecurityLevel,
+            ) -> binder::Result<Strong<dyn IKeyMintDevice>> {
+                match self.1 {
+                    Some(error) => Err(error()),
+                    None => Ok(self.0.clone()),
+                }
+            }
+            fn getSecureClock(&self) -> binder::Result<Strong<dyn ISecureClock>> {
+                Err(StatusCode::UNKNOWN_TRANSACTION.into())
+            }
+            fn getSharedSecret(
+                &self,
+                _: SecurityLevel,
+            ) -> binder::Result<Strong<dyn ISharedSecret>> {
+                Err(StatusCode::UNKNOWN_TRANSACTION.into())
+            }
+        }
+        let device = BnKeyMintDevice::new_binder(
+            keymint_tests::auth_wrapper(&[0x41; 32]),
+            binder::BinderFeatures::default(),
+        );
+        for level in [SecurityLevel::TRUSTED_ENVIRONMENT, SecurityLevel::STRONGBOX] {
+            let compatibility = Compat(device.clone(), None);
+            assert_eq!(
+                keymint_from_compatibility(&compatibility, level).unwrap().unwrap().as_binder(),
+                device.as_binder()
+            );
+            let failures: [fn() -> BinderStatus; 3] = [
+                || StatusCode::NAME_NOT_FOUND.into(),
+                || StatusCode::DEAD_OBJECT.into(),
+                || BinderStatus::new_service_specific_error(-2, None),
+            ];
+            for failure in failures {
+                let status = failure();
+                let missing = level == SecurityLevel::STRONGBOX
+                    && status.transaction_error() == StatusCode::NAME_NOT_FOUND
+                    && status.exception_code() == ExceptionCode::TRANSACTION_FAILED;
+                let compatibility = Compat(device.clone(), Some(failure));
+                let result = keymint_from_compatibility(&compatibility, level);
+                if missing {
+                    assert!(result.unwrap().is_none());
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().root_cause().downcast_ref::<KeystoreError>(),
+                        Some(&map_binder_status::<()>(Err(status)).unwrap_err())
+                    );
+                }
+            }
         }
     }
 
-    fn combined_authenticator_type() -> HardwareAuthenticatorType {
-        HardwareAuthenticatorType(
-            HardwareAuthenticatorType::PASSWORD.0 | HardwareAuthenticatorType::FINGERPRINT.0,
+    pub(crate) fn with_system_keymint<T>(device: KeyMintWrapper, run: impl FnOnce() -> T) -> T {
+        let _guard = AUTH_TEST_LOCK.lock().unwrap();
+        crate::config::CONFIG.get_or_init(|| RwLock::new(crate::config::Config::for_tests()));
+        let device = BnKeyMintDevice::new_binder(device, binder::BinderFeatures::default());
+        let previous = SYSTEM_KEYMINT_CACHE.with(|cache| {
+            cache.replace(Some(HashMap::from([
+                ("android.hardware.security.keymint.IKeyMintDevice/default", device.clone()),
+                ("android.hardware.security.keymint.IKeyMintDevice/strongbox", device),
+            ])))
+        });
+        let keys = SYSTEM_VERIFIER_KEY_CACHE.with(|cache| std::mem::take(&mut *cache.borrow_mut()));
+        let omk = keymint_tests::AUTH_TOKEN_WRAPPER
+            .replace(Some(keymint_tests::auth_wrapper(&[0x73; 32])));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+        keymint_tests::AUTH_TOKEN_WRAPPER.replace(omk);
+        SYSTEM_KEYMINT_CACHE.with(|cache| {
+            cache.replace(previous);
+        });
+        SYSTEM_VERIFIER_KEY_CACHE.with(|cache| {
+            cache.replace(keys);
+        });
+        match result {
+            Ok(value) => value,
+            Err(error) => std::panic::resume_unwind(error),
+        }
+    }
+
+    #[test]
+    fn ingestion_caches_original_tokens_including_bad_mac_and_shape() {
+        use crate::keymaster::database::perboot::PERBOOT_DB;
+        let manager = AuthorizationManager::Synchronous;
+        let mut token = keymint_tests::signed_auth_token(37, &[0x41; 32]);
+        token.userId = 0x1337_0123;
+        for mac in [vec![0; 32], vec![0; 3], Vec::new()] {
+            token.mac = mac;
+            manager.add_auth_token(&token);
+            let cached = PERBOOT_DB
+                .find_auth_token_entry(|entry| entry.auth_token().userId == token.userId)
+                .unwrap();
+            assert_eq!(cached.auth_token(), &token);
+        }
+    }
+
+    #[test]
+    fn verifier_does_not_refresh_authentication_rejections() {
+        for code in [ErrorCode::KEY_USER_NOT_AUTHENTICATED, ErrorCode::INVALID_ARGUMENT] {
+            assert!(!verifier_key_needs_refresh(&BinderStatus::new_service_specific_error(
+                code.0, None
+            )));
+        }
+        for code in [ErrorCode::INVALID_KEY_BLOB, ErrorCode::KEY_REQUIRES_UPGRADE] {
+            assert!(verifier_key_needs_refresh(&BinderStatus::new_service_specific_error(
+                code.0, None
+            )));
+        }
+        assert!(!verifier_key_needs_refresh(&StatusCode::DEAD_OBJECT.into()));
+    }
+
+    #[test]
+    fn only_the_explicit_compatibility_switch_bypasses_mac_verification() {
+        let system = keymint_tests::auth_wrapper(&[0x41; 32]);
+        with_system_keymint(system, || {
+            let mut token = keymint_tests::signed_auth_token(37, &[0x41; 32]);
+            token.mac[0] ^= 1;
+            assert!(!should_skip_system_auth_token_verification());
+            let error = verify_auth_token_for_omk(&token).unwrap_err();
+            assert!(
+                matches!(error.root_cause().downcast_ref::<KeystoreError>(), Some(KeystoreError::Km(code)) if *code == ErrorCode::KEY_USER_NOT_AUTHENTICATED)
+            );
+            config().write().unwrap().main.force_skip_system_biometric_hat_verification = true;
+            let result = verify_auth_token_for_omk(&token);
+            config().write().unwrap().main.force_skip_system_biometric_hat_verification = false;
+            result.unwrap();
+            token.mac.clear();
+            assert!(validate_auth_token_shape(&token).is_err());
+        });
+    }
+
+    #[test]
+    fn device_system_verifier_explicitly_rejects_bad_mac() {
+        const SERVICE: &str = "android.hardware.security.keymint.IKeyMintDevice/default";
+        let device = get_system_keymint(SERVICE, SecurityLevel::TRUSTED_ENVIRONMENT)
+            .expect("System verifier lookup")
+            .expect("System verifier service must be available");
+        let token = keymint_tests::signed_auth_token(0, &[0x41; 32]);
+        let params = verifier_key_params(&token).unwrap();
+        let id = VerifierKeyCacheKey {
+            service: SERVICE,
+            auth_type: token.authenticatorType.0,
+            user_id: token.userId,
+            authenticator_id: token.authenticatorId,
+        };
+        let key = get_system_verifier_key(SERVICE, &device, &id, &params)
+            .expect("System verifier key generation must succeed");
+        let op_params = key_params_to_aidl(
+            &[KeyParam::Digest(KmDigest::Sha256), KeyParam::MacLength(256)],
+            KeyMintDevice::KEY_MINT_V5,
         )
-    }
-
-    #[test]
-    fn mirrored_auth_token_shapes_match_aosp_ingestion() {
-        let caller = mirrored_caller();
-        let mut variants = Vec::new();
-
-        let mut token = valid_auth_token();
-        token.mac.pop();
-        variants.push(("non-32-byte MAC", token));
-
-        variants.push((
-            "all-zero authorization fields",
-            HardwareAuthToken { mac: vec![0; AUTH_TOKEN_MAC_LEN], ..Default::default() },
-        ));
-
-        let mut token = valid_auth_token();
-        token.userId = 0;
-        token.authenticatorId = 0;
-        token.timestamp.milliSeconds = 1;
-        variants.push(("zero SIDs with timestamp", token));
-
-        let mut token = valid_auth_token();
-        token.userId = 0;
-        token.authenticatorId = 0;
-        variants.push(("zero SIDs with challenge and auth type", token));
-
-        let mut token = valid_auth_token();
-        token.authenticatorType = HardwareAuthenticatorType::NONE;
-        variants.push(("nonzero SID with NONE", token));
-
-        let mut token = valid_auth_token();
-        token.authenticatorType = HardwareAuthenticatorType::ANY;
-        variants.push(("ANY authenticator type", token));
-
-        let mut token = valid_auth_token();
-        token.authenticatorType = combined_authenticator_type();
-        variants.push(("combined authenticator type", token));
-
-        let mut token = valid_auth_token();
-        token.authenticatorType = HardwareAuthenticatorType(4);
-        variants.push(("unknown authenticator type", token));
-
-        for (label, token) in variants {
-            assert!(
-                validate_auth_token_shape_for_source(Some(&caller), &token).is_ok(),
-                "mirror rejected {label}"
-            );
-        }
-    }
-
-    #[test]
-    fn direct_auth_token_shape_validation_remains_strict() {
-        assert!(validate_auth_token_shape_for_source(None, &valid_auth_token()).is_ok());
-
-        let mut combined = valid_auth_token();
-        combined.authenticatorType = combined_authenticator_type();
-        assert!(validate_auth_token_shape_for_source(None, &combined).is_ok());
-
-        let mut variants = Vec::new();
-
-        let mut token = valid_auth_token();
-        token.mac.pop();
-        variants.push(("non-32-byte MAC", token));
-
-        let mut token = valid_auth_token();
-        token.userId = 0;
-        token.authenticatorId = 0;
-        variants.push(("zero SIDs", token));
-
-        let mut token = valid_auth_token();
-        token.authenticatorType = HardwareAuthenticatorType::NONE;
-        variants.push(("NONE authenticator type", token));
-
-        let mut token = valid_auth_token();
-        token.authenticatorType = HardwareAuthenticatorType::ANY;
-        variants.push(("ANY authenticator type", token));
-
-        let mut token = valid_auth_token();
-        token.authenticatorType = HardwareAuthenticatorType(4);
-        variants.push(("unknown authenticator type", token));
-
-        for (label, token) in variants {
-            assert!(
-                validate_auth_token_shape_for_source(None, &token).is_err(),
-                "direct validation accepted {label}"
-            );
-        }
-    }
-
-    #[test]
-    fn mirrored_localization_failures_are_dropped() {
-        let caller = mirrored_caller();
-        let mut token = valid_auth_token();
-        token.authenticatorType = HardwareAuthenticatorType(4);
-
-        assert!(localize_auth_token_for_source(Some(&caller), &token, |token| {
-            token.to_km()?;
-            Ok(token.clone())
-        })
-        .expect("unknown mirror auth type should preserve System success")
-        .is_none());
-
-        let token = valid_auth_token();
-        assert!(localize_auth_token_for_source(Some(&caller), &token, |_| {
-            Err(anyhow::anyhow!("auth-token HMAC key is not initialized"))
-        })
-        .expect("unavailable mirror HMAC key should preserve System success")
-        .is_none());
-    }
-
-    #[test]
-    fn direct_localization_failures_are_propagated() {
-        assert!(localize_auth_token_for_source(None, &valid_auth_token(), |_| {
-            Err(anyhow::anyhow!("auth-token HMAC key is not initialized"))
-        })
-        .is_err());
-    }
-
-    #[test]
-    fn combined_authenticator_type_is_rejected_by_wire_conversion() {
-        let mut token = valid_auth_token();
-        token.authenticatorType = combined_authenticator_type();
-
-        assert!(validate_auth_token_shape_for_source(None, &token).is_ok());
-        assert!(token.to_km().is_err());
+        .unwrap();
+        let result = begin_system_verifier_once(&device, &key.blob, &op_params, &token);
+        let cleanup = device.deleteKey(&key.blob);
+        clear_system_keymint(SERVICE);
+        cleanup.expect("temporary verifier key cleanup");
+        let status = result.expect_err("an independent test MAC must not authenticate with System");
+        assert_eq!(status.exception_code(), ExceptionCode::SERVICE_SPECIFIC);
+        assert_eq!(status.service_specific_error(), ErrorCode::KEY_USER_NOT_AUTHENTICATED.0);
     }
 }

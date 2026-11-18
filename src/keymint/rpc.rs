@@ -15,7 +15,6 @@
 
 //! Emulated implementation of device traits for `IRemotelyProvisionedComponent`.
 
-use core::cell::RefCell;
 use kmr_common::crypto::{ec, ec::CoseKeyPurpose, Ec, KeyMaterial};
 use kmr_common::{crypto, explicit, rpc_err, vec_try, Error};
 use kmr_crypto_boring::{ec::BoringEc, hmac::BoringHmac, rng::BoringRng};
@@ -25,6 +24,7 @@ use kmr_ta::device::{
 use kmr_wire::coset::{iana, CoseSign1Builder, HeaderBuilder};
 use kmr_wire::keymint::{Digest, EcCurve};
 use kmr_wire::{cbor::value::Value, coset::AsCborValue, rpc, CborError};
+use std::cell::RefCell;
 
 /// Trait to encapsulate deterministic derivation of secret data.
 pub trait DeriveBytes {

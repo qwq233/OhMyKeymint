@@ -6,7 +6,7 @@
   directly relevant modules for equivalent behavior. Reuse or minimally extend existing code.
 - Android is the only production and acceptance target. Target-specific build, check, and test
   commands must use `aarch64-linux-android`; host or x86_64 success alone is insufficient.
-- Compatibility scope: Android 12-17; Linux kernels 4.14-6.18 and newer LTS kernels. Preserve
+- Compatibility scope: Android 13-17; Linux kernels 4.14-6.18 and newer LTS kernels. Preserve
   behavior across this range, and do not claim a platform was validated without evidence.
 - Do not introduce new non-Rust product or runtime code without explicit approval. Existing Python
   build/deployment scripts and shell packaging assets are tooling, not precedent for new runtime
@@ -48,9 +48,9 @@
 - Do not support key or descriptor continuity between System and OMK. Pass old, externally
   supplied, and System-created descriptors to the selected backend unchanged; an OMK business
   error for such a descriptor is authoritative.
-- Return OMK business errors as-is. Reachable transport, boundary, or injector failures that are
-  not OMK-unavailable must not fall back to a successful system reply; normalize them to the
-  existing AOSP-compatible error path, such as `SYSTEM_ERROR` where applicable.
+- Return OMK business errors and actual Binder failures as-is. Injector and common middleware
+  must not synthesize wire error codes. Internal invariant failures that prevent safe continuation
+  must record a native fatal diagnostic and panic; they must not become successful System replies.
 - Only confirmed OMK-unavailable failures may preserve the original system reply. These include a
   missing service/backend, connection failure, and stale or dead RPC transport failures such as
   `DeadObject`, `RpcError`, and `NotEnoughData`. Reuse the existing classifiers instead of
@@ -103,6 +103,7 @@
 
 ## Repository Conventions
 
+- Do not use `#[path = "..."]` to load modules in any file, including build scripts.
 - Use targeted `rg` searches. Keep edits ASCII unless the file already uses non-ASCII.
 - Treat `refs/` as non-build reference, probe, and evidence material. It is not part of the main
   Cargo workspace or shipped module. Use it for contract checks, but verify conclusions against the

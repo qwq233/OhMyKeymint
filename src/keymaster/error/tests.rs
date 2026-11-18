@@ -17,7 +17,7 @@
 use super::*;
 use crate::selinux;
 use anyhow::{anyhow, Context};
-use rsbinder::{BinderResult, ExceptionCode, Status as BinderStatus, StatusCode};
+use binder::{ExceptionCode, Result as BinderResult, Status as BinderStatus, StatusCode};
 
 fn nested_nested_rc(rc: ResponseCode) -> anyhow::Result<()> {
     Err(anyhow!(Error::Rc(rc))).context("nested nested rc")
@@ -114,7 +114,7 @@ fn keystore_error_test() -> anyhow::Result<(), String> {
     // ExceptionCode::SERVICE_SPECIFIC and the given
     // service specific error.
     let sse = map_km_error(binder_sse_error(1));
-    assert_eq!(Err(Error::Binder(ExceptionCode::ServiceSpecific, 1)), sse);
+    assert_eq!(Err(Error::Binder(ExceptionCode::SERVICE_SPECIFIC, 1)), sse);
     // into_binder then maps it on a service specific error of ResponseCode::SYSTEM_ERROR.
     assert_eq!(
         Result::<(), ResponseCode>::Err(ResponseCode::SYSTEM_ERROR),
@@ -124,8 +124,8 @@ fn keystore_error_test() -> anyhow::Result<(), String> {
     );
 
     // map_km_error creates a Error::Binder variant storing the given exception code.
-    let binder_exception = map_km_error(binder_exception(ExceptionCode::TransactionFailed));
-    assert_eq!(Err(Error::BinderTransaction(StatusCode::FailedTransaction)), binder_exception);
+    let binder_exception = map_km_error(binder_exception(ExceptionCode::TRANSACTION_FAILED));
+    assert_eq!(Err(Error::BinderTransaction(StatusCode::FAILED_TRANSACTION)), binder_exception);
     // into_binder then maps it on a service specific error of ResponseCode::SYSTEM_ERROR.
     assert_eq!(
         Result::<(), ResponseCode>::Err(ResponseCode::SYSTEM_ERROR),

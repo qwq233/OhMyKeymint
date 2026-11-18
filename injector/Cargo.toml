@@ -12,20 +12,13 @@ path = "src/main.rs"
 [dependencies]
 libc = "0.2.190"
 log = "0.4.34"
-log4rs = { version = "1.4.0", default-features = false, features = ["all_components"] }
 kmr-common = { path = "../common", version = "0.1.0" }
-nix = { version = "0.31.3", features = ["ptrace", "signal"] }
+nix = { version = "0.32.0", features = ["ptrace", "signal"] }
 omhook = { version = "1.0.0", default-features = false, features = [ "plt" ] }
 anyhow = "1.0.104"
-async-trait = "0.1.92"
-rsbinder = { version = "0.12.0", features = ["android_12_plus", "rpc"] }
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.11.1"
 toml = "1.1.8"
 rand = "0.10.3"
-android_logger = "0.15.1"
-multi_log = "0.1.2"
-num_cpus = "1.17.0"
-
-[build-dependencies]
-rsbinder-aidl = "0.12.0"
+binder = { version = "0.1.1", path = "../libs/binder", package = "android-binder" }
+zerocopy = { version = "0.8.63", features = ["derive"] }

@@ -1,27 +1,23 @@
-use std::{
-    cell::RefCell,
-    path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, LazyLock, Mutex, Once, OnceLock, RwLock,
-    },
-};
+use std::cell::RefCell;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock, RwLock};
 
-use rsbinder::Strong;
+use binder::Strong;
 
 use anyhow::{Context, Result};
 
-use crate::{
-    android::hardware::security::secureclock::ISecureClock::ISecureClock,
-    err,
-    keymaster::{
-        apex::ModuleInfoBundle, async_task::AsyncTask, db::KeymasterDb, enforcements::Enforcements,
-        gc::Gc, keymint_device::get_keymint_wrapper, super_key::SuperKeyManager,
-        utils::get_interface_once,
-    },
-    plat::property_watcher::PropertyWatcher,
-    watchdog as wd,
-};
+use crate::android::hardware::security::secureclock::ISecureClock::ISecureClock;
+use crate::keymaster::apex::ModuleInfoBundle;
+use crate::keymaster::async_task::AsyncTask;
+use crate::keymaster::db::KeymasterDb;
+use crate::keymaster::enforcements::Enforcements;
+use crate::keymaster::gc::Gc;
+use crate::keymaster::keymint_device::get_keymint_wrapper;
+use crate::keymaster::super_key::SuperKeyManager;
+use crate::keymaster::utils::get_interface_once;
+use crate::plat::property_watcher::PropertyWatcher;
+use crate::{err, watchdog as wd};
 
 static DB_INIT: Once = Once::new();
 const OMK_DB_ROOT: &str = "/data/misc/keystore/omk/data";
@@ -161,7 +157,7 @@ pub fn get_timestamp_service() -> Result<Strong<dyn ISecureClock>> {
 }
 
 fn connect_secureclock() -> Result<Strong<dyn ISecureClock>> {
-    let descriptors = <crate::android::hardware::security::secureclock::ISecureClock::BpSecureClock as ISecureClock>::descriptor();
+    let descriptors = <crate::android::hardware::security::secureclock::ISecureClock::BpSecureClock as ISecureClock>::get_descriptor();
     let dev: Strong<dyn ISecureClock> = get_interface_once(descriptors).context(err!())?;
 
     Ok(dev)

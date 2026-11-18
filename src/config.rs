@@ -547,6 +547,26 @@ impl Config {
             trust_intent: config_file.trust.clone(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self::from_file(
+            &ConfigFile::default(),
+            ResolvedTrust {
+                os_version: 17,
+                security_patch: "2026-10-01".into(),
+                os_patchlevel: "2026-10-01".into(),
+                vendor_patchlevel: "2026-10-05".into(),
+                boot_patchlevel: "2026-10-05".into(),
+                vb_key: [0; 32],
+                vb_hash: [0; 32],
+                vb_key_source: TrustValueSource::ExplicitHex,
+                vb_hash_source: TrustValueSource::ExplicitHex,
+                verified_boot_state: true,
+                device_locked: true,
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

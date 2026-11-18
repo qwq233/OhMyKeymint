@@ -15,11 +15,13 @@
 //! Utility functions tests.
 
 use super::*;
-use crate::android::hardware::security::keymint::{
-    Algorithm::Algorithm, EcCurve::EcCurve, HardwareAuthenticatorType::HardwareAuthenticatorType,
-    KeyParameter::KeyParameter as KmKeyParameter, KeyParameterValue::KeyParameterValue,
-    SecurityLevel::SecurityLevel, Tag::Tag,
-};
+use crate::android::hardware::security::keymint::Algorithm::Algorithm;
+use crate::android::hardware::security::keymint::EcCurve::EcCurve;
+use crate::android::hardware::security::keymint::HardwareAuthenticatorType::HardwareAuthenticatorType;
+use crate::android::hardware::security::keymint::KeyParameter::KeyParameter as KmKeyParameter;
+use crate::android::hardware::security::keymint::KeyParameterValue::KeyParameterValue;
+use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use crate::android::hardware::security::keymint::Tag::Tag;
 use anyhow::Result;
 use kmr_wire::keymint::{KeyParam, MlDsaVariant};
 use kmr_wire::{KeySizeInBits, ValueNotRecognized};
@@ -478,10 +480,16 @@ fn test_package_manager_native_layout() {
     assert_eq!(package_manager_native_layout(None), PackageManagerNativeLayout::Android15Or16);
     assert_eq!(
         legacy_pm_transactions(PackageManagerNativeLayout::Android12To14),
-        (rsbinder::FIRST_CALL_TRANSACTION + 5, rsbinder::FIRST_CALL_TRANSACTION + 4)
+        (
+            binder::binder_impl::FIRST_CALL_TRANSACTION + 5,
+            binder::binder_impl::FIRST_CALL_TRANSACTION + 4
+        )
     );
     assert_eq!(
         legacy_pm_transactions(PackageManagerNativeLayout::Android15Or16),
-        (rsbinder::FIRST_CALL_TRANSACTION + 6, rsbinder::FIRST_CALL_TRANSACTION + 5)
+        (
+            binder::binder_impl::FIRST_CALL_TRANSACTION + 6,
+            binder::binder_impl::FIRST_CALL_TRANSACTION + 5
+        )
     );
 }

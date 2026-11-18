@@ -19,20 +19,18 @@
 //! defined by keystore2 and keystore2_key respectively.
 
 use crate::android::os::IPermissionController::IPermissionController;
-use crate::android::system::keystore2::{
-    Domain::Domain, KeyDescriptor::KeyDescriptor, KeyPermission::KeyPermission,
-};
+use crate::android::system::keystore2::Domain::Domain;
+use crate::android::system::keystore2::KeyDescriptor::KeyDescriptor;
+use crate::android::system::keystore2::KeyPermission::KeyPermission;
 use crate::err as ks_err;
-use crate::keymaster::error::Error as KsError;
-use crate::keymaster::error::ResponseCode;
+use crate::keymaster::error::{Error as KsError, ResponseCode};
 use crate::keymaster::utils::{get_interface_once, AppUid};
 use crate::selinux::{self, implement_class, Backend, ClassPermission};
 use crate::top::qwq2333::ohmykeymint::CallerInfo::CallerInfo;
 use anyhow::Context as AnyhowContext;
-use kmr_common::consts::{AID_KEYSTORE, AID_ROOT};
-use rsbinder::{calling_caller, hub, thread_state::CallingContext, Caller, Status};
-use std::cmp::PartialEq;
-use std::convert::From;
+use binder::binder_impl::IBinderInternal;
+use binder::Status;
+use kmr_common::consts::AID_KEYSTORE;
 use std::ffi::{CStr, CString};
 use std::sync::{LazyLock, OnceLock};
 
@@ -50,6 +48,28 @@ static RUNTIME_SERVICE_CONTEXT: OnceLock<String> = OnceLock::new();
 #[cfg(not(test))]
 const AOSP_KEYSTORE_TARGET_CONTEXT: &str = "u:r:keystore:s0";
 const TRUSTED_ROOT_SERVICE_CONTEXTS: &[&str] = &["u:r:magisk:s0", "u:r:ksu:s0", "u:r:su:s0"];
+
+pub(crate) struct CallingContext {
+    pub uid: libc::uid_t,
+    pub pid: libc::pid_t,
+    pub sid: Option<CString>,
+}
+
+impl Default for CallingContext {
+    fn default() -> Self {
+        if binder::ThreadState::is_handling_transaction() {
+            Self {
+                uid: binder::ThreadState::get_calling_uid(),
+                pid: binder::ThreadState::get_calling_pid(),
+                sid: binder::ThreadState::with_calling_sid(|sid| sid.map(CStr::to_owned)),
+            }
+        } else {
+            // RPC does not expose kernel Binder caller identity.
+            // SAFETY: These libc identity queries have no pointer or initialization preconditions.
+            Self { uid: unsafe { libc::getuid() }, pid: unsafe { libc::getpid() }, sid: None }
+        }
+    }
+}
 
 fn lookup_keystore2_key_context(namespace: i64) -> anyhow::Result<selinux::Context> {
     KEYSTORE2_KEY_LABEL_BACKEND.lookup(&namespace.to_string())
@@ -313,7 +333,7 @@ pub(crate) fn resolve_caller_info(ctx: Option<&CallerInfo>) -> CallerInfo {
 }
 
 const PERMISSION_MANAGER_SERVICE: &str = "permissionmgr";
-const CHECK_UID_PERMISSION_TRANSACTION: u32 = rsbinder::FIRST_CALL_TRANSACTION + 30;
+const CHECK_UID_PERMISSION_TRANSACTION: u32 = binder::binder_impl::FIRST_CALL_TRANSACTION + 30;
 const PERMISSION_CONTROLLER_SERVICE: &str = "permission";
 const DEFAULT_DEVICE_ID: i32 = 0;
 const PERMISSION_GRANTED: i32 = 0;
@@ -529,20 +549,17 @@ pub fn check_key_permission(
     )
 }
 
-fn forwarding_transport_is_trusted(caller: Option<Caller>) -> bool {
-    match caller {
-        Some(Caller::Kernel { uid, sid, .. }) => {
-            uid == AID_KEYSTORE && sid.as_ref().is_some_and(|sid| trusted_forwarding_sid(sid))
-        }
-        Some(Caller::Rpc(rsbinder::rpc::PeerIdentity::Local { uid, .. })) => {
-            matches!(uid, AID_ROOT | AID_KEYSTORE)
-        }
-        _ => false,
+fn forwarding_transport_is_trusted() -> bool {
+    // Non-kernel requests enter through the trusted private socket or local dispatch.
+    if !binder::ThreadState::is_handling_transaction() {
+        return true;
     }
+    let caller = CallingContext::default();
+    caller.uid == AID_KEYSTORE && caller.sid.as_ref().is_some_and(|sid| trusted_forwarding_sid(sid))
 }
 
 pub fn check_forwarded_caller_provenance(label: &str) -> anyhow::Result<()> {
-    if forwarding_transport_is_trusted(calling_caller()) {
+    if forwarding_transport_is_trusted() {
         return Ok(());
     }
 
@@ -611,7 +628,7 @@ fn check_android_permission_with_controller(
     permission: &str,
     permission_denied: KsError,
 ) -> anyhow::Result<()> {
-    let controller: rsbinder::Strong<dyn IPermissionController> =
+    let controller: binder::Strong<dyn IPermissionController> =
         get_interface_once(PERMISSION_CONTROLLER_SERVICE)
             .context(format!("service {PERMISSION_CONTROLLER_SERVICE} unavailable"))?;
     let has_permission = controller
@@ -633,27 +650,25 @@ fn check_android_permission_with_manager(
     permission: &str,
     permission_denied: KsError,
 ) -> anyhow::Result<()> {
-    let binder = hub::try_get_service(PERMISSION_MANAGER_SERVICE)
+    let binder = binder::ext::get_service_once(PERMISSION_MANAGER_SERVICE)
         .ok()
         .flatten()
         .ok_or_else(KsError::sys)
         .context(format!("service {PERMISSION_MANAGER_SERVICE} unavailable"))?;
-    let proxy = binder
-        .as_proxy()
-        .ok_or_else(KsError::sys)
-        .context("permissionmgr binder was unexpectedly local")?;
+    binder::ext::associate_descriptor(&binder, "android.permission.IPermissionManager")
+        .context("permissionmgr descriptor mismatch")?;
     let mut data =
-        proxy.prepare_transact(true).context("failed to prepare permissionmgr transaction")?;
+        binder.prepare_transact().context("failed to prepare permissionmgr transaction")?;
     data.write(&(uid as i32)).context("failed to write permissionmgr uid argument")?;
     data.write(&permission.to_string())
         .context("failed to write permissionmgr permission argument")?;
     data.write(&DEFAULT_DEVICE_ID).context("failed to write permissionmgr deviceId argument")?;
 
-    let mut reply = proxy
-        .submit_transact(CHECK_UID_PERMISSION_TRANSACTION, &data, 0)
-        .context("permissionmgr transact failed")?
-        .context("permissionmgr returned no reply")?;
-    reply.set_data_position(0);
+    let reply = binder
+        .submit_transact(CHECK_UID_PERMISSION_TRANSACTION, data, 0)
+        .context("permissionmgr transact failed")?;
+    // SAFETY: Zero is within every valid Parcel.
+    unsafe { reply.set_data_position(0)? };
 
     let status: Status = reply.read().context("failed to decode permissionmgr reply status")?;
     if !status.is_ok() {
