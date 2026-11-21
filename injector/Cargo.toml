@@ -1,6 +1,6 @@
 [package]
 name = "injector"
-version = "1.2.6"
+version = "1.3.0"
 edition = "2021"
 license-file = "../LICENSE.md"
 build = "build.rs"

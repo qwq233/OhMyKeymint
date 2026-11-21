@@ -1,6 +1,6 @@
 [package]
 name = "OhMyKeymint"
-version = "1.2.6"
+version = "1.3.0"
 edition = "2021"
 license-file = "LICENSE.md"
 
@@ -23,20 +23,20 @@ anyhow = "1.0.104"
 lazy_static = "1.5.1"
 thiserror = "2.0.21"
 serde = { version = "1.0.229", features = ["derive"] }
-x509-cert = "0.3.0"
+x509-cert = "0.3.1"
 watchdog_rs = { path = "watchdog", version = "0.1.0" }
 nix = { version = "0.32.0", features = ["fs", "mman"] }
 rsproperties = { version = "0.7.0", features = ["builder"] }
 libsqlite3-sys = "0.40.0"
 rand = "0.10.4"
 der = "0.8.3"
-toml = "1.2.1"
+toml = "1.2.2"
 regex = "1.13.2"
 base64 = "0.23.1"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
 num_cpus = "1.17.0"
 binder = { version = "0.1.1", path = "libs/binder", package = "android-binder" }
-zerocopy = { version = "0.8.63", features = ["derive"] }
+zerocopy = { version = "0.8.64", features = ["derive"] }
 
 [profile.dev]
 incremental = true
